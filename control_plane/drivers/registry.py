@@ -476,6 +476,16 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("odoo_instance_override",),
         ),
         _action(
+            "website_bootstrap_override",
+            "Write website bootstrap override",
+            "Write typed Odoo website bootstrap intent before post-deploy applies it.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/odoo/website-bootstrap-override",
+            authz_action="odoo_website_bootstrap_override.write",
+            writes_records=("odoo_instance_override",),
+        ),
+        _action(
             "stable_bootstrap",
             "Bootstrap stable instance",
             "Run a guarded Odoo stable bootstrap through Launchplane-owned provider scheduling.",

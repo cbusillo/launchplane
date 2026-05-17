@@ -39,6 +39,8 @@ from control_plane.contracts.odoo_instance_override_record import OdooAddonSetti
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapPayload
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapRoute
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -1060,6 +1062,20 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                         ),
                     ),
                 ),
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    tenant="opw",
+                    name="OPW",
+                    canonical_url="https://opw-prod.example.com",
+                    logo_path="addons/opw/static/src/img/logo.png",
+                    routes=(
+                        OdooWebsiteBootstrapRoute(
+                            name="Home",
+                            url="/",
+                            module="website",
+                            homepage=True,
+                        ),
+                    ),
+                ),
                 updated_at="2026-04-21T18:30:00Z",
                 source_label="test",
             )
@@ -1078,6 +1094,10 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 loaded_record.addon_settings[0].value.secret_binding_id,
                 "secret-binding-shopify-token",
             )
+            self.assertIsNotNone(loaded_record.website_bootstrap)
+            assert loaded_record.website_bootstrap is not None
+            self.assertEqual(loaded_record.website_bootstrap.name, "OPW")
+            self.assertEqual(loaded_record.website_bootstrap.routes[0].url, "/")
             self.assertEqual(
                 [(record.context, record.instance) for record in listed_records], [("opw", "prod")]
             )

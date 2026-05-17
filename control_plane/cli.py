@@ -52,6 +52,7 @@ from control_plane.contracts.odoo_instance_override_record import OdooConfigPara
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapPayload
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -8854,6 +8855,7 @@ def _summarize_odoo_instance_override_record(
         ),
         "config_parameter_count": len(record.config_parameters),
         "addon_setting_count": len(record.addon_settings),
+        "website_bootstrap": record.website_bootstrap is not None,
     }
 
 
@@ -9169,8 +9171,10 @@ def _build_odoo_instance_override_record_with_config_parameter(
     return OdooInstanceOverrideRecord(
         context=normalized_context,
         instance=normalized_instance,
+        apply_on=target_record.apply_on if target_record is not None else ("deploy", "promotion"),
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
+        website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -9216,6 +9220,38 @@ def _build_odoo_instance_override_record_with_addon_setting(
         instance=normalized_instance,
         config_parameters=config_parameters,
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
+        website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "cli",
+    )
+
+
+def _build_odoo_instance_override_record_with_website_bootstrap(
+    *,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+    context_name: str,
+    instance_name: str,
+    website_bootstrap: OdooWebsiteBootstrapPayload,
+    source_label: str,
+) -> OdooInstanceOverrideRecord:
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    if not normalized_context or not normalized_instance:
+        raise click.ClickException(
+            "Odoo instance override records require --context and --instance."
+        )
+    target_record = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    return OdooInstanceOverrideRecord(
+        context=normalized_context,
+        instance=normalized_instance,
+        apply_on=target_record.apply_on if target_record is not None else ("deploy", "promotion"),
+        config_parameters=target_record.config_parameters if target_record is not None else (),
+        addon_settings=target_record.addon_settings if target_record is not None else (),
+        website_bootstrap=website_bootstrap,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -9343,6 +9379,7 @@ def _migrate_odoo_override_secret_transport_record(
             apply_on=record.apply_on,
             config_parameters=tuple(config_parameters),
             addon_settings=tuple(addon_settings),
+            website_bootstrap=record.website_bootstrap,
             last_apply=record.last_apply,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
@@ -14661,6 +14698,57 @@ def odoo_overrides_put_addon_setting(
             addon_name=addon_name,
             setting_name=setting_name,
             override_value=override_value,
+            source_label=source_label,
+        )
+        postgres_store.write_odoo_instance_override_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_odoo_instance_override_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@odoo_overrides.command("put-website-bootstrap")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--payload-file",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    required=True,
+    help="JSON file containing a typed devkit website_bootstrap payload.",
+)
+@click.option("--source-label", default="cli", show_default=True)
+def odoo_overrides_put_website_bootstrap(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    payload_file: Path,
+    source_label: str,
+) -> None:
+    try:
+        raw_payload = json.loads(payload_file.read_text(encoding="utf-8"))
+    except JSONDecodeError as error:
+        raise click.ClickException("Odoo website bootstrap payload must be valid JSON.") from error
+    website_bootstrap = OdooWebsiteBootstrapPayload.model_validate(raw_payload)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_odoo_instance_override_records()
+        record = _build_odoo_instance_override_record_with_website_bootstrap(
+            existing_records=existing_records,
+            context_name=context_name,
+            instance_name=instance_name,
+            website_bootstrap=website_bootstrap,
             source_label=source_label,
         )
         postgres_store.write_odoo_instance_override_record(record)

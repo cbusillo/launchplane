@@ -105,6 +105,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -1123,6 +1124,31 @@ class OdooConfigParameterOverrideRequest(BaseModel):
         return self
 
 
+class OdooWebsiteBootstrapOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    instance: str
+    website_bootstrap: OdooWebsiteBootstrapPayload
+    source_label: str = "launchplane-service"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooWebsiteBootstrapOverrideRequest":
+        self.product = self.product.strip()
+        self.context = self.context.strip().lower()
+        self.instance = self.instance.strip().lower()
+        self.source_label = self.source_label.strip() or "launchplane-service"
+        if not self.product:
+            raise ValueError("Odoo website-bootstrap override requires product.")
+        if not self.context:
+            raise ValueError("Odoo website-bootstrap override requires context.")
+        if not self.instance:
+            raise ValueError("Odoo website-bootstrap override requires instance.")
+        return self
+
+
 class OdooConfigParameterOverrideEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     override: OdooConfigParameterOverrideRequest
@@ -1132,6 +1158,18 @@ class OdooConfigParameterOverrideEnvelope(_ProductRouteEnvelope):
         _validate_driver_envelope_product(self.product, label="Odoo config-parameter override")
         if self.product.strip() != self.override.product.strip():
             raise ValueError("Odoo config-parameter override requires matching product values.")
+        return self
+
+
+class OdooWebsiteBootstrapOverrideEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    override: OdooWebsiteBootstrapOverrideRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooWebsiteBootstrapOverrideEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo website-bootstrap override")
+        if self.product.strip() != self.override.product.strip():
+            raise ValueError("Odoo website-bootstrap override requires matching product values.")
         return self
 
 
@@ -1181,6 +1219,15 @@ _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooConfigParameterOverrideEnvelope,
     denial_message=(
         "Workflow cannot write Odoo config-parameter overrides for the requested product/context."
+    ),
+)
+
+
+_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/website-bootstrap-override",
+    envelope_model=OdooWebsiteBootstrapOverrideEnvelope,
+    denial_message=(
+        "Workflow cannot write Odoo website-bootstrap overrides for the requested product/context."
     ),
 )
 
@@ -2404,6 +2451,41 @@ def _write_odoo_config_parameter_override(
         apply_on=apply_on,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
+        website_bootstrap=existing_record.website_bootstrap if existing_record is not None else None,
+        updated_at=_utc_now_timestamp(),
+        source_label=request.source_label,
+    )
+    record_store.write_odoo_instance_override_record(record)
+    return record
+
+
+def _write_odoo_website_bootstrap_override(
+    *,
+    record_store: _OdooInstanceOverrideStore,
+    request: OdooWebsiteBootstrapOverrideRequest,
+) -> OdooInstanceOverrideRecord:
+    try:
+        existing_record = record_store.read_odoo_instance_override_record(
+            context_name=request.context, instance_name=request.instance
+        )
+    except FileNotFoundError:
+        existing_record = None
+    apply_on = tuple(
+        dict.fromkeys(
+            (
+                *(existing_record.apply_on if existing_record is not None else ()),
+                "deploy",
+                "promotion",
+            )
+        )
+    )
+    record = OdooInstanceOverrideRecord(
+        context=request.context,
+        instance=request.instance,
+        apply_on=apply_on,
+        config_parameters=existing_record.config_parameters if existing_record is not None else (),
+        addon_settings=existing_record.addon_settings if existing_record is not None else (),
+        website_bootstrap=request.website_bootstrap,
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
@@ -9806,6 +9888,45 @@ def create_launchplane_service_app(
                         override.key for override in override_record.config_parameters
                     ),
                 }
+            elif path == _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path:
+                odoo_website_override_request = (
+                    _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.envelope_model.model_validate(payload)
+                )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_website_override_request.product,
+                    authorization_context=odoo_website_override_request.override.context,
+                    descriptor_context=odoo_website_override_request.override.context,
+                    descriptor_instance=odoo_website_override_request.override.instance,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                override_record = _write_odoo_website_bootstrap_override(
+                    record_store=cast(_OdooInstanceOverrideStore, record_store),
+                    request=odoo_website_override_request.override,
+                )
+                result = {
+                    "context": override_record.context,
+                    "instance": override_record.instance,
+                    "website_bootstrap": override_record.website_bootstrap is not None,
+                }
+                driver_result = result
             elif path == _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path:
                 odoo_bootstrap_request = _ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(
                     payload

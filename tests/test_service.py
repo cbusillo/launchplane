@@ -18628,6 +18628,112 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "https://cm-testing.shinycomputers.com",
             )
 
+    def test_odoo_website_bootstrap_override_driver_writes_typed_payload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://cm-testing.shinycomputers.com",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-10T20:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 1,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-website-bootstrap-override.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_website_bootstrap_override.write"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-website-bootstrap-override.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/website-bootstrap-override",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "override": {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "website_bootstrap": {
+                            "tenant": "cm",
+                            "name": "Cell Mechanic",
+                            "canonical_url": "https://cm-testing.shinycomputers.com",
+                            "homepage_url": "/cell-mechanic",
+                            "logo_path": "addons/cm_website/static/src/img/logo.png",
+                            "logo_alt": "Cell Mechanic",
+                            "routes": [
+                                {
+                                    "name": "Cell Mechanic",
+                                    "url": "/cell-mechanic",
+                                    "module": "cm_website",
+                                    "homepage": True,
+                                }
+                            ],
+                        },
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-cm-testing-website-bootstrap"},
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["website_bootstrap"], True)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+            self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
+            self.assertIsNotNone(stored_record.website_bootstrap)
+            assert stored_record.website_bootstrap is not None
+            self.assertEqual(stored_record.website_bootstrap.name, "Cell Mechanic")
+            self.assertEqual(
+                stored_record.website_bootstrap.canonical_url,
+                "https://cm-testing.shinycomputers.com",
+            )
+
     def test_odoo_config_parameter_override_driver_rejects_unauthorized_workflow(
         self,
     ) -> None:
