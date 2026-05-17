@@ -12773,6 +12773,284 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 400)
             self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_odoo_preview_verification_driver_marks_latest_generation_ready(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
+                    context="cm",
+                    anchor_repo="odoo-tenant-cm",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.cm-preview.example.test",
+                    state="pending",
+                    created_at="2026-05-09T15:00:00Z",
+                    updated_at="2026-05-09T15:05:00Z",
+                    eligible_at="2026-05-09T15:00:00Z",
+                    active_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    latest_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    latest_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
+                    sequence=1,
+                    state="verifying",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-05-09T15:00:00Z",
+                    started_at="2026-05-09T15:00:00Z",
+                    resolved_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
+                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="odoo-tenant-cm",
+                        pr_number=42,
+                        head_sha="abc123",
+                        pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pending",
+                    overall_health_status="pending",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "pass",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"]["transition"], "ready")
+            preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
+            generation = store.read_preview_generation_record(
+                "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
+            )
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, generation.generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.verify_status, "pass")
+            self.assertEqual(generation.overall_health_status, "pass")
+            self.assertEqual(generation.ready_at, "2026-05-09T15:08:00Z")
+
+    def test_odoo_preview_verification_driver_marks_latest_generation_failed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
+                    context="cm",
+                    anchor_repo="odoo-tenant-cm",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.cm-preview.example.test",
+                    state="active",
+                    created_at="2026-05-09T15:00:00Z",
+                    updated_at="2026-05-09T15:05:00Z",
+                    eligible_at="2026-05-09T15:00:00Z",
+                    active_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    serving_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    latest_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    latest_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
+                    sequence=1,
+                    state="verifying",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-05-09T15:00:00Z",
+                    started_at="2026-05-09T15:00:00Z",
+                    resolved_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
+                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="odoo-tenant-cm",
+                        pr_number=42,
+                        head_sha="abc123",
+                        pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pending",
+                    overall_health_status="pending",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, _payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "fail",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                        "failure_summary": "Odoo preview page did not include Cell Mechanic.",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
+            )
+
+            self.assertEqual(status_code, 202)
+            preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
+            generation = store.read_preview_generation_record(
+                "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
+            )
+            self.assertEqual(preview.state, "failed")
+            self.assertEqual(generation.state, "failed")
+            self.assertEqual(generation.verify_status, "fail")
+            self.assertEqual(generation.overall_health_status, "fail")
+            self.assertEqual(generation.failure_stage, "verify")
+            self.assertIn("Cell Mechanic", generation.failure_summary)
+
+    def test_odoo_preview_verification_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/odoo-tenant-cm",
+                                "workflow_refs": [
+                                    "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                                ],
+                                "event_names": ["pull_request"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["preview_refresh.execute"],
+                            }
+                        ]
+                    }
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "pass",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_generic_web_preview_refresh_route_keeps_blocked_result_non_mutating(
         self,
     ) -> None:

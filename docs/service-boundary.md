@@ -1143,6 +1143,14 @@ CLI adapters and expose them over HTTP.
 
 ### Preview generation evidence
 
+Driver-owned preview verification routes can update those records without
+requiring product workflows to render Launchplane record payloads directly. For
+Odoo preview smoke follow-ups, `POST /v1/drivers/odoo/preview-verification`
+accepts the product, context, anchor repo/PR, `verification_status`,
+`verified_at`, and an optional failure summary, then marks the latest preview
+generation ready or failed. The route is safe-write evidence ingestion only; it
+does not mutate provider state.
+
 `POST /v1/evidence/previews/generations`
 
 ```json

@@ -105,6 +105,11 @@ artifact/revision evidence, and module install/update evidence. Product
 workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
 ready-to-comment signal instead of independently deciding readiness from raw
 health checks.
+If a later browser or product-specific smoke workflow needs to publish evidence,
+it should call `POST /v1/drivers/odoo/preview-verification` with the PR identity,
+`verification_status`, `verified_at`, and optional failure summary. Launchplane
+updates the latest preview generation and preserves the result in the same
+preview records used by refresh.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,

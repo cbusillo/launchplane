@@ -140,8 +140,9 @@ Odoo declares `base_driver_id="generic-web"` and exposes Odoo-shaped preview
 routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-refresh`,
 `POST /v1/drivers/odoo/preview-inventory`,
-`POST /v1/drivers/odoo/preview-readiness`, and
-`POST /v1/drivers/odoo/preview-destroy`. These routes use the generic-web
+`POST /v1/drivers/odoo/preview-readiness`,
+`POST /v1/drivers/odoo/preview-destroy`, and
+`POST /v1/drivers/odoo/preview-verification`. These routes use the generic-web
 preview request schema, live URL derivation, and record writer so Odoo PR
 previews land in the same Launchplane preview and preview-generation records as
 generic-web previews.
@@ -162,6 +163,10 @@ source revision evidence, module install/update evidence from rendered Odoo env,
 the preview generation as `ready` with deploy, verify, and overall health status
 `pass`; failed smoke records a concise verification failure so PR feedback does
 not advertise ready before the checks pass.
+The verification route is a Launchplane-owned evidence ingress for follow-up
+browser or product smoke checks: it marks the latest preview generation ready or
+failed through the same preview-generation records without mutating provider
+state.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
 instance-scoped action. It is enabled per product-profile lane through
