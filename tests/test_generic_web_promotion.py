@@ -22,6 +22,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PromotionRecord,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
@@ -36,6 +37,7 @@ from control_plane.workflows.generic_web_promotion_workflow import (
     _latest_workflow_dispatch_run,
     dispatch_generic_web_promotion_workflow,
 )
+from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.workflows.ship import build_deployment_record
 
 
@@ -131,6 +133,14 @@ def _request(**overrides: object) -> GenericWebProdPromotionRequest:
 
 
 def _deployment_record() -> DeploymentRecord:
+    runtime_identity = RuntimeIdentity(
+        product="sellyouroutboard",
+        context="sellyouroutboard-testing",
+        instance="prod",
+        deployment_record_id="deployment-syo-prod",
+        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        source_git_ref="abc123",
+    )
     ship_request = ShipRequest(
         artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         context="sellyouroutboard-testing",
@@ -154,7 +164,21 @@ def _deployment_record() -> DeploymentRecord:
             target_id="app-123",
             target_name="syo-prod-app",
         ),
+        runtime_identity=runtime_identity,
     )
+
+
+def _runtime_identity_payload(**overrides: object) -> dict[str, object]:
+    payload = RuntimeIdentity(
+        product="sellyouroutboard",
+        context="sellyouroutboard-testing",
+        instance="prod",
+        deployment_record_id="deployment-syo-prod",
+        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        source_git_ref="abc123",
+    ).model_dump(mode="json")
+    payload.update(overrides)
+    return payload
 
 
 def _testing_inventory(**overrides: object) -> EnvironmentInventory:
@@ -211,6 +235,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
                 return_value=None,
             ) as healthcheck,
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": _runtime_identity_payload()}
+                ),
+            ) as identity_healthcheck,
         ):
             result = execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
@@ -230,7 +260,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         deployment = store.deployments["deployment-syo-prod"]
         self.assertEqual(deployment.destination_health.status, "pass")
         self.assertIn(("sellyouroutboard-testing", "prod"), store.inventories)
-        self.assertEqual(healthcheck.call_count, 2)
+        self.assertEqual(healthcheck.call_count, 1)
+        identity_healthcheck.assert_called_once()
 
     def test_execute_prod_promotion_qualifies_bare_release_tag(self) -> None:
         store = _GenericWebPromotionStore(_profile())
@@ -268,6 +299,17 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
                 return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={
+                        "runtime_identity": _runtime_identity_payload(
+                            artifact_id=expected_artifact_id,
+                            source_git_ref="2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                        )
+                    }
+                ),
             ),
         ):
             result = execute_generic_web_prod_promotion(
@@ -314,6 +356,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
                 return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": _runtime_identity_payload()}
+                ),
             ),
             patch(
                 "control_plane.workflows.generic_web_promotion.resolve_launchplane_github_token",
@@ -386,6 +434,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
                 return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": _runtime_identity_payload()}
+                ),
             ),
             patch(
                 "control_plane.workflows.generic_web_promotion.resolve_launchplane_github_token",
@@ -469,6 +523,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
                 return_value=None,
             ) as healthcheck,
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": _runtime_identity_payload()}
+                ),
+            ) as identity_healthcheck,
         ):
             result = execute_generic_web_prod_promotion(
                 control_plane_root=Path("."),
@@ -478,12 +538,14 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
         self.assertEqual(result.promotion_status, "pass")
         health_urls = [call.kwargs["url"] for call in healthcheck.call_args_list]
+        identity_health_urls = [call.kwargs["url"] for call in identity_healthcheck.call_args_list]
         self.assertEqual(
             health_urls,
-            [
-                "https://testing.sellyouroutboard.com/healthz",
-                "https://www.sellyouroutboard.com/healthz",
-            ],
+            ["https://testing.sellyouroutboard.com/healthz"],
+        )
+        self.assertEqual(
+            identity_health_urls,
+            ["https://www.sellyouroutboard.com/healthz"],
         )
 
     def test_source_health_failure_records_failed_promotion_without_deploy(self) -> None:
@@ -544,6 +606,77 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.source_health_status, "pass")
         self.assertEqual(result.destination_health_status, "skipped")
         self.assertEqual(healthcheck.call_count, 1)
+
+    def test_missing_runtime_identity_fails_promotion_without_inventory_refresh(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            store.write_deployment_record(_deployment_record())
+            return _deploy_result()
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(payload={"status": "ok"}),
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertEqual(result.destination_health_status, "fail")
+        self.assertIn("Runtime identity was not reported", result.error_message)
+        self.assertNotIn(("sellyouroutboard-testing", "prod"), store.inventories)
+        promotion = next(iter(store.promotions.values()))
+        self.assertEqual(promotion.destination_health.status, "fail")
+        self.assertEqual(promotion.deploy.status, "fail")
+
+    def test_runtime_identity_mismatch_fails_promotion_without_inventory_refresh(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+        observed_identity = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="prod",
+            deployment_record_id="deployment-syo-prod",
+            artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:different",
+            source_git_ref="abc123",
+        )
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            store.write_deployment_record(_deployment_record())
+            return _deploy_result()
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": observed_identity.model_dump(mode="json")}
+                ),
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertEqual(result.destination_health_status, "fail")
+        self.assertIn("Runtime identity mismatched fields", result.error_message)
+        self.assertNotIn(("sellyouroutboard-testing", "prod"), store.inventories)
 
     def test_execute_rejects_stale_source_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())

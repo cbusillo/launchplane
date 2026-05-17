@@ -49,7 +49,7 @@ def wait_for_healthcheck_with_retry(
     last_error: str = ""
     while monotonic() < deadline:
         try:
-            return wait_once(url, timeout_seconds)
+            return wait_once(url=url, timeout_seconds=timeout_seconds)
         except click.ClickException as error:
             last_error = str(error)
         except HTTPError as error:
