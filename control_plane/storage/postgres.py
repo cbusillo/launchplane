@@ -50,6 +50,9 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
@@ -752,6 +755,36 @@ class LaunchplaneOdooStableBootstrapOperationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneOdooStableTargetReplacementOperationRow(Base):
+    __tablename__ = "launchplane_odoo_stable_target_replacement_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_odoo_replacement_operation_lane_status_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_odoo_replacement_operation_idempotency_idx",
+            "idempotency_key",
+            desc("updated_at"),
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneHumanSessionRow(Base):
     __tablename__ = "launchplane_human_sessions"
     __table_args__ = (
@@ -1165,6 +1198,74 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneOdooStableBootstrapOperationRow.updated_at.desc(),
                 LaunchplaneOdooStableBootstrapOperationRow.operation_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneOdooStableTargetReplacementOperationRow(
+                operation_id=record.operation_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                idempotency_key=record.idempotency_key,
+                status=record.status,
+                phase=record.phase,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_odoo_stable_target_replacement_operation_record(
+        self, operation_id: str
+    ) -> OdooStableTargetReplacementOperationRecord:
+        return self._read_model(
+            model_type=OdooStableTargetReplacementOperationRecord,
+            orm_model=LaunchplaneOdooStableTargetReplacementOperationRow,
+            filters=(
+                LaunchplaneOdooStableTargetReplacementOperationRow.operation_id == operation_id,
+            ),
+        )
+
+    def list_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneOdooStableTargetReplacementOperationRow.product == product)
+        if context_name:
+            filters.append(
+                LaunchplaneOdooStableTargetReplacementOperationRow.context == context_name
+            )
+        if instance_name:
+            filters.append(
+                LaunchplaneOdooStableTargetReplacementOperationRow.instance == instance_name
+            )
+        if idempotency_key:
+            filters.append(
+                LaunchplaneOdooStableTargetReplacementOperationRow.idempotency_key
+                == idempotency_key
+            )
+        if statuses:
+            filters.append(LaunchplaneOdooStableTargetReplacementOperationRow.status.in_(statuses))
+        return self._list_models(
+            model_type=OdooStableTargetReplacementOperationRecord,
+            orm_model=LaunchplaneOdooStableTargetReplacementOperationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneOdooStableTargetReplacementOperationRow.updated_at.desc(),
+                LaunchplaneOdooStableTargetReplacementOperationRow.operation_id.desc(),
             ),
             limit=limit,
         )
@@ -2796,6 +2897,7 @@ class PostgresRecordStore(HumanSessionStore):
             "merge_train_policies": 0,
             "merge_train_runs": 0,
             "odoo_stable_bootstrap_operations": 0,
+            "odoo_stable_target_replacement_operations": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
         }
@@ -2881,9 +2983,19 @@ class PostgresRecordStore(HumanSessionStore):
                 self.write_merge_train_policy_record(merge_train_policy_record)
                 counts["merge_train_policies"] += 1
         if hasattr(filesystem_store, "list_odoo_stable_bootstrap_operation_records"):
-            for operation_record in filesystem_store.list_odoo_stable_bootstrap_operation_records():
-                self.write_odoo_stable_bootstrap_operation_record(operation_record)
+            for (
+                bootstrap_operation_record
+            ) in filesystem_store.list_odoo_stable_bootstrap_operation_records():
+                self.write_odoo_stable_bootstrap_operation_record(bootstrap_operation_record)
                 counts["odoo_stable_bootstrap_operations"] += 1
+        if hasattr(filesystem_store, "list_odoo_stable_target_replacement_operation_records"):
+            for (
+                replacement_operation_record
+            ) in filesystem_store.list_odoo_stable_target_replacement_operation_records():
+                self.write_odoo_stable_target_replacement_operation_record(
+                    replacement_operation_record
+                )
+                counts["odoo_stable_target_replacement_operations"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1

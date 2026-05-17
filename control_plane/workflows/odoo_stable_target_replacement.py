@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -21,6 +21,11 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
+    OdooStableTargetReplacementRequest,
+)
 from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -60,29 +65,6 @@ class OdooStableTargetReplacementStore(Protocol):
 
 DokployRequest = Callable[..., JsonValue]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
-
-
-class OdooStableTargetReplacementRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    instance: str
-    strategy: Literal["recreate-in-place", "replace-and-cutover"] = "recreate-in-place"
-    allow_empty_data: bool = False
-    data_source_mode: Literal["existing", "empty", "upstream_restore"] = "existing"
-    confirmation: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooStableTargetReplacementRequest":
-        self.product = self.product.strip()
-        self.instance = self.instance.strip().lower()
-        self.confirmation = self.confirmation.strip().lower()
-        if not self.product:
-            raise ValueError("Odoo stable target replacement requires product.")
-        if not self.instance:
-            raise ValueError("Odoo stable target replacement requires instance.")
-        return self
 
 
 class OdooStableTargetRuntimeSnapshot(BaseModel):
@@ -135,56 +117,6 @@ class OdooStableTargetReplacementPlan(BaseModel):
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     steps: tuple[OdooStableTargetReplacementStep, ...] = ()
-
-
-class OdooStableTargetReplacementApplyRequest(OdooStableTargetReplacementRequest):
-    artifact_id: str = ""
-    source_git_ref: str = ""
-    verify_health: bool = True
-    verify_canonical: bool = True
-    verify_logo: bool = True
-    no_cache: bool = False
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    health_timeout_seconds: int | None = Field(default=None, ge=1)
-
-    @model_validator(mode="after")
-    def _validate_apply_request(self) -> "OdooStableTargetReplacementApplyRequest":
-        self.artifact_id = self.artifact_id.strip()
-        self.source_git_ref = self.source_git_ref.strip()
-        if self.strategy != "recreate-in-place":
-            raise ValueError(
-                "Odoo target replacement apply currently supports recreate-in-place only."
-            )
-        if bool(self.artifact_id) != bool(self.source_git_ref):
-            raise ValueError(
-                "Odoo target replacement apply requires artifact_id and source_git_ref together."
-            )
-        return self
-
-
-class OdooStableTargetReplacementApplyResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    product: str
-    context: str
-    instance: str
-    strategy: Literal["recreate-in-place"]
-    deployment_record_id: str = ""
-    deploy_status: Literal["pass", "fail"]
-    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
-    health_status: Literal["pass", "fail", "skipped"] = "skipped"
-    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
-    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
-    health_url: str = ""
-    canonical_url: str = ""
-    logo_urls: tuple[str, ...] = ()
-    verification_evidence: OdooVerificationEvidence = Field(default_factory=OdooVerificationEvidence)
-    runtime_identity_injected: bool = False
-    target_id: str = ""
-    target_name: str = ""
-    artifact_id: str = ""
-    image_reference: str = ""
-    error_message: str = ""
 
 
 class _ApplyResultBase(BaseModel):
@@ -611,9 +543,7 @@ def build_odoo_stable_target_replacement_plan(
         blockers.append("Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
     if request.data_source_mode != "existing" and not request.allow_empty_data:
-        blockers.append(
-            "Odoo prelaunch rebuild requests must explicitly set allow_empty_data."
-        )
+        blockers.append("Odoo prelaunch rebuild requests must explicitly set allow_empty_data.")
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
     ):

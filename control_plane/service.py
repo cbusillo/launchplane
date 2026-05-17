@@ -113,6 +113,16 @@ from control_plane.contracts.odoo_stable_bootstrap_operation import (
     build_odoo_stable_bootstrap_operation_id,
     odoo_stable_bootstrap_operation_is_terminal,
 )
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
+    OdooStableTargetReplacementRequest,
+)
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+    build_odoo_stable_target_replacement_operation_id,
+    odoo_stable_target_replacement_operation_is_terminal,
+)
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -311,9 +321,7 @@ from control_plane.workflows.odoo_prod_rollback import (
     execute_odoo_prod_rollback,
 )
 from control_plane.workflows.odoo_stable_target_replacement import (
-    OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementStore,
-    OdooStableTargetReplacementRequest,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -581,6 +589,27 @@ class _OdooStableBootstrapOperationStore(Protocol):
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[OdooStableBootstrapOperationRecord, ...]: ...
+
+
+class _OdooStableTargetReplacementOperationStore(Protocol):
+    def write_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> object: ...
+
+    def read_odoo_stable_target_replacement_operation_record(
+        self, operation_id: str
+    ) -> OdooStableTargetReplacementOperationRecord: ...
+
+    def list_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1730,6 +1759,7 @@ _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
         _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
+        _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
         _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
         _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
@@ -2275,6 +2305,12 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_stable_bootstrap.execute", {"operation_id": segments[5]}
+    if (
+        len(segments) == 6
+        and segments[:4] == ["v1", "drivers", "odoo", "target-replacement"]
+        and segments[4] == "operations"
+    ):
+        return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
     if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "driver-view":
         return "driver.read", {"context": segments[2]}
     if (
@@ -2488,7 +2524,9 @@ def _write_odoo_config_parameter_override(
         apply_on=apply_on,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
-        website_bootstrap=existing_record.website_bootstrap if existing_record is not None else None,
+        website_bootstrap=existing_record.website_bootstrap
+        if existing_record is not None
+        else None,
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
@@ -4120,6 +4158,7 @@ def _accepted_payload(
                 "merge_train_stack_collapse_plan_record_id",
                 "merge_train_run_id",
                 "odoo_stable_bootstrap_operation_id",
+                "odoo_stable_target_replacement_operation_id",
             }
         },
         **({"result": serialized_driver_result} if serialized_driver_result else {}),
@@ -4142,6 +4181,18 @@ def _odoo_stable_bootstrap_operation_poll_url(operation_id: str) -> str:
     return f"/v1/drivers/odoo/stable-bootstrap/operations/{operation_id.strip()}"
 
 
+def _target_replacement_operation_payload(
+    operation: OdooStableTargetReplacementOperationRecord,
+) -> dict[str, object]:
+    payload = operation.model_dump(mode="json")
+    payload["poll_url"] = _odoo_stable_target_replacement_operation_poll_url(operation.operation_id)
+    return payload
+
+
+def _odoo_stable_target_replacement_operation_poll_url(operation_id: str) -> str:
+    return f"/v1/drivers/odoo/target-replacement/operations/{operation_id.strip()}"
+
+
 def _odoo_stable_bootstrap_operation_store(
     record_store: object,
 ) -> _OdooStableBootstrapOperationStore:
@@ -4154,6 +4205,21 @@ def _odoo_stable_bootstrap_operation_store(
         return cast(_OdooStableBootstrapOperationStore, record_store)
     raise click.ClickException(
         "Odoo stable bootstrap operations require Launchplane operation-record storage."
+    )
+
+
+def _odoo_stable_target_replacement_operation_store(
+    record_store: object,
+) -> _OdooStableTargetReplacementOperationStore:
+    required_methods = (
+        "write_odoo_stable_target_replacement_operation_record",
+        "read_odoo_stable_target_replacement_operation_record",
+        "list_odoo_stable_target_replacement_operation_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_OdooStableTargetReplacementOperationStore, record_store)
+    raise click.ClickException(
+        "Odoo stable target replacement operations require Launchplane operation-record storage."
     )
 
 
@@ -4177,6 +4243,35 @@ def _find_active_odoo_stable_bootstrap_operation(
     instance: str,
 ) -> OdooStableBootstrapOperationRecord | None:
     records = operation_store.list_odoo_stable_bootstrap_operation_records(
+        product=product,
+        context_name=context,
+        instance_name=instance,
+        statuses=("pending", "running"),
+        limit=1,
+    )
+    return records[0] if records else None
+
+
+def _find_odoo_stable_target_replacement_operation_by_idempotency_key(
+    *,
+    operation_store: _OdooStableTargetReplacementOperationStore,
+    idempotency_key: str,
+) -> OdooStableTargetReplacementOperationRecord | None:
+    records = operation_store.list_odoo_stable_target_replacement_operation_records(
+        idempotency_key=idempotency_key,
+        limit=1,
+    )
+    return records[0] if records else None
+
+
+def _find_active_odoo_stable_target_replacement_operation(
+    *,
+    operation_store: _OdooStableTargetReplacementOperationStore,
+    product: str,
+    context: str,
+    instance: str,
+) -> OdooStableTargetReplacementOperationRecord | None:
+    records = operation_store.list_odoo_stable_target_replacement_operation_records(
         product=product,
         context_name=context,
         instance_name=instance,
@@ -4213,6 +4308,34 @@ def _build_odoo_stable_bootstrap_operation_record(
     )
 
 
+def _build_odoo_stable_target_replacement_operation_record(
+    *,
+    replacement_request: OdooStableTargetReplacementApplyRequest,
+    context: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    created_at: str,
+) -> OdooStableTargetReplacementOperationRecord:
+    return OdooStableTargetReplacementOperationRecord(
+        operation_id=build_odoo_stable_target_replacement_operation_id(
+            product=replacement_request.product,
+            context=context,
+            instance=replacement_request.instance,
+            created_at=created_at,
+        ),
+        product=replacement_request.product,
+        context=context,
+        instance=replacement_request.instance,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        request=replacement_request,
+        status="pending",
+        phase="created",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
 def _start_odoo_stable_bootstrap_operation_worker(
     *,
     operation_id: str,
@@ -4229,6 +4352,27 @@ def _start_odoo_stable_bootstrap_operation_worker(
             "trace_id": trace_id,
         },
         name=f"odoo-stable-bootstrap-{operation_id}",
+        daemon=True,
+    )
+    worker.start()
+
+
+def _start_odoo_stable_target_replacement_operation_worker(
+    *,
+    operation_id: str,
+    control_plane_root_path: Path,
+    record_store: object,
+    trace_id: str,
+) -> None:
+    worker = threading.Thread(
+        target=_run_odoo_stable_target_replacement_operation_worker,
+        kwargs={
+            "operation_id": operation_id,
+            "control_plane_root_path": control_plane_root_path,
+            "record_store": record_store,
+            "trace_id": trace_id,
+        },
+        name=f"odoo-target-replacement-{operation_id}",
         daemon=True,
     )
     worker.start()
@@ -4289,10 +4433,75 @@ def _run_odoo_stable_bootstrap_operation_worker(
             "updated_at": finished_at,
             "finished_at": finished_at,
             "result": result,
-            "error_message": "" if passed else (result.error_message or "Odoo stable bootstrap failed."),
+            "error_message": ""
+            if passed
+            else (result.error_message or "Odoo stable bootstrap failed."),
         }
     )
     operation_store.write_odoo_stable_bootstrap_operation_record(terminal_operation)
+
+
+def _run_odoo_stable_target_replacement_operation_worker(
+    *,
+    operation_id: str,
+    control_plane_root_path: Path,
+    record_store: object,
+    trace_id: str,
+) -> None:
+    operation_store = _odoo_stable_target_replacement_operation_store(record_store)
+    operation = operation_store.read_odoo_stable_target_replacement_operation_record(operation_id)
+    if odoo_stable_target_replacement_operation_is_terminal(operation):
+        return
+    started_at = _utc_now_timestamp()
+    running_operation = operation.model_copy(
+        update={
+            "status": "running",
+            "phase": "running",
+            "started_at": operation.started_at or started_at,
+            "updated_at": started_at,
+            "runner_trace_id": trace_id,
+        }
+    )
+    operation_store.write_odoo_stable_target_replacement_operation_record(running_operation)
+    try:
+        result = execute_odoo_stable_target_replacement_apply(
+            control_plane_root=control_plane_root_path,
+            record_store=cast(OdooStableTargetReplacementStore, record_store),
+            request=running_operation.request,
+        )
+    except Exception as error:
+        logging.exception(
+            "Odoo stable target replacement operation %s failed before producing a result.",
+            operation_id,
+        )
+        finished_at = _utc_now_timestamp()
+        failed_operation = running_operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "error_message": str(error),
+            }
+        )
+        operation_store.write_odoo_stable_target_replacement_operation_record(failed_operation)
+        return
+    finished_at = _utc_now_timestamp()
+    passed = _odoo_stable_target_replacement_operation_result_passed(result)
+    terminal_operation = running_operation.model_copy(
+        update={
+            "status": "pass" if passed else "fail",
+            "phase": "completed" if passed else "failed",
+            "deployment_record_id": result.deployment_record_id,
+            "updated_at": finished_at,
+            "finished_at": finished_at,
+            "result": result,
+            "error_message": ""
+            if passed
+            else (result.error_message or "Odoo stable target replacement failed."),
+        }
+    )
+    operation_store.write_odoo_stable_target_replacement_operation_record(terminal_operation)
 
 
 def _odoo_stable_bootstrap_operation_result_passed(
@@ -4300,6 +4509,18 @@ def _odoo_stable_bootstrap_operation_result_passed(
 ) -> bool:
     return (
         result.bootstrap_status == "pass"
+        and result.post_deploy_status == "pass"
+        and result.health_status != "fail"
+        and result.canonical_status != "fail"
+        and result.logo_status != "fail"
+    )
+
+
+def _odoo_stable_target_replacement_operation_result_passed(
+    result: OdooStableTargetReplacementApplyResult,
+) -> bool:
+    return (
+        result.deploy_status == "pass"
         and result.post_deploy_status == "pass"
         and result.health_status != "fail"
         and result.canonical_status != "fail"
@@ -6382,9 +6603,7 @@ def create_launchplane_service_app(
 
         original_start_response = start_response
 
-        def start_response_with_session_cookie(
-            status: str, headers: list[tuple[str, str]]
-        ) -> None:
+        def start_response_with_session_cookie(status: str, headers: list[tuple[str, str]]) -> None:
             response_headers = list(headers)
             if session_manager is not None and renewed_session is not None:
                 response_headers.append(
@@ -6760,6 +6979,55 @@ def create_launchplane_service_app(
                             **(
                                 {"result": operation.result.model_dump(mode="json")}
                                 if operation.result is not None
+                                else {}
+                            ),
+                        },
+                    )
+                if action == "odoo_target_replacement_apply.execute":
+                    replacement_operation_id = params["operation_id"]
+                    replacement_operation_store = _odoo_stable_target_replacement_operation_store(
+                        record_store
+                    )
+                    try:
+                        replacement_operation = replacement_operation_store.read_odoo_stable_target_replacement_operation_record(
+                            replacement_operation_id
+                        )
+                    except FileNotFoundError:
+                        return _not_found_response(
+                            start_response=start_response,
+                            trace_id=request_trace_id,
+                            path=path,
+                        )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product=replacement_operation.product,
+                        context=replacement_operation.context,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Odoo target replacement operation status for the requested product/context.",
+                                },
+                            },
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "operation": _target_replacement_operation_payload(
+                                replacement_operation
+                            ),
+                            **(
+                                {"result": replacement_operation.result.model_dump(mode="json")}
+                                if replacement_operation.result is not None
                                 else {}
                             ),
                         },
@@ -10540,23 +10808,100 @@ def create_launchplane_service_app(
                 )
                 if authorization_response is not None:
                     return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                if not request_idempotency_key:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "idempotency_key_required",
+                                "message": "Odoo target replacement operations require an Idempotency-Key header.",
+                            },
+                        },
+                    )
+                replacement_operation_store = _odoo_stable_target_replacement_operation_store(
+                    record_store
                 )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_stable_target_replacement_apply(
-                    control_plane_root=resolved_root,
-                    record_store=cast(OdooStableTargetReplacementStore, record_store),
-                    request=odoo_replacement_apply_request.replacement,
+                existing_replacement_operation = (
+                    _find_odoo_stable_target_replacement_operation_by_idempotency_key(
+                        operation_store=replacement_operation_store,
+                        idempotency_key=request_idempotency_key,
+                    )
                 )
-                result = {"deployment_record_id": driver_result.deployment_record_id}
+                if existing_replacement_operation is not None:
+                    if existing_replacement_operation.request_fingerprint != request_fingerprint:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=409,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_reused",
+                                    "message": "Idempotency-Key was already used for a different Odoo target replacement request.",
+                                },
+                            },
+                        )
+                    driver_result = _target_replacement_operation_payload(
+                        existing_replacement_operation
+                    )
+                    result = {
+                        "odoo_stable_target_replacement_operation_id": existing_replacement_operation.operation_id,
+                        **(
+                            {
+                                "deployment_record_id": existing_replacement_operation.deployment_record_id
+                            }
+                            if existing_replacement_operation.deployment_record_id
+                            else {}
+                        ),
+                    }
+                else:
+                    active_replacement_operation = (
+                        _find_active_odoo_stable_target_replacement_operation(
+                            operation_store=replacement_operation_store,
+                            product=odoo_replacement_apply_request.product,
+                            context=replacement_apply_lane.context,
+                            instance=odoo_replacement_apply_request.replacement.instance,
+                        )
+                    )
+                    if active_replacement_operation is not None:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=409,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "odoo_stable_target_replacement_operation_active",
+                                    "message": "An Odoo target replacement operation is already active for this product/context/instance.",
+                                },
+                                "operation": _target_replacement_operation_payload(
+                                    active_replacement_operation
+                                ),
+                            },
+                        )
+                    replacement_operation = _build_odoo_stable_target_replacement_operation_record(
+                        replacement_request=odoo_replacement_apply_request.replacement,
+                        context=replacement_apply_lane.context,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        created_at=_utc_now_timestamp(),
+                    )
+                    replacement_operation_store.write_odoo_stable_target_replacement_operation_record(
+                        replacement_operation
+                    )
+                    _start_odoo_stable_target_replacement_operation_worker(
+                        operation_id=replacement_operation.operation_id,
+                        control_plane_root_path=resolved_root,
+                        record_store=record_store,
+                        trace_id=request_trace_id,
+                    )
+                    driver_result = _target_replacement_operation_payload(replacement_operation)
+                    result = {
+                        "odoo_stable_target_replacement_operation_id": replacement_operation.operation_id
+                    }
             elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
                 verireel_testing_deploy_request = (
                     _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)

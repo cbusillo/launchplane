@@ -738,9 +738,16 @@ or change routes.
 
 When a plan is `ready`, the trusted `Odoo Target Replacement Apply` workflow can
 call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
-`recreate-in-place` path. The first apply surface is testing-only and keeps the
-existing compose target, explicit Odoo volume env keys, and expected hostnames;
-it re-syncs the Launchplane-rendered compose source, reconciles each expected
+`recreate-in-place` path. The service creates a durable operation record and
+returns immediately; the workflow polls
+`GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
+operation status is `pass` or `fail`, then uploads the final operation payload as
+the workflow artifact. `Idempotency-Key` is required: a repeated request with the
+same key returns the existing operation, while a different key for the same
+product/context/instance is rejected while a `pending` or `running` operation is
+active. The first apply surface is testing-only and keeps the existing compose
+target, explicit Odoo volume env keys, and expected hostnames; the operation
+worker re-syncs the Launchplane-rendered compose source, reconciles each expected
 Dokploy compose domain route to the `web` service on the product runtime port,
 renders the matching Traefik router labels into the raw compose, injects the
 runtime identity breadcrumb, triggers Dokploy deploy, runs Odoo post-deploy,
