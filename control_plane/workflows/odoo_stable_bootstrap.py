@@ -46,6 +46,14 @@ from control_plane.workflows.ship import (
 
 ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
+__all__ = [
+    "ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS",
+    "OdooStableBootstrapRequest",
+    "OdooStableBootstrapResult",
+    "OdooStableBootstrapStore",
+    "execute_odoo_stable_bootstrap",
+]
+
 
 class OdooStableBootstrapStore(Protocol):
     def read_odoo_instance_override_record(
