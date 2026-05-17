@@ -4199,7 +4199,6 @@ def _build_odoo_stable_bootstrap_operation_record(
             context=bootstrap_request.context,
             instance=bootstrap_request.instance,
             created_at=created_at,
-            idempotency_key=idempotency_key,
         ),
         product=bootstrap_request.product,
         context=bootstrap_request.context,

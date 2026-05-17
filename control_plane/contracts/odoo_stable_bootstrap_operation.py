@@ -102,7 +102,7 @@ class OdooStableBootstrapOperationRecord(BaseModel):
 
 
 def build_odoo_stable_bootstrap_operation_id(
-    *, product: str, context: str, instance: str, created_at: str, idempotency_key: str
+    *, product: str, context: str, instance: str, created_at: str
 ) -> str:
     normalized_product = product.strip().lower().replace("/", "-")
     normalized_context = context.strip().lower()
@@ -115,7 +115,6 @@ def build_odoo_stable_bootstrap_operation_id(
                 normalized_context,
                 normalized_instance,
                 normalized_created_at,
-                idempotency_key.strip(),
             )
         ).encode("utf-8")
     ).hexdigest()[:16]

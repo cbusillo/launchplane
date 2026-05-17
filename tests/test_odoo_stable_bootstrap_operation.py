@@ -47,14 +47,12 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
             context="cm",
             instance="testing",
             created_at="2026-05-17T00:00:00Z",
-            idempotency_key="bootstrap-cm-testing",
         )
         second = build_odoo_stable_bootstrap_operation_id(
             product="odoo-tenant-cm",
             context="cm",
             instance="testing",
             created_at="2026-05-17T00:00:00Z",
-            idempotency_key="bootstrap-cm-testing",
         )
 
         self.assertEqual(first, second)
