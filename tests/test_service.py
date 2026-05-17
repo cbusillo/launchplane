@@ -1053,7 +1053,7 @@ def _invoke_app(
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured_status = ""
 
-    def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+    def start_response(status: str, _response_headers: list[tuple[str, str]]) -> None:
         nonlocal captured_status
         captured_status = status
 
@@ -1108,10 +1108,10 @@ def _invoke_raw_app(
     captured_status = ""
     captured_headers: list[tuple[str, str]] = []
 
-    def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+    def start_response(status: str, response_headers: list[tuple[str, str]]) -> None:
         nonlocal captured_status, captured_headers
         captured_status = status
-        captured_headers = headers
+        captured_headers = response_headers
 
     response_body = b"".join(app(environ, start_response))
     return (
