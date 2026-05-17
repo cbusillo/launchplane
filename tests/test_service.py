@@ -13190,6 +13190,70 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 400)
             self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_odoo_preview_verification_driver_rejects_checked_url_mapping(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "pass",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                        "checked_urls": {
+                            "health": "https://pr-42.cm-preview.example.test/web/health"
+                        },
+                        "timeout_seconds": 30,
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:mapping"},
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
+
     def test_odoo_preview_verification_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
