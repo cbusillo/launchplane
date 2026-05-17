@@ -40,6 +40,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     context: str
     instance: str
     idempotency_key: str
+    idempotency_scope: str = ""
     request_fingerprint: str
     request: OdooStableTargetReplacementApplyRequest
     status: OdooStableTargetReplacementOperationStatus = "pending"
@@ -71,6 +72,7 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
             self.idempotency_key,
             "Odoo stable target replacement operation requires idempotency_key.",
         )
+        self.idempotency_scope = self.idempotency_scope.strip()
         self.request_fingerprint = _normalize_required(
             self.request_fingerprint,
             "Odoo stable target replacement operation requires request_fingerprint.",

@@ -1,4 +1,6 @@
+import hashlib
 import json
+import time
 from pathlib import Path
 from typing import TypeVar
 
@@ -621,6 +623,7 @@ class FilesystemRecordStore:
         context_name: str = "",
         instance_name: str = "",
         idempotency_key: str = "",
+        idempotency_scope: str = "",
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]:
@@ -634,12 +637,58 @@ class FilesystemRecordStore:
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
             and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not idempotency_scope or record.idempotency_scope == idempotency_scope)
             and (not statuses or record.status in statuses)
         ]
         records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]:
+        reservation_id = _odoo_target_replacement_lane_reservation_id(record)
+        reservation_path = self._record_path(
+            "odoo_stable_target_replacement_lane_reservations", reservation_id
+        )
+        reservation_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with reservation_path.open("x", encoding="utf-8") as reservation_file:
+                reservation_file.write(record.operation_id)
+        except FileExistsError:
+            reserved_operation_id = reservation_path.read_text(encoding="utf-8").strip()
+            if reserved_operation_id:
+                reserved_operation = (
+                    self._wait_for_odoo_stable_target_replacement_reserved_operation(
+                        reserved_operation_id
+                    )
+                )
+                if reserved_operation is None:
+                    reservation_path.unlink(missing_ok=True)
+                    return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                        record
+                    )
+                if reserved_operation.status in {"pending", "running"}:
+                    return reserved_operation, False
+            reservation_path.unlink(missing_ok=True)
+            return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                record
+            )
+        self.write_odoo_stable_target_replacement_operation_record(record)
+        return record, True
+
+    def _wait_for_odoo_stable_target_replacement_reserved_operation(
+        self, operation_id: str
+    ) -> OdooStableTargetReplacementOperationRecord | None:
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                return self.read_odoo_stable_target_replacement_operation_record(operation_id)
+            except FileNotFoundError:
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.01)
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
         return self._write_model("backup_gates", record.record_id, record)
@@ -969,3 +1018,11 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+
+def _odoo_target_replacement_lane_reservation_id(
+    record: OdooStableTargetReplacementOperationRecord,
+) -> str:
+    lane_key = "|".join((record.product, record.context, record.instance))
+    digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
+    return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"

@@ -597,6 +597,10 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> object: ...
 
+    def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, bool]: ...
+
     def read_odoo_stable_target_replacement_operation_record(
         self, operation_id: str
     ) -> OdooStableTargetReplacementOperationRecord: ...
@@ -608,6 +612,7 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
         context_name: str = "",
         instance_name: str = "",
         idempotency_key: str = "",
+        idempotency_scope: str = "",
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
@@ -4311,6 +4316,7 @@ def _odoo_stable_target_replacement_operation_store(
 ) -> _OdooStableTargetReplacementOperationStore:
     required_methods = (
         "write_odoo_stable_target_replacement_operation_record",
+        "create_odoo_stable_target_replacement_operation_record_if_no_active_lane",
         "read_odoo_stable_target_replacement_operation_record",
         "list_odoo_stable_target_replacement_operation_records",
     )
@@ -4354,26 +4360,11 @@ def _find_odoo_stable_target_replacement_operation_by_idempotency_key(
     *,
     operation_store: _OdooStableTargetReplacementOperationStore,
     idempotency_key: str,
+    idempotency_scope: str,
 ) -> OdooStableTargetReplacementOperationRecord | None:
     records = operation_store.list_odoo_stable_target_replacement_operation_records(
         idempotency_key=idempotency_key,
-        limit=1,
-    )
-    return records[0] if records else None
-
-
-def _find_active_odoo_stable_target_replacement_operation(
-    *,
-    operation_store: _OdooStableTargetReplacementOperationStore,
-    product: str,
-    context: str,
-    instance: str,
-) -> OdooStableTargetReplacementOperationRecord | None:
-    records = operation_store.list_odoo_stable_target_replacement_operation_records(
-        product=product,
-        context_name=context,
-        instance_name=instance,
-        statuses=("pending", "running"),
+        idempotency_scope=idempotency_scope,
         limit=1,
     )
     return records[0] if records else None
@@ -4411,6 +4402,7 @@ def _build_odoo_stable_target_replacement_operation_record(
     replacement_request: OdooStableTargetReplacementApplyRequest,
     context: str,
     idempotency_key: str,
+    idempotency_scope: str,
     request_fingerprint: str,
     created_at: str,
 ) -> OdooStableTargetReplacementOperationRecord:
@@ -4425,6 +4417,7 @@ def _build_odoo_stable_target_replacement_operation_record(
         context=context,
         instance=replacement_request.instance,
         idempotency_key=idempotency_key,
+        idempotency_scope=idempotency_scope,
         request_fingerprint=request_fingerprint,
         request=replacement_request,
         status="pending",
@@ -11131,6 +11124,7 @@ def create_launchplane_service_app(
                     _find_odoo_stable_target_replacement_operation_by_idempotency_key(
                         operation_store=replacement_operation_store,
                         idempotency_key=request_idempotency_key,
+                        idempotency_scope=request_scope,
                     )
                 )
                 if existing_replacement_operation is not None:
@@ -11161,15 +11155,20 @@ def create_launchplane_service_app(
                         ),
                     }
                 else:
-                    active_replacement_operation = (
-                        _find_active_odoo_stable_target_replacement_operation(
-                            operation_store=replacement_operation_store,
-                            product=odoo_replacement_apply_request.product,
-                            context=replacement_apply_lane.context,
-                            instance=odoo_replacement_apply_request.replacement.instance,
+                    replacement_operation = _build_odoo_stable_target_replacement_operation_record(
+                        replacement_request=odoo_replacement_apply_request.replacement,
+                        context=replacement_apply_lane.context,
+                        idempotency_key=request_idempotency_key,
+                        idempotency_scope=request_scope,
+                        request_fingerprint=request_fingerprint,
+                        created_at=_utc_now_timestamp(),
+                    )
+                    replacement_operation, created_replacement_operation = (
+                        replacement_operation_store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                            replacement_operation
                         )
                     )
-                    if active_replacement_operation is not None:
+                    if not created_replacement_operation:
                         return _json_response(
                             start_response=start_response,
                             status_code=409,
@@ -11181,20 +11180,10 @@ def create_launchplane_service_app(
                                     "message": "An Odoo target replacement operation is already active for this product/context/instance.",
                                 },
                                 "operation": _target_replacement_operation_payload(
-                                    active_replacement_operation
+                                    replacement_operation
                                 ),
                             },
                         )
-                    replacement_operation = _build_odoo_stable_target_replacement_operation_record(
-                        replacement_request=odoo_replacement_apply_request.replacement,
-                        context=replacement_apply_lane.context,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        created_at=_utc_now_timestamp(),
-                    )
-                    replacement_operation_store.write_odoo_stable_target_replacement_operation_record(
-                        replacement_operation
-                    )
                     _start_odoo_stable_target_replacement_operation_worker(
                         operation_id=replacement_operation.operation_id,
                         control_plane_root_path=resolved_root,

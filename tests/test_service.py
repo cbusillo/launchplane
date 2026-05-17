@@ -20342,6 +20342,122 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             worker_mock.assert_called_once()
 
+    def test_odoo_target_replacement_apply_driver_scopes_replay_to_caller(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _odoo_profile_payload_with_prod_lane()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main",
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main",
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            first_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            second_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply-other.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service._start_odoo_stable_target_replacement_operation_worker"
+            ) as worker_mock:
+                first_status, first_payload = _invoke_app(
+                    first_app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "replacement": {
+                            "product": "odoo-tenant-cm",
+                            "instance": "testing",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                        },
+                    },
+                    headers={"Idempotency-Key": "shared-target-replacement-key"},
+                )
+                first_operation_id = first_payload["records"][
+                    "odoo_stable_target_replacement_operation_id"
+                ]
+                first_operation = store.read_odoo_stable_target_replacement_operation_record(
+                    first_operation_id
+                )
+                store.write_odoo_stable_target_replacement_operation_record(
+                    first_operation.model_copy(
+                        update={
+                            "status": "pass",
+                            "phase": "completed",
+                            "finished_at": "2026-05-17T00:05:00Z",
+                            "updated_at": "2026-05-17T00:05:00Z",
+                        }
+                    )
+                )
+                second_status, second_payload = _invoke_app(
+                    second_app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "replacement": {
+                            "product": "odoo-tenant-cm",
+                            "instance": "prod",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                        },
+                    },
+                    headers={"Idempotency-Key": "shared-target-replacement-key"},
+                )
+
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 202)
+            self.assertNotEqual(
+                first_payload["records"]["odoo_stable_target_replacement_operation_id"],
+                second_payload["records"]["odoo_stable_target_replacement_operation_id"],
+            )
+            worker_mock.assert_called()
+            self.assertEqual(worker_mock.call_count, 2)
+
     def test_odoo_target_replacement_apply_driver_blocks_second_active_lane_operation(
         self,
     ) -> None:

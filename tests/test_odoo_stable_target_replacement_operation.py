@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -20,6 +21,7 @@ def _operation_payload(operation_id: str = "operation-cm-testing") -> dict[str, 
         "context": "cm",
         "instance": "testing",
         "idempotency_key": "replacement-cm-testing",
+        "idempotency_scope": "github-actions|cbusillo/launchplane|apply.yml|subject-a",
         "request_fingerprint": "fingerprint-123",
         "request": {
             "schema_version": 1,
@@ -95,6 +97,79 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                 (active.operation_id,),
             )
 
+    def test_filesystem_store_filters_idempotency_by_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-scope-a"),
+                    "idempotency_scope": "caller-a",
+                    "status": "pass",
+                    "phase": "completed",
+                    "finished_at": "2026-05-17T00:05:00Z",
+                    "updated_at": "2026-05-17T00:05:00Z",
+                }
+            )
+            second = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-scope-b"),
+                    "idempotency_scope": "caller-b",
+                    "status": "pass",
+                    "phase": "completed",
+                    "finished_at": "2026-05-17T00:06:00Z",
+                    "updated_at": "2026-05-17T00:06:00Z",
+                }
+            )
+
+            store.write_odoo_stable_target_replacement_operation_record(first)
+            store.write_odoo_stable_target_replacement_operation_record(second)
+
+            scoped_records = store.list_odoo_stable_target_replacement_operation_records(
+                idempotency_key="replacement-cm-testing",
+                idempotency_scope="caller-a",
+            )
+
+            self.assertEqual(
+                tuple(record.operation_id for record in scoped_records),
+                ("operation-scope-a",),
+            )
+
+    def test_filesystem_store_reserves_active_lane_atomically(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            records = [
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_operation_payload(f"operation-cm-testing-{index}"),
+                        "idempotency_key": f"replacement-cm-testing-{index}",
+                        "idempotency_scope": f"caller-{index}",
+                    }
+                )
+                for index in range(2)
+            ]
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = tuple(
+                    executor.map(
+                        store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
+                        records,
+                    )
+                )
+
+            created_results = tuple(created for _, created in results)
+            returned_ids = {record.operation_id for record, _ in results}
+            active_records = store.list_odoo_stable_target_replacement_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="testing",
+                statuses=("pending", "running"),
+            )
+
+            self.assertEqual(created_results.count(True), 1)
+            self.assertEqual(created_results.count(False), 1)
+            self.assertEqual(len(returned_ids), 1)
+            self.assertEqual(len(active_records), 1)
+
     def test_postgres_store_round_trips_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -107,6 +182,7 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             loaded = store.read_odoo_stable_target_replacement_operation_record(record.operation_id)
             active_records = store.list_odoo_stable_target_replacement_operation_records(
                 idempotency_key="replacement-cm-testing",
+                idempotency_scope="github-actions|cbusillo/launchplane|apply.yml|subject-a",
                 statuses=("pending",),
             )
 
@@ -115,6 +191,37 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                 tuple(item.operation_id for item in active_records),
                 (record.operation_id,),
             )
+
+    def test_postgres_store_reserves_active_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            first = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-a")
+            )
+            second = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-cm-testing-b"),
+                    "idempotency_key": "replacement-cm-testing-b",
+                    "idempotency_scope": "caller-b",
+                }
+            )
+
+            created_first = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    first
+                )
+            )
+            created_second = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    second
+                )
+            )
+
+            self.assertTrue(created_first[1])
+            self.assertFalse(created_second[1])
+            self.assertEqual(created_first[0].operation_id, created_second[0].operation_id)
 
 
 if __name__ == "__main__":
