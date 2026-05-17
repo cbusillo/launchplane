@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+    ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
 )
@@ -152,6 +153,11 @@ def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductPr
                     confirmation="restore opw upstream" if enabled else "",
                     expected_target_name="opw-prod" if enabled else "",
                     expected_domains=("opw-prod.shinycomputers.com",) if enabled else (),
+                ),
+                odoo_data_policy=ProductOdooLaneDataPolicy(
+                    data_authority="restorable" if enabled else "unknown",
+                    allowed_rebuild_sources=("upstream_restore",) if enabled else (),
+                    upstream_source="odoo-tenant-opw/opw/prod-upstream" if enabled else "",
                 ),
             ),
         ),
@@ -388,6 +394,53 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         self.assertEqual(plan.plan_status, "blocked")
         self.assertIn("prelaunch rebuild is not enabled", "; ".join(plan.blockers))
+
+    def test_build_plan_blocks_upstream_restore_disallowed_by_lane_data_policy(self) -> None:
+        profile = _opw_profile_with_prelaunch_policy(enabled=True)
+        lane = profile.lanes[0].model_copy(
+            update={"odoo_data_policy": ProductOdooLaneDataPolicy()}
+        )
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "opw-prod",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    profile=profile,
+                    target_record=_opw_target_record(),
+                    target_id_record=_opw_target_id_record(),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        self.assertIn("lane data policy", "; ".join(plan.blockers))
+        self.assertIn("'upstream_restore'", "; ".join(plan.blockers))
 
     def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
         identity = json.dumps(

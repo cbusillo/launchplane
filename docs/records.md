@@ -232,22 +232,32 @@ Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
 an issue-backed approval URL, the destructive confirmation phrase,
 `data_source_mode`, expected Dokploy target name, expected domains, and required
-verification checks. Launchplane treats the policy plus stored/observed target
-proof as the authority for whether a bootstrap can proceed; request
-product/context/instance alone is not sufficient. The approval issue is the
-implementation signal, not a launch tracker: close it when the policy is encoded
-and keep launch/cutover retirement in a separate issue or explicit expiration
-record.
+verification checks. The lane's `odoo_data_policy` must also allow that rebuild
+source; `unknown` data authority allows no destructive rebuild source. Launchplane
+treats the policy, data authority, and stored/observed target proof as the
+authority for whether a bootstrap can proceed; request product/context/instance
+alone is not sufficient. The approval issue is the implementation signal, not a
+launch tracker: close it when the policy is encoded and keep launch/cutover
+retirement in a separate issue or explicit expiration record.
 
 Odoo prelaunch rebuild eligibility is also lane-owned product-profile data. A
 lane's `odoo_prelaunch_rebuild` policy defaults to disabled and must explicitly
 carry an issue-backed approval URL, confirmation phrase, data source mode,
 expected Dokploy target name, and expected domains. The initial data source
 modes are `empty` and `upstream_restore`. Target replacement plan/apply requests
-that set a prelaunch data source must match this policy before Launchplane will
-treat missing Odoo volume keys as intentional. This keeps provisional lanes such
-as OPW testing/prod auditable without making environment names like `prod`
-destructive authority by themselves.
+that set a prelaunch data source must match this policy and the lane's
+`odoo_data_policy.allowed_rebuild_sources` before Launchplane will treat missing
+Odoo volume keys as intentional. This keeps provisional lanes such as OPW
+testing/prod auditable without making environment names like `prod` destructive
+authority by themselves.
+
+`odoo_data_policy` records the lane's data authority separately from operational
+driver defaults. `resettable` lanes may explicitly allow `empty` rebuilds;
+`restorable` lanes may explicitly allow `upstream_restore` and must name an
+`upstream_source`; `authoritative` lanes require backup-before-destroy and
+restore-proof safeguards. Routine Odoo probe details such as `/web/health` and
+logo URL discovery belong in the Odoo driver, not in tenant-owned product config,
+unless a lane has a real exception that needs an explicit override.
 
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should

@@ -63,6 +63,7 @@ def build_product_profile_record(
                 health_url=lane.health_url or _health_url(lane.base_url, manifest.health_path),
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
                 odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
+                odoo_data_policy=lane.odoo_data_policy,
             )
             for lane in manifest.lanes
         ),

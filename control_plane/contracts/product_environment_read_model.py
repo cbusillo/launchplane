@@ -142,6 +142,12 @@ class ProductEnvironmentSummary(BaseModel):
     prelaunch_rebuild_allowed: bool = False
     prelaunch_rebuild_data_source_mode: str = ""
     prelaunch_rebuild_approval_issue_url: str = ""
+    odoo_data_authority: str = "unknown"
+    odoo_allowed_rebuild_sources: tuple[str, ...] = ()
+    odoo_upstream_source: str = ""
+    odoo_requires_backup_before_destroy: bool = True
+    odoo_requires_restore_proof: bool = True
+    odoo_requires_runtime_identity: bool = True
     trust_state: FreshnessStatus
     provenance: DataProvenance
     warnings: tuple[str, ...] = ()
@@ -197,6 +203,12 @@ class ProductEnvironmentDetail(BaseModel):
     prelaunch_rebuild_allowed: bool = False
     prelaunch_rebuild_data_source_mode: str = ""
     prelaunch_rebuild_approval_issue_url: str = ""
+    odoo_data_authority: str = "unknown"
+    odoo_allowed_rebuild_sources: tuple[str, ...] = ()
+    odoo_upstream_source: str = ""
+    odoo_requires_backup_before_destroy: bool = True
+    odoo_requires_restore_proof: bool = True
+    odoo_requires_runtime_identity: bool = True
     target: ProductTargetSummary
     runtime_settings: tuple[ProductRuntimeSettingSummary, ...] = ()
     managed_secrets: tuple[ProductSecretBindingSummary, ...] = ()
@@ -376,6 +388,12 @@ def build_product_environment_detail(
         if lane.odoo_prelaunch_rebuild.enabled
         else "",
         prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
+        odoo_data_authority=lane.odoo_data_policy.data_authority,
+        odoo_allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
+        odoo_upstream_source=lane.odoo_data_policy.upstream_source,
+        odoo_requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
+        odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
+        odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
         target=_target_summary(lane_summary),
         runtime_settings=_runtime_setting_summaries(lane_summary),
         managed_secrets=_secret_binding_summaries(lane_summary),
@@ -1030,6 +1048,12 @@ def _build_environment_summary(
         if lane.odoo_prelaunch_rebuild.enabled
         else "",
         prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
+        odoo_data_authority=lane.odoo_data_policy.data_authority,
+        odoo_allowed_rebuild_sources=lane.odoo_data_policy.allowed_rebuild_sources,
+        odoo_upstream_source=lane.odoo_data_policy.upstream_source,
+        odoo_requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
+        odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
+        odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
         trust_state=provenance.freshness_status,
         provenance=provenance,
         available_actions=_action_availability(

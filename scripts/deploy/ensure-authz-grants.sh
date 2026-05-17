@@ -309,6 +309,13 @@ apply_odoo_cm_onboarding() {
                 require_health_verification: true,
                 require_canonical_verification: true,
                 require_logo_verification: true
+              },
+              odoo_data_policy: {
+                data_authority: "resettable",
+                allowed_rebuild_sources: ["empty"],
+                requires_backup_before_destroy: false,
+                requires_restore_proof: false,
+                requires_runtime_identity: true
               }
             },
             {
@@ -324,6 +331,13 @@ apply_odoo_cm_onboarding() {
                 require_health_verification: true,
                 require_canonical_verification: true,
                 require_logo_verification: true
+              },
+              odoo_data_policy: {
+                data_authority: "resettable",
+                allowed_rebuild_sources: ["empty"],
+                requires_backup_before_destroy: false,
+                requires_restore_proof: false,
+                requires_runtime_identity: true
               }
             }
           ],
@@ -427,6 +441,14 @@ apply_odoo_opw_onboarding() {
                 confirmation: "restore opw upstream",
                 expected_target_name: "opw-testing",
                 expected_domains: ["opw-testing.shinycomputers.com"]
+              },
+              odoo_data_policy: {
+                data_authority: "restorable",
+                allowed_rebuild_sources: ["upstream_restore"],
+                upstream_source: "odoo-tenant-opw/opw/testing-upstream",
+                requires_backup_before_destroy: true,
+                requires_restore_proof: true,
+                requires_runtime_identity: true
               }
             },
             {
@@ -439,6 +461,14 @@ apply_odoo_opw_onboarding() {
                 confirmation: "restore opw upstream",
                 expected_target_name: "opw-prod",
                 expected_domains: ["opw-prod.shinycomputers.com"]
+              },
+              odoo_data_policy: {
+                data_authority: "restorable",
+                allowed_rebuild_sources: ["upstream_restore"],
+                upstream_source: "odoo-tenant-opw/opw/prod-upstream",
+                requires_backup_before_destroy: true,
+                requires_restore_proof: true,
+                requires_runtime_identity: true
               }
             }
           ],

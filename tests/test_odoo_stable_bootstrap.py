@@ -20,6 +20,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductOdooLaneDataPolicy,
     ProductOdooStableBootstrapPolicy,
     ProductImageProfile,
     ProductLaneProfile,
@@ -105,6 +106,12 @@ class _Store:
                         confirmation=_BOOTSTRAP_CONFIRMATION,
                         expected_target_name="cm-testing",
                         expected_domains=("cm-testing.shinycomputers.com",),
+                    ),
+                    odoo_data_policy=ProductOdooLaneDataPolicy(
+                        data_authority="resettable",
+                        allowed_rebuild_sources=("empty",),
+                        requires_backup_before_destroy=False,
+                        requires_restore_proof=False,
                     ),
                 ),
             ),
@@ -481,6 +488,27 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertIn("requires confirmation", str(raised_error.exception))
+
+    def test_execute_refuses_disallowed_data_policy_source(self) -> None:
+        store = _Store()
+        lane = store.profile.lanes[0].model_copy(
+            update={"odoo_data_policy": ProductOdooLaneDataPolicy()}
+        )
+        store.profile = store.profile.model_copy(update={"lanes": (lane,)})
+        with self.assertRaises(click.ClickException) as raised_error:
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertIn("lane data policy", str(raised_error.exception))
+        self.assertIn("'empty'", str(raised_error.exception))
 
     def test_execute_refuses_mismatched_target_name(self) -> None:
         store = _Store()

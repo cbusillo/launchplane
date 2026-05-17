@@ -39,6 +39,13 @@ def _manifest_payload() -> dict[str, object]:
                     "expected_target_name": "example-site-testing",
                     "expected_domains": ["testing.example.invalid"],
                 },
+                "odoo_data_policy": {
+                    "data_authority": "resettable",
+                    "allowed_rebuild_sources": ["empty"],
+                    "requires_backup_before_destroy": False,
+                    "requires_restore_proof": False,
+                    "requires_runtime_identity": True,
+                },
             },
             {
                 "instance": "prod",
@@ -52,6 +59,14 @@ def _manifest_payload() -> dict[str, object]:
                     "confirmation": "restore example upstream",
                     "expected_target_name": "example-site-prod",
                     "expected_domains": ["example.invalid"],
+                },
+                "odoo_data_policy": {
+                    "data_authority": "restorable",
+                    "allowed_rebuild_sources": ["upstream_restore"],
+                    "upstream_source": "example-site/prod/upstream",
+                    "requires_backup_before_destroy": True,
+                    "requires_restore_proof": True,
+                    "requires_runtime_identity": True,
                 },
             },
         ],
@@ -458,6 +473,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             profile.lanes[1].odoo_prelaunch_rebuild.data_source_mode,
             "upstream_restore",
         )
+        self.assertEqual(profile.lanes[0].odoo_data_policy.data_authority, "resettable")
+        self.assertEqual(
+            profile.lanes[0].odoo_data_policy.allowed_rebuild_sources,
+            ("empty",),
+        )
+        self.assertEqual(profile.lanes[1].odoo_data_policy.data_authority, "restorable")
+        self.assertEqual(profile.lanes[1].odoo_data_policy.upstream_source, "example-site/prod/upstream")
         self.assertEqual(profile.preview.enable_label, "preview-requested")
         self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
         self.assertEqual(
