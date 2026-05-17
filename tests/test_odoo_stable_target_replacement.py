@@ -357,6 +357,23 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ("https://cm-testing.example.com/web/content/website/1/logo/Cell%20Mechanic.png",),
         )
 
+    def test_extract_logo_urls_accepts_unquoted_same_origin_logo_assets(self) -> None:
+        urls = _extract_same_origin_logo_urls(
+            base_url="https://cm-testing.example.com",
+            body=(
+                "<img src=/web/image/website/7/logo?unique=abc&amp;download=1>"
+                "<meta property=og:image content=/web/content?model=website&amp;id=1&amp;field=logo>"
+            ),
+        )
+
+        self.assertEqual(
+            urls,
+            (
+                "https://cm-testing.example.com/web/image/website/7/logo?unique=abc&download=1",
+                "https://cm-testing.example.com/web/content?model=website&id=1&field=logo",
+            ),
+        )
+
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
