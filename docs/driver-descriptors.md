@@ -174,6 +174,10 @@ are derived by the driver from the lane base URL and Odoo conventions. It is
 separate from target replacement: replacement reconciles provider/runtime target
 state, while bootstrap rebuilds Odoo application data for lanes that are
 explicitly safe to recreate.
+The POST route returns a durable operation record instead of holding the request
+open for the whole bootstrap. Callers poll
+`/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` and treat terminal
+`pass`/`fail` as the source of truth for workflow exit status and artifacts.
 
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call

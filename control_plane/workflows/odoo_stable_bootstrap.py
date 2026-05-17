@@ -4,8 +4,6 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -13,6 +11,10 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_stable_bootstrap import (
+    OdooStableBootstrapRequest,
+    OdooStableBootstrapResult,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -44,6 +46,14 @@ from control_plane.workflows.ship import (
 
 ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
+__all__ = [
+    "ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS",
+    "OdooStableBootstrapRequest",
+    "OdooStableBootstrapResult",
+    "OdooStableBootstrapStore",
+    "execute_odoo_stable_bootstrap",
+]
+
 
 class OdooStableBootstrapStore(Protocol):
     def read_odoo_instance_override_record(
@@ -67,60 +77,6 @@ class OdooStableBootstrapStore(Protocol):
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
-
-
-class OdooStableBootstrapRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str = "cm"
-    instance: str
-    confirmation: str
-    verify_health: bool = True
-    verify_canonical: bool = True
-    verify_logo: bool = True
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    health_timeout_seconds: int | None = Field(default=None, ge=1)
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooStableBootstrapRequest":
-        self.product = self.product.strip()
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
-        self.confirmation = self.confirmation.strip().lower()
-        if not self.product:
-            raise ValueError("Odoo stable bootstrap requires product.")
-        if not self.context:
-            raise ValueError("Odoo stable bootstrap requires context.")
-        if not self.instance:
-            raise ValueError("Odoo stable bootstrap requires instance.")
-        return self
-
-
-class OdooStableBootstrapResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    product: str
-    context: str
-    instance: str
-    deployment_record_id: str = ""
-    bootstrap_status: Literal["pass", "fail"]
-    bootstrap_run_status: Literal["pass", "fail", "skipped"] = "skipped"
-    readiness_status: Literal["pass", "fail", "verification_failed", "skipped"] = "skipped"
-    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
-    health_status: Literal["pass", "fail", "skipped"] = "skipped"
-    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
-    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
-    health_url: str = ""
-    canonical_url: str = ""
-    logo_urls: tuple[str, ...] = ()
-    verification_evidence: OdooVerificationEvidence = Field(default_factory=OdooVerificationEvidence)
-    target_id: str = ""
-    target_name: str = ""
-    artifact_id: str = ""
-    source_git_ref: str = ""
-    error_message: str = ""
 
 
 def _normalize_domain(raw_domain: str) -> str:

@@ -446,6 +446,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
             frozenset(
                 {
+                    control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
                     control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
                     control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
                     control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
