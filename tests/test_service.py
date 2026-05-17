@@ -1131,9 +1131,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example/",
                 "LAUNCHPLANE_SESSION_SECRET": "session-secret",
                 "LAUNCHPLANE_COOKIE_SECURE": "false",
-                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": (
-                    " Info@ShinyComputers.com, ops@example.com "
-                ),
+                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": " Info@ShinyComputers.com, ops@example.com ",
             },
             clear=True,
         ):
@@ -3661,7 +3659,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     app,
                     method="GET",
                     path="/v1/work-graph/merge-train/admission",
-                    query_string=("repository=cbusillo/sellyouroutboard&base_branch=main"),
+                    query_string="repository=cbusillo/sellyouroutboard&base_branch=main",
                 )
 
         self.assertEqual(status_code, 200)
@@ -9286,7 +9284,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 app,
                 method="GET",
                 path="/v1/product-profiles/sellyouroutboard/context-cutover-audit",
-                query_string=("source_context=sellyouroutboard&target_context=sellyouroutboard"),
+                query_string="source_context=sellyouroutboard&target_context=sellyouroutboard",
             )
 
         self.assertEqual(status_code, 400)
@@ -14622,8 +14620,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "oauth_env": {
                                 "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
                                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
-                                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": ("info@shinycomputers.com"),
-                                "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ("webhook-secret"),
+                                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": "info@shinycomputers.com",
+                                "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "webhook-secret",
                                 "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token",
                                 "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
                                 "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
