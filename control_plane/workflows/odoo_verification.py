@@ -93,7 +93,7 @@ def verify_odoo_stable_readiness(
         if verify_health:
             if not normalized_health_url:
                 raise click.ClickException("Odoo health verification has no health URL.")
-            evidence = _run_probe_with_retry(
+            evidence = _run_health_probe_with_retry(
                 lambda: _verify_health_url(
                     health_url=normalized_health_url,
                     timeout_seconds=timeout_seconds,
@@ -357,19 +357,32 @@ def _run_probe_with_retry(
     retry_interval_seconds: int,
 ) -> OdooVerificationProbeEvidence:
     deadline = time.monotonic() + timeout_seconds
-    last_error: click.ClickException | None = None
     while True:
         try:
             return verification()
         except _ProbeFailure:
             raise
         except click.ClickException as error:
-            last_error = error
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                if last_error is None:
-                    raise click.ClickException("Odoo verification retry ended without an error.")
-                raise last_error
+                raise error
+            time.sleep(min(retry_interval_seconds, remaining_seconds))
+
+
+def _run_health_probe_with_retry(
+    verification: Callable[[], OdooVerificationProbeEvidence],
+    *,
+    timeout_seconds: int,
+    retry_interval_seconds: int,
+) -> OdooVerificationProbeEvidence:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            return verification()
+        except click.ClickException as error:
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise error
             time.sleep(min(retry_interval_seconds, remaining_seconds))
 
 
@@ -380,17 +393,13 @@ def _run_logo_probe_with_retry(
     retry_interval_seconds: int,
 ) -> tuple[OdooVerificationProbeEvidence, tuple[str, ...]]:
     deadline = time.monotonic() + timeout_seconds
-    last_error: click.ClickException | None = None
     while True:
         try:
             return verification()
         except _ProbeFailure:
             raise
         except click.ClickException as error:
-            last_error = error
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                if last_error is None:
-                    raise click.ClickException("Odoo logo verification retry ended without an error.")
-                raise last_error
+                raise error
             time.sleep(min(retry_interval_seconds, remaining_seconds))
