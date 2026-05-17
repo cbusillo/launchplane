@@ -6649,29 +6649,29 @@ def _launchplane_managed_store_status(*, database_url: str) -> dict[str, object]
                 pass
 
 
-def _build_launchplane_service_target_preflight(
+def _launchplane_database_url_parts(database_url: str) -> tuple[str, str]:
+    if not database_url:
+        return "", ""
+    parsed_database_url = urlsplit(database_url)
+    return parsed_database_url.scheme.strip().lower(), (parsed_database_url.hostname or "").strip()
+
+
+def _launchplane_service_git_access_mode(custom_git_url: str) -> str:
+    if custom_git_url.startswith("git@"):
+        return "ssh"
+    if custom_git_url.startswith("https://") or custom_git_url.startswith("http://"):
+        return "https"
+    return ""
+
+
+def _build_launchplane_service_runtime_contract(
     *,
-    target_type: str,
-    target_id: str,
-    target_payload: Mapping[str, object],
+    env_map: dict[str, str],
+    database_url: str,
+    database_scheme: str,
+    database_host: str,
+    managed_store_status: Mapping[str, object],
 ) -> dict[str, object]:
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    source_type = str(target_payload.get("sourceType") or "").strip()
-    custom_git_url = str(target_payload.get("customGitUrl") or "").strip()
-    custom_git_branch = str(target_payload.get("customGitBranch") or "").strip()
-    custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
-    compose_path = str(target_payload.get("composePath") or "").strip()
-    compose_status = str(target_payload.get("composeStatus") or "").strip()
-    database_url = _launchplane_service_env_alias_value(
-        env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS
-    )
-    database_scheme = ""
-    database_host = ""
-    if database_url:
-        parsed_database_url = urlsplit(database_url)
-        database_scheme = parsed_database_url.scheme.strip().lower()
-        database_host = (parsed_database_url.hostname or "").strip()
-    managed_store_status = _launchplane_managed_store_status(database_url=database_url)
     managed_secret_bindings = managed_store_status.get("dokploy_secret_bindings", {})
     assert isinstance(managed_secret_bindings, dict)
     authz_policy_record_count = _int_from_json_value(
@@ -6683,14 +6683,7 @@ def _build_launchplane_service_target_preflight(
     runtime_environment_record_count = _int_from_json_value(
         managed_store_status.get("runtime_environment_record_count")
     )
-
-    git_access_mode = ""
-    if custom_git_url.startswith("git@"):
-        git_access_mode = "ssh"
-    elif custom_git_url.startswith("https://") or custom_git_url.startswith("http://"):
-        git_access_mode = "https"
-
-    runtime_contract = {
+    return {
         "database_url_present": bool(database_url),
         "database_scheme": database_scheme,
         "database_host": database_host,
@@ -6728,8 +6721,19 @@ def _build_launchplane_service_target_preflight(
         ),
     }
 
+
+def _launchplane_service_preflight_blockers(
+    *,
+    target_type: str,
+    source_type: str,
+    custom_git_url: str,
+    custom_git_branch: str,
+    custom_git_ssh_key_id: str,
+    compose_path: str,
+    git_access_mode: str,
+    runtime_contract: Mapping[str, object],
+) -> list[str]:
     blockers: list[str] = []
-    warnings: list[str] = []
     if target_type == "compose" and not compose_path:
         blockers.append("Dokploy compose target is missing composePath.")
     if source_type == "git" and not custom_git_url:
@@ -6742,9 +6746,9 @@ def _build_launchplane_service_target_preflight(
         )
     if not runtime_contract["database_url_present"]:
         blockers.append("Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.")
-    elif not database_scheme.startswith("postgresql"):
+    elif not str(runtime_contract["database_scheme"]).startswith("postgresql"):
         blockers.append("Launchplane service target database URL is not a PostgreSQL URL.")
-    elif not database_host:
+    elif not runtime_contract["database_host"]:
         blockers.append("Launchplane service target database URL is missing a database host.")
 
     if not runtime_contract["master_encryption_key_present"]:
@@ -6758,7 +6762,22 @@ def _build_launchplane_service_target_preflight(
             blockers.append(
                 "Launchplane service runtime store is missing managed Dokploy binding DOKPLOY_TOKEN."
             )
-    else:
+
+    if not runtime_contract["policy_configured"]:
+        blockers.append(
+            "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE. "
+            "Startup fails closed without an explicit policy input."
+        )
+    return blockers
+
+
+def _launchplane_service_preflight_warnings(
+    *,
+    compose_status: str,
+    runtime_contract: Mapping[str, object],
+) -> list[str]:
+    warnings: list[str] = []
+    if not runtime_contract["managed_store_inspectable"]:
         warnings.append(
             "Launchplane service managed-store inspection was unavailable. Confirm the shared store has configured Dokploy bindings for DOKPLOY_HOST and DOKPLOY_TOKEN."
         )
@@ -6767,11 +6786,6 @@ def _build_launchplane_service_target_preflight(
             "Launchplane service target still exposes legacy Dokploy credentials in target env. Remove DOKPLOY_HOST and DOKPLOY_TOKEN after confirming the shared store bindings."
         )
 
-    if not runtime_contract["policy_configured"]:
-        blockers.append(
-            "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE. "
-            "Startup fails closed without an explicit policy input."
-        )
     if not runtime_contract["authz_policy_db_configured"]:
         warnings.append(
             "Launchplane service target has no confirmed DB-backed authz policy records. "
@@ -6797,6 +6811,49 @@ def _build_launchplane_service_target_preflight(
         warnings.append(
             f"Dokploy target currently reports composeStatus={compose_status!r}; investigate the live target before replacing it."
         )
+    return warnings
+
+
+def _build_launchplane_service_target_preflight(
+    *,
+    target_type: str,
+    target_id: str,
+    target_payload: Mapping[str, object],
+) -> dict[str, object]:
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    source_type = str(target_payload.get("sourceType") or "").strip()
+    custom_git_url = str(target_payload.get("customGitUrl") or "").strip()
+    custom_git_branch = str(target_payload.get("customGitBranch") or "").strip()
+    custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
+    compose_path = str(target_payload.get("composePath") or "").strip()
+    compose_status = str(target_payload.get("composeStatus") or "").strip()
+    database_url = _launchplane_service_env_alias_value(
+        env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS
+    )
+    database_scheme, database_host = _launchplane_database_url_parts(database_url)
+    managed_store_status = _launchplane_managed_store_status(database_url=database_url)
+    git_access_mode = _launchplane_service_git_access_mode(custom_git_url)
+    runtime_contract = _build_launchplane_service_runtime_contract(
+        env_map=env_map,
+        database_url=database_url,
+        database_scheme=database_scheme,
+        database_host=database_host,
+        managed_store_status=managed_store_status,
+    )
+    blockers = _launchplane_service_preflight_blockers(
+        target_type=target_type,
+        source_type=source_type,
+        custom_git_url=custom_git_url,
+        custom_git_branch=custom_git_branch,
+        custom_git_ssh_key_id=custom_git_ssh_key_id,
+        compose_path=compose_path,
+        git_access_mode=git_access_mode,
+        runtime_contract=runtime_contract,
+    )
+    warnings = _launchplane_service_preflight_warnings(
+        compose_status=compose_status,
+        runtime_contract=runtime_contract,
+    )
 
     return {
         "target_id": target_id,
