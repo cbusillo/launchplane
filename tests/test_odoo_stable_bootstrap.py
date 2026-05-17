@@ -30,9 +30,12 @@ from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
     execute_odoo_stable_bootstrap,
-    _run_verification_with_retry,
 )
 from control_plane.workflows.odoo_stable_target_replacement import DokployRequest
+from control_plane.workflows.odoo_verification import (
+    OdooVerificationEvidence,
+    OdooVerificationResult,
+)
 
 
 _BOOTSTRAP_CONFIRMATION = "bootstrap cm testing"
@@ -50,6 +53,34 @@ def _mismatched_dokploy_request(
     if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
         return [{"host": "cm-prod.shinycomputers.com", "domainId": "domain-cm"}]
     return []
+
+
+def _verification_result() -> OdooVerificationResult:
+    return OdooVerificationResult(
+        health_status="pass",
+        canonical_status="pass",
+        logo_status="pass",
+        evidence=OdooVerificationEvidence(
+            base_url="https://cm-testing.shinycomputers.com",
+            health_url="https://cm-testing.shinycomputers.com/web/health",
+            canonical_url="https://cm-testing.shinycomputers.com",
+            logo_urls=("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
+        ),
+    )
+
+
+def _verification_failure_result() -> OdooVerificationResult:
+    return OdooVerificationResult(
+        health_status="pass",
+        canonical_status="fail",
+        logo_status="skipped",
+        evidence=OdooVerificationEvidence(
+            base_url="https://cm-testing.shinycomputers.com",
+            health_url="https://cm-testing.shinycomputers.com/web/health",
+            canonical_url="https://cm-testing.shinycomputers.com",
+        ),
+        error_message="canonical failed",
+    )
 
 
 class _Store:
@@ -184,17 +215,9 @@ class OdooStableBootstrapTests(unittest.TestCase):
                 ),
             ) as post_deploy_mock,
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_health_url",
-                side_effect=lambda **_kwargs: None,
-            ) as health_mock,
-            patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url",
-                side_effect=lambda **_kwargs: None,
-            ) as canonical_mock,
-            patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_logo_route",
-                side_effect=lambda **_kwargs: None,
-            ) as logo_mock,
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ) as verify_readiness,
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
                 side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:05:00Z"),
@@ -231,17 +254,22 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(captured_bootstrap_runs[0]["timeout_seconds"], None)
         post_deploy_mock.assert_called_once()
         self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "deploy")
-        health_mock.assert_called_once()
-        self.assertEqual(
-            health_mock.call_args.kwargs["health_url"],
-            "https://cm-testing.shinycomputers.com/web/health",
+        verify_readiness.assert_called_once_with(
+            base_url="https://cm-testing.shinycomputers.com",
+            health_url="https://cm-testing.shinycomputers.com/web/health",
+            verify_health=True,
+            verify_canonical=True,
+            verify_logo=True,
+            timeout_seconds=30,
+            retry_interval_seconds=5,
         )
-        canonical_mock.assert_called_once()
+        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/web/health")
+        self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
         self.assertEqual(
-            canonical_mock.call_args.kwargs["base_url"],
-            "https://cm-testing.shinycomputers.com",
+            result.logo_urls,
+            ("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
         )
-        logo_mock.assert_called_once()
+        self.assertEqual(result.verification_evidence.health_url, result.health_url)
         self.assertEqual(len(store.deployment_records), 2)
         self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
         self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "pass")
@@ -311,9 +339,10 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     post_deploy_status="pass",
                 ),
             ),
-            patch("control_plane.workflows.odoo_stable_bootstrap._verify_health_url"),
-            patch("control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url"),
-            patch("control_plane.workflows.odoo_stable_bootstrap._verify_logo_route"),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
                 side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
@@ -378,16 +407,8 @@ class OdooStableBootstrapTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_health_url",
-                side_effect=lambda **_kwargs: None,
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url",
-                side_effect=lambda **_kwargs: None,
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_logo_route",
-                side_effect=lambda **_kwargs: None,
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
             ),
         ):
             result = execute_odoo_stable_bootstrap(
@@ -731,12 +752,8 @@ class OdooStableBootstrapTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_health_url",
-                side_effect=lambda **_kwargs: None,
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url",
-                side_effect=click.ClickException("canonical failed"),
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_failure_result(),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
@@ -779,29 +796,6 @@ class OdooStableBootstrapTests(unittest.TestCase):
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",
         )
-
-    def test_verification_retry_allows_transient_startup_failure(self) -> None:
-        attempts = 0
-
-        def flaky_verification() -> None:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise click.ClickException("temporary health 404")
-
-        with patch(
-            "control_plane.workflows.odoo_stable_bootstrap.time.sleep",
-            side_effect=lambda _seconds: None,
-        ) as sleep_mock:
-            _run_verification_with_retry(
-                flaky_verification,
-                timeout_seconds=30,
-                retry_interval_seconds=5,
-            )
-
-        self.assertEqual(attempts, 2)
-        sleep_mock.assert_called_once()
-
 
 if __name__ == "__main__":
     unittest.main()
