@@ -102,6 +102,25 @@ class RuntimeIdentityTests(unittest.TestCase):
         self.assertIn("did not return JSON", detail)
         self.assertIsNone(observed)
 
+    def test_health_payload_runtime_identity_status_marks_invalid_identity_malformed(self) -> None:
+        expected = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="testing",
+            deployment_record_id="deployment-123",
+            artifact_id="artifact-a",
+            source_git_ref="abc123",
+        )
+
+        status, detail, observed = health_payload_runtime_identity_status(
+            expected=expected,
+            payload={"runtime_identity": {"deployment_record_id": "deployment-123"}},
+        )
+
+        self.assertEqual(status, "malformed")
+        self.assertIn("could not be parsed", detail)
+        self.assertIsNone(observed)
+
 
 if __name__ == "__main__":
     unittest.main()

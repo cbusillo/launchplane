@@ -10,6 +10,7 @@ RuntimeIdentityStatus = Literal[
     "match",
     "mismatch",
     "missing",
+    "malformed",
     "unverifiable",
 ]
 
@@ -97,6 +98,20 @@ def runtime_identity_from_health_payload(payload: object) -> RuntimeIdentity | N
     return None
 
 
+def health_payload_has_runtime_identity_key(payload: object) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    return any(
+        key in payload
+        for key in (
+            "runtime_identity",
+            "launchplane_runtime_identity",
+            "launchplaneRuntimeIdentity",
+            RUNTIME_IDENTITY_ENV_KEY,
+        )
+    )
+
+
 def compare_runtime_identity(
     *, expected: RuntimeIdentity | None, observed: RuntimeIdentity | None
 ) -> tuple[RuntimeIdentityStatus, str]:
@@ -137,5 +152,11 @@ def health_payload_runtime_identity_status(
             None,
         )
     observed = runtime_identity_from_health_payload(payload)
+    if observed is None and health_payload_has_runtime_identity_key(payload):
+        return (
+            "malformed",
+            "Health endpoint returned runtime identity evidence that could not be parsed.",
+            None,
+        )
     status, detail = compare_runtime_identity(expected=expected, observed=observed)
     return status, detail, observed

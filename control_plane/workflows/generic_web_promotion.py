@@ -38,8 +38,10 @@ from control_plane.workflows.launchplane import (
     resolve_launchplane_github_token,
 )
 from control_plane.workflows.runtime_identity_health import (
+    RuntimeIdentityHealthcheckError,
     healthcheck_evidence_with_runtime_identity,
     wait_for_healthcheck_with_retry,
+    wait_for_runtime_identity_healthcheck_with_retry,
 )
 from control_plane.workflows.promote import generate_promotion_record_id
 from control_plane.workflows.ship import utc_now_timestamp
@@ -352,7 +354,8 @@ def execute_generic_web_prod_promotion(
         inventory_record_id=inventory_record_id,
         target_id=deploy_result.target_id,
         dry_run=False,
-        error_message=deploy_result.error_message,
+        error_message=deploy_result.error_message
+        or _health_failure_detail(final_record.destination_health),
     )
     if final_result.promotion_status != "pass" or not request.release_tag:
         return final_result
@@ -527,9 +530,10 @@ def _verify_health_evidence_with_identity(
     healthcheck_errors: list[str] = []
     for health_url in evidence.urls:
         try:
-            healthcheck_pass = wait_for_healthcheck_with_retry(
+            healthcheck_pass = wait_for_runtime_identity_healthcheck_with_retry(
                 url=health_url,
                 timeout_seconds=timeout_seconds,
+                expected_runtime_identity=expected_runtime_identity,
                 sleep=time.sleep,
                 monotonic=time.monotonic,
             )
@@ -544,8 +548,21 @@ def _verify_health_evidence_with_identity(
                 healthcheck_pass=healthcheck_pass,
             )
             if verified_evidence.runtime_identity_status != "match":
-                raise click.ClickException(verified_evidence.runtime_identity_detail)
+                return verified_evidence.model_copy(update={"status": "fail"})
             return verified_evidence
+        except RuntimeIdentityHealthcheckError as error:
+            healthcheck_errors.append(str(error))
+            if error.healthcheck_pass is not None:
+                return healthcheck_evidence_with_runtime_identity(
+                    HealthcheckEvidence(
+                        verified=True,
+                        urls=evidence.urls,
+                        timeout_seconds=timeout_seconds,
+                        status="fail",
+                    ),
+                    expected_runtime_identity=expected_runtime_identity,
+                    healthcheck_pass=error.healthcheck_pass,
+                )
         except click.ClickException as error:
             healthcheck_errors.append(str(error))
     raise click.ClickException(
@@ -557,12 +574,18 @@ def _verify_health_evidence_with_identity(
 def _mark_health_failed(evidence: HealthcheckEvidence) -> HealthcheckEvidence:
     if evidence.status == "skipped":
         return evidence
-    return HealthcheckEvidence(
-        verified=bool(evidence.urls),
-        urls=evidence.urls,
-        timeout_seconds=evidence.timeout_seconds,
-        status="fail",
+    return evidence.model_copy(
+        update={
+            "verified": bool(evidence.urls),
+            "status": "fail",
+        }
     )
+
+
+def _health_failure_detail(evidence: HealthcheckEvidence) -> str:
+    if evidence.status != "fail":
+        return ""
+    return evidence.runtime_identity_detail
 
 
 def _mark_health_skipped(evidence: HealthcheckEvidence) -> HealthcheckEvidence:
