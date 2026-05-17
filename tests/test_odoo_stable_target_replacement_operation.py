@@ -1,5 +1,6 @@
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from json import JSONDecodeError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Lock
@@ -218,6 +219,50 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
 
                 first_record, first_created = first_future.result(timeout=2.0)
                 second_record, second_created = second_future.result(timeout=2.0)
+
+            self.assertEqual(first_record.operation_id, first.operation_id)
+            self.assertTrue(first_created)
+            self.assertEqual(second_record.operation_id, first.operation_id)
+            self.assertFalse(second_created)
+
+    def test_filesystem_store_waits_for_reserved_operation_json_to_settle(self) -> None:
+        class SettlingReadFilesystemRecordStore(FilesystemRecordStore):
+            def __init__(self, state_dir: Path) -> None:
+                super().__init__(state_dir)
+                self._operation_reads: dict[str, int] = {}
+
+            def read_odoo_stable_target_replacement_operation_record(
+                self, operation_id: str
+            ) -> OdooStableTargetReplacementOperationRecord:
+                read_count = self._operation_reads.get(operation_id, 0)
+                self._operation_reads[operation_id] = read_count + 1
+                if operation_id == "operation-cm-testing-first" and read_count == 0:
+                    raise JSONDecodeError("Expecting value", "", 0)
+                return super().read_odoo_stable_target_replacement_operation_record(operation_id)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = SettlingReadFilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-first")
+            )
+            second = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-cm-testing-second"),
+                    "idempotency_key": "replacement-cm-testing-second",
+                    "idempotency_scope": "caller-second",
+                }
+            )
+
+            first_record, first_created = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    first
+                )
+            )
+            second_record, second_created = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    second
+                )
+            )
 
             self.assertEqual(first_record.operation_id, first.operation_id)
             self.assertTrue(first_created)

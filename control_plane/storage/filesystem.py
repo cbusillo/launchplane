@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import time
+from json import JSONDecodeError
 from pathlib import Path
 from typing import TypeVar
 
@@ -704,7 +705,7 @@ class FilesystemRecordStore:
         while True:
             try:
                 return self.read_odoo_stable_target_replacement_operation_record(operation_id)
-            except FileNotFoundError:
+            except (FileNotFoundError, JSONDecodeError):
                 if time.monotonic() >= deadline:
                     return None
                 time.sleep(0.01)
