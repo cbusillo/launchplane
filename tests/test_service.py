@@ -78,7 +78,7 @@ from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssue
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
-from control_plane.service import create_launchplane_service_app
+from control_plane.service import OdooPreviewVerificationRequest, create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -13253,6 +13253,103 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 400)
             self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_odoo_preview_verification_driver_rejects_scalar_checked_url(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "pass",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                        "checked_urls": "https://pr-42.cm-preview.example.test/web/health",
+                        "timeout_seconds": 30,
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:scalar"},
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_odoo_preview_verification_request_accepts_explicit_url_collections(
+        self,
+    ) -> None:
+        base_payload = {
+            "schema_version": 1,
+            "context": "cm",
+            "anchor_repo": "odoo-tenant-cm",
+            "anchor_pr_number": 42,
+            "verification_status": "pass",
+            "verified_at": "2026-05-09T15:08:00Z",
+            "timeout_seconds": 30,
+        }
+
+        list_request = OdooPreviewVerificationRequest.model_validate(
+            {
+                **base_payload,
+                "checked_urls": [" https://pr-42.cm-preview.example.test/web/health "],
+            }
+        )
+        tuple_request = OdooPreviewVerificationRequest.model_validate(
+            {
+                **base_payload,
+                "checked_urls": ("https://pr-42.cm-preview.example.test/cell-mechanic",),
+            }
+        )
+
+        self.assertEqual(
+            list_request.checked_urls,
+            ("https://pr-42.cm-preview.example.test/web/health",),
+        )
+        self.assertEqual(
+            tuple_request.checked_urls,
+            ("https://pr-42.cm-preview.example.test/cell-mechanic",),
+        )
 
     def test_odoo_preview_verification_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
