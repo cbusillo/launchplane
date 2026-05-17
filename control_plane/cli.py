@@ -8,7 +8,7 @@ import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, Protocol, cast, overload
+from typing import Literal, Protocol, TypeVar, cast, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -324,47 +324,80 @@ def _build_authz_policy_record(
     )
 
 
+_ChoiceValue = TypeVar("_ChoiceValue", bound=str)
+OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
+OdooProdRollbackSourceChannel = Literal["testing"]
+DokployTargetType = Literal["compose", "application"]
+
+
+def _normalize_cli_choice(
+    value: str,
+    *,
+    choices: Mapping[str, _ChoiceValue],
+    error_message: str,
+) -> _ChoiceValue:
+    normalized_value = value.strip().lower()
+    try:
+        return choices[normalized_value]
+    except KeyError as exc:
+        raise click.ClickException(error_message) from exc
+
+
 def _normalize_secret_scope(scope: str) -> SecretScope:
-    normalized_scope = scope.strip().lower()
-    if normalized_scope == "global":
-        return "global"
-    if normalized_scope == "context":
-        return "context"
-    if normalized_scope == "context_instance":
-        return "context_instance"
-    raise click.ClickException("Secret scope must be one of global, context, or context_instance.")
+    return cast(
+        SecretScope,
+        _normalize_cli_choice(
+            scope,
+            choices={
+                "global": "global",
+                "context": "context",
+                "context_instance": "context_instance",
+            },
+            error_message="Secret scope must be one of global, context, or context_instance.",
+        ),
+    )
 
 
 def _normalize_odoo_apply_status(
     status: str,
-) -> Literal["skipped", "pending", "pass", "fail"]:
-    normalized_status = status.strip().lower()
-    if normalized_status == "skipped":
-        return "skipped"
-    if normalized_status == "pending":
-        return "pending"
-    if normalized_status == "pass":
-        return "pass"
-    if normalized_status == "fail":
-        return "fail"
-    raise click.ClickException(
-        "Odoo override apply status must be skipped, pending, pass, or fail."
+) -> OdooOverrideApplyStatus:
+    return cast(
+        OdooOverrideApplyStatus,
+        _normalize_cli_choice(
+            status,
+            choices={
+                "skipped": "skipped",
+                "pending": "pending",
+                "pass": "pass",
+                "fail": "fail",
+            },
+            error_message="Odoo override apply status must be skipped, pending, pass, or fail.",
+        ),
     )
 
 
-def _normalize_odoo_prod_rollback_source_channel(source_channel: str) -> Literal["testing"]:
-    if source_channel.strip().lower() == "testing":
-        return "testing"
-    raise click.ClickException("Odoo prod rollback source channel must be testing.")
+def _normalize_odoo_prod_rollback_source_channel(
+    source_channel: str,
+) -> OdooProdRollbackSourceChannel:
+    return cast(
+        OdooProdRollbackSourceChannel,
+        _normalize_cli_choice(
+            source_channel,
+            choices={"testing": "testing"},
+            error_message="Odoo prod rollback source channel must be testing.",
+        ),
+    )
 
 
-def _normalize_dokploy_target_type(target_type: str) -> Literal["compose", "application"]:
-    normalized_target_type = target_type.strip().lower()
-    if normalized_target_type == "compose":
-        return "compose"
-    if normalized_target_type == "application":
-        return "application"
-    raise click.ClickException("Dokploy target type must be compose or application.")
+def _normalize_dokploy_target_type(target_type: str) -> DokployTargetType:
+    return cast(
+        DokployTargetType,
+        _normalize_cli_choice(
+            target_type,
+            choices={"compose": "compose", "application": "application"},
+            error_message="Dokploy target type must be compose or application.",
+        ),
+    )
 
 
 class _PolicyRecordSummaryFields(Protocol):
