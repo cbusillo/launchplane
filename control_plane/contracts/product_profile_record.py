@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL = "launchplane-preview"
+OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
+OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 
 
 class ProductImageProfile(BaseModel):
@@ -117,6 +119,44 @@ class ProductOdooPrelaunchRebuildPolicy(BaseModel):
         return self
 
 
+class ProductOdooLaneDataPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data_authority: OdooDataAuthority = "unknown"
+    allowed_rebuild_sources: tuple[OdooRebuildSourceMode, ...] = ()
+    upstream_source: str = ""
+    requires_backup_before_destroy: bool = True
+    requires_restore_proof: bool = True
+    requires_runtime_identity: bool = True
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ProductOdooLaneDataPolicy":
+        normalized_sources: list[OdooRebuildSourceMode] = []
+        for source in self.allowed_rebuild_sources:
+            if source not in normalized_sources:
+                normalized_sources.append(source)
+        self.allowed_rebuild_sources = tuple(normalized_sources)
+        self.upstream_source = self.upstream_source.strip()
+        if self.data_authority == "unknown" and self.allowed_rebuild_sources:
+            raise ValueError(
+                "unknown Odoo data authority cannot allow rebuild sources"
+            )
+        if "upstream_restore" in self.allowed_rebuild_sources and not self.upstream_source:
+            raise ValueError(
+                "Odoo data policy allowing upstream_restore requires upstream_source"
+            )
+        if self.data_authority == "authoritative" and not self.requires_backup_before_destroy:
+            raise ValueError(
+                "authoritative Odoo data policy requires backup before destroy"
+            )
+        if self.data_authority == "authoritative" and not self.requires_restore_proof:
+            raise ValueError("authoritative Odoo data policy requires restore proof")
+        return self
+
+    def allows_rebuild_source(self, source: str) -> bool:
+        return source in self.allowed_rebuild_sources
+
+
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -129,6 +169,9 @@ class ProductLaneProfile(BaseModel):
     )
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy = Field(
         default_factory=ProductOdooPrelaunchRebuildPolicy
+    )
+    odoo_data_policy: ProductOdooLaneDataPolicy = Field(
+        default_factory=ProductOdooLaneDataPolicy
     )
 
     @model_validator(mode="after")

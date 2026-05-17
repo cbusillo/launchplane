@@ -366,6 +366,11 @@ def _assert_prelaunch_rebuild_policy_allows_request(
             "Odoo prelaunch rebuild data source mode mismatch: "
             f"request={request.data_source_mode!r} policy={policy.data_source_mode!r}."
         )
+    if not lane.odoo_data_policy.allows_rebuild_source(request.data_source_mode):
+        raise click.ClickException(
+            "Odoo lane data policy does not allow prelaunch rebuild data source "
+            f"{request.data_source_mode!r} for {request.product} {lane.context}/{lane.instance}."
+        )
     if request.confirmation != policy.confirmation:
         raise click.ClickException(
             f"Odoo prelaunch rebuild requires confirmation {policy.confirmation!r}."

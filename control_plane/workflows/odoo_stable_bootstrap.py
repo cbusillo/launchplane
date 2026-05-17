@@ -148,6 +148,11 @@ def _assert_bootstrap_policy_allows_request(
         raise click.ClickException(
             f"Unsupported Odoo stable bootstrap data source mode {policy.data_source_mode!r}."
         )
+    if not lane.odoo_data_policy.allows_rebuild_source(policy.data_source_mode):
+        raise click.ClickException(
+            "Odoo lane data policy does not allow stable bootstrap data source "
+            f"{policy.data_source_mode!r} for {request.product} {request.context}/{request.instance}."
+        )
     if policy.expected_target_name and target_record.target_name != policy.expected_target_name:
         raise click.ClickException(
             "Odoo stable bootstrap target proof failed: expected target "

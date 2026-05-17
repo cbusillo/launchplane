@@ -57,6 +57,14 @@ def _site_profile_payload(
                     "expected_target_name": f"{product}-prod",
                     "expected_domains": [f"{product}.example"],
                 },
+                "odoo_data_policy": {
+                    "data_authority": "restorable",
+                    "allowed_rebuild_sources": ["upstream_restore"],
+                    "upstream_source": "example-site/prod/upstream",
+                    "requires_backup_before_destroy": True,
+                    "requires_restore_proof": True,
+                    "requires_runtime_identity": True,
+                },
             },
         ),
         "preview": {
@@ -691,6 +699,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertTrue(detail.prelaunch_rebuild_allowed)
         self.assertEqual(detail.prelaunch_rebuild_data_source_mode, "upstream_restore")
+        self.assertEqual(prod_summary.odoo_data_authority, "restorable")
+        self.assertEqual(prod_summary.odoo_allowed_rebuild_sources, ("upstream_restore",))
+        self.assertEqual(prod_summary.odoo_upstream_source, "example-site/prod/upstream")
+        self.assertTrue(detail.odoo_requires_backup_before_destroy)
+        self.assertTrue(detail.odoo_requires_restore_proof)
+        self.assertTrue(detail.odoo_requires_runtime_identity)
 
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
