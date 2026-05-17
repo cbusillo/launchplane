@@ -29,6 +29,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
