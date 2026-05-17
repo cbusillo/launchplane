@@ -12969,6 +12969,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "anchor_pr_number": 42,
                         "verification_status": "pass",
                         "verified_at": "2026-05-09T15:08:00Z",
+                        "checked_urls": [
+                            "https://pr-42.cm-preview.example.test/web/health",
+                            "https://pr-42.cm-preview.example.test/cell-mechanic",
+                        ],
+                        "timeout_seconds": 30,
                     },
                 },
                 headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
@@ -12976,6 +12981,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["records"]["transition"], "ready")
+            self.assertEqual(payload["records"]["preview_state"], "active")
+            self.assertEqual(
+                payload["records"]["preview_generation_id"],
+                "preview-cm-odoo-tenant-cm-pr-42-generation-0001",
+            )
+            self.assertEqual(payload["records"]["verification_status"], "pass")
+            self.assertEqual(payload["records"]["verified_at"], "2026-05-09T15:08:00Z")
+            self.assertEqual(
+                payload["records"]["odoo_preview_verification"]["checked_urls"],
+                [
+                    "https://pr-42.cm-preview.example.test/web/health",
+                    "https://pr-42.cm-preview.example.test/cell-mechanic",
+                ],
+            )
+            self.assertEqual(payload["records"]["odoo_preview_verification"]["timeout_seconds"], 30)
             preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
             generation = store.read_preview_generation_record(
                 "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
@@ -13068,7 +13088,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            status_code, _payload = _invoke_app(
+            status_code, payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/drivers/odoo/preview-verification",
@@ -13082,6 +13102,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "anchor_pr_number": 42,
                         "verification_status": "fail",
                         "verified_at": "2026-05-09T15:08:00Z",
+                        "checked_urls": ["https://pr-42.cm-preview.example.test/cell-mechanic"],
+                        "timeout_seconds": 20,
                         "failure_summary": "Odoo preview page did not include Cell Mechanic.",
                     },
                 },
@@ -13089,6 +13111,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"]["transition"], "failed")
+            self.assertEqual(payload["records"]["preview_state"], "failed")
+            self.assertEqual(payload["records"]["verification_status"], "fail")
+            self.assertEqual(
+                payload["records"]["odoo_preview_verification"]["failure_summary"],
+                "Odoo preview page did not include Cell Mechanic.",
+            )
             preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
             generation = store.read_preview_generation_record(
                 "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
@@ -13099,6 +13128,67 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(generation.overall_health_status, "fail")
             self.assertEqual(generation.failure_stage, "verify")
             self.assertIn("Cell Mechanic", generation.failure_summary)
+
+    def test_odoo_preview_verification_driver_rejects_checked_urls_without_timeout(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "anchor_repo": "odoo-tenant-cm",
+                        "anchor_pr_number": 42,
+                        "verification_status": "pass",
+                        "verified_at": "2026-05-09T15:08:00Z",
+                        "checked_urls": ["https://pr-42.cm-preview.example.test/web/health"],
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:missing-timeout"},
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_odoo_preview_verification_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

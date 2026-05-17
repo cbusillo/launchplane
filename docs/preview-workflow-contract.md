@@ -107,9 +107,10 @@ ready-to-comment signal instead of independently deciding readiness from raw
 health checks.
 If a later browser or product-specific smoke workflow needs to publish evidence,
 it should call `POST /v1/drivers/odoo/preview-verification` with the PR identity,
-`verification_status`, `verified_at`, and optional failure summary. Launchplane
-updates the latest preview generation and preserves the result in the same
-preview records used by refresh.
+`verification_status`, `verified_at`, optional checked URLs plus timeout, and
+optional failure summary. Launchplane updates the latest preview generation and
+returns a typed `odoo_preview_verification` result while preserving the durable
+status/failure evidence in the same preview records used by refresh.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,

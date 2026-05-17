@@ -146,6 +146,9 @@ routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
 preview request schema, live URL derivation, and record writer so Odoo PR
 previews land in the same Launchplane preview and preview-generation records as
 generic-web previews.
+The preview-verification route accepts optional checked URL evidence and returns
+a typed `odoo_preview_verification` result while only mutating Launchplane
+preview-generation records.
 Odoo is the only current generic-web-based driver allowed to use the staged
 compose preview MVP: if its product profile uses `preview.data_transport_mode =
 "bootstrap"` and its template lane is a Dokploy `compose` target, preview refresh

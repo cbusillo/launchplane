@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 from typing import TypeVar
@@ -656,6 +657,8 @@ class FilesystemRecordStore:
         try:
             with reservation_path.open("x", encoding="utf-8") as reservation_file:
                 reservation_file.write(record.operation_id)
+                reservation_file.flush()
+                os.fsync(reservation_file.fileno())
         except FileExistsError:
             reserved_operation_id = reservation_path.read_text(encoding="utf-8").strip()
             if reserved_operation_id:
