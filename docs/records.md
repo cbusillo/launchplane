@@ -398,11 +398,12 @@ state/
   `odoo_stable_target_replacement_operations`. These records mirror the stable
   bootstrap operation boundary for the guarded `recreate-in-place` replacement
   path: the service stores the apply request, `Idempotency-Key`, request
-  fingerprint, status/phase, deployment-record id when available, final apply
-  result, and terminal error. Reusing the same key with the same request replays
-  the existing operation; reusing it for a different request is rejected; an
-  active `pending` or `running` operation blocks another apply for the same
-  product/context/instance.
+  fingerprint, caller idempotency scope, status/phase, deployment-record id
+  when available, final apply result, and terminal error. Reusing the same key
+  with the same request and caller identity replays the existing operation;
+  reusing it for a different request is rejected; an active `pending` or
+  `running` operation blocks another apply for the same product/context/instance
+  through a storage-owned lane reservation.
 - Odoo prod rollback writes a normal deployment record for the rollback deploy,
   refreshes prod inventory, mints the prod release tuple from the selected
   artifact manifest, and annotates the current prod promotion record's

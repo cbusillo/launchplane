@@ -743,9 +743,11 @@ returns immediately; the workflow polls
 `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` until the
 operation status is `pass` or `fail`, then uploads the final operation payload as
 the workflow artifact. `Idempotency-Key` is required: a repeated request with the
-same key returns the existing operation, while a different key for the same
-product/context/instance is rejected while a `pending` or `running` operation is
-active. The first apply surface is testing-only and keeps the existing compose
+same key from the same caller identity returns the existing operation, while a
+different key for the same product/context/instance is rejected while a
+`pending` or `running` operation is active. Storage owns that active-lane
+reservation so the worker starts only after the lane is claimed. The first apply
+surface is testing-only and keeps the existing compose
 target, explicit Odoo volume env keys, and expected hostnames; the operation
 worker re-syncs the Launchplane-rendered compose source, reconciles each expected
 Dokploy compose domain route to the `web` service on the product runtime port,

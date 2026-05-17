@@ -192,6 +192,9 @@ Odoo target replacement apply uses the same durable operation shape for the
 guarded `recreate-in-place` path: `POST /v1/drivers/odoo/target-replacement-apply`
 creates or replays an operation, and callers poll
 `/v1/drivers/odoo/target-replacement/operations/{operation_id}` until terminal.
+Replay is scoped to the authenticated caller identity, and storage reserves the
+product/context/instance lane before the worker starts so concurrent apply
+requests cannot launch duplicate replacements.
 
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call
