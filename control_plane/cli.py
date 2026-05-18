@@ -14805,6 +14805,12 @@ def odoo_targets_replacement_plan(
                 ),
                 confirmation=confirmation,
             ),
+            dokploy_config_reader=lambda *, control_plane_root: (
+                control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root,
+                    database_url=database_url,
+                )
+            ),
         )
     finally:
         postgres_store.close()

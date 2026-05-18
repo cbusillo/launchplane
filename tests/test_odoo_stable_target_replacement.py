@@ -508,6 +508,21 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("Launchplane has no Dokploy target record for this lane.", plan.blockers)
         self.assertIn("Launchplane has no Dokploy target-id record for this lane.", plan.blockers)
 
+    def test_build_plan_reports_missing_product_profile_as_operator_error(self) -> None:
+        with self.assertRaises(click.ClickException) as raised_error:
+            build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(),
+                request=OdooStableTargetReplacementRequest(
+                    product="missing-tenant", instance="testing"
+                ),
+            )
+
+        self.assertIn(
+            "Launchplane has no product profile record for 'missing-tenant'.",
+            str(raised_error.exception),
+        )
+
     def test_build_plan_blocks_missing_volume_contract(self) -> None:
         with (
             patch(
