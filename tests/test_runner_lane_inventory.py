@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 import json
 import unittest
+from typing import cast
 from unittest.mock import patch
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -10,6 +12,9 @@ from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class _FixedClock:
@@ -53,17 +58,13 @@ class GitHubRunnerLaneInventoryReaderTests(unittest.TestCase):
     def test_reader_marks_all_busy_online_lanes_as_capacity_constrained(self) -> None:
         inventory = GitHubRunnerLaneInventoryReader(
             transport=RecordingMergeTrainGitHubTransport(
-                responses=(
-                    {"total_count": 1, "runners": [_runner(201, "lane-1", busy=True)]},
-                )
+                responses=({"total_count": 1, "runners": [_runner(201, "lane-1", busy=True)]},)
             ),
             clock=_FixedClock(),
         ).read_runner_lane_inventory(repository="cbusillo/repo")
 
         self.assertTrue(inventory.capacity_constrained)
-        self.assertEqual(
-            inventory.capacity_reason, "all online self-hosted runner lanes are busy"
-        )
+        self.assertEqual(inventory.capacity_reason, "all online self-hosted runner lanes are busy")
 
     def test_reader_paginates_runner_results(self) -> None:
         first_page = [_runner(number, f"lane-{number}") for number in range(1, 101)]
@@ -118,7 +119,7 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
             patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "runner-inventory",
@@ -136,7 +137,7 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
     def test_cli_requires_github_token(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 ["work-graph", "runner-inventory", "--repository", "cbusillo/repo"],
             )
 
