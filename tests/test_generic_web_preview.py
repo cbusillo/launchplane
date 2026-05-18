@@ -895,6 +895,53 @@ class GenericWebPreviewTests(unittest.TestCase):
                     ),
                 )
 
+    def test_execute_generic_web_preview_refresh_blocks_when_base_url_missing(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
+            }
+        )
+        store = _GenericWebPreviewStore(profile)
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
+                return_value=control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                    (
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="sellyouroutboard-testing",
+                            env={"OTHER_KEY": "value"},
+                            updated_at="2026-05-10T05:30:00Z",
+                            source_label="test",
+                        ),
+                    )
+                ),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+            ) as dokploy_request,
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-05-10T05:30:00Z", "2026-05-10T05:30:01Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewRefreshRequest(
+                    product="sellyouroutboard",
+                    preview_slug="pr-42",
+                    preview_url="",
+                    image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                    anchor_head_sha="abc123",
+                ),
+            )
+
+        self.assertEqual(result.refresh_status, "blocked")
+        self.assertEqual(result.preview_url, "")
+        self.assertIn("Missing LAUNCHPLANE_PREVIEW_BASE_URL", result.error_message)
+        dokploy_request.assert_not_called()
+
     def test_resolve_preview_url_rejects_non_root_base_url(self) -> None:
         profile = _profile().model_copy(
             update={
