@@ -14,6 +14,7 @@ from click.testing import CliRunner
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import JsonValue
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
@@ -21,6 +22,12 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -75,6 +82,24 @@ def _seed_dokploy_target_records(
                 source_label="test",
             )
         )
+
+
+def _write_odoo_product_profile_record(*, store: PostgresRecordStore) -> None:
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord(
+            product="odoo-tenant-cm",
+            display_name="Odoo CM",
+            repository="cbusillo/odoo-tenant-cm",
+            driver_id="odoo",
+            image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
+            runtime_port=8069,
+            health_path="/web/health",
+            lanes=(ProductLaneProfile(instance="testing", context="cm"),),
+            preview=ProductPreviewProfile(enabled=True, context="cm"),
+            updated_at="2026-05-09T00:00:00Z",
+            source="test",
+        )
+    )
 
 
 class _FakeDokployTargetStore:
@@ -1632,6 +1657,154 @@ protected_store_keys = ["yps-your-part-supplier"]
         self.assertEqual(host, "https://dokploy.db.example")
         self.assertEqual(token, "db-token")
 
+    def test_read_dokploy_config_uses_explicit_database_url(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            explicit_database_url = _sqlite_database_url(
+                control_plane_root / "explicit-launchplane.sqlite3"
+            )
+            ignored_database_url = _sqlite_database_url(
+                control_plane_root / "ignored-launchplane.sqlite3"
+            )
+            explicit_store = PostgresRecordStore(database_url=explicit_database_url)
+            ignored_store = PostgresRecordStore(database_url=ignored_database_url)
+            explicit_store.ensure_schema()
+            ignored_store.ensure_schema()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": ignored_database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=explicit_store,
+                    host="https://dokploy.explicit.example",
+                    token="explicit-token",
+                )
+                _write_dokploy_managed_secrets(
+                    store=ignored_store,
+                    host="https://dokploy.ignored.example",
+                    token="ignored-token",
+                )
+                host, token = control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root,
+                    database_url=explicit_database_url,
+                )
+
+            explicit_store.close()
+            ignored_store.close()
+
+        self.assertEqual(host, "https://dokploy.explicit.example")
+        self.assertEqual(token, "explicit-token")
+
+    def test_odoo_target_replacement_plan_cli_uses_database_bound_dokploy_secrets(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            explicit_database_url = _sqlite_database_url(
+                control_plane_root / "explicit-launchplane.sqlite3"
+            )
+            ignored_database_url = _sqlite_database_url(
+                control_plane_root / "ignored-launchplane.sqlite3"
+            )
+            explicit_store = PostgresRecordStore(database_url=explicit_database_url)
+            ignored_store = PostgresRecordStore(database_url=ignored_database_url)
+            explicit_store.ensure_schema()
+            ignored_store.ensure_schema()
+            _write_odoo_product_profile_record(store=explicit_store)
+            _seed_dokploy_target_records(
+                store=explicit_store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_id = "compose-cm-testing"
+target_type = "compose"
+target_name = "cm-testing"
+domains = ["cm-testing.shinycomputers.com"]
+""",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": ignored_database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=explicit_store,
+                    host="https://dokploy.explicit.example",
+                    token="explicit-token",
+                )
+                _write_dokploy_managed_secrets(
+                    store=ignored_store,
+                    host="https://dokploy.ignored.example",
+                    token="ignored-token",
+                )
+                captured_requests: list[dict[str, object]] = []
+
+                def fake_dokploy_request(**kwargs: object) -> JsonValue:
+                    captured_requests.append(dict(kwargs))
+                    if kwargs.get("path") == "/api/domain.byComposeId":
+                        return [
+                            {
+                                "host": "cm-testing.shinycomputers.com",
+                                "domainId": "domain-cm",
+                            }
+                        ]
+                    return []
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.dokploy_request",
+                        side_effect=fake_dokploy_request,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                        return_value={
+                            "name": "cm-testing",
+                            "sourceType": "raw",
+                            "composePath": "docker-compose.yml",
+                            "composeFile": "services: {}",
+                            "env": "",
+                        },
+                    ),
+                ):
+                    result = runner.invoke(
+                        main,
+                        [
+                            "odoo-targets",
+                            "replacement-plan",
+                            "--database-url",
+                            explicit_database_url,
+                            "--product",
+                            "odoo-tenant-cm",
+                            "--instance",
+                            "testing",
+                            "--control-plane-root",
+                            str(control_plane_root),
+                        ],
+                        catch_exceptions=False,
+                    )
+
+            explicit_store.close()
+            ignored_store.close()
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(captured_requests)
+        self.assertEqual(captured_requests[0]["host"], "https://dokploy.explicit.example")
+        self.assertEqual(captured_requests[0]["token"], "explicit-token")
+        self.assertNotIn("ignored-token", result.output)
+
     def test_read_dokploy_config_ignores_repo_env_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -2120,9 +2293,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
     def test_launchplane_compose_exports_runtime_image_reference(self) -> None:
         compose_text = Path("docker-compose.yml").read_text()
 
-        self.assertIn(
-            "image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text
-        )
+        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
         self.assertIn(
             "DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}",
             compose_text,
@@ -2143,7 +2314,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("\n  script-runner:", compose_file)
         self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
         self.assertIn("dokploy-network:", compose_file)
-        self.assertIn('traefik.enable=true', compose_file)
+        self.assertIn("traefik.enable=true", compose_file)
         self.assertIn(
             "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-",
             compose_file,

@@ -64,6 +64,7 @@ class OdooStableTargetReplacementStore(Protocol):
 
 
 DokployRequest = Callable[..., JsonValue]
+DokployConfigReader = Callable[..., tuple[str, str]]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
 
@@ -507,9 +508,19 @@ def build_odoo_stable_target_replacement_plan(
     control_plane_root: Path,
     record_store: OdooStableTargetReplacementStore,
     request: OdooStableTargetReplacementRequest,
-    dokploy_request: DokployRequest = control_plane_dokploy.dokploy_request,
+    dokploy_request: DokployRequest | None = None,
+    dokploy_config_reader: DokployConfigReader | None = None,
 ) -> OdooStableTargetReplacementPlan:
-    profile = record_store.read_product_profile_record(request.product)
+    resolved_dokploy_request = dokploy_request or control_plane_dokploy.dokploy_request
+    resolved_dokploy_config_reader = (
+        dokploy_config_reader or control_plane_dokploy.read_dokploy_config
+    )
+    try:
+        profile = record_store.read_product_profile_record(request.product)
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            f"Launchplane has no product profile record for {request.product!r}."
+        ) from error
     if profile.driver_id != "odoo":
         raise click.ClickException(
             f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, not odoo."
@@ -547,15 +558,13 @@ def build_odoo_stable_target_replacement_plan(
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
     ):
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
+        host, token = resolved_dokploy_config_reader(control_plane_root=control_plane_root)
         current_target = _snapshot_current_target(
             host=host,
             token=token,
             target_record=target_record,
             target_id_record=target_id_record,
-            request=dokploy_request,
+            request=resolved_dokploy_request,
         )
         try:
             approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(

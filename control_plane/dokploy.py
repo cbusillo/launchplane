@@ -496,9 +496,13 @@ def resolve_ship_healthcheck_urls(
     return tuple(f"{base_url}{healthcheck_path}" for base_url in base_urls)
 
 
-def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[str, str]:
+def read_control_plane_environment_values(
+    *, control_plane_root: Path, database_url: str | None = None
+) -> dict[str, str]:
     del control_plane_root
-    return control_plane_secrets.overlay_dokploy_environment_values(environment_values={})
+    return control_plane_secrets.overlay_dokploy_environment_values(
+        environment_values={}, database_url=database_url
+    )
 
 
 def read_control_plane_dokploy_source_of_truth(
@@ -674,9 +678,11 @@ def _load_optional_dokploy_source_of_truth_from_database(
             pass
 
 
-def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
+def read_dokploy_config(
+    *, control_plane_root: Path, database_url: str | None = None
+) -> tuple[str, str]:
     environment_values = read_control_plane_environment_values(
-        control_plane_root=control_plane_root
+        control_plane_root=control_plane_root, database_url=database_url
     )
 
     host = environment_values.get("DOKPLOY_HOST", "").strip()
