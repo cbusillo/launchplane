@@ -134,6 +134,27 @@ class RunnerLaneBaselineTests(unittest.TestCase):
             ["home_directory_outside_allowed_roots"],
         )
 
+    def test_readiness_allows_absolute_home_directory_under_root(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(
+                allowed_service_users=("gha",),
+                allowed_home_roots=("/",),
+            ),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    service_user="GHA ",
+                    home_directory="/home/gha",
+                    observed_at="2026-05-18T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertTrue(readiness.ready)
+        self.assertEqual(readiness.violations, ())
+
     def test_readiness_rejects_symlinked_home_directory_outside_allowed_roots(
         self,
     ) -> None:
