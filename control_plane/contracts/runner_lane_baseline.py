@@ -104,10 +104,9 @@ def evaluate_runner_lane_baseline(
     for observation in sorted(observations, key=lambda lane: lane.runner_name):
         violations.extend(_evaluate_observation(policy=policy, observation=observation))
 
+    observed_lane_names = {observation.runner_name for observation in observations}
     lanes_with_violations = {violation.runner_name for violation in violations}
-    compliant_lanes = len(
-        {observation.runner_name for observation in observations} - lanes_with_violations
-    )
+    compliant_lanes = len(observed_lane_names - lanes_with_violations)
     ready = bool(observations) and not violations
     summary = "runner lane baseline satisfied"
     if not observations:
@@ -116,7 +115,7 @@ def evaluate_runner_lane_baseline(
         summary = "runner lane baseline violations found"
     return RunnerLaneBaselineReadiness(
         ready=ready,
-        observed_lanes=len(observations),
+        observed_lanes=len(observed_lane_names),
         compliant_lanes=compliant_lanes,
         violations=tuple(violations),
         summary=summary,
