@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
-import mimetypes
 import os
 import re
 import secrets
@@ -15,7 +14,7 @@ from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
 from typing import BinaryIO, Callable, Generic, Iterable, Literal, Protocol, TypeVar, cast
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import WSGIApplication
 
@@ -207,6 +206,7 @@ from control_plane.storage.factory import build_record_store, storage_backend_na
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
+from control_plane.ui_static_http import serve_ui_route
 from control_plane.product_config_http import (
     ProductConfigRouteResult,
     apply_product_config_route,
@@ -2340,87 +2340,6 @@ def _not_found_response(
             "error": {"code": "not_found", "message": f"No Launchplane route for {path}."},
         },
     )
-
-
-def _ui_static_response(
-    *,
-    start_response: _StartResponse,
-    status_code: int,
-    content: bytes,
-    content_type: str,
-    cache_control: str,
-) -> list[bytes]:
-    status_line = f"{status_code} {_http_status_text(status_code)}"
-    start_response(
-        status_line,
-        [
-            ("Content-Type", content_type),
-            ("Content-Length", str(len(content))),
-            ("Cache-Control", cache_control),
-        ],
-    )
-    return [content]
-
-
-def _ui_file_response(
-    *,
-    start_response: _StartResponse,
-    file_path: Path,
-    cache_control: str,
-) -> list[bytes]:
-    content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-    return _ui_static_response(
-        start_response=start_response,
-        status_code=200,
-        content=file_path.read_bytes(),
-        content_type=content_type,
-        cache_control=cache_control,
-    )
-
-
-def _serve_ui_route(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    path: str,
-    ui_static_root: Path,
-) -> list[bytes]:
-    index_path = ui_static_root / "index.html"
-    if not index_path.is_file():
-        return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
-
-    if path in {"/", "/ui", "/ui/"}:
-        return _ui_file_response(
-            start_response=start_response,
-            file_path=index_path,
-            cache_control="no-store",
-        )
-
-    if path.startswith("/ui/assets/"):
-        relative_asset_path = unquote(path.removeprefix("/ui/"))
-        if ".." in Path(relative_asset_path).parts:
-            return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
-        asset_path = (ui_static_root / relative_asset_path).resolve()
-        try:
-            asset_path.relative_to(ui_static_root.resolve())
-        except ValueError:
-            return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
-        if not asset_path.is_file():
-            return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
-        return _ui_file_response(
-            start_response=start_response,
-            file_path=asset_path,
-            cache_control="public, max-age=31536000, immutable",
-        )
-
-    if path.startswith("/ui/"):
-        return _ui_file_response(
-            start_response=start_response,
-            file_path=index_path,
-            cache_control="no-store",
-        )
-
-    return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
 
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
@@ -7148,11 +7067,13 @@ def create_launchplane_service_app(
                 },
             )
         if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
-            return _serve_ui_route(
+            return serve_ui_route(
                 start_response=start_response,
                 trace_id=request_trace_id,
                 path=path,
                 ui_static_root=ui_static_root,
+                json_response=_json_response,
+                http_status_text=_http_status_text,
             )
         if method == "GET" and path == "/v1/health":
             return _json_response(
