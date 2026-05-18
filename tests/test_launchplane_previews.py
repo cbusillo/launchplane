@@ -6,8 +6,10 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -64,6 +66,9 @@ from control_plane.workflows.launchplane import (
     parse_preview_request_metadata,
     resolve_launchplane_preview_base_url,
 )
+
+
+CLI_MAIN = cast(Command, main)
 
 
 def _preview_record(
@@ -1112,7 +1117,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show",
@@ -1161,7 +1166,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show",
@@ -1222,7 +1227,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -1369,7 +1374,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show-tenant",
@@ -1469,7 +1474,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "ingest-pr-event",
@@ -1514,7 +1519,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "write-enablement",
@@ -1569,7 +1574,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "ingest-pr-event",
@@ -1609,7 +1614,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show-tenant",
@@ -1652,7 +1657,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -1753,7 +1758,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -1830,7 +1835,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -1874,7 +1879,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -1916,7 +1921,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -1972,7 +1977,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show-tenant",
@@ -2098,7 +2103,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -2189,7 +2194,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-index-page",
@@ -2236,7 +2241,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-policy-page",
@@ -2317,7 +2322,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-policy-page",
@@ -2363,7 +2368,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -2426,7 +2431,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -2488,7 +2493,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -2541,7 +2546,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -2610,7 +2615,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-site",
@@ -2716,7 +2721,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -2772,7 +2777,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -2833,7 +2838,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -2890,7 +2895,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -2965,7 +2970,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -3017,7 +3022,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -3071,7 +3076,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "render-status-page",
@@ -3142,7 +3147,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show",
@@ -3192,7 +3197,7 @@ ODOO_DB_PASSWORD = "local-secret"
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "show",
@@ -3252,7 +3257,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "write-preview",
@@ -3318,7 +3323,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "write-preview",
@@ -3368,7 +3373,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "write-preview",
@@ -3408,7 +3413,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "write-preview",
@@ -3462,7 +3467,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "write-generation",
@@ -3503,7 +3508,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "write-generation",
@@ -3589,7 +3594,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "request-generation",
@@ -3659,7 +3664,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "write-from-generation",
@@ -3749,7 +3754,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "mark-generation-ready",
@@ -3828,7 +3833,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "mark-generation-failed",
@@ -3875,7 +3880,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "destroy-preview",
@@ -3928,7 +3933,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "write-destroyed",
@@ -3988,7 +3993,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4077,7 +4082,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4153,7 +4158,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4224,7 +4229,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 ),
             ):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4299,7 +4304,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 ),
             ):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "show-tenant",
@@ -4359,7 +4364,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 ),
             ):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "show-tenant",
@@ -4409,7 +4414,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4495,7 +4500,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4550,7 +4555,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4600,7 +4605,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4665,7 +4670,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 ) as create_comment,
             ):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4735,7 +4740,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 ) as update_comment,
             ):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4784,7 +4789,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -4816,7 +4821,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
@@ -4866,7 +4871,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
@@ -4904,7 +4909,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "ingest-github-webhook",
@@ -4930,7 +4935,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             input_file.write_text(json.dumps(malformed_payload), encoding="utf-8")
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "ingest-github-webhook",
@@ -4956,7 +4961,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
@@ -4988,7 +4993,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
@@ -5029,7 +5034,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
@@ -5063,7 +5068,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5119,7 +5124,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             build_result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5153,7 +5158,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 replay_result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
@@ -5196,7 +5201,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5242,7 +5247,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5340,7 +5345,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             build_result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5370,7 +5375,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 replay_result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
@@ -5423,7 +5428,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5473,7 +5478,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5523,7 +5528,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5583,7 +5588,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             build_result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5605,7 +5610,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 replay_result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
@@ -5649,7 +5654,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5698,7 +5703,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5747,7 +5752,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5794,7 +5799,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5842,7 +5847,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5925,7 +5930,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -5963,7 +5968,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6001,7 +6006,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6039,7 +6044,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6086,7 +6091,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6122,7 +6127,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6156,7 +6161,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6190,7 +6195,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6224,7 +6229,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6258,7 +6263,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6292,7 +6297,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6326,7 +6331,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6360,7 +6365,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6394,7 +6399,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6428,7 +6433,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6453,7 +6458,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "build-github-webhook-replay-envelope",
@@ -6506,7 +6511,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
@@ -6563,7 +6568,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "replay-github-webhook",
@@ -6592,7 +6597,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "replay-github-webhook",
@@ -6639,7 +6644,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
@@ -6738,7 +6743,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "list",
@@ -6801,7 +6806,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "launchplane-previews",
                     "history",
