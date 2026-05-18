@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -14,6 +16,9 @@ from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
 )
+
+
+CLI_MAIN = cast(Command, main)
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -310,7 +315,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     clear=True,
                 ):
                     result = CliRunner().invoke(
-                        main,
+                        CLI_MAIN,
                         [
                             "dokploy-targets",
                             "adopt",
@@ -366,7 +371,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     clear=True,
                 ):
                     result = CliRunner().invoke(
-                        main,
+                        CLI_MAIN,
                         [
                             "dokploy-targets",
                             "adopt",
@@ -441,7 +446,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     clear=True,
                 ):
                     result = CliRunner().invoke(
-                        main,
+                        CLI_MAIN,
                         [
                             "dokploy-targets",
                             "adopt",
@@ -747,7 +752,7 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                 clear=True,
             ):
                 result = CliRunner().invoke(
-                    main,
+                    CLI_MAIN,
                     [
                         "dokploy-targets",
                         "create-application",
