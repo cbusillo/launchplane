@@ -136,6 +136,17 @@ def _manifest_payload() -> dict[str, object]:
 
 
 class ProductOnboardingTests(unittest.TestCase):
+    def test_deploy_authz_grants_include_terminal_agent_product_profile_read(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("product_profile.read", script_text)
+        self.assertIn("deploy:terminal-agent-product-profile-read-grant", script_text)
+        self.assertIn("terminal-agent-product-profile-read", script_text)
+
     def test_deploy_odoo_cm_onboarding_manifest_encodes_issue_backed_bootstrap_policy(
         self,
     ) -> None:

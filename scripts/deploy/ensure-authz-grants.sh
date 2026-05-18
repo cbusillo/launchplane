@@ -842,6 +842,12 @@ post_terminal_agent_grant \
 post_terminal_agent_grant \
   launchplane \
   launchplane \
+  product_profile.read \
+  deploy:terminal-agent-product-profile-read-grant \
+  terminal-agent-product-profile-read
+post_terminal_agent_grant \
+  launchplane \
+  launchplane \
   product_environment.read \
   deploy:terminal-agent-agent-context-product-read-grant \
   terminal-agent-agent-context-product-read
