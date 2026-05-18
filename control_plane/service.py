@@ -948,6 +948,13 @@ _PREVIEW_READINESS_ROUTE_PATHS = frozenset(
 _PREVIEW_DESTROY_ROUTE_PATHS = frozenset(
     {_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path, _ODOO_PREVIEW_DESTROY_ROUTE.route_path}
 )
+_GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
+    _PREVIEW_DESIRED_STATE_ROUTE_PATHS
+    | _PREVIEW_INVENTORY_ROUTE_PATHS
+    | _PREVIEW_REFRESH_ROUTE_PATHS
+    | _PREVIEW_READINESS_ROUTE_PATHS
+    | _PREVIEW_DESTROY_ROUTE_PATHS
+)
 
 
 class BackupGateEvidenceEnvelope(BaseModel):
@@ -5722,10 +5729,25 @@ def _product_driver_compatible(
     *, profile: LaunchplaneProductProfileRecord, expected_driver_id: str
 ) -> bool:
     expected = expected_driver_id.strip()
-    if profile.driver_id == expected:
+    profile_driver_id = profile.driver_id.strip()
+    if profile_driver_id == expected:
         return True
-    descriptor = read_driver_descriptor(profile.driver_id)
+    descriptor = read_driver_descriptor(profile_driver_id)
     return descriptor.base_driver_id == expected
+
+
+def _product_driver_route_compatible(
+    *, profile: LaunchplaneProductProfileRecord, expected_driver_id: str, route_path: str
+) -> bool:
+    if profile.driver_id.strip() == expected_driver_id.strip():
+        return True
+    return (
+        route_path in _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
+        and _product_driver_compatible(
+            profile=profile,
+            expected_driver_id=expected_driver_id,
+        )
+    )
 
 
 def _find_product_profile_lane(
@@ -5748,6 +5770,7 @@ def _resolve_product_driver_context(
     record_store: object,
     product: str,
     driver_id: str,
+    route_path: str = "",
     context: str = "",
     instance: str = "",
     require_profile: bool = False,
@@ -5760,7 +5783,11 @@ def _resolve_product_driver_context(
     if not callable(read_profile):
         raise ValueError("Product driver validation requires product profile storage.")
     profile = cast(LaunchplaneProductProfileRecord, read_profile(normalized_product))
-    if not _product_driver_compatible(profile=profile, expected_driver_id=normalized_driver_id):
+    if not _product_driver_route_compatible(
+        profile=profile,
+        expected_driver_id=normalized_driver_id,
+        route_path=route_path,
+    ):
         raise ProductDriverMismatchError(
             "Product profile is not compatible with the requested driver route."
         )
@@ -5787,6 +5814,7 @@ def _resolve_descriptor_product_driver_context(
         record_store=record_store,
         product=product,
         driver_id=_driver_route_metadata_from_descriptors()[route_path].driver_id,
+        route_path=route_path,
         context=context,
         instance=instance,
         require_profile=require_profile,
@@ -10418,6 +10446,12 @@ def create_launchplane_service_app(
             elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
                 generic_web_promotion_request = (
                     _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                )
+                _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=generic_web_promotion_request.product,
+                    require_profile=True,
                 )
                 _profile, _source_lane, destination_lane = resolve_generic_web_promotion_lanes(
                     record_store=record_store,
