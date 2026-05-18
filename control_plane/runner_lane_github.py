@@ -48,7 +48,7 @@ class GitHubRunnerLaneInventoryReader:
                 )
             page_lanes = tuple(
                 _runner_lane_record(
-                    repository=repository,
+                    repository=repository_path,
                     observed_at=observed_at,
                     payload=_json_object(runner, "GitHub runner entry"),
                 )
@@ -57,7 +57,7 @@ class GitHubRunnerLaneInventoryReader:
             lanes.extend(page_lanes)
             if len(page_lanes) < 100:
                 return build_runner_lane_inventory(
-                    repository=repository,
+                    repository=repository_path,
                     observed_at=observed_at,
                     lanes=tuple(lanes),
                 )
@@ -72,7 +72,7 @@ def _runner_lane_record(
         name=_required_text(payload.get("name"), "GitHub runner entry requires name."),
         repository=repository,
         status=_required_text(payload.get("status"), "GitHub runner entry requires status."),
-        busy=bool(payload.get("busy")),
+        busy=_required_bool(payload.get("busy"), "GitHub runner entry requires busy."),
         labels=_runner_labels(payload.get("labels")),
         host_hint=_host_hint_from_name(
             _required_text(payload.get("name"), "GitHub runner entry requires name.")
@@ -107,7 +107,7 @@ def _host_hint_from_name(name: str) -> str:
 
 
 def _repository_path(repository: str) -> str:
-    normalized_repository = repository.strip()
+    normalized_repository = "/".join(part.strip() for part in repository.strip().split("/"))
     if normalized_repository.count("/") != 1:
         raise ValueError("GitHub repository must be formatted as owner/name.")
     owner, repo = normalized_repository.split("/", 1)
@@ -131,5 +131,11 @@ def _required_text(value: object, message: str) -> str:
 
 def _required_int(value: object, message: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
+        raise MergeTrainGitHubError(message)
+    return value
+
+
+def _required_bool(value: object, message: str) -> bool:
+    if not isinstance(value, bool):
         raise MergeTrainGitHubError(message)
     return value
