@@ -1,10 +1,19 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 
+from click import Command
+from click.testing import CliRunner
+
+from control_plane.cli import main
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
 from control_plane.contracts.runner_lane_baseline import evaluate_runner_lane_baseline
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class RunnerLaneBaselineTests(unittest.TestCase):
@@ -156,6 +165,75 @@ class RunnerLaneBaselineTests(unittest.TestCase):
         self.assertEqual(
             [violation.code for violation in readiness.violations],
             ["home_directory_outside_allowed_roots"],
+        )
+
+
+class RunnerLaneBaselineCliTests(unittest.TestCase):
+    def test_cli_observes_runner_baseline_from_job_environment(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            home_directory = Path(temp_dir) / "gha"
+            docker_config = Path(temp_dir) / "docker-config"
+            home_directory.mkdir()
+            docker_config.mkdir()
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-baseline-observe",
+                    "--observed-at",
+                    "2026-05-18T18:28:00Z",
+                    "--allowed-service-user",
+                    "gha",
+                    "--allowed-home-root",
+                    temp_dir,
+                ],
+                env={
+                    "RUNNER_NAME": "chris-testing-odoo-tenant-cm",
+                    "RUNNER_LABELS": "self-hosted,Linux,X64,launchplane,chris-testing",
+                    "USER": "gha",
+                    "HOME": home_directory.as_posix(),
+                    "DOCKER_CONFIG": docker_config.as_posix(),
+                    "LAUNCHPLANE_ISOLATED_DOCKER_CONFIG": docker_config.as_posix(),
+                },
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["observation"]["runner_name"], "chris-testing-odoo-tenant-cm")
+        self.assertTrue(payload["observation"]["docker_config_isolated"])
+        self.assertTrue(payload["readiness"]["ready"])
+        self.assertEqual(payload["readiness"]["violations"], [])
+
+    def test_cli_fails_closed_without_docker_isolation_evidence(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-baseline-observe",
+                    "--runner-name",
+                    "chris-testing-odoo-tenant-cm",
+                    "--label",
+                    "self-hosted",
+                    "--label",
+                    "launchplane",
+                    "--home-directory",
+                    temp_dir,
+                    "--observed-at",
+                    "2026-05-18T18:28:00Z",
+                ],
+                env={
+                    "DOCKER_CONFIG": "",
+                    "LAUNCHPLANE_ISOLATED_DOCKER_CONFIG": "",
+                },
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["readiness"]["ready"])
+        self.assertEqual(
+            [violation["code"] for violation in payload["readiness"]["violations"]],
+            ["docker_config_isolation_missing"],
         )
 
 
