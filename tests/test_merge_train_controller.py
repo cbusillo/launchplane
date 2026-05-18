@@ -17,11 +17,22 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_id,
 )
 from control_plane.workflows.merge_train_controller import (
+    MergeTrainControllerDecision,
     decide_merge_train_controller_record_action,
 )
 
 
 class MergeTrainControllerDecisionTests(unittest.TestCase):
+    def test_decision_accepts_service_admit_collapsed_root_action(self) -> None:
+        decision = MergeTrainControllerDecision(
+            action="admit_collapsed_root",
+            reason="collapsed root is ready for batch admission",
+            stack_collapse_plan_record_id="stack-ready",
+        )
+
+        self.assertEqual(decision.action, "admit_collapsed_root")
+        self.assertEqual(decision.model_dump(mode="json")["action"], "admit_collapsed_root")
+
     def test_decision_is_idle_without_existing_records(self) -> None:
         decision = decide_merge_train_controller_record_action(
             candidate_records=(), landing_plan_records=(), stack_collapse_plan_records=()
@@ -230,8 +241,7 @@ def _landing_plan_record(
     landing_plan = landing_plan.model_copy(
         update={
             "entries": tuple(
-                entry.model_copy(update={"status": entry_status})
-                for entry in landing_plan.entries
+                entry.model_copy(update={"status": entry_status}) for entry in landing_plan.entries
             )
         }
     )
