@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 from unittest.mock import patch
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -22,6 +24,9 @@ from control_plane.merge_train import (
 from control_plane.merge_train_github import MergeTrainGitHubError
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class _FakeLabelClient:
@@ -95,7 +100,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
             )
 
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-dry-run",
@@ -229,7 +234,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
             )
 
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-dry-run",
@@ -269,7 +274,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-run-once",
@@ -345,7 +350,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-run-once",
@@ -371,7 +376,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir, patch.dict("os.environ", {}, clear=True):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-run-once",
@@ -409,7 +414,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 ["work-graph", "merge-train-run-once", "--policy-file", str(policy_file)],
             )
 
@@ -450,7 +455,10 @@ class MergeTrainStackDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ready_for_collapse")
         self.assertEqual(result.stack_order, (10, 11, 12))
-        self.assertEqual([entry.head_ref for entry in result.entries], ["feature/root", "feature/middle", "feature/leaf"])
+        self.assertEqual(
+            [entry.head_ref for entry in result.entries],
+            ["feature/root", "feature/middle", "feature/leaf"],
+        )
 
     def test_reports_not_stacked_for_single_root_pr(self) -> None:
         snapshot = MergeTrainDryRunSnapshot(
