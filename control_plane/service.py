@@ -240,6 +240,12 @@ from control_plane.workflows.merge_train_worker import (
     MergeTrainWorkerClients,
     run_merge_train_worker_step,
 )
+from control_plane.workflows.merge_train_controller import (
+    latest_merge_train_batch_candidate_progress_record as controller_latest_merge_train_batch_candidate_progress_record,
+    latest_merge_train_batch_landing_progress_record as controller_latest_merge_train_batch_landing_progress_record,
+    latest_merge_train_stack_collapse_progress_record as controller_latest_merge_train_stack_collapse_progress_record,
+    merge_train_batch_landing_entry_rank as controller_merge_train_batch_landing_entry_rank,
+)
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
@@ -3023,73 +3029,23 @@ def _validate_merge_train_stack_collapse_record_for_controller(
 def _latest_merge_train_batch_candidate_progress_record(
     records: tuple[MergeTrainBatchCandidateRecord, ...],
 ) -> MergeTrainBatchCandidateRecord | None:
-    if not records:
-        return None
-    status_rank = {
-        "planned": 0,
-        "building": 1,
-        "ready_for_checks": 2,
-        "passed": 3,
-        "failed": 4,
-        "stale": 4,
-        "blocked": 4,
-    }
-    return max(
-        records,
-        key=lambda record: (
-            record.updated_at,
-            status_rank[record.candidate.status],
-            record.record_id,
-        ),
-    )
+    return controller_latest_merge_train_batch_candidate_progress_record(records)
 
 
 def _latest_merge_train_batch_landing_progress_record(
     records: tuple[MergeTrainBatchLandingPlanRecord, ...],
 ) -> MergeTrainBatchLandingPlanRecord | None:
-    if not records:
-        return None
-    return max(
-        records,
-        key=lambda record: (
-            record.updated_at,
-            max(
-                _merge_train_batch_landing_entry_rank(entry.status)
-                for entry in record.landing_plan.entries
-            ),
-            record.record_id,
-        ),
-    )
+    return controller_latest_merge_train_batch_landing_progress_record(records)
 
 
 def _latest_merge_train_stack_collapse_progress_record(
     records: tuple[MergeTrainStackCollapsePlanRecord, ...],
 ) -> MergeTrainStackCollapsePlanRecord | None:
-    if not records:
-        return None
-    status_rank = {
-        "planned": 0,
-        "collapsing": 1,
-        "waiting_for_root_checks": 2,
-        "ready_for_train": 3,
-        "blocked": 4,
-        "stale": 4,
-    }
-    return max(
-        records,
-        key=lambda record: (record.updated_at, status_rank[record.plan.status], record.record_id),
-    )
+    return controller_latest_merge_train_stack_collapse_progress_record(records)
 
 
 def _merge_train_batch_landing_entry_rank(status: str) -> int:
-    return {
-        "planned": 0,
-        "merging": 1,
-        "merged": 2,
-        "blocked": 3,
-        "stale": 3,
-        "skipped": 3,
-    }[status]
+    return controller_merge_train_batch_landing_entry_rank(status)
 
 
 def _validate_stack_collapse_record_for_landing(
