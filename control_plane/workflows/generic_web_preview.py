@@ -1493,17 +1493,31 @@ def execute_generic_web_preview_refresh(
             record_store=record_store,
             product=request.product,
         )
-    preview_url = resolve_generic_web_preview_url(
-        control_plane_root=control_plane_root,
-        profile=resolved_profile,
-        request=request,
-    )
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(
         app_name_prefix=app_name_prefix,
         preview_slug=request.preview_slug,
     )
+    try:
+        preview_url = resolve_generic_web_preview_url(
+            control_plane_root=control_plane_root,
+            profile=resolved_profile,
+            request=request,
+        )
+    except click.ClickException as exc:
+        finished_at = utc_now_timestamp()
+        return GenericWebPreviewRefreshResult(
+            refresh_status="blocked",
+            refresh_started_at=started_at,
+            refresh_finished_at=finished_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=application_name,
+            preview_url="",
+            error_message=str(exc),
+        )
     readiness = evaluate_generic_web_preview_readiness(
         control_plane_root=control_plane_root,
         record_store=record_store,
