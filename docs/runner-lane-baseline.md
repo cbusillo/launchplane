@@ -92,3 +92,20 @@ For live products, use a non-production runner or a read-only observation path
 until the operator explicitly approves host changes. VeriReel production must
 not be used as a runner-baseline test surface without explicit operator
 permission.
+
+## Control Planning
+
+Runner control starts with a dry-run plan, not a host mutation. The typed
+contract in `control_plane.contracts.runner_lane_control` requires all of these
+before a plan can become ready:
+
+- the repository is explicitly opted into runner control
+- the requested action is enabled by policy
+- mutate mode is explicitly requested
+- the lane baseline is ready
+- existing lanes carry the managed label, defaulting to `launchplane-managed`
+- busy drain, restart, or removal requests include explicit drain confirmation
+
+The planner does not create, drain, restart, or remove a runner. It only returns
+structured blockers and next steps so a later host adapter can be reviewed
+against a stable policy boundary.
