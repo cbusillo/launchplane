@@ -2,11 +2,16 @@ import json
 import subprocess
 import unittest
 from collections.abc import Sequence
+from typing import cast
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.every_code_webhooks import sync_every_code_webhooks
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class _WebhookRunner:
@@ -100,8 +105,12 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
         self.assertEqual(patch_payload["config"]["url"], webhook_url)
         self.assertEqual(post_payload["config"]["url"], webhook_url)
         self.assertEqual(patch_payload["config"]["secret"], "secret")
-        label_edits = [command for command, _input in runner.calls if command[:3] == ("gh", "label", "edit")]
-        label_creates = [command for command, _input in runner.calls if command[:3] == ("gh", "label", "create")]
+        label_edits = [
+            command for command, _input in runner.calls if command[:3] == ("gh", "label", "edit")
+        ]
+        label_creates = [
+            command for command, _input in runner.calls if command[:3] == ("gh", "label", "create")
+        ]
         self.assertIn(
             (
                 "gh",
@@ -144,13 +153,15 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
 
     def test_cli_sync_webhooks_requires_webhook_url_config(self) -> None:
         result = CliRunner().invoke(
-            main,
+            CLI_MAIN,
             ["every-code", "sync-webhooks", "--owner", "cbusillo"],
             env={"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "secret"},
         )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--webhook-url or LAUNCHPLANE_EVERY_CODE_WEBHOOK_URL is required", result.output)
+        self.assertIn(
+            "--webhook-url or LAUNCHPLANE_EVERY_CODE_WEBHOOK_URL is required", result.output
+        )
 
 
 if __name__ == "__main__":
