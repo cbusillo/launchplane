@@ -1,8 +1,10 @@
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
 import click
+from click import Command
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -34,6 +36,9 @@ from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
 )
+
+
+CLI_MAIN = cast(Command, main)
 
 
 def _artifact_manifest() -> ArtifactIdentityManifest:
@@ -481,7 +486,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             patch("control_plane.cli._store", return_value=Mock()),
         ):
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "odoo-rollbacks",
                     "execute",
