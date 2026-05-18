@@ -265,6 +265,128 @@ apply_product_onboarding() {
   return 1
 }
 
+apply_verireel_onboarding() {
+  local idempotency_suffix="verireel-preview-profile"
+  local request_payload response_file status_code
+
+  request_payload="$({
+    jq -n \
+      '{
+        schema_version: 1,
+        product: "launchplane",
+        manifest: {
+          product: "verireel",
+          display_name: "VeriReel",
+          repository: "cbusillo/verireel",
+          driver_id: "verireel",
+          image_repository: "ghcr.io/cbusillo/verireel-app",
+          runtime_port: 3000,
+          health_path: "/api/health",
+          lanes: [
+            {
+              instance: "testing",
+              context: "verireel",
+              base_url: "https://ver-testing.shinycomputers.com"
+            },
+            {
+              instance: "prod",
+              context: "verireel",
+              base_url: "https://ver-prod.shinycomputers.com"
+            }
+          ],
+          preview: {
+            enabled: true,
+            context: "verireel-testing",
+            enable_label: "preview",
+            slug_template: "pr-{number}",
+            app_name_prefix: "ver-preview",
+            template_instance: "testing",
+            preview_url_env_keys: ["VERIREEL_APP_URL", "BETTER_AUTH_URL"],
+            preview_domain_env_keys: ["LAUNCHPLANE_PREVIEW_BASE_URL"],
+            data_transport_mode: "driver"
+          },
+          runtime_environments: [
+            {
+              scope: "context",
+              context: "verireel-testing",
+              env: {
+                LAUNCHPLANE_PREVIEW_BASE_URL: "https://ver-preview.shinycomputers.com"
+              }
+            }
+          ],
+          expected_config: {
+            runtime_environment_keys: [
+              {
+                key: "LAUNCHPLANE_PREVIEW_BASE_URL",
+                context: "verireel-testing"
+              }
+            ],
+            managed_secret_bindings: [
+              {
+                binding_key: "BETTER_AUTH_SECRET",
+                context: "verireel",
+                instance: "testing"
+              },
+              {
+                binding_key: "VERIREEL_SECRETS_MASTER_KEY",
+                context: "verireel",
+                instance: "testing"
+              },
+              {
+                binding_key: "VERIREEL_CRON_SECRET",
+                context: "verireel",
+                instance: "testing"
+              },
+              {
+                binding_key: "POSTGRES_PASSWORD",
+                context: "verireel",
+                instance: "testing"
+              },
+              {
+                binding_key: "BETTER_AUTH_SECRET",
+                context: "verireel",
+                instance: "prod"
+              },
+              {
+                binding_key: "VERIREEL_SECRETS_MASTER_KEY",
+                context: "verireel",
+                instance: "prod"
+              },
+              {
+                binding_key: "VERIREEL_CRON_SECRET",
+                context: "verireel",
+                instance: "prod"
+              },
+              {
+                binding_key: "POSTGRES_PASSWORD",
+                context: "verireel",
+                instance: "prod"
+              }
+            ]
+          },
+          source_label: "deploy:verireel-product-onboarding"
+        }
+      }'
+  })"
+  response_file="$(mktemp)"
+  status_code="$(curl -sS \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${oidc_token}" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: launchplane-product-onboarding:${idempotency_suffix}:${GITHUB_SHA}" \
+    --data "$request_payload" \
+    "${LAUNCHPLANE_SERVICE_URL}/v1/product-onboarding/apply")"
+  if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+    cat "$response_file"
+    return 0
+  fi
+  cat "$response_file" >&2
+  echo "Launchplane VeriReel product onboarding request failed with HTTP ${status_code}." >&2
+  return 1
+}
+
 apply_odoo_cm_onboarding() {
   local idempotency_suffix="odoo-cm-preview-profile"
   local request_payload response_file status_code
@@ -760,6 +882,7 @@ post_odoo_cm_preview_grant() {
 
 apply_product_onboarding \
   discord-blue
+apply_verireel_onboarding
 apply_odoo_cm_onboarding
 apply_odoo_opw_onboarding
 post_grant \

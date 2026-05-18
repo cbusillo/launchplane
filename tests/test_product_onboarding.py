@@ -147,6 +147,156 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("deploy:terminal-agent-product-profile-read-grant", script_text)
         self.assertIn("terminal-agent-product-profile-read", script_text)
 
+    def test_deploy_verireel_onboarding_manifest_enrolls_preview_lifecycle(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$*\" in\n"
+                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                "  *)\n"
+                "    idempotency_key=''\n"
+                "    output_file=''\n"
+                "    request_payload=''\n"
+                "    while [ \"$#\" -gt 0 ]; do\n"
+                "      case \"$1\" in\n"
+                "        -o) shift; output_file=\"$1\" ;;\n"
+                "        -H)\n"
+                "          shift\n"
+                "          case \"$1\" in\n"
+                "            Idempotency-Key:*) idempotency_key=\"$1\" ;;\n"
+                "          esac\n"
+                "          ;;\n"
+                "        --data) shift; request_payload=\"$1\" ;;\n"
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                "    case \"$idempotency_key\" in\n"
+                "      *launchplane-product-onboarding:verireel-preview-profile*)\n"
+                "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
+                "        printf '%s' \"${idempotency_key#Idempotency-Key: }\" > \"$CAPTURED_IDEMPOTENCY_KEY\"\n"
+                "        ;;\n"
+                "    esac\n"
+                "    if [ -n \"$output_file\" ]; then\n"
+                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_request_payload = temporary_directory / "request.json"
+            captured_idempotency_key = temporary_directory / "idempotency-key.txt"
+            captured_idempotency_key.touch()
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
+                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
+                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
+                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
+                "CAPTURED_REQUEST_PAYLOAD": str(captured_request_payload),
+                "CAPTURED_IDEMPOTENCY_KEY": str(captured_idempotency_key),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request_payload = json.loads(captured_request_payload.read_text())
+            idempotency_key = captured_idempotency_key.read_text().strip()
+
+        manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
+
+        self.assertEqual(request_payload["product"], "launchplane")
+        self.assertEqual(manifest.product, "verireel")
+        self.assertEqual(manifest.display_name, "VeriReel")
+        self.assertEqual(manifest.repository, "cbusillo/verireel")
+        self.assertEqual(manifest.driver_id, "verireel")
+        self.assertEqual(manifest.image_repository, "ghcr.io/cbusillo/verireel-app")
+        self.assertEqual(manifest.runtime_port, 3000)
+        self.assertEqual(manifest.health_path, "/api/health")
+        self.assertEqual(
+            [(lane.instance, lane.context, lane.base_url) for lane in manifest.lanes],
+            [
+                ("testing", "verireel", "https://ver-testing.shinycomputers.com"),
+                ("prod", "verireel", "https://ver-prod.shinycomputers.com"),
+            ],
+        )
+        self.assertTrue(manifest.preview.enabled)
+        self.assertEqual(manifest.preview.context, "verireel-testing")
+        self.assertEqual(manifest.preview.enable_label, "preview")
+        self.assertEqual(manifest.preview.slug_template, "pr-{number}")
+        self.assertEqual(manifest.preview.app_name_prefix, "ver-preview")
+        self.assertEqual(manifest.preview.data_transport_mode, "driver")
+        self.assertEqual(
+            manifest.preview.preview_url_env_keys,
+            ("VERIREEL_APP_URL", "BETTER_AUTH_URL"),
+        )
+        self.assertEqual(
+            manifest.preview.preview_domain_env_keys,
+            ("LAUNCHPLANE_PREVIEW_BASE_URL",),
+        )
+        self.assertEqual(len(manifest.dokploy_targets), 0)
+        self.assertEqual(len(manifest.secret_bindings), 0)
+        self.assertEqual(len(manifest.runtime_environments), 1)
+        preview_runtime = manifest.runtime_environments[0]
+        self.assertEqual(preview_runtime.scope, "context")
+        self.assertEqual(preview_runtime.context, "verireel-testing")
+        self.assertEqual(
+            preview_runtime.env["LAUNCHPLANE_PREVIEW_BASE_URL"],
+            "https://ver-preview.shinycomputers.com",
+        )
+        self.assertEqual(
+            [
+                (requirement.context, requirement.instance, requirement.binding_key)
+                for requirement in manifest.expected_config.managed_secret_bindings
+            ],
+            [
+                ("verireel", "testing", "BETTER_AUTH_SECRET"),
+                ("verireel", "testing", "VERIREEL_SECRETS_MASTER_KEY"),
+                ("verireel", "testing", "VERIREEL_CRON_SECRET"),
+                ("verireel", "testing", "POSTGRES_PASSWORD"),
+                ("verireel", "prod", "BETTER_AUTH_SECRET"),
+                ("verireel", "prod", "VERIREEL_SECRETS_MASTER_KEY"),
+                ("verireel", "prod", "VERIREEL_CRON_SECRET"),
+                ("verireel", "prod", "POSTGRES_PASSWORD"),
+            ],
+        )
+        self.assertEqual(
+            idempotency_key,
+            "launchplane-product-onboarding:verireel-preview-profile:test-sha",
+        )
+
     def test_deploy_odoo_cm_onboarding_manifest_encodes_issue_backed_bootstrap_policy(
         self,
     ) -> None:
