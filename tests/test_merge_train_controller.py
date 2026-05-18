@@ -55,7 +55,7 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "observe_candidate")
 
-    def test_decision_stops_on_failed_or_stale_candidate(self) -> None:
+    def test_decision_handles_failed_and_terminal_candidates(self) -> None:
         failed_decision = decide_merge_train_controller_record_action(
             candidate_records=(_candidate_record(status="failed"),),
             landing_plan_records=(),
@@ -69,6 +69,43 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
 
         self.assertEqual(failed_decision.action, "candidate_failed")
         self.assertEqual(stale_decision.action, "candidate_stopped")
+
+    def test_decision_stops_for_newest_terminal_candidate_over_older_passed_candidate(
+        self,
+    ) -> None:
+        passed_record = _candidate_record(
+            status="passed",
+            record_id="candidate-passed",
+            candidate_sha="candidate-sha",
+        )
+        stale_record = _candidate_record(
+            status="stale",
+            record_id="candidate-stale",
+            updated_at="2026-05-18T01:01:00Z",
+            candidate_sha="candidate-sha-stale",
+        )
+        blocked_record = _candidate_record(
+            status="blocked",
+            record_id="candidate-blocked",
+            updated_at="2026-05-18T01:02:00Z",
+            candidate_sha="candidate-sha-blocked",
+        )
+
+        stale_decision = decide_merge_train_controller_record_action(
+            candidate_records=(passed_record, stale_record),
+            landing_plan_records=(),
+            stack_collapse_plan_records=(),
+        )
+        blocked_decision = decide_merge_train_controller_record_action(
+            candidate_records=(passed_record, blocked_record),
+            landing_plan_records=(),
+            stack_collapse_plan_records=(),
+        )
+
+        self.assertEqual(stale_decision.action, "candidate_stopped")
+        self.assertEqual(stale_decision.candidate_record_id, stale_record.record_id)
+        self.assertEqual(blocked_decision.action, "candidate_stopped")
+        self.assertEqual(blocked_decision.candidate_record_id, blocked_record.record_id)
 
     def test_decision_plans_landing_for_passed_candidate(self) -> None:
         passed_record = _candidate_record(status="passed", candidate_sha="candidate-sha")
@@ -134,7 +171,7 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
 
         self.assertEqual(planned_decision.action, "execute_stack_collapse")
         self.assertEqual(planned_decision.stack_collapse_plan_record_id, planned_record.record_id)
-        self.assertEqual(waiting_decision.action, "admit_collapsed_root")
+        self.assertEqual(waiting_decision.action, "wait_for_root_checks")
         self.assertEqual(waiting_decision.stack_collapse_plan_record_id, "stack-waiting")
 
 

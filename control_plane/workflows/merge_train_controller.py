@@ -22,7 +22,7 @@ MergeTrainControllerAction = Literal[
     "plan_landing",
     "land_batch",
     "batch_landed",
-    "admit_collapsed_root",
+    "wait_for_root_checks",
     "execute_stack_collapse",
 ]
 
@@ -114,8 +114,8 @@ def decide_merge_train_controller_record_action(
     )
     if waiting_collapse_record is not None:
         return MergeTrainControllerDecision(
-            action="admit_collapsed_root",
-            reason="collapsed stack root is waiting for root checks",
+            action="wait_for_root_checks",
+            reason="collapsed stack root still needs mergeability checks",
             stack_collapse_plan_record_id=waiting_collapse_record.record_id,
         )
 
