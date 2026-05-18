@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import click
@@ -17,6 +17,14 @@ from control_plane.contracts.work_graph_read_model import (
 
 _API_VERSION_ARGS = ("-H", "X-GitHub-Api-Version: 2022-11-28")
 GitHubCheckState = Literal["success", "pending", "failure", "unknown"]
+_WORK_ITEM_FOCUS_BY_VALUE: dict[str, WorkItemFocus] = {
+    "Now": "Now",
+    "Next": "Next",
+    "Waiting": "Waiting",
+    "Later": "Later",
+    "Done": "Done",
+    "Unknown": "Unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -83,26 +91,20 @@ def load_github_project_planning_facts_config_from_env(
             "Set both LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER and "
             "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER to enable work graph Project facts."
         )
-    try:
-        project_number = int(project_number_value)
-    except ValueError as error:
-        raise click.ClickException(
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER must be a positive integer."
-        ) from error
-    limit_value = environ.get("LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT", "").strip()
-    try:
-        limit = int(limit_value) if limit_value else 200
-    except ValueError as error:
-        raise click.ClickException(
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT must be a positive integer."
-        ) from error
-    signal_limit_value = environ.get("LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT", "").strip()
-    try:
-        signal_limit = int(signal_limit_value) if signal_limit_value else 50
-    except ValueError as error:
-        raise click.ClickException(
-            "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT must be a positive integer."
-        ) from error
+    project_number = _int_env_value(
+        environ,
+        name="LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER",
+    )
+    limit = _int_env_value(
+        environ,
+        name="LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT",
+        default=200,
+    )
+    signal_limit = _int_env_value(
+        environ,
+        name="LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT",
+        default=50,
+    )
     return GitHubProjectPlanningFactsConfig(
         owner=owner,
         project_number=project_number,
@@ -110,6 +112,16 @@ def load_github_project_planning_facts_config_from_env(
         signal_limit=signal_limit,
         gh_binary=environ.get("LAUNCHPLANE_WORK_GRAPH_GH_BINARY", "gh").strip() or "gh",
     )
+
+
+def _int_env_value(environ: dict[str, str], *, name: str, default: int | None = None) -> int:
+    value = environ.get(name, "").strip()
+    if not value and default is not None:
+        return default
+    try:
+        return int(value)
+    except ValueError as error:
+        raise click.ClickException(f"{name} must be a positive integer.") from error
 
 
 def _run_gh_json(command: Sequence[str]) -> dict[str, Any]:
@@ -165,9 +177,7 @@ def _enrich_planning_facts_with_github_signals(
         enriched.append(
             fact
             if not updates
-            else WorkGraphPlanningIssueFacts.model_validate(
-                fact.model_dump(mode="python") | updates
-            )
+            else WorkGraphPlanningIssueFacts.model_validate(fact.model_dump() | updates)
         )
     return tuple(enriched)
 
@@ -344,8 +354,9 @@ def _repository_from_url(value: str) -> str:
 
 def _focus_from_project_item(*, item: dict[str, Any], status: str) -> WorkItemFocus | None:
     focus = _string(item.get("focus") or item.get("Focus"))
-    if focus in {"Now", "Next", "Waiting", "Later", "Done", "Unknown"}:
-        return cast(WorkItemFocus, focus)
+    recognized_focus = _WORK_ITEM_FOCUS_BY_VALUE.get(focus)
+    if recognized_focus is not None:
+        return recognized_focus
     if status == "Done":
         return "Done"
     if status == "Waiting":
