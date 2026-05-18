@@ -1,4 +1,13 @@
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import cast
+
+from click import Command
+from click.testing import CliRunner
+
+from control_plane.cli import main
 
 from pydantic import ValidationError
 
@@ -7,6 +16,9 @@ from control_plane.contracts.preview_workflow_contract import (
     decide_preview_workflow_operation,
     preview_workflow_idempotency_key,
 )
+
+
+CLI_MAIN = cast(Command, main)
 
 
 def _event(**overrides: object) -> PreviewWorkflowEvent:
@@ -129,6 +141,152 @@ class PreviewWorkflowContractTests(unittest.TestCase):
                 run_id="123456",
                 run_attempt="2",
             )
+
+
+class PreviewWorkflowDecisionCliTests(unittest.TestCase):
+    def test_cli_derives_refresh_decision_from_github_event_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            event_file = Path(temp_dir) / "event.json"
+            event_file.write_text(
+                json.dumps(
+                    {
+                        "action": "synchronize",
+                        "repository": {"full_name": "cbusillo/sellyouroutboard"},
+                        "pull_request": {
+                            "number": 105,
+                            "labels": [{"name": "preview"}],
+                            "base": {
+                                "repo": {"full_name": "cbusillo/sellyouroutboard"},
+                            },
+                            "head": {
+                                "repo": {"full_name": "cbusillo/sellyouroutboard"},
+                                "sha": "abc123",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "preview-workflow-decision",
+                    "--event-file",
+                    str(event_file),
+                    "--event-name",
+                    "pull_request",
+                    "--actor",
+                    "cbusillo",
+                    "--product",
+                    "sell-your-outboard",
+                    "--context",
+                    "sellyouroutboard-testing",
+                    "--run-id",
+                    "123456",
+                    "--run-attempt",
+                    "2",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["event"]["anchor_pr_number"], 105)
+        self.assertEqual(payload["event"]["label_names"], ["preview"])
+        self.assertEqual(payload["decision"]["operation"], "refresh")
+        self.assertEqual(
+            payload["decision"]["launchplane_route_path"],
+            "/v1/drivers/generic-web/preview-refresh",
+        )
+        self.assertEqual(
+            payload["idempotency_key"],
+            "preview-workflow:sell-your-outboard:sellyouroutboard-testing:refresh:pr-105:123456:2",
+        )
+
+    def test_cli_reports_unsupported_notice_without_untrusted_checkout(self) -> None:
+        result = CliRunner().invoke(
+            CLI_MAIN,
+            [
+                "work-graph",
+                "preview-workflow-decision",
+                "--event-name",
+                "pull_request_target",
+                "--action",
+                "labeled",
+                "--repository",
+                "cbusillo/sellyouroutboard",
+                "--anchor-repo",
+                "cbusillo/sellyouroutboard",
+                "--anchor-pr-number",
+                "106",
+                "--actor",
+                "contributor",
+                "--base-repository",
+                "cbusillo/sellyouroutboard",
+                "--head-repository",
+                "someone/sellyouroutboard",
+                "--label",
+                "preview",
+                "--action-label",
+                "preview",
+                "--product",
+                "sell-your-outboard",
+                "--context",
+                "sellyouroutboard-testing",
+                "--run-id",
+                "123457",
+                "--run-attempt",
+                "1",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["decision"]["operation"], "unsupported_notice")
+        self.assertEqual(payload["decision"]["execution_trust"], "fork")
+        self.assertFalse(payload["decision"]["checkout_untrusted_head"])
+        self.assertEqual(payload["decision"]["feedback_status"], "unsupported")
+
+    def test_cli_omits_idempotency_key_for_ignored_events(self) -> None:
+        result = CliRunner().invoke(
+            CLI_MAIN,
+            [
+                "work-graph",
+                "preview-workflow-decision",
+                "--event-name",
+                "pull_request",
+                "--action",
+                "synchronize",
+                "--repository",
+                "cbusillo/sellyouroutboard",
+                "--anchor-repo",
+                "cbusillo/sellyouroutboard",
+                "--anchor-pr-number",
+                "107",
+                "--actor",
+                "cbusillo",
+                "--base-repository",
+                "cbusillo/sellyouroutboard",
+                "--head-repository",
+                "cbusillo/sellyouroutboard",
+                "--label",
+                "bug",
+                "--product",
+                "sell-your-outboard",
+                "--context",
+                "sellyouroutboard-testing",
+                "--run-id",
+                "123458",
+                "--run-attempt",
+                "1",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["decision"]["operation"], "ignore")
+        self.assertEqual(payload["idempotency_key"], "")
 
 
 if __name__ == "__main__":

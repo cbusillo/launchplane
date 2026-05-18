@@ -56,6 +56,25 @@ The decision is deliberately small:
 The same contract applies to SYO, VeriReel, Odoo CM, and future products. Driver
 routes may differ by product family, but event interpretation stays the same.
 
+Product repo adapters can ask Launchplane to render that decision from a GitHub
+event payload before doing product-owned work:
+
+```shell
+uv run launchplane work-graph preview-workflow-decision \
+  --event-file "$GITHUB_EVENT_PATH" \
+  --event-name "$GITHUB_EVENT_NAME" \
+  --product sell-your-outboard \
+  --context sellyouroutboard-testing \
+  --run-id "$GITHUB_RUN_ID" \
+  --run-attempt "$GITHUB_RUN_ATTEMPT"
+```
+
+The command is read-only. It does not contact GitHub, call Launchplane service
+routes, check out pull-request code, or mutate a provider. It emits the normalized
+event, decision, route path, feedback status, and run-scoped idempotency key as
+JSON so product workflows can branch on the shared contract instead of
+duplicating event semantics.
+
 ## Required Workflow Shape
 
 Same-repository PRs use `pull_request` because the workflow may check out and
