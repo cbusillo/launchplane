@@ -227,6 +227,11 @@ Dokploy-hosted.
   read GitHub's current repository runner list. The command is read-only and
   reports lane count, online/busy/idle/offline counts, labels, host hints, and a
   capacity-constrained heuristic from the observation timestamp.
+- Treat [runner-lane-baseline.md](runner-lane-baseline.md) as the readiness
+  contract before routing shared product automation onto a lane. The baseline
+  fails closed without positive per-job Docker credential isolation evidence, so
+  product repositories should not carry local `DOCKER_CONFIG` workaround retries
+  as the long-term safety mechanism.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous

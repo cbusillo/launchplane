@@ -763,6 +763,12 @@ preflights.
   DB-backed authority boundary: runtime train state belongs in Launchplane
   storage, not checked-in config, service-host env, logs, or product-repo
   conditionals.
+- Runner lane baseline readiness is represented by typed policy, observation,
+  violation, and readiness contracts in
+  `control_plane.contracts.runner_lane_baseline`. These contracts are evidence
+  about whether a self-hosted runner lane satisfies Launchplane's host baseline;
+  they are not product deploy authority and they do not replace route-specific
+  authorization, promotion, backup-gate, or provider safety checks.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns
