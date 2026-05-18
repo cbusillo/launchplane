@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -29,12 +30,19 @@ from control_plane.product_context_audit import build_product_context_cutover_au
 from control_plane.storage.postgres import PostgresRecordStore
 
 
+CLI_MAIN = cast(Command, main)
+
+
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
 def _payload_list(payload: dict[str, object], key: str) -> list[dict[str, object]]:
     return cast("list[dict[str, object]]", payload[key])
+
+
+def _ignore_unused_store_arguments(*_values: object) -> None:
+    return None
 
 
 def _product_profile() -> LaunchplaneProductProfileRecord:
@@ -63,7 +71,6 @@ def _product_profile() -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(
             enabled=True,
             context="sellyouroutboard-testing",
-            slug_template="pr-{number}",
         ),
         updated_at="2026-05-01T00:00:00Z",
         source="test",
@@ -261,7 +268,7 @@ class _FakeContextAuditStore:
         instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[SecretRecord, ...]:
-        del limit
+        _ignore_unused_store_arguments(limit)
         return tuple(
             record
             for record in self.secret_records
@@ -278,7 +285,7 @@ class _FakeContextAuditStore:
         instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[SecretBinding, ...]:
-        del limit
+        _ignore_unused_store_arguments(limit)
         return tuple(
             record
             for record in self.secret_bindings
@@ -293,22 +300,25 @@ class _FakeContextAuditStore:
     def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
         return self.target_id_records
 
-    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
+    @staticmethod
+    def list_environment_inventory() -> tuple[EnvironmentInventory, ...]:
         return ()
 
-    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
+    @staticmethod
+    def list_release_tuple_records() -> tuple[ReleaseTupleRecord, ...]:
         return ()
 
+    @staticmethod
     def list_backup_gate_records(
-        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+        *, context_name: str = "", instance_name: str = "", limit: int | None = None
     ) -> tuple[BackupGateRecord, ...]:
-        del context_name, instance_name, limit
+        _ignore_unused_store_arguments(context_name, instance_name, limit)
         return ()
 
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
     ) -> tuple[DeploymentRecord, ...]:
-        del limit
+        _ignore_unused_store_arguments(limit)
         return tuple(
             record
             for record in self.deployment_records
@@ -316,15 +326,15 @@ class _FakeContextAuditStore:
             and (not instance_name or record.instance == instance_name)
         )
 
+    @staticmethod
     def list_promotion_records(
-        self,
         *,
         context_name: str = "",
         from_instance_name: str = "",
         to_instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[PromotionRecord, ...]:
-        del context_name, from_instance_name, to_instance_name, limit
+        _ignore_unused_store_arguments(context_name, from_instance_name, to_instance_name, limit)
         return ()
 
 
@@ -366,7 +376,7 @@ class ProductProfileContextAuditTests(unittest.TestCase):
             _seed_records(database_url)
 
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "product-profiles",
                     "audit-context-cutover",
@@ -427,7 +437,7 @@ class ProductProfileContextAuditTests(unittest.TestCase):
             store.close()
 
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "product-profiles",
                     "audit-context-cutover",
