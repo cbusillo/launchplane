@@ -99,6 +99,30 @@ class RunnerLaneBaselineTests(unittest.TestCase):
             ["home_directory_outside_allowed_roots", "service_user_not_allowed"],
         )
 
+    def test_readiness_rejects_home_directory_traversal_outside_allowed_roots(
+        self,
+    ) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(
+                allowed_home_roots=("/var/lib/actions-runners",),
+            ),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    home_directory="/var/lib/actions-runners/../tmp",
+                    observed_at="2026-05-18T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["home_directory_outside_allowed_roots"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
