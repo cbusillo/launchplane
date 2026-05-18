@@ -48,7 +48,7 @@ class RunnerLaneBaselineObservation(BaseModel):
             self.runner_name, "runner lane baseline observation requires runner_name"
         )
         self.labels = _normalized_tokens(self.labels)
-        self.service_user = self.service_user.strip()
+        self.service_user = _normalized_token(self.service_user)
         self.home_directory = _normalized_path(self.home_directory)
         self.observed_at = _required_text(
             self.observed_at, "runner lane baseline observation requires observed_at"
@@ -181,6 +181,8 @@ def _path_is_under_roots(path: str, roots: tuple[str, ...]) -> bool:
         normalized_root = _resolved_path(root)
         if not normalized_root or not posixpath.isabs(normalized_root):
             continue
+        if normalized_root == "/":
+            return True
         if normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}/"):
             return True
     return False
@@ -205,7 +207,11 @@ def _resolved_path(value: str) -> str:
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(sorted({value.strip().lower() for value in values if value.strip()}))
+    return tuple(sorted({normalized for value in values if (normalized := _normalized_token(value))}))
+
+
+def _normalized_token(value: str) -> str:
+    return value.strip().lower()
 
 
 def _required_text(value: str, message: str) -> str:
