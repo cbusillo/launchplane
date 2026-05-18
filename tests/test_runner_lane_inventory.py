@@ -89,6 +89,22 @@ class GitHubRunnerLaneInventoryReaderTests(unittest.TestCase):
             ],
         )
 
+    def test_reader_normalizes_pasted_repository_components(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"total_count": 1, "runners": [_runner(301, "lane-1")]},)
+        )
+
+        inventory = GitHubRunnerLaneInventoryReader(
+            transport=transport, clock=_FixedClock()
+        ).read_runner_lane_inventory(repository=" cbusillo / launchplane ")
+
+        self.assertEqual(inventory.repository, "cbusillo/launchplane")
+        self.assertEqual(inventory.lanes[0].repository, "cbusillo/launchplane")
+        self.assertEqual(
+            [request.path for request in transport.requests],
+            ["/repos/cbusillo/launchplane/actions/runners?per_page=100&page=1"],
+        )
+
     def test_reader_rejects_malformed_runner_response(self) -> None:
         reader = GitHubRunnerLaneInventoryReader(
             transport=RecordingMergeTrainGitHubTransport(responses=({"runners": {}},)),
@@ -96,6 +112,32 @@ class GitHubRunnerLaneInventoryReaderTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(MergeTrainGitHubError, "must include runners"):
+            reader.read_runner_lane_inventory(repository="cbusillo/repo")
+
+    def test_reader_rejects_missing_busy_flag(self) -> None:
+        runner = _runner(401, "lane-1")
+        runner.pop("busy")
+        reader = GitHubRunnerLaneInventoryReader(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=({"total_count": 1, "runners": [runner]},)
+            ),
+            clock=_FixedClock(),
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubError, "requires busy"):
+            reader.read_runner_lane_inventory(repository="cbusillo/repo")
+
+    def test_reader_rejects_non_boolean_busy_flag(self) -> None:
+        runner = _runner(402, "lane-1")
+        runner["busy"] = "false"
+        reader = GitHubRunnerLaneInventoryReader(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=({"total_count": 1, "runners": [runner]},)
+            ),
+            clock=_FixedClock(),
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubError, "requires busy"):
             reader.read_runner_lane_inventory(repository="cbusillo/repo")
 
 
