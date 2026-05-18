@@ -39,6 +39,9 @@ policy from observation:
 
 No observation means not ready. Unknown Docker credential isolation means not
 ready. Missing labels or configured host guardrails also make the lane not ready.
+Home-directory checks canonicalize observed and allowed paths before comparing
+roots, so traversal segments such as `..` cannot satisfy a configured root by
+string prefix alone.
 
 ## Operations
 
