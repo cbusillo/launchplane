@@ -1,3 +1,5 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
@@ -116,6 +118,39 @@ class RunnerLaneBaselineTests(unittest.TestCase):
                 ),
             ),
         )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["home_directory_outside_allowed_roots"],
+        )
+
+    def test_readiness_rejects_symlinked_home_directory_outside_allowed_roots(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            allowed_root = root / "actions-runners"
+            outside_root = root / "outside-home"
+            linked_home = allowed_root / "runner-home"
+            allowed_root.mkdir()
+            outside_root.mkdir()
+            linked_home.symlink_to(outside_root, target_is_directory=True)
+
+            readiness = evaluate_runner_lane_baseline(
+                policy=RunnerLaneBaselinePolicy(
+                    allowed_home_roots=(allowed_root.as_posix(),),
+                ),
+                observations=(
+                    RunnerLaneBaselineObservation(
+                        runner_name="launchplane-runner-1",
+                        labels=("self-hosted", "launchplane"),
+                        docker_config_isolated=True,
+                        home_directory=linked_home.as_posix(),
+                        observed_at="2026-05-18T12:00:00Z",
+                    ),
+                ),
+            )
 
         self.assertFalse(readiness.ready)
         self.assertEqual(

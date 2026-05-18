@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import posixpath
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -173,16 +174,14 @@ def _evaluate_observation(
 
 
 def _path_is_under_roots(path: str, roots: tuple[str, ...]) -> bool:
-    normalized_path = _normalized_path(path)
+    normalized_path = _resolved_path(path)
     if not normalized_path or not posixpath.isabs(normalized_path):
         return False
     for root in roots:
-        normalized_root = _normalized_path(root)
+        normalized_root = _resolved_path(root)
         if not normalized_root or not posixpath.isabs(normalized_root):
             continue
-        if normalized_path == normalized_root or normalized_path.startswith(
-            f"{normalized_root}/"
-        ):
+        if normalized_path == normalized_root or normalized_path.startswith(f"{normalized_root}/"):
             return True
     return False
 
@@ -196,6 +195,13 @@ def _normalized_path(value: str) -> str:
     if not normalized_value:
         return ""
     return posixpath.normpath(normalized_value)
+
+
+def _resolved_path(value: str) -> str:
+    normalized_value = _normalized_path(value)
+    if not normalized_value:
+        return ""
+    return Path(normalized_value).resolve(strict=False).as_posix()
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:

@@ -234,6 +234,10 @@ class GenericWebPreviewRefreshResult(BaseModel):
     error_message: str = ""
 
 
+class MissingPreviewBaseUrlError(click.ClickException):
+    pass
+
+
 class GenericWebPreviewReadinessRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -918,7 +922,7 @@ def resolve_generic_web_preview_url(
     )
     preview_base_url = str(context_values.get(_PREVIEW_BASE_URL_ENV_KEY) or "").strip()
     if not preview_base_url:
-        raise click.ClickException(
+        raise MissingPreviewBaseUrlError(
             f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
         )
     return _preview_url_from_base_url(
@@ -1505,7 +1509,7 @@ def execute_generic_web_preview_refresh(
             profile=resolved_profile,
             request=request,
         )
-    except click.ClickException as exc:
+    except MissingPreviewBaseUrlError as exc:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewRefreshResult(
             refresh_status="blocked",
