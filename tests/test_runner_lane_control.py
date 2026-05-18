@@ -55,6 +55,66 @@ class RunnerLaneControlPlanTests(unittest.TestCase):
         self.assertEqual(plan.blockers, ())
         self.assertIn("restart the approved runner service", plan.next_steps)
 
+    def test_ready_plan_normalizes_repository_spacing_in_policy_request_and_inventory(
+        self,
+    ) -> None:
+        plan = plan_runner_lane_control(
+            policy=RunnerLaneControlPolicy(
+                allowed_repositories=(" cbusillo / repo ",),
+                allow_restart=True,
+            ),
+            request=RunnerLaneControlRequest(
+                action="restart",
+                repository=" cbusillo / repo ",
+                lane_name="lane-1",
+                mutate=True,
+            ),
+            inventory=_inventory(
+                repository=" cbusillo / repo ",
+                labels=("self-hosted", "launchplane", "launchplane-managed"),
+            ),
+            baseline_readiness=_ready_baseline(),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.repository, "cbusillo/repo")
+        self.assertEqual(plan.blockers, ())
+
+    def test_control_plan_blocks_when_lane_name_is_ambiguous(self) -> None:
+        plan = plan_runner_lane_control(
+            policy=RunnerLaneControlPolicy(
+                allowed_repositories=("cbusillo/repo",),
+                allow_restart=True,
+            ),
+            request=RunnerLaneControlRequest(
+                action="restart",
+                repository="cbusillo/repo",
+                lane_name="lane-1",
+                mutate=True,
+            ),
+            inventory=_inventory(
+                labels=("self-hosted", "launchplane", "launchplane-managed"),
+                extra_lanes=(
+                    RunnerLaneRecord(
+                        github_id=2,
+                        name="lane-1",
+                        repository="cbusillo/repo",
+                        status="online",
+                        busy=False,
+                        labels=("self-hosted", "launchplane", "launchplane-managed"),
+                        observed_at="2026-05-18T20:30:00Z",
+                    ),
+                ),
+            ),
+            baseline_readiness=_ready_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["lane_name_ambiguous"],
+        )
+
     def test_remove_blocks_unmanaged_busy_lane(self) -> None:
         plan = plan_runner_lane_control(
             policy=RunnerLaneControlPolicy(
@@ -164,7 +224,11 @@ def _ready_baseline() -> RunnerLaneBaselineReadiness:
 
 
 def _inventory(
-    *, repository: str = "cbusillo/repo", labels: tuple[str, ...], busy: bool = False
+    *,
+    repository: str = "cbusillo/repo",
+    labels: tuple[str, ...],
+    busy: bool = False,
+    extra_lanes: tuple[RunnerLaneRecord, ...] = (),
 ) -> RunnerLaneInventory:
     return build_runner_lane_inventory(
         repository=repository,
@@ -179,6 +243,7 @@ def _inventory(
                 labels=labels,
                 observed_at="2026-05-18T20:30:00Z",
             ),
+            *extra_lanes,
         ),
     )
 

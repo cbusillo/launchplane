@@ -110,4 +110,7 @@ before a plan can become ready:
 
 The planner does not create, drain, restart, or remove a runner. It only returns
 structured blockers and next steps so a later host adapter can be reviewed
-against a stable policy boundary.
+against a stable policy boundary. Repository values are canonicalized to
+`owner/name` before comparing policy, request, and inventory records, and a
+matching lane name must resolve to exactly one inventory record before the plan
+can target it.
