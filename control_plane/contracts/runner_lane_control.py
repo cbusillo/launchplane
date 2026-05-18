@@ -16,6 +16,7 @@ RunnerLaneControlBlockerCode = Literal[
     "busy_lane_requires_drain_confirmation",
     "inventory_repository_mismatch",
     "lane_already_exists",
+    "lane_name_ambiguous",
     "lane_not_found",
     "managed_label_missing",
     "mutate_not_requested",
@@ -36,7 +37,7 @@ class RunnerLaneControlPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_policy(self) -> "RunnerLaneControlPolicy":
-        self.allowed_repositories = _normalized_tokens(self.allowed_repositories)
+        self.allowed_repositories = _normalized_repositories(self.allowed_repositories)
         self.required_managed_label = _normalized_token(self.required_managed_label)
         if not self.required_managed_label:
             raise ValueError("runner lane control policy requires managed label")
@@ -55,7 +56,7 @@ class RunnerLaneControlRequest(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneControlRequest":
-        self.repository = _normalized_token(self.repository)
+        self.repository = _normalized_repository(self.repository)
         self.lane_name = _required_text(self.lane_name, "runner lane control requires lane_name")
         if not self.repository:
             raise ValueError("runner lane control requires repository")
@@ -109,6 +110,7 @@ def plan_runner_lane_control(
     baseline_readiness: RunnerLaneBaselineReadiness,
 ) -> RunnerLaneControlPlan:
     blockers: list[RunnerLaneControlBlocker] = []
+    inventory_repository = _normalized_repository(inventory.repository)
     if policy.allowed_repositories and request.repository not in policy.allowed_repositories:
         blockers.append(
             _blocker(
@@ -138,22 +140,30 @@ def plan_runner_lane_control(
             )
         )
 
-    if inventory.repository != request.repository:
+    if inventory_repository != request.repository:
         blockers.append(
             _blocker(
                 "inventory_repository_mismatch",
                 (
                     "runner lane inventory repository does not match request: "
-                    f"{inventory.repository}"
+                    f"{inventory_repository}"
                 ),
             )
         )
-    lane = next((item for item in inventory.lanes if item.name == request.lane_name), None)
+    matching_lanes = tuple(item for item in inventory.lanes if item.name == request.lane_name)
+    lane = matching_lanes[0] if len(matching_lanes) == 1 else None
+    if len(matching_lanes) > 1:
+        blockers.append(
+            _blocker(
+                "lane_name_ambiguous",
+                f"runner lane name matches multiple inventory records: {request.lane_name}",
+            )
+        )
     if request.action == "create" and lane is not None:
         blockers.append(
             _blocker("lane_already_exists", f"runner lane already exists: {request.lane_name}")
         )
-    if request.action != "create" and lane is None:
+    if request.action != "create" and lane is None and len(matching_lanes) <= 1:
         blockers.append(_blocker("lane_not_found", f"runner lane not found: {request.lane_name}"))
     if request.action in {"drain", "restart", "remove"} and lane is not None:
         if policy.required_managed_label not in _normalized_tokens(lane.labels):
@@ -216,8 +226,27 @@ def _blocker(code: RunnerLaneControlBlockerCode, message: str) -> RunnerLaneCont
     return RunnerLaneControlBlocker(code=code, message=message)
 
 
+def _normalized_repositories(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        sorted({normalized for value in values if (normalized := _normalized_repository(value))})
+    )
+
+
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted({normalized for value in values if (normalized := _normalized_token(value))}))
+
+
+def _normalized_repository(value: str) -> str:
+    normalized_value = value.strip().lower()
+    if not normalized_value:
+        return ""
+    normalized_repository = "/".join(part.strip() for part in normalized_value.split("/"))
+    if normalized_repository.count("/") != 1:
+        raise ValueError("runner lane control requires repository formatted as owner/name")
+    owner, name = normalized_repository.split("/", 1)
+    if not owner or not name:
+        raise ValueError("runner lane control requires repository formatted as owner/name")
+    return normalized_repository
 
 
 def _normalized_token(value: str) -> str:
