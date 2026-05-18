@@ -6720,6 +6720,47 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(unrelated_status, 401)
         self.assertEqual(unrelated_payload["error"]["code"], "authentication_required")
 
+    def test_local_operator_token_cannot_read_product_profiles(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+                clear=True,
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles",
+                authorization="Bearer local-operator-token",
+            )
+            show_status, show_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard",
+                authorization="Bearer local-operator-token",
+            )
+
+        self.assertEqual(list_status, 403)
+        self.assertEqual(list_payload["error"]["code"], "authorization_denied")
+        self.assertEqual(show_status, 403)
+        self.assertEqual(show_payload["error"]["code"], "authorization_denied")
+
     def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -11923,7 +11964,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch("control_plane.service.dispatch_generic_web_promotion_workflow") as dispatch_mock:
+            with patch(
+                "control_plane.service.dispatch_generic_web_promotion_workflow"
+            ) as dispatch_mock:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",

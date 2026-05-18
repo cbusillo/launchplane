@@ -74,9 +74,7 @@ AgentConsumerActionSafety = Literal[
     "policy_admin",
 ]
 AgentAuthzDecision = Literal["allowed", "denied"]
-LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset(
-    {"product_config.plan", "product_config.apply", "product_profile.read"}
-)
+LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset({"product_config.plan", "product_config.apply"})
 
 
 class TokenVerifier(Protocol):

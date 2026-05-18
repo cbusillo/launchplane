@@ -90,8 +90,12 @@ class RunnerLaneControlPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerLaneControlPlan":
-        self.repository = _required_text(self.repository, "runner lane control plan requires repository")
-        self.lane_name = _required_text(self.lane_name, "runner lane control plan requires lane_name")
+        self.repository = _required_text(
+            self.repository, "runner lane control plan requires repository"
+        )
+        self.lane_name = _required_text(
+            self.lane_name, "runner lane control plan requires lane_name"
+        )
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
         self.summary = _required_text(self.summary, "runner lane control plan requires summary")
@@ -111,7 +115,7 @@ def plan_runner_lane_control(
 ) -> RunnerLaneControlPlan:
     blockers: list[RunnerLaneControlBlocker] = []
     inventory_repository = _normalized_repository(inventory.repository)
-    if policy.allowed_repositories and request.repository not in policy.allowed_repositories:
+    if not policy.allowed_repositories or request.repository not in policy.allowed_repositories:
         blockers.append(
             _blocker(
                 "repository_not_allowed",
@@ -173,7 +177,11 @@ def plan_runner_lane_control(
                     f"runner lane is missing managed label: {policy.required_managed_label}",
                 )
             )
-        if lane.busy and request.action in {"drain", "restart", "remove"} and not request.drain_busy_lane:
+        if (
+            lane.busy
+            and request.action in {"drain", "restart", "remove"}
+            and not request.drain_busy_lane
+        ):
             blockers.append(
                 _blocker(
                     "busy_lane_requires_drain_confirmation",
@@ -214,11 +222,18 @@ def _next_steps(
     if status == "blocked":
         return ("resolve blockers before running any host or GitHub runner mutation",)
     if action == "create":
-        return ("create runner lane through an approved host adapter", "verify GitHub sees the lane online")
+        return (
+            "create runner lane through an approved host adapter",
+            "verify GitHub sees the lane online",
+        )
     if action == "drain":
         return ("stop admitting new jobs to the managed lane", "wait for active jobs to finish")
     if action == "restart":
-        return ("drain the managed lane", "restart the approved runner service", "verify the lane returns online")
+        return (
+            "drain the managed lane",
+            "restart the approved runner service",
+            "verify the lane returns online",
+        )
     return ("drain the managed lane", "remove only the Launchplane-owned runner registration")
 
 
@@ -233,7 +248,9 @@ def _normalized_repositories(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(sorted({normalized for value in values if (normalized := _normalized_token(value))}))
+    return tuple(
+        sorted({normalized for value in values if (normalized := _normalized_token(value))})
+    )
 
 
 def _normalized_repository(value: str) -> str:
