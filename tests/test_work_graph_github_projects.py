@@ -315,6 +315,19 @@ class GitHubProjectPlanningFactsTests(unittest.TestCase):
         assert config is not None
         self.assertEqual(config.signal_limit, 12)
 
+    def test_env_config_rejects_invalid_limit(self) -> None:
+        with self.assertRaisesRegex(
+            click.ClickException,
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT must be a positive integer.",
+        ):
+            load_github_project_planning_facts_config_from_env(
+                {
+                    "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo",
+                    "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
+                    "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "many",
+                }
+            )
+
     def test_failed_gh_call_is_operator_visible(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             directory = Path(temporary_directory_name)
