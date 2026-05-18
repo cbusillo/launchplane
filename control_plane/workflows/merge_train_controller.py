@@ -24,6 +24,7 @@ MergeTrainControllerAction = Literal[
     "batch_landed",
     "wait_for_root_checks",
     "execute_stack_collapse",
+    "admit_collapsed_root",
 ]
 
 
@@ -43,9 +44,7 @@ def decide_merge_train_controller_record_action(
     landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...],
     stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...],
 ) -> MergeTrainControllerDecision:
-    active_landing_record = latest_merge_train_batch_landing_plan_record(
-        landing_plan_records
-    )
+    active_landing_record = latest_merge_train_batch_landing_plan_record(landing_plan_records)
     if active_landing_record is not None:
         waiting_collapse_record = latest_merge_train_stack_collapse_plan_record(
             stack_collapse_plan_records,
@@ -86,9 +85,7 @@ def decide_merge_train_controller_record_action(
             candidate_record_id=active_candidate_record.record_id,
         )
 
-    passed_candidate_record = latest_passed_merge_train_batch_candidate_record(
-        candidate_records
-    )
+    passed_candidate_record = latest_passed_merge_train_batch_candidate_record(candidate_records)
     if passed_candidate_record is not None:
         completed_landing_record = latest_completed_merge_train_batch_landing_plan_record(
             landing_plan_records=landing_plan_records,
