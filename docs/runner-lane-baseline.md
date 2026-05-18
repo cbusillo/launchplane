@@ -101,7 +101,8 @@ Runner control starts with a dry-run plan, not a host mutation. The typed
 contract in `control_plane.contracts.runner_lane_control` requires all of these
 before a plan can become ready:
 
-- the repository is explicitly opted into runner control
+- the repository allow-list is non-empty and explicitly opts the repository into
+  runner control
 - the requested action is enabled by policy
 - mutate mode is explicitly requested
 - the lane baseline is ready

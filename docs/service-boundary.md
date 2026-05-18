@@ -187,9 +187,10 @@ idempotency records; the defaults are `local-owner-agent` and
 non-empty `reason`; apply is rejected until the service has recorded a matching
 local-operator dry-run for the same product config payload. These requests still
 use Launchplane records, redacted responses, runtime key-safety policy, and
-managed secret storage. The local-operator identity is not accepted for authz
-policy administration, so the credential cannot rewrite its own permission
-model.
+managed secret storage. The local-operator identity is scoped to product-config
+plan/apply and is not accepted for product-profile reads or authz policy
+administration, so the credential cannot enumerate product profiles or rewrite
+its own permission model.
 
 `GET /v1/every-code/summary` returns a compact agent-safe projection of Every
 Code work requests. It requires `every_code_work_request.read` for

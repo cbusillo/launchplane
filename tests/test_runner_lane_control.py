@@ -92,6 +92,25 @@ class RunnerLaneControlPlanTests(unittest.TestCase):
         self.assertEqual(plan.repository, "cbusillo/repo")
         self.assertEqual(plan.blockers, ())
 
+    def test_control_plan_blocks_when_allowed_repositories_are_empty(self) -> None:
+        plan = plan_runner_lane_control(
+            policy=RunnerLaneControlPolicy(allow_restart=True),
+            request=RunnerLaneControlRequest(
+                action="restart",
+                repository="cbusillo/repo",
+                lane_name="lane-1",
+                mutate=True,
+            ),
+            inventory=_inventory(labels=("self-hosted", "launchplane", "launchplane-managed")),
+            baseline_readiness=_ready_baseline(),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["repository_not_allowed"],
+        )
+
     def test_control_plan_blocks_when_lane_name_is_ambiguous(self) -> None:
         plan = plan_runner_lane_control(
             policy=RunnerLaneControlPolicy(
