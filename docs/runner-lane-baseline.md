@@ -57,6 +57,20 @@ reconciliation must run through a Launchplane-owned runner lane flow, not throug
 product workflow edits and not through ad hoc retries after a shared Docker
 credential race.
 
+To inspect whether recent workflow jobs look runner-capacity constrained from
+GitHub Actions timing evidence, run:
+
+```bash
+uv run launchplane work-graph runner-queue-wait --repository owner/name
+```
+
+The queue-wait command is also read-only. It reads recent workflow runs and their
+job metadata, computes `started_at - created_at` only when GitHub exposes both
+timestamps, and reports missing or malformed timestamps as `unknown` rather than
+as a zero-second wait. By default it also reads current runner inventory so the
+JSON summary can show queue-wait evidence next to current lane-capacity status.
+Use `--skip-runner-inventory` for fixture-only or permission-limited reads.
+
 To emit baseline observation evidence from a self-hosted runner job, run:
 
 ```bash
