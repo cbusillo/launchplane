@@ -11025,12 +11025,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
 
-    def test_generic_web_deploy_route_accepts_base_driver_product(self) -> None:
+    def test_generic_web_deploy_route_rejects_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
             profile_payload = _product_profile_payload()
-            profile_payload["driver_id"] = "verireel"
+            profile_payload["driver_id"] = "odoo"
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
             )
@@ -11038,9 +11038,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {
                     "github_actions": [
                         {
-                            "repository": "every/verireel",
+                            "repository": "cbusillo/odoo-tenant-cm",
                             "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview-control-plane.yml@refs/heads/main"
                             ],
                             "event_names": ["pull_request"],
                             "products": ["sellyouroutboard"],
@@ -11052,16 +11052,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
 
-            with patch(
-                "control_plane.service.execute_generic_web_deploy",
-                return_value=driver_result,
-            ) as deploy:
+            with patch("control_plane.service.execute_generic_web_deploy") as deploy:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -11080,12 +11084,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     headers={"Idempotency-Key": "generic-web-deploy-derived-driver"},
                 )
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-testing")
-        deploy.assert_called_once()
-        _, kwargs = deploy.call_args
-        self.assertEqual(kwargs["profile"].driver_id, "verireel")
-        self.assertEqual(kwargs["lane"].instance, "testing")
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        deploy.assert_not_called()
 
     def test_generic_web_deploy_route_accepts_padded_lane_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -11409,6 +11410,69 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_generic_web_prod_promotion_route_rejects_base_driver_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["driver_id"] = "odoo"
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_generic_web_prod_promotion") as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        execute_mock.assert_not_called()
 
     def test_generic_web_prod_promotion_route_accepts_padded_lane_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -11816,6 +11880,69 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_generic_web_promotion_workflow_rejects_base_driver_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["driver_id"] = "odoo"
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.dispatch"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.dispatch_generic_web_promotion_workflow") as dispatch_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion-workflow",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "workflow": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "context": "sellyouroutboard-testing",
+                            "dry_run": False,
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        dispatch_mock.assert_not_called()
 
     def test_generic_web_promotion_workflow_rejects_unowned_context_before_authz(
         self,
