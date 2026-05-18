@@ -41,7 +41,9 @@ No observation means not ready. Unknown Docker credential isolation means not
 ready. Missing labels or configured host guardrails also make the lane not ready.
 Home-directory checks canonicalize observed and allowed paths before comparing
 roots, so traversal segments such as `..` cannot satisfy a configured root by
-string prefix alone.
+string prefix alone. Readiness counts lanes by unique runner name, so duplicate
+observations for the same runner do not inflate the observed or compliant lane
+totals.
 
 ## Operations
 

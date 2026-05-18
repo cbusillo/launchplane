@@ -155,6 +155,30 @@ class RunnerLaneBaselineTests(unittest.TestCase):
         self.assertTrue(readiness.ready)
         self.assertEqual(readiness.violations, ())
 
+    def test_readiness_counts_duplicate_runner_observations_once(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    observed_at="2026-05-18T12:00:00Z",
+                ),
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    observed_at="2026-05-18T12:01:00Z",
+                ),
+            ),
+        )
+
+        self.assertTrue(readiness.ready)
+        self.assertEqual(readiness.observed_lanes, 1)
+        self.assertEqual(readiness.compliant_lanes, 1)
+        self.assertEqual(readiness.violations, ())
+
     def test_readiness_rejects_symlinked_home_directory_outside_allowed_roots(
         self,
     ) -> None:
