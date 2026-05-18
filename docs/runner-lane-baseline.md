@@ -114,3 +114,23 @@ against a stable policy boundary. Repository values are canonicalized to
 `owner/name` before comparing policy, request, and inventory records, and a
 matching lane name must resolve to exactly one inventory record before the plan
 can target it.
+
+To build the first read-only control plan from saved inventory and baseline
+evidence, run:
+
+```bash
+uv run launchplane work-graph runner-control-plan \
+  --action restart \
+  --repository owner/name \
+  --lane-name launchplane-runner-1 \
+  --allow-restart \
+  --allowed-repository owner/name \
+  --inventory-file runner-inventory.json \
+  --baseline-readiness-file runner-baseline.json
+```
+
+The command does not contact GitHub and does not mutate hosts. It only evaluates
+the typed runner-control policy and request against the supplied inventory and
+baseline readiness JSON. `--mutate` records the operator's explicit mutation
+intent in the request so the planner can tell whether a future host adapter would
+be allowed to proceed, but this CLI command itself remains a dry-run surface.

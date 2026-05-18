@@ -1,4 +1,13 @@
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import cast
+
+from click import Command
+from click.testing import CliRunner
+
+from control_plane.cli import main
 
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
@@ -10,6 +19,9 @@ from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class RunnerLaneControlPlanTests(unittest.TestCase):
@@ -206,6 +218,101 @@ class RunnerLaneControlPlanTests(unittest.TestCase):
         self.assertEqual(
             [blocker.code for blocker in plan.blockers],
             ["inventory_repository_mismatch"],
+        )
+
+
+class RunnerLaneControlPlanCliTests(unittest.TestCase):
+    def test_cli_builds_runner_control_plan_from_inventory_and_baseline_files(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            inventory_file = Path(temp_dir) / "inventory.json"
+            baseline_file = Path(temp_dir) / "baseline.json"
+            inventory_file.write_text(
+                json.dumps(
+                    _inventory(
+                        repository=" cbusillo / repo ",
+                        labels=("self-hosted", "launchplane", "launchplane-managed"),
+                    ).model_dump(mode="json")
+                ),
+                encoding="utf-8",
+            )
+            baseline_file.write_text(
+                json.dumps({"readiness": _ready_baseline().model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-control-plan",
+                    "--action",
+                    "restart",
+                    "--repository",
+                    " cbusillo / repo ",
+                    "--lane-name",
+                    "lane-1",
+                    "--mutate",
+                    "--allow-restart",
+                    "--allowed-repository",
+                    "cbusillo/repo",
+                    "--inventory-file",
+                    str(inventory_file),
+                    "--baseline-readiness-file",
+                    str(baseline_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["request"]["repository"], "cbusillo/repo")
+        self.assertEqual(payload["plan"]["status"], "ready")
+        self.assertEqual(payload["plan"]["blockers"], [])
+
+    def test_cli_keeps_runner_control_plan_dry_run_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            inventory_file = Path(temp_dir) / "inventory.json"
+            baseline_file = Path(temp_dir) / "baseline.json"
+            inventory_file.write_text(
+                json.dumps(
+                    _inventory(
+                        labels=("self-hosted", "launchplane", "launchplane-managed")
+                    ).model_dump(mode="json")
+                ),
+                encoding="utf-8",
+            )
+            baseline_file.write_text(
+                json.dumps(_ready_baseline().model_dump(mode="json")),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-control-plan",
+                    "--action",
+                    "restart",
+                    "--repository",
+                    "cbusillo/repo",
+                    "--lane-name",
+                    "lane-1",
+                    "--allow-restart",
+                    "--allowed-repository",
+                    "cbusillo/repo",
+                    "--inventory-file",
+                    str(inventory_file),
+                    "--baseline-readiness-file",
+                    str(baseline_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["request"]["mutate"])
+        self.assertEqual(payload["plan"]["status"], "blocked")
+        self.assertEqual(
+            [blocker["code"] for blocker in payload["plan"]["blockers"]],
+            ["mutate_not_requested"],
         )
 
 
