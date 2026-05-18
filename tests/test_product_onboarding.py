@@ -6,12 +6,16 @@ from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+
+
+CLI_MAIN = cast(Command, main)
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -559,7 +563,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             manifest_path.write_text(json.dumps(_manifest_payload()))
 
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "product-onboarding",
                     "apply",
