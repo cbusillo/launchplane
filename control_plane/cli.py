@@ -94,6 +94,9 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     ScalarValue,
 )
+from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
+from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
+from control_plane.contracts.runner_lane_baseline import evaluate_runner_lane_baseline
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
     RuntimeKeySafetyPolicyRecord,
@@ -9868,9 +9871,9 @@ def work_graph_runner_inventory(
         if not token:
             raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
         transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
-        inventory = GitHubRunnerLaneInventoryReader(transport=transport).read_runner_lane_inventory(
-            repository=repository
-        )
+        runner_inventory = GitHubRunnerLaneInventoryReader(
+            transport=transport
+        ).read_runner_lane_inventory(repository=repository)
     except MergeTrainGitHubError as error:
         detail = str(error)
         if error.status_code is not None:
@@ -9878,7 +9881,142 @@ def work_graph_runner_inventory(
         raise click.ClickException(f"GitHub runner inventory request failed: {detail}") from error
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
-    click.echo(json.dumps(inventory.model_dump(mode="json"), indent=2, sort_keys=True))
+    click.echo(json.dumps(runner_inventory.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@work_graph.command("runner-baseline-observe")
+@click.option(
+    "--runner-name",
+    default="",
+    help="Observed runner name. Defaults to RUNNER_NAME or RUNNER_TRACKING_ID.",
+)
+@click.option(
+    "--label",
+    "labels",
+    multiple=True,
+    help="Observed runner label. Repeat for each label.",
+)
+@click.option(
+    "--docker-config-isolated/--docker-config-not-isolated",
+    default=None,
+    help=(
+        "Whether the runner has positive per-job Docker credential isolation "
+        "evidence. Defaults to true when LAUNCHPLANE_ISOLATED_DOCKER_CONFIG "
+        "and DOCKER_CONFIG are both set to the same path."
+    ),
+)
+@click.option(
+    "--service-user",
+    default="",
+    help="Observed service user. Defaults to USER, LOGNAME, or GITHUB_ACTOR.",
+)
+@click.option(
+    "--home-directory",
+    default="",
+    help="Observed home directory. Defaults to HOME.",
+)
+@click.option(
+    "--observed-at",
+    default="",
+    help="Observation timestamp. Defaults to the current UTC timestamp.",
+)
+@click.option(
+    "--required-label",
+    "required_labels",
+    multiple=True,
+    help="Required runner label. Defaults to self-hosted and launchplane.",
+)
+@click.option(
+    "--allowed-service-user",
+    "allowed_service_users",
+    multiple=True,
+    help="Allowed service user. Repeat for each allowed user.",
+)
+@click.option(
+    "--allowed-home-root",
+    "allowed_home_roots",
+    multiple=True,
+    help="Allowed home directory root. Repeat for each allowed root.",
+)
+def work_graph_runner_baseline_observe(
+    runner_name: str,
+    labels: tuple[str, ...],
+    docker_config_isolated: bool | None,
+    service_user: str,
+    home_directory: str,
+    observed_at: str,
+    required_labels: tuple[str, ...],
+    allowed_service_users: tuple[str, ...],
+    allowed_home_roots: tuple[str, ...],
+) -> None:
+    try:
+        observation = RunnerLaneBaselineObservation(
+            runner_name=_runner_baseline_runner_name(runner_name),
+            labels=_runner_baseline_labels(labels),
+            docker_config_isolated=_runner_baseline_docker_config_isolated(docker_config_isolated),
+            service_user=_runner_baseline_service_user(service_user),
+            home_directory=_runner_baseline_home_directory(home_directory),
+            observed_at=observed_at.strip() or utc_now_timestamp(),
+        )
+        policy = RunnerLaneBaselinePolicy(
+            required_labels=required_labels or ("self-hosted", "launchplane"),
+            allowed_service_users=allowed_service_users,
+            allowed_home_roots=allowed_home_roots,
+        )
+        readiness = evaluate_runner_lane_baseline(policy=policy, observations=(observation,))
+    except (ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        json.dumps(
+            {
+                "observation": observation.model_dump(mode="json"),
+                "policy": policy.model_dump(mode="json"),
+                "readiness": readiness.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def _runner_baseline_runner_name(value: str) -> str:
+    return (
+        value.strip()
+        or os.environ.get("RUNNER_NAME", "").strip()
+        or os.environ.get("RUNNER_TRACKING_ID", "").strip()
+    )
+
+
+def _runner_baseline_labels(values: tuple[str, ...]) -> tuple[str, ...]:
+    if values:
+        return values
+    raw_labels = os.environ.get("RUNNER_LABELS", "").strip()
+    if raw_labels:
+        return tuple(label.strip() for label in raw_labels.split(",") if label.strip())
+    return ()
+
+
+def _runner_baseline_docker_config_isolated(value: bool | None) -> bool | None:
+    if value is not None:
+        return value
+    docker_config = os.environ.get("DOCKER_CONFIG", "").strip()
+    isolated_config = os.environ.get("LAUNCHPLANE_ISOLATED_DOCKER_CONFIG", "").strip()
+    if docker_config and isolated_config and docker_config == isolated_config:
+        return True
+    return None
+
+
+def _runner_baseline_service_user(value: str) -> str:
+    return (
+        value.strip()
+        or os.environ.get("USER", "").strip()
+        or os.environ.get("LOGNAME", "").strip()
+        or os.environ.get("GITHUB_ACTOR", "").strip()
+    )
+
+
+def _runner_baseline_home_directory(value: str) -> str:
+    return value.strip() or os.environ.get("HOME", "").strip()
 
 
 @every_code.command("run-once")

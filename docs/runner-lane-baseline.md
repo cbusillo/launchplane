@@ -57,6 +57,23 @@ reconciliation must run through a Launchplane-owned runner lane flow, not throug
 product workflow edits and not through ad hoc retries after a shared Docker
 credential race.
 
+To emit baseline observation evidence from a self-hosted runner job, run:
+
+```bash
+uv run launchplane work-graph runner-baseline-observe \
+  --allowed-service-user gha \
+  --allowed-home-root /opt/actions-runners
+```
+
+The observation command is read-only. By default it reads `RUNNER_NAME`,
+`RUNNER_TRACKING_ID`, `RUNNER_LABELS`, `USER`, `HOME`, `DOCKER_CONFIG`, and
+`LAUNCHPLANE_ISOLATED_DOCKER_CONFIG` from the current job environment, then
+evaluates the readiness contract in the same JSON payload. Docker credential
+isolation is considered present only when the job exposes matching
+`DOCKER_CONFIG` and `LAUNCHPLANE_ISOLATED_DOCKER_CONFIG` values, or when an
+operator passes explicit `--docker-config-isolated` evidence. Missing evidence
+for labels or Docker isolation still fails closed.
+
 For live products, use a non-production runner or a read-only observation path
 until the operator explicitly approves host changes. VeriReel production must
 not be used as a runner-baseline test surface without explicit operator
