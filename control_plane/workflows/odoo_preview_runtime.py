@@ -476,6 +476,7 @@ def _execute_refresh(
             compose_id=compose_id,
             domain_host=plan.domain_host,
             runtime_port=plan.runtime_port,
+            certificate_type="letsencrypt",
         )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 

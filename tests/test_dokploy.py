@@ -2462,6 +2462,28 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(create_payload["https"], True)
         self.assertEqual(create_payload["certificateType"], "none")
 
+    def test_ensure_compose_web_domain_route_allows_certificate_type_override(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byComposeId":
+                return []
+            return {"domainId": "domain-created"}
+
+        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+            control_plane_dokploy.ensure_compose_web_domain_route(
+                host="https://dokploy.example.com",
+                token="token-123",
+                compose_id="compose-cm-testing",
+                domain_host="cm-testing.shinycomputers.com",
+                runtime_port=8069,
+                certificate_type="letsencrypt",
+            )
+
+        create_payload = cast("dict[str, object]", requests[1]["payload"])
+        self.assertEqual(create_payload["certificateType"], "letsencrypt")
+
     def test_service_render_authz_policy_uses_explicit_policy_source(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

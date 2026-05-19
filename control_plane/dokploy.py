@@ -1137,6 +1137,7 @@ def ensure_compose_web_domain_route(
     compose_id: str,
     domain_host: str,
     runtime_port: int,
+    certificate_type: str = "none",
 ) -> str:
     normalized_compose_id = compose_id.strip()
     normalized_domain_host = domain_host.strip()
@@ -1146,6 +1147,7 @@ def ensure_compose_web_domain_route(
         raise click.ClickException("Compose domain route reconciliation requires a domain host.")
     if runtime_port <= 0:
         raise click.ClickException("Compose domain route reconciliation requires a positive port.")
+    normalized_certificate_type = certificate_type.strip() or "none"
 
     raw_domains = dokploy_request(
         host=host,
@@ -1170,7 +1172,7 @@ def ensure_compose_web_domain_route(
         "port": runtime_port,
         "https": True,
         "applicationId": None,
-        "certificateType": "none",
+        "certificateType": normalized_certificate_type,
         "customCertResolver": None,
         "composeId": normalized_compose_id,
         "serviceName": "web",

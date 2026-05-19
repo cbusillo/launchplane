@@ -308,7 +308,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
                 return_value="domain-cm-pr-45",
-            ),
+            ) as ensure_domain,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
                 return_value={"deploymentId": "before"},
@@ -355,6 +355,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             target_type="compose",
             target_id="compose-cm-pr-45",
             no_cache=False,
+        )
+        ensure_domain.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            compose_id="compose-cm-pr-45",
+            domain_host="pr-45.cm-preview.example.test",
+            runtime_port=8069,
+            certificate_type="letsencrypt",
         )
         wait_deploy.assert_called_once()
         smoke_check.assert_called_once()
