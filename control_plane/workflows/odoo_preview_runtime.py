@@ -654,6 +654,7 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
         headers={"Accept": "application/json, text/plain, */*", "Cache-Control": "no-store"},
     )
     deadline = timeout_seconds
+    last_http_status: int | None = None
     while deadline > 0:
         try:
             with urlopen(request, timeout=min(15, deadline)) as response:
@@ -661,15 +662,16 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
             if 200 <= response.status < 400:
                 return
         except HTTPError as exc:
-            if exc.code < 500:
-                raise click.ClickException(
-                    f"Odoo preview smoke check returned HTTP {exc.code}."
-                ) from exc
+            last_http_status = exc.code
         except (TimeoutError, URLError, ValueError):
             pass
         sleep_seconds = min(5, deadline)
         time.sleep(sleep_seconds)
         deadline -= sleep_seconds
+    if last_http_status is not None:
+        raise click.ClickException(
+            f"Odoo preview smoke check returned HTTP {last_http_status}."
+        )
     raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
 
 

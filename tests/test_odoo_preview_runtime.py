@@ -1,6 +1,8 @@
 import unittest
+from email.message import Message
 from typing import Literal
 from unittest.mock import ANY, patch
+from urllib.error import HTTPError
 
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
@@ -16,6 +18,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployEndpointSpec,
     build_odoo_preview_dokploy_dry_run,
     execute_odoo_preview_dokploy_apply,
+    _wait_for_smoke_check,
 )
 
 
@@ -387,6 +390,50 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
         self.assertTrue(delete_payload["deleteVolumes"])
+
+    def test_smoke_check_retries_transient_http_404(self) -> None:
+        responses: list[HTTPError | _SmokeResponse] = [
+            HTTPError(
+                "https://pr-45.cm-preview.example.test/web/health",
+                404,
+                "Not Found",
+                hdrs=Message(),
+                fp=None,
+            ),
+            _SmokeResponse(status=200),
+        ]
+
+        def _fake_urlopen(*_args: object, **_kwargs: object) -> object:
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with (
+            patch("control_plane.workflows.odoo_preview_runtime.urlopen", side_effect=_fake_urlopen),
+            patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
+        ):
+            _wait_for_smoke_check(
+                preview_url="https://pr-45.cm-preview.example.test/",
+                health_path="/web/health",
+                timeout_seconds=10,
+            )
+
+        sleep.assert_called_once_with(5)
+
+
+class _SmokeResponse:
+    def __init__(self, *, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> "_SmokeResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b"ok"
 
 
 if __name__ == "__main__":
