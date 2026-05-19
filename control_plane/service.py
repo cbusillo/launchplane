@@ -29,6 +29,7 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.agent_context_service import (
     agent_context_action_allowed,
@@ -281,6 +282,7 @@ from control_plane.workflows.generic_web_preview import (
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.odoo_preview_runtime import (
+    ODOO_PREVIEW_REQUIRED_ENV_KEYS,
     OdooPreviewDokployApplyRequest,
     execute_odoo_preview_dokploy_apply,
 )
@@ -950,6 +952,58 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
         return self
+
+
+def _odoo_preview_service_environment_values(
+    *,
+    control_plane_root_path: Path,
+    profile: LaunchplaneProductProfileRecord,
+    apply_request: OdooPreviewDokployApplyRequest,
+    database_url: str | None,
+) -> dict[str, str]:
+    plan = apply_request.dry_run_plan
+    if plan.operation == "destroy":
+        return {}
+    preview_profile = profile.preview
+    template_instance = preview_profile.template_instance.strip()
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root_path,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+        database_url=database_url,
+    )
+    environment_values.update(preview_profile.override_env)
+    environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
+    environment_values["ODOO_DATA_VOLUME"] = _odoo_preview_identifier(
+        plan.compose_name, suffix="data"
+    )
+    environment_values["ODOO_LOG_VOLUME"] = _odoo_preview_identifier(
+        plan.compose_name, suffix="logs"
+    )
+    environment_values["ODOO_DB_VOLUME"] = _odoo_preview_identifier(
+        plan.compose_name, suffix="db-volume"
+    )
+    for key in preview_profile.preview_url_env_keys:
+        environment_values[key] = plan.preview_url
+    for key in preview_profile.preview_domain_env_keys:
+        environment_values[key] = plan.domain_host
+    missing_env_keys = tuple(
+        key for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS if not environment_values.get(key, "").strip()
+    )
+    if missing_env_keys:
+        raise click.ClickException(
+            "Odoo preview apply requires DB-backed runtime environment keys for "
+            f"{preview_profile.context}/{template_instance}: " + ", ".join(missing_env_keys)
+        )
+    return environment_values
+
+
+def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
+    if not normalized:
+        normalized = "odoo_preview"
+    suffix_identifier = re.sub(r"[^a-zA-Z0-9]+", "_", suffix.strip()).strip("_").lower()
+    return f"{normalized}_{suffix_identifier}" if suffix_identifier else normalized
 
 
 _ODOO_PREVIEW_APPLY_ROUTE = _DriverRouteExecutionMetadata(
@@ -11780,9 +11834,18 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
+                resolved_environment_values = _odoo_preview_service_environment_values(
+                    control_plane_root_path=resolved_root,
+                    profile=resolved_driver_context.profile,
+                    apply_request=odoo_preview_apply_request.apply,
+                    database_url=database_url,
+                )
+                service_apply_request = odoo_preview_apply_request.apply.model_copy(
+                    update={"environment_values": resolved_environment_values}
+                )
                 driver_result = execute_odoo_preview_dokploy_apply(
                     control_plane_root=resolved_root,
-                    request=odoo_preview_apply_request.apply,
+                    request=service_apply_request,
                     database_url=database_url,
                 )
                 result = driver_result.model_dump(mode="json")

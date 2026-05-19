@@ -43,9 +43,9 @@ class RuntimeEnvironmentDefinition:
 
 
 def load_runtime_environment_definition(
-    *, control_plane_root: Path
+    *, control_plane_root: Path, database_url: str | None = None
 ) -> RuntimeEnvironmentDefinition:
-    database_url = resolve_database_url()
+    database_url = resolve_database_url(database_url)
     if database_url:
         database_definition = _load_optional_runtime_environment_definition_from_database(
             database_url=database_url
@@ -64,8 +64,12 @@ def resolve_runtime_environment_values(
     control_plane_root: Path,
     context_name: str,
     instance_name: str,
+    database_url: str | None = None,
 ) -> dict[str, str]:
-    definition = load_runtime_environment_definition(control_plane_root=control_plane_root)
+    definition = load_runtime_environment_definition(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
     merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
     context_definition = definition.contexts.get(context_name)
     if context_definition is None:
@@ -90,6 +94,7 @@ def resolve_runtime_environment_values(
         environment_values=merged_values,
         context_name=context_name,
         instance_name=instance_name,
+        database_url=database_url,
     )
 
 
@@ -97,8 +102,12 @@ def resolve_runtime_context_values(
     *,
     control_plane_root: Path,
     context_name: str,
+    database_url: str | None = None,
 ) -> dict[str, str]:
-    definition = load_runtime_environment_definition(control_plane_root=control_plane_root)
+    definition = load_runtime_environment_definition(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
     merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
     context_definition = definition.contexts.get(context_name)
     if context_definition is None:
@@ -109,6 +118,7 @@ def resolve_runtime_context_values(
     return control_plane_secrets.overlay_runtime_environment_secret_values(
         environment_values=merged_values,
         context_name=context_name,
+        database_url=database_url,
     )
 
 

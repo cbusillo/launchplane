@@ -39,7 +39,7 @@ OdooPreviewDokployOperationName = Literal[
     "compose_delete",
 ]
 
-_ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
+ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
     "ODOO_DB_NAME",
     "ODOO_DB_USER",
     "ODOO_DB_PASSWORD",
@@ -343,10 +343,10 @@ def execute_odoo_preview_dokploy_apply(
 
     missing_env_keys = tuple(
         key
-        for key in _ODOO_PREVIEW_REQUIRED_ENV_KEYS
+        for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS
         if not request.environment_values.get(key, "").strip()
     )
-    if missing_env_keys:
+    if plan.operation != "destroy" and missing_env_keys:
         return _apply_result(
             request=request,
             status="blocked",
