@@ -2331,6 +2331,18 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertNotIn("traefik.http.routers", compose_file)
         self.assertIn("dokploy-network:", compose_file)
 
+    def test_render_odoo_raw_compose_file_can_avoid_host_port_publishing(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            domain_hosts=("pr-45.cm-preview.example.test",),
+            publish_host_ports=False,
+        )
+
+        self.assertNotIn("ODOO_WEB_HOST_PORT", compose_file)
+        self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", compose_file)
+        self.assertIn("traefik.enable=true", compose_file)
+        self.assertIn(".loadbalancer.server.port=8069", compose_file)
+
     def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"

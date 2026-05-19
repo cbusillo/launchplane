@@ -126,7 +126,11 @@ def _render_odoo_web_traefik_labels(*, domain_hosts: tuple[str, ...], runtime_po
 
 
 def render_odoo_raw_compose_file(
-    *, image_reference: str, domain_hosts: tuple[str, ...] = (), runtime_port: int = 8069
+    *,
+    image_reference: str,
+    domain_hosts: tuple[str, ...] = (),
+    runtime_port: int = 8069,
+    publish_host_ports: bool = True,
 ) -> str:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
@@ -136,6 +140,12 @@ def render_odoo_raw_compose_file(
     web_route_labels = _render_odoo_web_traefik_labels(
         domain_hosts=domain_hosts, runtime_port=runtime_port
     )
+    web_host_ports = ""
+    if publish_host_ports:
+        web_host_ports = """    ports:
+      - "${ODOO_WEB_HOST_PORT:-8069}:8069"
+      - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
+"""
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
@@ -189,9 +199,7 @@ services:
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs
-    ports:
-      - "${{ODOO_WEB_HOST_PORT:-8069}}:8069"
-      - "${{ODOO_LONGPOLL_HOST_PORT:-8072}}:8072"
+{web_host_ports.rstrip()}
     environment:
       <<: *odoo-env
     healthcheck:

@@ -313,6 +313,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         assert isinstance(create_payload, dict)
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
         sync_source.assert_called_once()
+        _, sync_kwargs = sync_source.call_args
+        self.assertNotIn("ODOO_WEB_HOST_PORT", sync_kwargs["compose_file"])
+        self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", sync_kwargs["compose_file"])
+        self.assertIn("traefik.enable=true", sync_kwargs["compose_file"])
         update_env.assert_called_once()
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example",
