@@ -431,6 +431,13 @@ state/
   `odoo-shared-addons`, and `disable_odoo_online` stay support/dependency repos,
   while Launchplane records the immutable image/build refs used to produce an
   artifact.
+- `odoo-docker` owns Odoo base-image build and promotion across its own
+  candidate, testing, and stable image tracks. Launchplane does not create a
+  separate base-image promotion record today; it consumes the selected
+  base-image digest, tag, source repository, and source ref from the artifact
+  manifest and carries that evidence through deploy, inventory, and read-model
+  records. Add a Launchplane-owned base-image promotion record only if
+  Launchplane starts deciding or executing those image-track promotions itself.
 - Lane and driver read models expose the current lane's stored artifact manifest
   when the inventory or latest deployment points to one. Operators can inspect
   the Odoo base-image digests/tags/source refs and `odoo-devkit` provenance from
