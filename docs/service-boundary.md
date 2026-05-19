@@ -1160,6 +1160,10 @@ product preview template lane from DB-backed runtime-environment records and
 managed secret overlays, then derives per-preview database and volume names from
 the compose name before invoking the provider adapter. Responses return only
 redacted step evidence, compose/domain identifiers, status, and error summaries.
+If the service-side runtime contract is incomplete before any provider mutation,
+the route returns `odoo_preview_runtime_config_incomplete` with the affected
+context, instance, and missing key names only; it never returns runtime values or
+secret material.
 The route is idempotency-keyed and intended for approved non-production Odoo
 preview targets while the isolated runtime migration is being exercised.
 
