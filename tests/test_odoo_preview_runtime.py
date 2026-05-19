@@ -4,6 +4,8 @@ from typing import Literal
 from unittest.mock import ANY, patch
 from urllib.error import HTTPError
 
+import click
+
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
     OdooPreviewRuntimeBindingEvidence,
@@ -351,6 +353,70 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("ODOO_DB_USER", result.error_message)
         read_dokploy_config.assert_not_called()
+
+    def test_apply_existing_refresh_smoke_failure_preserves_existing_domain(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={"composeId": "compose-cm-pr-45", "environmentId": "env-cm-preview"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.update_dokploy_target_env",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.ensure_compose_web_domain_route",
+                return_value="domain-cm-pr-45",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.trigger_deployment",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.wait_for_target_deployment",
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
+                side_effect=click.ClickException("smoke failed"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._delete_domain",
+            ) as delete_domain,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._delete_compose",
+            ) as delete_compose,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=ANY,
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(result.compose_id, "compose-cm-pr-45")
+        self.assertEqual(result.domain_id, "domain-cm-pr-45")
+        self.assertFalse(result.created_compose)
+        delete_domain.assert_not_called()
+        delete_compose.assert_not_called()
 
     def test_apply_destroy_deletes_domain_then_compose_with_volumes(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
