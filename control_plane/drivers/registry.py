@@ -567,6 +567,15 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("preview",),
         ),
         _action(
+            "preview_apply",
+            "Apply isolated preview",
+            "Apply a ready isolated Odoo preview plan to runtime state.",
+            safety="destructive",
+            scope="preview",
+            route_path="/v1/drivers/odoo/preview-apply",
+            authz_action="odoo_preview_apply.execute",
+        ),
+        _action(
             "preview_verification",
             "Record preview verification",
             "Record Odoo product smoke verification for the latest preview generation.",

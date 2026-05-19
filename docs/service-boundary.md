@@ -96,6 +96,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/website-bootstrap-override`
   - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/target-replacement-apply`
+  - `POST /v1/drivers/odoo/preview-apply`
   - `POST /v1/drivers/odoo/stable-verification`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
@@ -1056,6 +1057,8 @@ retries do not collide. The regular cleanup workflow uses
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
 - Odoo preview refresh driver:
   `odoo-preview-refresh:<product>:<anchor_pr_number>:<sha>`
+- Odoo isolated preview apply driver:
+  `odoo-preview-apply:<product>:<preview_slug>:<operation>:<sha-or-destroy>`
 - Odoo preview destroy driver:
   `odoo-preview-destroy:<product>:<anchor_pr_number>`
 
@@ -1146,7 +1149,18 @@ CLI adapters and expose them over HTTP.
 ### Preview generation evidence
 
 Driver-owned preview verification routes can update those records without
-requiring product workflows to render Launchplane record payloads directly. For
+requiring product workflows to render Launchplane record payloads directly.
+For isolated Odoo preview provider applies,
+`POST /v1/drivers/odoo/preview-apply` accepts the product plus a ready
+`OdooPreviewDokployApplyRequest`, authorizes against
+`odoo_preview_apply.execute` for the requested product/preview context, and
+executes only through the Launchplane service. The request carries runtime env
+values into the service for the adapter, but responses return only redacted step
+evidence, compose/domain identifiers, status, and error summaries. The route is
+idempotency-keyed and intended for approved non-production Odoo preview targets
+while the isolated runtime migration is being exercised.
+
+For
 Odoo preview smoke follow-ups, `POST /v1/drivers/odoo/preview-verification`
 accepts the product, context, anchor repo/PR, `verification_status`,
 `verified_at`, optional checked URLs as an explicit list plus

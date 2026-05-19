@@ -142,10 +142,14 @@ routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-inventory`,
 `POST /v1/drivers/odoo/preview-readiness`,
 `POST /v1/drivers/odoo/preview-destroy`, and
-`POST /v1/drivers/odoo/preview-verification`. These routes use the generic-web
-preview request schema, live URL derivation, and record writer so Odoo PR
-previews land in the same Launchplane preview and preview-generation records as
-generic-web previews.
+`POST /v1/drivers/odoo/preview-verification`. The lower-level
+`POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
+Dokploy plan to provider state after service authorization and idempotency
+checks. The route returns the adapter's redacted step evidence and keeps secret
+runtime values inside the service boundary. The standard refresh/destroy routes
+use the generic-web preview request schema, live URL derivation, and record
+writer so Odoo PR previews land in the same Launchplane preview and
+preview-generation records as generic-web previews.
 The preview-verification route accepts optional checked URL evidence and returns
 a typed `odoo_preview_verification` result while only mutating Launchplane
 preview-generation records.
