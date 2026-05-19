@@ -177,6 +177,16 @@ compose runtime. The dry-run uses Dokploy's documented `/api/compose.create` and
 clears those paths. Preview compose delete intent includes `deleteVolumes` so the
 eventual apply path removes per-PR database and filestore volumes instead of
 leaving orphaned runtime state.
+`execute_odoo_preview_dokploy_apply` is the first live-provider adapter behind
+that contract. It accepts only a ready dry-run plan plus explicit runtime env
+values, blocks before reading Dokploy credentials when required Odoo env keys are
+missing, renders Launchplane-owned raw compose source, reconciles the preview
+domain, deploys the compose, and returns redacted step evidence. Destroy looks up
+domains for the matching preview compose, deletes the matching preview hostname,
+then deletes the compose with `deleteVolumes`. The adapter is not a generic local
+fallback: shared/provider execution still needs an approved non-production target
+and a caller surface that sources Launchplane-managed Dokploy credentials without
+printing secret values.
 For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
 owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
 source revision evidence, module install/update evidence from rendered Odoo env,
