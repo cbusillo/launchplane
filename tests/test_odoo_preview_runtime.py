@@ -271,7 +271,18 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"composeId": "compose-cm-pr-45", "environmentId": "env-cm-preview"},
+                side_effect=(
+                    {
+                        "composeId": "compose-template",
+                        "environmentId": "env-cm-preview",
+                        "serverId": "server-nonprod",
+                    },
+                    {
+                        "composeId": "compose-cm-pr-45",
+                        "environmentId": "env-cm-preview",
+                        "serverId": "server-nonprod",
+                    },
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
@@ -314,6 +325,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertIsInstance(create_payload, dict)
         assert isinstance(create_payload, dict)
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
+        self.assertEqual(create_payload["serverId"], "server-nonprod")
         sync_source.assert_called_once()
         _, sync_kwargs = sync_source.call_args
         self.assertNotIn("ODOO_WEB_HOST_PORT", sync_kwargs["compose_file"])
@@ -369,7 +381,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"composeId": "compose-cm-pr-45", "environmentId": "env-cm-preview"},
+                return_value={
+                    "composeId": "compose-cm-pr-45",
+                    "environmentId": "env-cm-preview",
+                    "serverId": "server-nonprod",
+                },
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
@@ -417,6 +433,41 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertFalse(result.created_compose)
         delete_domain.assert_not_called()
         delete_compose.assert_not_called()
+
+    def test_apply_refresh_blocks_create_without_template_server_id(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+            )
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={"composeId": "compose-template", "environmentId": "env-cm-preview"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+            ) as dokploy_request,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=ANY,
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("serverId", result.error_message)
+        dokploy_request.assert_not_called()
 
     def test_apply_destroy_deletes_domain_then_compose_with_volumes(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(

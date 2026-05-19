@@ -406,22 +406,31 @@ def _execute_refresh(
     domain_id = ""
     steps: list[OdooPreviewDokployApplyStep] = []
     try:
+        template_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=plan.compose_ref,
+        )
         compose_id = _resolve_or_create_compose(
             host=host,
             token=token,
             plan=plan,
+            template_payload=template_payload,
             steps=steps,
         )
         resolved_compose_id = compose_id
         created_compose_id = (
             compose_id if plan.compose_ref.startswith("${created.composeId:") else ""
         )
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-        )
+        target_payload = template_payload
+        if compose_id != plan.compose_ref:
+            target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+            )
         compose_file = request.compose_file or control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             domain_hosts=(plan.domain_host,),
@@ -563,12 +572,18 @@ def _resolve_or_create_compose(
     host: str,
     token: str,
     plan: OdooPreviewDokployDryRunPlan,
+    template_payload: JsonObject,
     steps: list[OdooPreviewDokployApplyStep],
 ) -> str:
     if not plan.compose_ref.startswith("${created.composeId:"):
         return plan.compose_ref
     if not plan.environment_id:
         raise click.ClickException("Odoo preview compose create requires environment_id.")
+    server_id = str(template_payload.get("serverId") or "").strip()
+    if not server_id:
+        raise click.ClickException(
+            "Odoo preview compose create requires the template compose serverId."
+        )
     created = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -579,6 +594,7 @@ def _resolve_or_create_compose(
             "appName": plan.compose_name,
             "description": f"Launchplane Odoo preview {plan.preview_slug}",
             "environmentId": plan.environment_id,
+            "serverId": server_id,
             "composeType": "docker-compose",
         },
     )
