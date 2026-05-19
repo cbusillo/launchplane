@@ -1117,6 +1117,12 @@ post_odoo_cm_preview_grant \
   odoo-cm-preview-artifact-publish-inputs
 post_odoo_cm_preview_grant \
   odoo \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-cm-preview-artifact-publish-inputs-manual-grant \
+  odoo-cm-preview-artifact-publish-inputs-manual \
+  workflow_dispatch
+post_odoo_cm_preview_grant \
+  odoo \
   odoo_artifact_publish.write \
   deploy:odoo-cm-preview-artifact-publish-grant \
   odoo-cm-preview-artifact-publish
