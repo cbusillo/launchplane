@@ -343,6 +343,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service.GenericWebPreviewDestroyEnvelope,
                     "destroy Odoo",
                 ),
+                "preview_apply": (
+                    control_plane_service._ODOO_PREVIEW_APPLY_ROUTE,
+                    control_plane_service.OdooPreviewApplyEnvelope,
+                    "apply Odoo preview",
+                ),
             },
         )
 

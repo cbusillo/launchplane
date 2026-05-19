@@ -280,6 +280,10 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_profile,
     preview_pr_number_from_slug,
 )
+from control_plane.workflows.odoo_preview_runtime import (
+    OdooPreviewDokployApplyRequest,
+    execute_odoo_preview_dokploy_apply,
+)
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
@@ -933,6 +937,25 @@ _ODOO_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-destroy",
     envelope_model=GenericWebPreviewDestroyEnvelope,
     denial_message="Workflow cannot destroy Odoo preview state for the requested product/context.",
+)
+
+
+class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    apply: OdooPreviewDokployApplyRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo preview apply")
+        if self.product.strip() != self.apply.dry_run_plan.product.strip():
+            raise ValueError("Odoo preview apply requires matching product values.")
+        return self
+
+
+_ODOO_PREVIEW_APPLY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-apply",
+    envelope_model=OdooPreviewApplyEnvelope,
+    denial_message="Workflow cannot apply Odoo preview provider state for the requested product/context.",
 )
 
 
@@ -11707,6 +11730,62 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=odoo_preview_verification_request.verification,
                 )
+            elif path == _ODOO_PREVIEW_APPLY_ROUTE.route_path:
+                odoo_preview_apply_request = (
+                    _ODOO_PREVIEW_APPLY_ROUTE.envelope_model.model_validate(payload)
+                )
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=odoo_preview_apply_request.product,
+                    require_profile=True,
+                )
+                if resolved_driver_context.profile is None:
+                    raise ProductDriverMismatchError(
+                        "Odoo preview apply requires a product profile."
+                    )
+                preview_profile = resolved_driver_context.profile.preview
+                if not preview_profile.enabled or not preview_profile.context.strip():
+                    raise ProductDriverMismatchError(
+                        "Odoo preview apply requires an enabled product preview profile."
+                    )
+                if (
+                    odoo_preview_apply_request.apply.dry_run_plan.repository.strip()
+                    != resolved_driver_context.profile.repository.strip()
+                ):
+                    raise ValueError(
+                        "Odoo preview apply repository does not match product profile."
+                    )
+                preview_context = preview_profile.context
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=odoo_preview_apply_request.product,
+                    context=preview_context,
+                    denial_message=_ODOO_PREVIEW_APPLY_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_preview_dokploy_apply(
+                    control_plane_root=resolved_root,
+                    request=odoo_preview_apply_request.apply,
+                    database_url=database_url,
+                )
+                result = driver_result.model_dump(mode="json")
             elif path == _ODOO_STABLE_VERIFICATION_ROUTE.route_path:
                 odoo_stable_verification_request = (
                     _ODOO_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
