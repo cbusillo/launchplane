@@ -594,6 +594,19 @@ apply_odoo_opw_onboarding() {
               }
             }
           ],
+          preview: {
+            enabled: true,
+            context: "opw",
+            enable_label: "preview",
+            slug_template: "pr-{number}",
+            app_name_prefix: "odoo-tenant-opw",
+            template_instance: "testing",
+            override_env: {
+              ODOO_INSTALL_MODULES: "opw_custom"
+            },
+            preview_url_env_keys: ["WEB_BASE_URL"],
+            data_transport_mode: "bootstrap"
+          },
           dokploy_targets: (
             (if ($testing_target_id | length) > 0 then
               [
