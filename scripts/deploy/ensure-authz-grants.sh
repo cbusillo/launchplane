@@ -694,6 +694,24 @@ apply_runtime_key_safety_policy() {
             secret_class: "shared_safe",
             allowed_contexts: ["sellyouroutboard"],
             allowed_instances: ["testing", "prod"]
+          },
+          {
+            binding_key: "ODOO_ADMIN_PASSWORD",
+            secret_class: "testing",
+            allowed_contexts: ["cm", "opw"],
+            allowed_instances: ["testing"]
+          },
+          {
+            binding_key: "ODOO_DB_PASSWORD",
+            secret_class: "testing",
+            allowed_contexts: ["cm", "opw"],
+            allowed_instances: ["testing"]
+          },
+          {
+            binding_key: "ODOO_MASTER_PASSWORD",
+            secret_class: "testing",
+            allowed_contexts: ["cm", "opw"],
+            allowed_instances: ["testing"]
           }
         ]
       }'
