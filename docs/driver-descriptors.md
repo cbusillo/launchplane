@@ -170,12 +170,13 @@ runtime matching the requested preview slug or PR number. Stable, testing, prod,
 or slug-mismatched targets are blocked before any provider mutation.
 `build_odoo_preview_dokploy_dry_run` is the provider-facing bridge from that
 ready runtime plan to Dokploy operation intent. It is dry-run only: blocked
-runtime plans produce no operations, create/delete endpoint paths must be
-explicitly configured before composing new runtime actions, env updates are
-marked as secret-bearing payloads, and create rollback lists only the newly
-created preview domain and compose runtime. This keeps the API uncertainty around
-Dokploy compose create/delete visible until the exact provider contract is
-verified.
+runtime plans produce no operations, env updates are marked as secret-bearing
+payloads, and create rollback lists only the newly created preview domain and
+compose runtime. The dry-run uses Dokploy's documented `/api/compose.create` and
+`/api/compose.delete` endpoints by default, but still blocks if a product/profile
+clears those paths. Preview compose delete intent includes `deleteVolumes` so the
+eventual apply path removes per-PR database and filestore volumes instead of
+leaving orphaned runtime state.
 For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
 owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
 source revision evidence, module install/update evidence from rendered Odoo env,

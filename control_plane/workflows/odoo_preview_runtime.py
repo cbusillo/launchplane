@@ -34,11 +34,11 @@ OdooPreviewDokployOperationName = Literal[
 class OdooPreviewDokployEndpointSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    compose_create_path: str = ""
+    compose_create_path: str = "/api/compose.create"
     compose_update_path: str = "/api/compose.update"
     compose_deploy_path: str = "/api/compose.deploy"
     compose_redeploy_path: str = "/api/compose.redeploy"
-    compose_delete_path: str = ""
+    compose_delete_path: str = "/api/compose.delete"
     domain_by_compose_path: str = "/api/domain.byComposeId"
     domain_create_path: str = "/api/domain.create"
     domain_update_path: str = "/api/domain.update"
@@ -63,6 +63,7 @@ class OdooPreviewDokployDryRunRequest(BaseModel):
         default_factory=OdooPreviewDokployEndpointSpec
     )
     no_cache: bool = False
+    delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
     compose_name: str = ""
     environment_id: str = ""
@@ -276,7 +277,7 @@ def _operations(
                 method="POST",
                 path=spec.compose_delete_path,
                 target=compose_ref,
-                payload_keys=("composeId",),
+                payload_keys=("composeId", "deleteVolumes"),
             ),
         )
 
@@ -290,7 +291,7 @@ def _operations(
                 target=_compose_name(
                     runtime_plan=runtime_plan, requested_name=request.compose_name
                 ),
-                payload_keys=("name", "environmentId"),
+                payload_keys=("name", "appName", "environmentId", "composeType"),
             )
         )
     operations.extend(
@@ -367,7 +368,7 @@ def _rollback_operations(
             method="POST",
             path=spec.compose_delete_path,
             target=compose_ref,
-            payload_keys=("composeId",),
+            payload_keys=("composeId", "deleteVolumes"),
         ),
     )
 
