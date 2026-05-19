@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -19,6 +20,7 @@ class LaunchplaneLaneSummary(BaseModel):
     context: str
     instance: str
     inventory: EnvironmentInventory | None = None
+    artifact_manifest: ArtifactIdentityManifest | None = None
     release_tuple: ReleaseTupleRecord | None = None
     latest_deployment: DeploymentRecord | None = None
     latest_promotion: PromotionRecord | None = None

@@ -923,6 +923,20 @@ def _artifact_id_from_model(model: BaseModel) -> str:
     return artifact_id if isinstance(artifact_id, str) else ""
 
 
+def _artifact_id_for_lane(
+    *,
+    inventory: EnvironmentInventory | None,
+    latest_deployment: DeploymentRecord | None,
+) -> str:
+    if inventory is not None and inventory.artifact_identity is not None:
+        inventory_artifact_id = inventory.artifact_identity.artifact_id.strip()
+        if inventory_artifact_id:
+            return inventory_artifact_id
+    if latest_deployment is not None and latest_deployment.artifact_identity is not None:
+        return latest_deployment.artifact_identity.artifact_id.strip()
+    return ""
+
+
 def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
     return {
         "session_id": session.session_id,
@@ -2708,17 +2722,33 @@ class PostgresRecordStore(HumanSessionStore):
                 instance_name=instance_name,
             ),
         )
+        inventory = self._read_optional_model(
+            model_type=EnvironmentInventory,
+            orm_model=LaunchplaneInventoryRow,
+            filters=(
+                LaunchplaneInventoryRow.context == context_name,
+                LaunchplaneInventoryRow.instance == instance_name,
+            ),
+        )
+        latest_deployment = next(
+            iter(
+                self.list_deployment_records(
+                    context_name=context_name,
+                    instance_name=instance_name,
+                    limit=1,
+                )
+            ),
+            None,
+        )
+        artifact_manifest = self._read_optional_artifact_manifest(
+            inventory=inventory,
+            latest_deployment=latest_deployment,
+        )
         return LaunchplaneLaneSummary(
             context=context_name,
             instance=instance_name,
-            inventory=self._read_optional_model(
-                model_type=EnvironmentInventory,
-                orm_model=LaunchplaneInventoryRow,
-                filters=(
-                    LaunchplaneInventoryRow.context == context_name,
-                    LaunchplaneInventoryRow.instance == instance_name,
-                ),
-            ),
+            inventory=inventory,
+            artifact_manifest=artifact_manifest,
             release_tuple=self._read_optional_model(
                 model_type=ReleaseTupleRecord,
                 orm_model=LaunchplaneReleaseTupleRow,
@@ -2727,16 +2757,7 @@ class PostgresRecordStore(HumanSessionStore):
                     LaunchplaneReleaseTupleRow.channel == instance_name,
                 ),
             ),
-            latest_deployment=next(
-                iter(
-                    self.list_deployment_records(
-                        context_name=context_name,
-                        instance_name=instance_name,
-                        limit=1,
-                    )
-                ),
-                None,
-            ),
+            latest_deployment=latest_deployment,
             latest_promotion=next(
                 iter(
                     self.list_promotion_records(
@@ -2787,6 +2808,23 @@ class PostgresRecordStore(HumanSessionStore):
                 instance_name=instance_name,
             ),
         )
+
+    def _read_optional_artifact_manifest(
+        self,
+        *,
+        inventory: EnvironmentInventory | None,
+        latest_deployment: DeploymentRecord | None,
+    ) -> ArtifactIdentityManifest | None:
+        artifact_id = _artifact_id_for_lane(
+            inventory=inventory,
+            latest_deployment=latest_deployment,
+        )
+        if not artifact_id:
+            return None
+        try:
+            return self.read_artifact_manifest(artifact_id)
+        except FileNotFoundError:
+            return None
 
     def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
         self._write_row(

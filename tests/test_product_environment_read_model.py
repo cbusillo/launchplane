@@ -6,6 +6,13 @@ from types import SimpleNamespace
 from typing import cast
 import unittest
 
+from control_plane.contracts.artifact_identity import (
+    ArtifactBaseImageProvenance,
+    ArtifactBuildProvenance,
+    ArtifactBuildToolProvenance,
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_environment_read_model import (
@@ -160,6 +167,35 @@ class _RuntimeIdentityReadModelStore(_PreviewRecordStore):
     ) -> None:
         super().__init__(profile, ())
         self._inventory = inventory
+        self._artifact_manifest = ArtifactIdentityManifest(
+            artifact_id="ghcr.io/every/example-site@sha256:abc123",
+            source_commit="abc123",
+            enterprise_base_digest="sha256:enterprise",
+            image=ArtifactImageReference(
+                repository="ghcr.io/every/example-site",
+                digest="sha256:abc123",
+            ),
+            build_provenance=ArtifactBuildProvenance(
+                base_images=(
+                    ArtifactBaseImageProvenance(
+                        role="runtime",
+                        image=ArtifactImageReference(
+                            repository="ghcr.io/cbusillo/odoo-runtime",
+                            digest="sha256:runtime",
+                        ),
+                        source_repository="cbusillo/odoo-docker",
+                        source_ref="1111111111111111111111111111111111111111",
+                    ),
+                ),
+                build_tools=(
+                    ArtifactBuildToolProvenance(
+                        name="odoo-devkit",
+                        source_repository="cbusillo/odoo-devkit",
+                        source_ref="2222222222222222222222222222222222222222",
+                    ),
+                ),
+            ),
+        )
 
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
@@ -167,6 +203,11 @@ class _RuntimeIdentityReadModelStore(_PreviewRecordStore):
         if context_name == self._inventory.context and instance_name == self._inventory.instance:
             return self._inventory
         raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest:
+        if artifact_id == self._artifact_manifest.artifact_id:
+            return self._artifact_manifest
+        raise FileNotFoundError(artifact_id)
 
 
 class _ActivityRecordStore(_PreviewRecordStore):
@@ -781,6 +822,51 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(detail.target.expected_runtime_identity, expected)
         self.assertEqual(detail.target.observed_runtime_identity, expected)
         self.assertEqual(detail.target.runtime_identity_status, "match")
+
+    def test_driver_lane_summary_exposes_artifact_build_provenance(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        inventory = EnvironmentInventory(
+            context="example-site-prod",
+            instance="prod",
+            artifact_identity=ArtifactIdentityReference(
+                artifact_id="ghcr.io/every/example-site@sha256:abc123"
+            ),
+            source_git_ref="abc123",
+            deploy=DeploymentEvidence(
+                target_name="example-site-prod",
+                target_type="application",
+                deploy_mode="dokploy-application-api",
+                deployment_id="control-plane-dokploy",
+                status="pass",
+                started_at="2026-05-02T10:00:00Z",
+                finished_at="2026-05-02T10:01:00Z",
+            ),
+            updated_at="2026-05-02T10:01:00Z",
+            deployment_record_id="deployment-prod-1",
+        )
+        store = _RuntimeIdentityReadModelStore(profile, inventory)
+
+        detail = build_product_environment_detail(
+            record_store=store,
+            product="example-site",
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+
+        artifact_manifest = detail.target.artifact_manifest
+        assert artifact_manifest is not None
+        self.assertEqual(
+            artifact_manifest.build_provenance.base_images[0].source_repository,
+            "cbusillo/odoo-docker",
+        )
+        self.assertEqual(
+            artifact_manifest.build_provenance.build_tools[0].name,
+            "odoo-devkit",
+        )
+        self.assertIn("odoo-devkit", detail.model_dump_json())
+
 
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

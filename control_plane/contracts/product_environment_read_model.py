@@ -5,6 +5,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -130,6 +131,7 @@ class ProductTargetSummary(BaseModel):
     target_type: str = ""
     target_name: str = ""
     target_id_recorded: bool = False
+    artifact_manifest: ArtifactIdentityManifest | None = None
     expected_runtime_identity: RuntimeIdentity | None = None
     observed_runtime_identity: RuntimeIdentity | None = None
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
@@ -1486,6 +1488,7 @@ def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTarge
         destination_health = lane_summary.latest_deployment.destination_health
     if lane_summary.dokploy_target is None:
         return ProductTargetSummary(
+            artifact_manifest=lane_summary.artifact_manifest,
             expected_runtime_identity=expected_identity,
             observed_runtime_identity=destination_health.observed_runtime_identity
             if destination_health is not None
@@ -1502,6 +1505,7 @@ def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTarge
         target_type=lane_summary.dokploy_target.target_type,
         target_name=lane_summary.dokploy_target.target_name,
         target_id_recorded=lane_summary.dokploy_target_id is not None,
+        artifact_manifest=lane_summary.artifact_manifest,
         expected_runtime_identity=expected_identity,
         observed_runtime_identity=destination_health.observed_runtime_identity
         if destination_health is not None
