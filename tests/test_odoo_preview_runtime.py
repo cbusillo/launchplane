@@ -159,6 +159,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             if operation.name == "domain_create_or_update"
         )
         self.assertEqual(domain_operation.path, "/api/domain.create")
+        self.assertEqual(domain_operation.alternate_paths, ("/api/domain.update",))
         self.assertEqual(
             [operation.name for operation in plan.rollback_operations],
             ["domain_delete", "compose_delete"],
