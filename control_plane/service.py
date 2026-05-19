@@ -954,6 +954,14 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooPreviewApplyConfigError(click.ClickException):
+    def __init__(self, *, context: str, instance: str, missing_keys: tuple[str, ...]) -> None:
+        super().__init__("Odoo preview apply runtime environment is incomplete.")
+        self.context = context
+        self.instance = instance
+        self.missing_keys = tuple(sorted(missing_keys))
+
+
 def _odoo_preview_service_environment_values(
     *,
     control_plane_root_path: Path,
@@ -993,9 +1001,10 @@ def _odoo_preview_service_environment_values(
         key for key in ODOO_PREVIEW_REQUIRED_ENV_KEYS if not environment_values.get(key, "").strip()
     )
     if missing_env_keys:
-        raise click.ClickException(
-            "Odoo preview apply requires DB-backed runtime environment keys for "
-            f"{preview_profile.context}/{template_instance}: " + ", ".join(missing_env_keys)
+        raise OdooPreviewApplyConfigError(
+            context=preview_profile.context,
+            instance=template_instance,
+            missing_keys=missing_env_keys,
         )
     return environment_values
 
@@ -12589,6 +12598,24 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "product_driver_mismatch",
                         "message": "Product is not configured for the requested driver route.",
+                    },
+                },
+            )
+        except OdooPreviewApplyConfigError as error:
+            return _json_response(
+                start_response=start_response,
+                status_code=400,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "odoo_preview_runtime_config_incomplete",
+                        "message": "Odoo preview apply runtime environment is incomplete.",
+                    },
+                    "details": {
+                        "context": error.context,
+                        "instance": error.instance,
+                        "missing_keys": list(error.missing_keys),
                     },
                 },
             )

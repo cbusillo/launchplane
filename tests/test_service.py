@@ -13808,7 +13808,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
 
             self.assertEqual(status_code, 400)
-            self.assertEqual(payload["error"]["code"], "invalid_request")
+            self.assertEqual(
+                payload["error"]["code"], "odoo_preview_runtime_config_incomplete"
+            )
+            self.assertEqual(payload["details"]["context"], "cm")
+            self.assertEqual(payload["details"]["instance"], "testing")
+            self.assertEqual(
+                payload["details"]["missing_keys"],
+                [
+                    "ODOO_ADMIN_PASSWORD",
+                    "ODOO_DB_PASSWORD",
+                    "ODOO_MASTER_PASSWORD",
+                ],
+            )
             apply_driver.assert_not_called()
 
     def test_odoo_preview_apply_route_rejects_unauthorized_workflow(self) -> None:
