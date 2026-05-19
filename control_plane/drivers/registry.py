@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from typing import Literal, Protocol, cast
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -46,6 +47,10 @@ class _ListProductProfileRecords(Protocol):
 
 class _ReadLaneSummary(Protocol):
     def __call__(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary: ...
+
+
+class _ReadArtifactManifest(Protocol):
+    def __call__(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
 
 class _ReadEnvironmentInventory(Protocol):
@@ -122,6 +127,13 @@ def _read_lane_summary_method(record_store: object) -> _ReadLaneSummary | None:
     return cast(
         _ReadLaneSummary | None,
         _callable_store_method(record_store, "read_lane_summary"),
+    )
+
+
+def _read_artifact_manifest_method(record_store: object) -> _ReadArtifactManifest | None:
+    return cast(
+        _ReadArtifactManifest | None,
+        _callable_store_method(record_store, "read_artifact_manifest"),
     )
 
 
@@ -208,6 +220,17 @@ def _optional_read_environment_inventory(
 ) -> EnvironmentInventory | None:
     try:
         return method(context_name=context_name, instance_name=instance_name)
+    except FileNotFoundError:
+        return None
+
+
+def _optional_read_artifact_manifest(
+    method: _ReadArtifactManifest, *, artifact_id: str
+) -> ArtifactIdentityManifest | None:
+    if not artifact_id.strip():
+        return None
+    try:
+        return method(artifact_id.strip())
     except FileNotFoundError:
         return None
 
@@ -1076,6 +1099,16 @@ def _read_lane_summary(
         latest_deployment=latest_deployment,
     ):
         inventory = None
+    artifact_manifest = None
+    read_artifact_manifest = _read_artifact_manifest_method(record_store)
+    if read_artifact_manifest is not None:
+        artifact_manifest = _optional_read_artifact_manifest(
+            read_artifact_manifest,
+            artifact_id=_lane_artifact_id(
+                inventory=inventory,
+                latest_deployment=latest_deployment,
+            ),
+        )
     latest_promotion = None
     list_promotions = _list_promotion_records_method(record_store)
     if list_promotions is not None:
@@ -1107,6 +1140,7 @@ def _read_lane_summary(
         context=context_name,
         instance=instance_name,
         inventory=inventory,
+        artifact_manifest=artifact_manifest,
         release_tuple=release_tuple,
         latest_deployment=latest_deployment,
         latest_promotion=latest_promotion,
@@ -1130,6 +1164,20 @@ def _inventory_is_older_than_deployment(
     if inventory_updated_at is None or deployment_recorded_at is None:
         return inventory.deployment_record_id != latest_deployment.record_id
     return inventory_updated_at < deployment_recorded_at
+
+
+def _lane_artifact_id(
+    *,
+    inventory: EnvironmentInventory | None,
+    latest_deployment: DeploymentRecord | None,
+) -> str:
+    if inventory is not None and inventory.artifact_identity is not None:
+        inventory_artifact_id = inventory.artifact_identity.artifact_id.strip()
+        if inventory_artifact_id:
+            return inventory_artifact_id
+    if latest_deployment is not None and latest_deployment.artifact_identity is not None:
+        return latest_deployment.artifact_identity.artifact_id.strip()
+    return ""
 
 
 def _list_preview_summaries(

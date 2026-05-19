@@ -2048,6 +2048,7 @@ env_var = "GH_TOKEN"
                 )
             )
             store.ensure_schema()
+            store.write_artifact_manifest(_artifact_manifest())
             store.write_environment_inventory(_inventory_record())
             store.write_deployment_record(
                 _deployment_record(
@@ -2105,6 +2106,10 @@ env_var = "GH_TOKEN"
         inventory_artifact_identity = inventory.artifact_identity
         assert inventory_artifact_identity is not None
         self.assertEqual(inventory_artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4")
+        artifact_manifest = summary.artifact_manifest
+        assert artifact_manifest is not None
+        self.assertEqual(artifact_manifest.artifact_id, "artifact-20260420-a1b2c3d4")
+        self.assertEqual(artifact_manifest.image.repository, "ghcr.io/cbusillo/odoo-tenant-opw")
         release_tuple = summary.release_tuple
         assert release_tuple is not None
         self.assertEqual(release_tuple.channel, "testing")

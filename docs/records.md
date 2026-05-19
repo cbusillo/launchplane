@@ -431,6 +431,11 @@ state/
   `odoo-shared-addons`, and `disable_odoo_online` stay support/dependency repos,
   while Launchplane records the immutable image/build refs used to produce an
   artifact.
+- Lane and driver read models expose the current lane's stored artifact manifest
+  when the inventory or latest deployment points to one. Operators can inspect
+  the Odoo base-image digests/tags/source refs and `odoo-devkit` provenance from
+  Launchplane read evidence without treating support repos as release-tuple
+  owners.
 - For a second product such as VeriReel, the first Launchplane onboarding slice
   should ingest deployment evidence from that product's existing release
   workflows into this record shape before Launchplane owns the deploy execution.
