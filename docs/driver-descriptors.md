@@ -149,16 +149,25 @@ generic-web previews.
 The preview-verification route accepts optional checked URL evidence and returns
 a typed `odoo_preview_verification` result while only mutating Launchplane
 preview-generation records.
-Odoo is the only current generic-web-based driver allowed to use the staged
-compose preview MVP: if its product profile uses `preview.data_transport_mode =
-"bootstrap"` and its template lane is a Dokploy `compose` target, preview refresh
-updates and deploys that configured compose target instead of creating a
-generic-web application. Odoo preview inventory and destroy read compose domains
-with `/api/domain.byComposeId` and delete only domains whose hostnames match the
-preview slug template. This exception is route-scoped to Odoo preview refresh,
-inventory, destroy, and readiness; it does not grant Odoo products access to
+Odoo's staged compose preview MVP is now historical compatibility evidence, not
+the target runtime architecture. That path updated and deployed the configured
+compose target when the product profile used `preview.data_transport_mode =
+"bootstrap"` and its template lane was a Dokploy `compose` target; inventory and
+destroy read compose domains with `/api/domain.byComposeId` and deleted only
+domains whose hostnames matched the preview slug template. This exception remains
+route-scoped to Odoo preview refresh, inventory, destroy, and readiness while the
+isolated runtime migration lands; it does not grant Odoo products access to
 stable generic-web deploy or promotion routes, and it does not make compose
 templates valid for generic-web products.
+The isolated Odoo preview replacement starts with the
+`plan_odoo_preview_runtime` contract. It must return `ready` before provider
+apply code can create, update, deploy, or destroy a PR runtime. The planner fails
+closed unless the strategy is an isolated per-PR Dokploy compose runtime, the
+public preview URL is already resolved, required preview-safe runtime bindings are
+present, default sensitive Odoo credentials are absent, provider capabilities
+include rollback/delete operations, and destroy evidence points to a preview
+runtime matching the requested preview slug or PR number. Stable, testing, prod,
+or slug-mismatched targets are blocked before any provider mutation.
 For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
 owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
 source revision evidence, module install/update evidence from rendered Odoo env,
