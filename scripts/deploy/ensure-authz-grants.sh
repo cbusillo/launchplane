@@ -1147,3 +1147,9 @@ post_odoo_cm_preview_grant \
   deploy:odoo-cm-preview-destroy-manual-grant \
   odoo-cm-preview-destroy-manual \
   workflow_dispatch
+post_odoo_cm_preview_grant \
+  odoo-tenant-cm \
+  odoo_preview_apply.execute \
+  deploy:odoo-cm-preview-apply-manual-grant \
+  odoo-cm-preview-apply-manual \
+  workflow_dispatch

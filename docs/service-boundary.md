@@ -1154,11 +1154,14 @@ For isolated Odoo preview provider applies,
 `POST /v1/drivers/odoo/preview-apply` accepts the product plus a ready
 `OdooPreviewDokployApplyRequest`, authorizes against
 `odoo_preview_apply.execute` for the requested product/preview context, and
-executes only through the Launchplane service. The request carries runtime env
-values into the service for the adapter, but responses return only redacted step
-evidence, compose/domain identifiers, status, and error summaries. The route is
-idempotency-keyed and intended for approved non-production Odoo preview targets
-while the isolated runtime migration is being exercised.
+executes only through the Launchplane service. Callers do not supply plaintext
+Odoo runtime env values for the live apply path. Launchplane resolves the
+product preview template lane from DB-backed runtime-environment records and
+managed secret overlays, then derives per-preview database and volume names from
+the compose name before invoking the provider adapter. Responses return only
+redacted step evidence, compose/domain identifiers, status, and error summaries.
+The route is idempotency-keyed and intended for approved non-production Odoo
+preview targets while the isolated runtime migration is being exercised.
 
 For
 Odoo preview smoke follow-ups, `POST /v1/drivers/odoo/preview-verification`
