@@ -1180,7 +1180,7 @@ def ensure_compose_web_domain_route(
         "port": runtime_port,
         "https": True,
         "applicationId": None,
-        "certificateType": "none",
+        "certificateType": "letsencrypt",
         "customCertResolver": None,
         "composeId": normalized_compose_id,
         "serviceName": "web",
