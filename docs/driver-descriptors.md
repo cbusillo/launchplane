@@ -189,8 +189,9 @@ values, blocks before reading Dokploy credentials when required Odoo env keys ar
 missing, stamps per-preview `ODOO_PROJECT_NAME` and `ODOO_STACK_NAME` values so
 the raw compose does not inherit the template runtime identity, renders
 Launchplane-owned raw compose source without publishing shared host ports,
-reconciles the preview domain, deploys the
-compose, and returns redacted step evidence. Destroy looks up
+keeps the raw compose limited to Dokploy network attachment labels so Dokploy's
+compose-domain records own the HTTP/HTTPS routers, reconciles the preview domain,
+deploys the compose, and returns redacted step evidence. Destroy looks up
 domains for the matching preview compose, deletes the matching preview hostname,
 then deletes the compose with `deleteVolumes`. The adapter is not a generic local
 fallback: shared/provider execution still needs an approved non-production target

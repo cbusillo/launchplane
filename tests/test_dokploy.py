@@ -2315,13 +2315,9 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
         self.assertIn("dokploy-network:", compose_file)
         self.assertIn("traefik.enable=true", compose_file)
-        self.assertIn(
-            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-",
-            compose_file,
-        )
-        self.assertIn(".rule=Host(`cm-testing.shinycomputers.com`)", compose_file)
-        self.assertIn(".entrypoints=websecure", compose_file)
-        self.assertIn(".loadbalancer.server.port=8069", compose_file)
+        self.assertIn("traefik.docker.network=dokploy-network", compose_file)
+        self.assertNotIn("traefik.http.routers", compose_file)
+        self.assertNotIn("traefik.http.services", compose_file)
 
     def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
@@ -2341,7 +2337,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertNotIn("ODOO_WEB_HOST_PORT", compose_file)
         self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", compose_file)
         self.assertIn("traefik.enable=true", compose_file)
-        self.assertIn(".loadbalancer.server.port=8069", compose_file)
+        self.assertNotIn("traefik.http.routers", compose_file)
+        self.assertNotIn("traefik.http.services", compose_file)
 
     def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
@@ -2430,7 +2427,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(update_payload["serviceName"], "web")
         self.assertEqual(update_payload["port"], 8069)
         self.assertEqual(update_payload["https"], True)
-        self.assertEqual(update_payload["certificateType"], "letsencrypt")
+        self.assertEqual(update_payload["certificateType"], "none")
         self.assertEqual(update_payload["path"], "/")
         self.assertEqual(update_payload["internalPath"], "/")
 
@@ -2463,7 +2460,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(create_payload["serviceName"], "web")
         self.assertEqual(create_payload["port"], 8069)
         self.assertEqual(create_payload["https"], True)
-        self.assertEqual(create_payload["certificateType"], "letsencrypt")
+        self.assertEqual(create_payload["certificateType"], "none")
 
     def test_service_render_authz_policy_uses_explicit_policy_source(self) -> None:
         runner = CliRunner()

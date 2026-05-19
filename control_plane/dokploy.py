@@ -112,16 +112,6 @@ def _render_odoo_web_traefik_labels(*, domain_hosts: tuple[str, ...], runtime_po
                 f"Odoo Traefik label rendering received an invalid domain host: {domain_host}"
             )
         seen_hosts.add(domain_host)
-        route_name = _traefik_route_name(domain_host=domain_host)
-        lines.extend(
-            (
-                f'      - "traefik.http.routers.{route_name}.rule=Host(`{domain_host}`)"',
-                f'      - "traefik.http.routers.{route_name}.entrypoints=websecure"',
-                f'      - "traefik.http.routers.{route_name}.tls.certResolver=letsencrypt"',
-                f'      - "traefik.http.routers.{route_name}.service={route_name}"',
-                f'      - "traefik.http.services.{route_name}.loadbalancer.server.port={runtime_port}"',
-            )
-        )
     return "\n".join(lines) + "\n"
 
 
@@ -1180,7 +1170,7 @@ def ensure_compose_web_domain_route(
         "port": runtime_port,
         "https": True,
         "applicationId": None,
-        "certificateType": "letsencrypt",
+        "certificateType": "none",
         "customCertResolver": None,
         "composeId": normalized_compose_id,
         "serviceName": "web",
