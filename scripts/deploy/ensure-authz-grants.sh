@@ -880,6 +880,24 @@ post_odoo_cm_preview_grant() {
     '*'
 }
 
+post_odoo_opw_preview_grant() {
+  local product_name="$1"
+  local action_name="$2"
+  local source_label="$3"
+  local idempotency_suffix="$4"
+  local event_name="${5:-pull_request}"
+  post_grant \
+    cbusillo/odoo-tenant-opw \
+    odoo-preview.yml \
+    "$product_name" \
+    opw \
+    "$action_name" \
+    "$source_label" \
+    "$idempotency_suffix" \
+    "$event_name" \
+    '*'
+}
+
 apply_product_onboarding \
   discord-blue
 apply_verireel_onboarding
@@ -1158,4 +1176,22 @@ post_odoo_cm_preview_grant \
   odoo_preview_apply.execute \
   deploy:odoo-cm-preview-apply-manual-grant \
   odoo-cm-preview-apply-manual \
+  workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-opw-preview-artifact-publish-inputs-manual-grant \
+  odoo-opw-preview-artifact-publish-inputs-manual \
+  workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo \
+  odoo_artifact_publish.write \
+  deploy:odoo-opw-preview-artifact-publish-grant \
+  odoo-opw-preview-artifact-publish \
+  workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  odoo_preview_apply.execute \
+  deploy:odoo-opw-preview-apply-manual-grant \
+  odoo-opw-preview-apply-manual \
   workflow_dispatch
