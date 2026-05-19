@@ -424,6 +424,7 @@ def _execute_refresh(
             image_reference=request.image_reference,
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
+            publish_host_ports=False,
         )
         control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,
