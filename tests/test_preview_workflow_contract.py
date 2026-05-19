@@ -204,6 +204,58 @@ class PreviewWorkflowDecisionCliTests(unittest.TestCase):
             "preview-workflow:sell-your-outboard:sellyouroutboard-testing:refresh:pr-105:123456:2",
         )
 
+    def test_cli_uses_github_environment_when_event_options_are_omitted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            event_file = Path(temp_dir) / "event.json"
+            event_file.write_text(
+                json.dumps(
+                    {
+                        "action": "synchronize",
+                        "repository": {"full_name": "cbusillo/sellyouroutboard"},
+                        "pull_request": {
+                            "number": 108,
+                            "labels": [{"name": "preview"}],
+                            "base": {
+                                "repo": {"full_name": "cbusillo/sellyouroutboard"},
+                            },
+                            "head": {
+                                "repo": {"full_name": "cbusillo/sellyouroutboard"},
+                                "sha": "def456",
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "preview-workflow-decision",
+                    "--actor",
+                    "cbusillo",
+                    "--product",
+                    "sell-your-outboard",
+                    "--context",
+                    "sellyouroutboard-testing",
+                    "--run-id",
+                    "123459",
+                    "--run-attempt",
+                    "1",
+                ],
+                env={
+                    "GITHUB_EVENT_NAME": "pull_request",
+                    "GITHUB_EVENT_PATH": str(event_file),
+                },
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["event"]["anchor_pr_number"], 108)
+        self.assertEqual(payload["event"]["event_name"], "pull_request")
+        self.assertEqual(payload["decision"]["operation"], "refresh")
+
     def test_cli_reports_unsupported_notice_without_untrusted_checkout(self) -> None:
         result = CliRunner().invoke(
             CLI_MAIN,

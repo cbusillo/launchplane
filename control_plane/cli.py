@@ -9985,14 +9985,12 @@ def work_graph_runner_queue_wait(
 @click.option(
     "--event-name",
     type=click.Choice(("pull_request", "pull_request_target", "workflow_dispatch")),
-    default="",
     help="GitHub event name. Defaults to GITHUB_EVENT_NAME when set.",
 )
 @click.option("--action", "event_action", default="", help="GitHub event action.")
 @click.option(
     "--operation",
-    type=click.Choice(("refresh", "destroy", "")),
-    default="",
+    type=click.Choice(("refresh", "destroy")),
     help="Manual workflow_dispatch preview operation.",
 )
 @click.option("--repository", default="", help="Current owner/name repository.")
@@ -10025,9 +10023,9 @@ def work_graph_runner_queue_wait(
 )
 def work_graph_preview_workflow_decision(
     event_file: Path | None,
-    event_name: PreviewWorkflowEventName | str,
+    event_name: PreviewWorkflowEventName | str | None,
     event_action: str,
-    operation: PreviewWorkflowOperation | str,
+    operation: PreviewWorkflowOperation | str | None,
     repository: str,
     anchor_repo: str,
     anchor_pr_number: int | None,
@@ -10330,9 +10328,9 @@ def _load_preview_workflow_github_event(event_file: Path | None) -> dict[str, ob
 def _build_preview_workflow_event(
     *,
     github_event: dict[str, object],
-    event_name: PreviewWorkflowEventName | str,
+    event_name: PreviewWorkflowEventName | str | None,
     event_action: str,
-    operation: PreviewWorkflowOperation | str,
+    operation: PreviewWorkflowOperation | str | None,
     repository: str,
     anchor_repo: str,
     anchor_pr_number: int | None,
@@ -10356,11 +10354,13 @@ def _build_preview_workflow_event(
     resolved_labels = label_names or _preview_workflow_label_names(
         pull_request.get("labels")
     )
-    resolved_event_name = event_name.strip() or os.environ.get("GITHUB_EVENT_NAME", "")
+    resolved_event_name = _preview_workflow_string(event_name) or os.environ.get(
+        "GITHUB_EVENT_NAME", ""
+    )
     resolved_action = event_action.strip() or _preview_workflow_string(
         github_event.get("action")
     )
-    resolved_operation = operation.strip() or _preview_workflow_string(
+    resolved_operation = _preview_workflow_string(operation) or _preview_workflow_string(
         input_payload.get("operation")
     )
     resolved_repository = repository.strip() or _preview_workflow_repository_name(
