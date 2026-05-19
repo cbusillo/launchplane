@@ -25,6 +25,7 @@ OdooPreviewDokployDryRunBlockerCode = Literal[
     "environment_id_missing",
     "preview_url_invalid",
     "runtime_plan_not_ready",
+    "template_compose_id_missing",
 ]
 OdooPreviewDokployApplyStatus = Literal["pass", "blocked", "fail"]
 OdooPreviewDokployOperationName = Literal[
@@ -87,11 +88,13 @@ class OdooPreviewDokployDryRunRequest(BaseModel):
     runtime_port: int = Field(default=8069, ge=1)
     compose_name: str = ""
     environment_id: str = ""
+    template_compose_id: str = ""
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewDokployDryRunRequest":
         self.compose_name = self.compose_name.strip()
         self.environment_id = self.environment_id.strip()
+        self.template_compose_id = self.template_compose_id.strip()
         return self
 
 
@@ -143,6 +146,7 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
     compose_ref: str
     compose_name: str
     environment_id: str = ""
+    template_compose_id: str = ""
     no_cache: bool = False
     delete_volumes: bool = True
     runtime_port: int = Field(default=8069, ge=1)
@@ -169,6 +173,7 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
             self.compose_name, "Odoo preview dry-run plan requires compose_name"
         )
         self.environment_id = self.environment_id.strip()
+        self.template_compose_id = self.template_compose_id.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.summary = _required_text(self.summary, "Odoo preview dry-run plan requires summary")
         if self.status == "ready" and self.blockers:
@@ -282,6 +287,13 @@ def build_odoo_preview_dokploy_dry_run(
                     "Odoo preview Dokploy dry-run requires environment_id before creating an isolated compose.",
                 )
             )
+        if not request.template_compose_id:
+            blockers.append(
+                _blocker(
+                    "template_compose_id_missing",
+                    "Odoo preview Dokploy dry-run requires template_compose_id before creating an isolated compose.",
+                )
+            )
 
     missing_paths = _missing_endpoint_paths(request=request)
     if missing_paths:
@@ -315,6 +327,7 @@ def build_odoo_preview_dokploy_dry_run(
         compose_ref=compose_ref,
         compose_name=compose_name,
         environment_id=request.environment_id,
+        template_compose_id=request.template_compose_id,
         no_cache=request.no_cache,
         delete_volumes=request.delete_volumes,
         runtime_port=request.runtime_port,
@@ -401,30 +414,29 @@ def _execute_refresh(
     *, host: str, token: str, request: OdooPreviewDokployApplyRequest
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
+    creating_compose = plan.compose_ref.startswith("${created.composeId:")
     created_compose_id = ""
     resolved_compose_id = ""
     domain_id = ""
     steps: list[OdooPreviewDokployApplyStep] = []
     try:
-        template_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
+        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
             host=host,
             token=token,
             target_type="compose",
-            target_id=plan.compose_ref,
+            target_id=source_compose_id,
         )
         compose_id = _resolve_or_create_compose(
             host=host,
             token=token,
             plan=plan,
-            template_payload=template_payload,
+            template_payload=target_payload,
             steps=steps,
         )
         resolved_compose_id = compose_id
-        created_compose_id = (
-            compose_id if plan.compose_ref.startswith("${created.composeId:") else ""
-        )
-        target_payload = template_payload
-        if compose_id != plan.compose_ref:
+        created_compose_id = compose_id if creating_compose else ""
+        if creating_compose:
             target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
@@ -770,7 +782,7 @@ def _operations(
                 target=_compose_name(
                     runtime_plan=runtime_plan, requested_name=request.compose_name
                 ),
-                payload_keys=("name", "appName", "environmentId", "composeType"),
+                payload_keys=("name", "appName", "environmentId", "serverId", "composeType"),
             )
         )
     operations.extend(
