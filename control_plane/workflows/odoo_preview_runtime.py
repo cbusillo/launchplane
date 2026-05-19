@@ -786,7 +786,7 @@ def _operations(
             OdooPreviewDokployOperation(
                 name="domain_create_or_update",
                 method="POST",
-                path=f"{spec.domain_create_path}|{spec.domain_update_path}",
+                path=spec.domain_create_path,
                 target=domain_host,
                 payload_keys=("host", "port", "composeId", "serviceName", "domainType"),
             ),
