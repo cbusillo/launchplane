@@ -127,7 +127,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertIn("environment_id_missing", {blocker.code for blocker in plan.blockers})
 
-    def test_refresh_create_dry_run_renders_ordered_provider_operations(self) -> None:
+    def test_refresh_create_dry_run_blocks_missing_template_compose_id(self) -> None:
         plan = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
                 runtime_plan=_runtime_plan(),
@@ -136,12 +136,26 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(plan.status, "blocked")
+        self.assertIn("template_compose_id_missing", {blocker.code for blocker in plan.blockers})
+
+    def test_refresh_create_dry_run_renders_ordered_provider_operations(self) -> None:
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        )
+
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.domain_host, "pr-45.cm-preview.example.test")
+        self.assertEqual(plan.template_compose_id, "compose-template")
         self.assertEqual(plan.operations[0].path, "/api/compose.create")
         self.assertEqual(
             plan.operations[0].payload_keys,
-            ("name", "appName", "environmentId", "composeType"),
+            ("name", "appName", "environmentId", "serverId", "composeType"),
         )
         self.assertEqual(
             [operation.name for operation in plan.operations],
@@ -250,6 +264,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 runtime_plan=_runtime_plan(),
                 endpoint_spec=_endpoint_spec(),
                 environment_id="env-cm-preview",
+                template_compose_id="compose-template",
             )
         )
         requests: list[dict[str, object]] = []
@@ -283,7 +298,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "serverId": "server-nonprod",
                     },
                 ),
-            ),
+            ) as fetch_target_payload,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.sync_dokploy_compose_raw_source",
             ) as sync_source,
@@ -321,6 +336,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertTrue(result.created_compose)
         self.assertEqual([request["path"] for request in requests], ["/api/compose.create"])
+        fetch_targets = [call.kwargs["target_id"] for call in fetch_target_payload.call_args_list]
+        self.assertEqual(fetch_targets, ["compose-template", "compose-cm-pr-45"])
         create_payload = requests[0]["payload"]
         self.assertIsInstance(create_payload, dict)
         assert isinstance(create_payload, dict)
@@ -440,6 +457,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 runtime_plan=_runtime_plan(),
                 endpoint_spec=_endpoint_spec(),
                 environment_id="env-cm-preview",
+                template_compose_id="compose-template",
             )
         )
 
