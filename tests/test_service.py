@@ -13693,6 +13693,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 applied_request.environment_values["ODOO_DATA_VOLUME"],
                 "cm_odoo_preview_pr_42_data",
             )
+            self.assertEqual(
+                applied_request.environment_values["ODOO_PROJECT_NAME"],
+                "cm-odoo-preview-pr-42",
+            )
+            self.assertEqual(
+                applied_request.environment_values["ODOO_STACK_NAME"],
+                "cm-odoo-preview-pr-42",
+            )
             self.assertNotEqual(
                 applied_request.environment_values["ODOO_DB_PASSWORD"],
                 "caller-secret-must-not-win",

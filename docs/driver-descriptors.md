@@ -186,8 +186,10 @@ leaving orphaned runtime state.
 `execute_odoo_preview_dokploy_apply` is the first live-provider adapter behind
 that contract. It accepts only a ready dry-run plan plus explicit runtime env
 values, blocks before reading Dokploy credentials when required Odoo env keys are
-missing, renders Launchplane-owned raw compose source, reconciles the preview
-domain, deploys the compose, and returns redacted step evidence. Destroy looks up
+missing, stamps per-preview `ODOO_PROJECT_NAME` and `ODOO_STACK_NAME` values so
+the raw compose does not inherit the template runtime identity, renders
+Launchplane-owned raw compose source, reconciles the preview domain, deploys the
+compose, and returns redacted step evidence. Destroy looks up
 domains for the matching preview compose, deletes the matching preview hostname,
 then deletes the compose with `deleteVolumes`. The adapter is not a generic local
 fallback: shared/provider execution still needs an approved non-production target

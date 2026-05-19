@@ -973,6 +973,8 @@ def _odoo_preview_service_environment_values(
         database_url=database_url,
     )
     environment_values.update(preview_profile.override_env)
+    environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
+    environment_values["ODOO_STACK_NAME"] = plan.compose_name
     environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
     environment_values["ODOO_DATA_VOLUME"] = _odoo_preview_identifier(
         plan.compose_name, suffix="data"
