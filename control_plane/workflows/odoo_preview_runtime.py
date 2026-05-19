@@ -113,6 +113,7 @@ class OdooPreviewDokployOperation(BaseModel):
     name: OdooPreviewDokployOperationName
     method: Literal["GET", "POST", "LOCAL"]
     path: str = ""
+    alternate_paths: tuple[str, ...] = ()
     target: str
     payload_keys: tuple[str, ...] = ()
     secret_payload: bool = False
@@ -122,6 +123,7 @@ class OdooPreviewDokployOperation(BaseModel):
         self.path = self.path.strip()
         if self.method != "LOCAL" and not self.path:
             raise ValueError("Dokploy API operation requires path")
+        self.alternate_paths = _normalized_optional_paths(self.alternate_paths)
         self.target = _required_text(self.target, "Dokploy operation requires target")
         self.payload_keys = _normalized_unique_texts(self.payload_keys)
         return self
@@ -787,6 +789,7 @@ def _operations(
                 name="domain_create_or_update",
                 method="POST",
                 path=spec.domain_create_path,
+                alternate_paths=(spec.domain_update_path,),
                 target=domain_host,
                 payload_keys=("host", "port", "composeId", "serviceName", "domainType"),
             ),
@@ -869,6 +872,19 @@ def _normalized_unique_texts(values: tuple[str, ...]) -> tuple[str, ...]:
         value = raw_value.strip()
         if not value:
             raise ValueError("Odoo preview Dokploy operation payload keys must be non-empty")
+        if value not in normalized:
+            normalized.append(value)
+    return tuple(normalized)
+
+
+def _normalized_optional_paths(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for raw_value in values:
+        value = raw_value.strip()
+        if not value:
+            continue
+        if not value.startswith("/api/"):
+            raise ValueError("Dokploy alternate operation paths must start with /api/")
         if value not in normalized:
             normalized.append(value)
     return tuple(normalized)
