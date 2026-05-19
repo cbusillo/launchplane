@@ -172,13 +172,34 @@ Promotion uses the same artifact identity and target records. When health URLs
 exist, Launchplane verifies the source and destination lane health around the
 deployment and writes promotion evidence.
 
-Rollback is another Launchplane-owned deployment to a previous immutable image
-reference. Operators should choose the previous good image from Launchplane
-deployment, promotion, inventory, or release-tuple evidence and redeploy that
-exact digest. Do not roll back by clicking Dokploy to a mutable tag or by
-changing product-repo workflow state. A future product-specific rollback route
-can add one-click selection and product smoke evidence, but the durable rollback
-source remains the previous immutable image identity.
+Rollback begins with a Launchplane-owned rollback plan. The generic-web planner
+is a safe-write contract: it reads the product profile, destination lane, a
+Launchplane deployment record selected as the rollback target, and optional
+backup-gate evidence, then writes a rollback-plan record. It does not mutate
+Dokploy or trigger a product workflow.
+
+Required planner input:
+
+- `product`
+- destination `instance`, usually `prod`
+- `rollback_deployment_record_id`, pointing at the previous good deployment
+  record for that same context and instance
+- optional `backup_record_id` when the product/operator requires backup-gate
+  evidence before stable recovery
+
+The planner fails closed when the rollback target is missing, belongs to a
+different context or instance, has a failed deploy, has failed health evidence,
+or does not reference the product image repository by immutable `@sha256:`
+digest. If `backup_required=true`, the request must name a stored backup-gate
+record, and that record must match the destination lane and have `status=pass`.
+
+The produced `GenericWebRollbackPlanRecord` stores the selected immutable
+artifact identity, source git ref, planned generic-web deploy payload, backup
+gate evidence, target health evidence, blockers, and summary. A later explicit
+apply path can consume the ready plan and call the normal generic-web deploy
+route, but operators must not roll back by clicking Dokploy to a mutable tag or
+changing product-repo workflow state. The durable rollback source remains the
+Launchplane deployment record and its immutable image digest.
 
 ## Discord Blue Target
 

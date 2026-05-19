@@ -20,6 +20,7 @@ from control_plane.contracts.every_code_work_request import (
     claim_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -807,6 +808,29 @@ class FilesystemRecordStore:
             ),
             reverse=True,
         )
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_generic_web_rollback_plan_record(self, record: GenericWebRollbackPlanRecord) -> Path:
+        return self._write_model("generic_web_rollback_plans", record.plan_id, record)
+
+    def list_generic_web_rollback_plan_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[GenericWebRollbackPlanRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                GenericWebRollbackPlanRecord, "generic_web_rollback_plans"
+            )
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.created_at, record.plan_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

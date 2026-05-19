@@ -16,6 +16,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackDeployPlan,
+    GenericWebRollbackPlanRecord,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -49,6 +53,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BackupGateEvidence,
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -907,6 +912,52 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     "deployment-20260413T182231Z-opw-prod",
                     "deployment-20260411T182231Z-opw-prod",
                 ],
+            )
+
+    def test_write_and_list_generic_web_rollback_plan_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = GenericWebRollbackPlanRecord(
+                plan_id="rollback-plan-older",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                status="ready",
+                rollback_deployment_record_id="deployment-syo-prod-older",
+                artifact_identity=ArtifactIdentityReference(
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:older"
+                ),
+                planned_deploy=GenericWebRollbackDeployPlan(
+                    product="sellyouroutboard",
+                    instance="prod",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:older",
+                    source_git_ref="older",
+                ),
+                source_git_ref="older",
+                backup_gate=BackupGateEvidence(required=False, status="skipped"),
+                target_health=HealthcheckEvidence(status="pass"),
+                created_at="2026-05-01T21:00:00Z",
+                summary="generic web rollback plan is ready",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "plan_id": "rollback-plan-newer",
+                    "rollback_deployment_record_id": "deployment-syo-prod-newer",
+                    "created_at": "2026-05-01T22:00:00Z",
+                }
+            )
+
+            written_path = store.write_generic_web_rollback_plan_record(older_record)
+            store.write_generic_web_rollback_plan_record(newer_record)
+
+            self.assertTrue(written_path.exists())
+            listed_records = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing", instance_name="prod"
+            )
+            self.assertEqual(
+                [record.plan_id for record in listed_records],
+                ["rollback-plan-newer", "rollback-plan-older"],
             )
 
     def test_artifacts_ingest_writes_manifest(self) -> None:
