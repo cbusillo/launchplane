@@ -28,10 +28,7 @@ def _capabilities() -> OdooPreviewProviderCapabilities:
 
 
 def _endpoint_spec() -> OdooPreviewDokployEndpointSpec:
-    return OdooPreviewDokployEndpointSpec(
-        compose_create_path="/api/compose.create",
-        compose_delete_path="/api/compose.delete",
-    )
+    return OdooPreviewDokployEndpointSpec()
 
 
 def _bindings() -> tuple[OdooPreviewRuntimeBindingEvidence, ...]:
@@ -85,9 +82,15 @@ def _runtime_plan(
 
 
 class OdooPreviewDokployDryRunTests(unittest.TestCase):
-    def test_refresh_create_dry_run_requires_explicit_create_and_delete_paths(self) -> None:
+    def test_refresh_create_dry_run_blocks_missing_create_and_delete_paths(self) -> None:
         plan = build_odoo_preview_dokploy_dry_run(
-            request=OdooPreviewDokployDryRunRequest(runtime_plan=_runtime_plan())
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=OdooPreviewDokployEndpointSpec(
+                    compose_create_path="",
+                    compose_delete_path="",
+                ),
+            )
         )
 
         self.assertEqual(plan.status, "blocked")
@@ -105,6 +108,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "ready")
         self.assertEqual(plan.domain_host, "pr-45.cm-preview.example.test")
+        self.assertEqual(plan.operations[0].path, "/api/compose.create")
+        self.assertEqual(
+            plan.operations[0].payload_keys,
+            ("name", "appName", "environmentId", "composeType"),
+        )
         self.assertEqual(
             [operation.name for operation in plan.operations],
             [
@@ -121,6 +129,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             [operation.name for operation in plan.rollback_operations],
             ["domain_delete", "compose_delete"],
         )
+        compose_delete = plan.rollback_operations[-1]
+        self.assertEqual(compose_delete.path, "/api/compose.delete")
+        self.assertIn("deleteVolumes", compose_delete.payload_keys)
         self.assertTrue(
             any(
                 operation.secret_payload
@@ -155,6 +166,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             [operation.name for operation in plan.operations],
             ["domain_lookup", "domain_delete", "compose_delete"],
         )
+        self.assertIn("deleteVolumes", plan.operations[-1].payload_keys)
         self.assertEqual(plan.rollback_operations, ())
 
     def test_blocked_runtime_plan_blocks_provider_dry_run(self) -> None:
