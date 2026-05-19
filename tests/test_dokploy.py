@@ -2429,6 +2429,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(update_payload["domainType"], "compose")
         self.assertEqual(update_payload["serviceName"], "web")
         self.assertEqual(update_payload["port"], 8069)
+        self.assertEqual(update_payload["https"], True)
+        self.assertEqual(update_payload["certificateType"], "letsencrypt")
         self.assertEqual(update_payload["path"], "/")
         self.assertEqual(update_payload["internalPath"], "/")
 
@@ -2460,6 +2462,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertEqual(create_payload["composeId"], "compose-cm-testing")
         self.assertEqual(create_payload["serviceName"], "web")
         self.assertEqual(create_payload["port"], 8069)
+        self.assertEqual(create_payload["https"], True)
+        self.assertEqual(create_payload["certificateType"], "letsencrypt")
 
     def test_service_render_authz_policy_uses_explicit_policy_source(self) -> None:
         runner = CliRunner()
