@@ -31,6 +31,10 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.generic_web_rollback import (
+    GenericWebRollbackDeployPlan,
+    GenericWebRollbackPlanRecord,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.merge_train_batch import (
@@ -94,7 +98,9 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BackupGateEvidence,
     DeploymentEvidence,
+    HealthcheckEvidence,
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -187,6 +193,33 @@ def _deployment_record(*, record_id: str, started_at: str, finished_at: str) -> 
             started_at=started_at,
             finished_at=finished_at,
         ),
+    )
+
+
+def _generic_web_rollback_plan_record(
+    *, plan_id: str, created_at: str
+) -> GenericWebRollbackPlanRecord:
+    return GenericWebRollbackPlanRecord(
+        plan_id=plan_id,
+        product="sellyouroutboard",
+        context="sellyouroutboard-testing",
+        instance="prod",
+        status="ready",
+        rollback_deployment_record_id="deployment-syo-prod-previous",
+        artifact_identity=ArtifactIdentityReference(
+            artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+        ),
+        planned_deploy=GenericWebRollbackDeployPlan(
+            product="sellyouroutboard",
+            instance="prod",
+            artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+            source_git_ref="abc123",
+        ),
+        source_git_ref="abc123",
+        backup_gate=BackupGateEvidence(required=False, status="skipped"),
+        target_health=HealthcheckEvidence(status="pass"),
+        created_at=created_at,
+        summary="generic web rollback plan is ready",
     )
 
 
@@ -1052,6 +1085,36 @@ class PostgresRecordStoreTests(unittest.TestCase):
         resolved_target = loaded_record.resolved_target
         assert resolved_target is not None
         self.assertEqual(resolved_target.target_id, "compose-123")
+
+    def test_write_and_list_generic_web_rollback_plan_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_generic_web_rollback_plan_record(
+                _generic_web_rollback_plan_record(
+                    plan_id="rollback-plan-older",
+                    created_at="2026-05-01T21:00:00Z",
+                )
+            )
+            store.write_generic_web_rollback_plan_record(
+                _generic_web_rollback_plan_record(
+                    plan_id="rollback-plan-newer",
+                    created_at="2026-05-01T22:00:00Z",
+                )
+            )
+            listed_records = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(
+            [record.plan_id for record in listed_records],
+            ["rollback-plan-newer", "rollback-plan-older"],
+        )
 
     def test_list_preview_records_filters_and_limits(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

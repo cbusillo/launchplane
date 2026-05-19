@@ -36,6 +36,7 @@ from control_plane.contracts.every_code_work_request import (
     claim_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.merge_train_batch import (
@@ -147,6 +148,27 @@ class LaunchplaneDeploymentRow(Base):
     source_git_ref: Mapped[str] = mapped_column(String, nullable=False)
     deploy_started_at: Mapped[str] = mapped_column(String, nullable=False)
     deploy_finished_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneGenericWebRollbackPlanRow(Base):
+    __tablename__ = "launchplane_generic_web_rollback_plans"
+    __table_args__ = (
+        Index(
+            "launchplane_generic_web_rollback_plans_context_instance_idx",
+            "context",
+            "instance",
+            desc("created_at"),
+        ),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    rollback_deployment_record_id: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1408,6 +1430,43 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneDeploymentRow.deploy_finished_at.desc(),
                 LaunchplaneDeploymentRow.deploy_started_at.desc(),
                 LaunchplaneDeploymentRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_generic_web_rollback_plan_record(self, record: GenericWebRollbackPlanRecord) -> None:
+        self._write_row(
+            LaunchplaneGenericWebRollbackPlanRow(
+                plan_id=record.plan_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                created_at=record.created_at,
+                status=record.status,
+                rollback_deployment_record_id=record.rollback_deployment_record_id,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_generic_web_rollback_plan_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[GenericWebRollbackPlanRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplaneGenericWebRollbackPlanRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneGenericWebRollbackPlanRow.instance == instance_name)
+        return self._list_models(
+            model_type=GenericWebRollbackPlanRecord,
+            orm_model=LaunchplaneGenericWebRollbackPlanRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneGenericWebRollbackPlanRow.created_at.desc(),
+                LaunchplaneGenericWebRollbackPlanRow.plan_id.desc(),
             ),
             limit=limit,
         )
