@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import time
+from pathlib import Path
 from typing import Literal
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
+import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import JsonObject
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewRuntimeOperation,
     OdooPreviewRuntimePlan,
@@ -15,9 +22,11 @@ from control_plane.contracts.odoo_preview_runtime_plan import (
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
 OdooPreviewDokployDryRunBlockerCode = Literal[
     "endpoint_path_missing",
+    "environment_id_missing",
     "preview_url_invalid",
     "runtime_plan_not_ready",
 ]
+OdooPreviewDokployApplyStatus = Literal["pass", "blocked", "fail"]
 OdooPreviewDokployOperationName = Literal[
     "compose_create",
     "compose_update_raw_source",
@@ -29,6 +38,17 @@ OdooPreviewDokployOperationName = Literal[
     "domain_delete",
     "compose_delete",
 ]
+
+_ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
+    "ODOO_DB_NAME",
+    "ODOO_DB_USER",
+    "ODOO_DB_PASSWORD",
+    "ODOO_DATA_VOLUME",
+    "ODOO_LOG_VOLUME",
+    "ODOO_DB_VOLUME",
+    "ODOO_MASTER_PASSWORD",
+    "ODOO_ADMIN_PASSWORD",
+)
 
 
 class OdooPreviewDokployEndpointSpec(BaseModel):
@@ -120,6 +140,10 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
     domain_host: str = ""
     compose_ref: str
     compose_name: str
+    environment_id: str = ""
+    no_cache: bool = False
+    delete_volumes: bool = True
+    runtime_port: int = Field(default=8069, ge=1)
     blockers: tuple[OdooPreviewDokployDryRunBlocker, ...] = ()
     operations: tuple[OdooPreviewDokployOperation, ...] = ()
     rollback_operations: tuple[OdooPreviewDokployOperation, ...] = ()
@@ -142,6 +166,7 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
         self.compose_name = _required_text(
             self.compose_name, "Odoo preview dry-run plan requires compose_name"
         )
+        self.environment_id = self.environment_id.strip()
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.summary = _required_text(self.summary, "Odoo preview dry-run plan requires summary")
         if self.status == "ready" and self.blockers:
@@ -150,6 +175,77 @@ class OdooPreviewDokployDryRunPlan(BaseModel):
             raise ValueError("blocked Odoo preview dry-run plan requires blockers")
         if self.status == "blocked" and (self.operations or self.rollback_operations):
             raise ValueError("blocked Odoo preview dry-run plan cannot include operations")
+        return self
+
+
+class OdooPreviewDokployApplyStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: OdooPreviewDokployOperationName
+    target: str
+    status: Literal["pass", "skipped"] = "pass"
+    detail: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_step(self) -> "OdooPreviewDokployApplyStep":
+        self.target = _required_text(self.target, "Odoo preview apply step requires target")
+        self.detail = self.detail.strip()
+        return self
+
+
+class OdooPreviewDokployApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dry_run_plan: OdooPreviewDokployDryRunPlan
+    image_reference: str
+    environment_values: dict[str, str] = Field(default_factory=dict)
+    compose_file: str = ""
+    health_path: str = "/web/health"
+    timeout_seconds: int = Field(default=300, ge=1)
+    wait_for_deploy: bool = True
+    smoke_check: bool = True
+
+    @model_validator(mode="after")
+    def _normalize_request(self) -> "OdooPreviewDokployApplyRequest":
+        self.image_reference = _required_text(
+            self.image_reference, "Odoo preview apply requires image_reference"
+        )
+        self.compose_file = self.compose_file.strip()
+        self.health_path = self.health_path.strip() or "/web/health"
+        if not self.health_path.startswith("/"):
+            self.health_path = f"/{self.health_path}"
+        self.environment_values = {
+            key.strip(): value for key, value in self.environment_values.items() if key.strip()
+        }
+        return self
+
+
+class OdooPreviewDokployApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: OdooPreviewDokployApplyStatus
+    operation: OdooPreviewRuntimeOperation
+    product: str
+    repository: str
+    preview_slug: str
+    preview_url: str
+    domain_host: str
+    compose_id: str = ""
+    compose_name: str
+    created_compose: bool = False
+    domain_id: str = ""
+    steps: tuple[OdooPreviewDokployApplyStep, ...] = ()
+    rollback_errors: tuple[str, ...] = ()
+    error_message: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_result(self) -> "OdooPreviewDokployApplyResult":
+        self.error_message = self.error_message.strip()
+        self.rollback_errors = tuple(
+            error.strip() for error in self.rollback_errors if error.strip()
+        )
+        if self.status in {"blocked", "fail"} and not self.error_message:
+            raise ValueError("blocked or failed Odoo preview apply result requires error_message")
         return self
 
 
@@ -176,6 +272,14 @@ def build_odoo_preview_dokploy_dry_run(
                 "Odoo preview Dokploy dry-run requires a preview URL with a hostname.",
             )
         )
+    if runtime_plan.operation == "refresh" and runtime_plan.target is None:
+        if not request.environment_id:
+            blockers.append(
+                _blocker(
+                    "environment_id_missing",
+                    "Odoo preview Dokploy dry-run requires environment_id before creating an isolated compose.",
+                )
+            )
 
     missing_paths = _missing_endpoint_paths(request=request)
     if missing_paths:
@@ -208,6 +312,10 @@ def build_odoo_preview_dokploy_dry_run(
         domain_host=domain_host,
         compose_ref=compose_ref,
         compose_name=compose_name,
+        environment_id=request.environment_id,
+        no_cache=request.no_cache,
+        delete_volumes=request.delete_volumes,
+        runtime_port=request.runtime_port,
         blockers=tuple(blockers),
         operations=operations,
         rollback_operations=rollback_operations,
@@ -217,6 +325,42 @@ def build_odoo_preview_dokploy_dry_run(
             else "Odoo preview Dokploy dry-run plan is blocked"
         ),
     )
+
+
+def execute_odoo_preview_dokploy_apply(
+    *,
+    control_plane_root: Path,
+    request: OdooPreviewDokployApplyRequest,
+    database_url: str | None = None,
+) -> OdooPreviewDokployApplyResult:
+    plan = request.dry_run_plan
+    if plan.status != "ready":
+        return _apply_result(
+            request=request,
+            status="blocked",
+            error_message="Odoo preview Dokploy apply requires a ready dry-run plan.",
+        )
+
+    missing_env_keys = tuple(
+        key
+        for key in _ODOO_PREVIEW_REQUIRED_ENV_KEYS
+        if not request.environment_values.get(key, "").strip()
+    )
+    if missing_env_keys:
+        return _apply_result(
+            request=request,
+            status="blocked",
+            error_message="Odoo preview Dokploy apply is missing runtime env keys: "
+            + ", ".join(missing_env_keys),
+        )
+
+    host, token = control_plane_dokploy.read_dokploy_config(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    if plan.operation == "destroy":
+        return _execute_destroy(host=host, token=token, request=request)
+    return _execute_refresh(host=host, token=token, request=request)
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:
@@ -249,6 +393,318 @@ def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tupl
         if not spec.compose_delete_path:
             missing.append("compose_delete_path")
     return tuple(missing)
+
+
+def _execute_refresh(
+    *, host: str, token: str, request: OdooPreviewDokployApplyRequest
+) -> OdooPreviewDokployApplyResult:
+    plan = request.dry_run_plan
+    created_compose_id = ""
+    domain_id = ""
+    steps: list[OdooPreviewDokployApplyStep] = []
+    try:
+        compose_id = _resolve_or_create_compose(
+            host=host,
+            token=token,
+            plan=plan,
+            steps=steps,
+        )
+        created_compose_id = (
+            compose_id if plan.compose_ref.startswith("${created.composeId:") else ""
+        )
+        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        compose_file = request.compose_file or control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=request.image_reference,
+            domain_hosts=(plan.domain_host,),
+            runtime_port=plan.runtime_port,
+        )
+        control_plane_dokploy.sync_dokploy_compose_raw_source(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=plan.compose_name,
+            target_payload=target_payload,
+            compose_file=compose_file,
+        )
+        steps.append(_step("compose_update_raw_source", compose_id))
+
+        env_text = control_plane_dokploy.serialize_dokploy_env_text(request.environment_values)
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            target_payload=target_payload,
+            env_text=env_text,
+        )
+        steps.append(_step("compose_update_env", compose_id))
+
+        domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            domain_host=plan.domain_host,
+            runtime_port=plan.runtime_port,
+        )
+        steps.append(_step("domain_create_or_update", plan.domain_host))
+
+        latest_before = control_plane_dokploy.latest_deployment_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        control_plane_dokploy.trigger_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            no_cache=plan.no_cache,
+        )
+        steps.append(_step("compose_deploy", compose_id))
+        if request.wait_for_deploy:
+            control_plane_dokploy.wait_for_target_deployment(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                before_key=control_plane_dokploy.deployment_key(latest_before),
+                timeout_seconds=request.timeout_seconds,
+            )
+        if request.smoke_check:
+            _wait_for_smoke_check(
+                preview_url=plan.preview_url,
+                health_path=request.health_path,
+                timeout_seconds=request.timeout_seconds,
+            )
+            steps.append(_step("smoke_check", plan.preview_url))
+        return _apply_result(
+            request=request,
+            status="pass",
+            compose_id=compose_id,
+            domain_id=domain_id,
+            created_compose=bool(created_compose_id),
+            steps=tuple(steps),
+        )
+    except click.ClickException as exc:
+        rollback_errors = _rollback_created_runtime(
+            host=host,
+            token=token,
+            domain_id=domain_id,
+            compose_id=created_compose_id,
+            delete_volumes=plan.delete_volumes,
+        )
+        return _apply_result(
+            request=request,
+            status="fail",
+            error_message=str(exc),
+            domain_id=domain_id,
+            compose_id=created_compose_id,
+            created_compose=bool(created_compose_id),
+            steps=tuple(steps),
+            rollback_errors=rollback_errors,
+        )
+
+
+def _execute_destroy(
+    *, host: str, token: str, request: OdooPreviewDokployApplyRequest
+) -> OdooPreviewDokployApplyResult:
+    plan = request.dry_run_plan
+    compose_id = plan.compose_ref
+    steps: list[OdooPreviewDokployApplyStep] = []
+    domain_ids: list[str] = []
+    try:
+        for domain in _compose_domains(host=host, token=token, compose_id=compose_id):
+            domain_id = str(domain.get("domainId") or "").strip()
+            domain_host = str(domain.get("host") or "").strip().lower()
+            if domain_id and domain_host == plan.domain_host:
+                domain_ids.append(domain_id)
+        steps.append(_step("domain_lookup", compose_id))
+        for domain_id in domain_ids:
+            _delete_domain(host=host, token=token, domain_id=domain_id)
+            steps.append(_step("domain_delete", domain_id))
+        _delete_compose(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            delete_volumes=plan.delete_volumes,
+        )
+        steps.append(_step("compose_delete", compose_id))
+        return _apply_result(
+            request=request,
+            status="pass",
+            compose_id=compose_id,
+            domain_id=domain_ids[0] if domain_ids else "",
+            steps=tuple(steps),
+        )
+    except click.ClickException as exc:
+        return _apply_result(
+            request=request,
+            status="fail",
+            error_message=str(exc),
+            compose_id=compose_id,
+            domain_id=domain_ids[0] if domain_ids else "",
+            steps=tuple(steps),
+        )
+
+
+def _resolve_or_create_compose(
+    *,
+    host: str,
+    token: str,
+    plan: OdooPreviewDokployDryRunPlan,
+    steps: list[OdooPreviewDokployApplyStep],
+) -> str:
+    if not plan.compose_ref.startswith("${created.composeId:"):
+        return plan.compose_ref
+    if not plan.environment_id:
+        raise click.ClickException("Odoo preview compose create requires environment_id.")
+    created = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.create",
+        method="POST",
+        payload={
+            "name": plan.compose_name,
+            "appName": plan.compose_name,
+            "description": f"Launchplane Odoo preview {plan.preview_slug}",
+            "environmentId": plan.environment_id,
+            "composeType": "docker-compose",
+        },
+    )
+    created_compose = control_plane_dokploy.as_json_object(created)
+    compose_id = str((created_compose or {}).get("composeId") or "").strip()
+    if not compose_id:
+        raise click.ClickException(
+            f"Dokploy did not return composeId for Odoo preview compose {plan.compose_name!r}."
+        )
+    steps.append(_step("compose_create", plan.compose_name))
+    return compose_id
+
+
+def _compose_domains(*, host: str, token: str, compose_id: str) -> tuple[JsonObject, ...]:
+    raw_domains = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": compose_id},
+    )
+    if not isinstance(raw_domains, list):
+        return ()
+    domains: list[JsonObject] = []
+    for raw_domain in raw_domains:
+        domain = control_plane_dokploy.as_json_object(raw_domain)
+        if domain is not None:
+            domains.append(domain)
+    return tuple(domains)
+
+
+def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
+    control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.delete",
+        method="POST",
+        payload={"domainId": domain_id},
+    )
+
+
+def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: bool) -> None:
+    control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.delete",
+        method="POST",
+        payload={"composeId": compose_id, "deleteVolumes": delete_volumes},
+    )
+
+
+def _rollback_created_runtime(
+    *, host: str, token: str, domain_id: str, compose_id: str, delete_volumes: bool
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if domain_id:
+        try:
+            _delete_domain(host=host, token=token, domain_id=domain_id)
+        except click.ClickException as exc:
+            errors.append(f"domain rollback failed: {exc}")
+    if compose_id:
+        try:
+            _delete_compose(
+                host=host,
+                token=token,
+                compose_id=compose_id,
+                delete_volumes=delete_volumes,
+            )
+        except click.ClickException as exc:
+            errors.append(f"compose rollback failed: {exc}")
+    return tuple(errors)
+
+
+def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds: int) -> None:
+    parsed = urlparse(preview_url.rstrip("/"))
+    smoke_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
+    request = Request(
+        smoke_url,
+        headers={"Accept": "application/json, text/plain, */*", "Cache-Control": "no-store"},
+    )
+    deadline = timeout_seconds
+    while deadline > 0:
+        try:
+            with urlopen(request, timeout=min(15, deadline)) as response:
+                response.read()
+            if 200 <= response.status < 400:
+                return
+        except HTTPError as exc:
+            if exc.code < 500:
+                raise click.ClickException(
+                    f"Odoo preview smoke check returned HTTP {exc.code}."
+                ) from exc
+        except (TimeoutError, URLError, ValueError):
+            pass
+        sleep_seconds = min(5, deadline)
+        time.sleep(sleep_seconds)
+        deadline -= sleep_seconds
+    raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
+
+
+def _step(name: OdooPreviewDokployOperationName, target: str) -> OdooPreviewDokployApplyStep:
+    return OdooPreviewDokployApplyStep(name=name, target=target)
+
+
+def _apply_result(
+    *,
+    request: OdooPreviewDokployApplyRequest,
+    status: OdooPreviewDokployApplyStatus,
+    compose_id: str = "",
+    domain_id: str = "",
+    created_compose: bool = False,
+    steps: tuple[OdooPreviewDokployApplyStep, ...] = (),
+    rollback_errors: tuple[str, ...] = (),
+    error_message: str = "",
+) -> OdooPreviewDokployApplyResult:
+    plan = request.dry_run_plan
+    return OdooPreviewDokployApplyResult(
+        status=status,
+        operation=plan.operation,
+        product=plan.product,
+        repository=plan.repository,
+        preview_slug=plan.preview_slug,
+        preview_url=plan.preview_url,
+        domain_host=plan.domain_host,
+        compose_id=compose_id,
+        compose_name=plan.compose_name,
+        created_compose=created_compose,
+        domain_id=domain_id,
+        steps=steps,
+        rollback_errors=rollback_errors,
+        error_message=error_message,
+    )
 
 
 def _operations(
