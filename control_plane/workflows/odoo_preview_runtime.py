@@ -402,6 +402,7 @@ def _execute_refresh(
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     created_compose_id = ""
+    resolved_compose_id = ""
     domain_id = ""
     steps: list[OdooPreviewDokployApplyStep] = []
     try:
@@ -411,6 +412,7 @@ def _execute_refresh(
             plan=plan,
             steps=steps,
         )
+        resolved_compose_id = compose_id
         created_compose_id = (
             compose_id if plan.compose_ref.startswith("${created.composeId:") else ""
         )
@@ -498,7 +500,7 @@ def _execute_refresh(
         rollback_errors = _rollback_created_runtime(
             host=host,
             token=token,
-            domain_id=domain_id,
+            domain_id=domain_id if created_compose_id else "",
             compose_id=created_compose_id,
             delete_volumes=plan.delete_volumes,
         )
@@ -507,7 +509,7 @@ def _execute_refresh(
             status="fail",
             error_message=str(exc),
             domain_id=domain_id,
-            compose_id=created_compose_id,
+            compose_id=resolved_compose_id,
             created_compose=bool(created_compose_id),
             steps=tuple(steps),
             rollback_errors=rollback_errors,
