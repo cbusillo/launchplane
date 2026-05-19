@@ -52,6 +52,11 @@ title: Secrets
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
+- Deploy-time runtime key-safety reconciliation classifies Odoo preview runtime
+  secret bindings such as `ODOO_ADMIN_PASSWORD`, `ODOO_DB_PASSWORD`, and
+  `ODOO_MASTER_PASSWORD` as testing-only for the non-production `cm` and `opw`
+  testing contexts. It writes policy metadata only; operators still supply or
+  rotate the secret values through product-config managed secret writes.
 - Shared and production runtime mutations must execute through the deployed
   Launchplane service API or an operator UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
