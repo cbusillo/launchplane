@@ -191,14 +191,17 @@ the raw compose does not inherit the template runtime identity, renders
 Launchplane-owned raw compose source without publishing shared host ports,
 keeps the raw compose limited to Dokploy network attachment labels so Dokploy's
 compose-domain records own the HTTP/HTTPS routers, reconciles the preview domain,
-requires fresh-create dry-runs to carry the template compose id, creates new
+and defaults preview domain certificate management to `none` so public TLS is
+owned by the external edge wildcard certificate rather than Dokploy ACME.
+Fresh-create dry-runs must carry the template compose id; apply creates new
 preview composes on that template compose's Dokploy server, deploys the compose,
-and returns redacted step evidence. Destroy looks up
-domains for the matching preview compose, deletes the matching preview hostname,
-then deletes the compose with `deleteVolumes`. The adapter is not a generic local
-fallback: shared/provider execution still needs an approved non-production target
-and a caller surface that sources Launchplane-managed Dokploy credentials without
-printing secret values.
+and returns redacted step evidence. Destroy looks up domains for the matching
+preview compose, deletes the matching preview hostname, then deletes the compose
+with `deleteVolumes`; if the domain lookup is already empty and Dokploy reports
+the compose missing, destroy treats the runtime as already clean. The adapter is
+not a generic local fallback: shared/provider execution still needs an approved
+non-production target and a caller surface that sources Launchplane-managed
+Dokploy credentials without printing secret values.
 For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
 owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
 source revision evidence, module install/update evidence from rendered Odoo env,

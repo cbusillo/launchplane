@@ -1143,6 +1143,10 @@ post_launchplane_preview_lifecycle_grants \
   odoo-tenant-cm \
   cm \
   odoo-cm
+post_launchplane_preview_lifecycle_grants \
+  odoo-tenant-opw \
+  opw \
+  odoo-opw
 post_verireel_preview_grant \
   preview-control-plane.yml \
   preview_pr_feedback.write \
@@ -1219,6 +1223,33 @@ post_odoo_opw_preview_grant \
   odoo_artifact_publish.write \
   deploy:odoo-opw-preview-artifact-publish-grant \
   odoo-opw-preview-artifact-publish \
+  workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  preview_refresh.execute \
+  deploy:odoo-opw-preview-refresh-grant \
+  odoo-opw-preview-refresh
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  preview_pr_feedback.write \
+  deploy:odoo-opw-preview-pr-feedback-grant \
+  odoo-opw-preview-pr-feedback
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  preview_pr_feedback.write \
+  deploy:odoo-opw-preview-unsupported-feedback-grant \
+  odoo-opw-preview-unsupported-feedback \
+  pull_request_target
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  preview_destroy.execute \
+  deploy:odoo-opw-preview-destroy-pr-grant \
+  odoo-opw-preview-destroy-pr
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  preview_destroy.execute \
+  deploy:odoo-opw-preview-destroy-manual-grant \
+  odoo-opw-preview-destroy-manual \
   workflow_dispatch
 post_odoo_opw_preview_grant \
   odoo-tenant-opw \
