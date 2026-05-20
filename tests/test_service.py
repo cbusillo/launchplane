@@ -354,6 +354,21 @@ class _FakeMergeTrainSnapshotReader:
         )
 
 
+class _FakeEmptyMergeTrainSnapshotReader:
+    def __init__(self, *, transport: object) -> None:
+        self.transport = transport
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        return MergeTrainDryRunSnapshot(
+            repository=repository,
+            base_branch=base_branch,
+            base_sha="current-base-main",
+            pull_requests=(),
+        )
+
+
 class _FakeStackedMergeTrainSnapshotReader:
     def __init__(self, *, transport: object) -> None:
         self.transport = transport
@@ -2675,6 +2690,42 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(stop_status, 202)
         self.assertEqual(stop_payload["result"]["controller_action"], "candidate_failed")
         self.assertEqual(stop_payload["result"]["candidate"]["status"], "failed")
+
+    def test_merge_train_controller_returns_idle_without_eligible_pull_requests(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeEmptyMergeTrainSnapshotReader,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["controller_action"], "idle")
+        self.assertEqual(payload["result"]["dry_run_result"]["intended_next_action"], "idle")
+        self.assertNotIn("candidate", payload["result"])
 
     def test_merge_train_controller_advances_stacked_batch_flow(self) -> None:
         with (
