@@ -3007,7 +3007,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertIn("merge_train_batch_candidate_record_id", plan_payload["records"])
         self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
+        self.assertEqual(
+            payload["error"]["message"],
+            "merge train policy not found for cbusillo/sellyouroutboard:main",
+        )
 
     def test_merge_train_controller_rejects_planned_stack_after_policy_digest_changes(
         self,
