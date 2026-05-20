@@ -2996,6 +2996,7 @@ def _build_merge_train_pr_feedback_record(
     policy_sha256: str,
     token: str,
     recorded_at: str,
+    response_trace_id: str,
 ) -> MergeTrainPrFeedbackRecord:
     marker = merge_train_pr_feedback_marker(
         repository=request.repository,
@@ -3063,6 +3064,7 @@ def _build_merge_train_pr_feedback_record(
             event=request.event,
             marker=marker,
             recorded_at=recorded_at,
+            response_trace_id=response_trace_id,
         ),
         repository=request.repository,
         base_branch=request.base_branch,
@@ -8596,6 +8598,17 @@ def create_launchplane_service_app(
                 result["merge_train_run_id"] = run_record.run_id
             elif path == _MERGE_TRAIN_PR_FEEDBACK_ROUTE:
                 feedback_request = MergeTrainPrFeedbackEnvelope.model_validate(payload)
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 policy_record = resolve_merge_train_policy_record(record_store)
                 policy = policy_record.policy
                 repository_policy = policy.find_repository_policy(
@@ -8655,6 +8668,7 @@ def create_launchplane_service_app(
                     policy_sha256=policy_record.policy_sha256,
                     token=token,
                     recorded_at=_utc_now_timestamp(),
+                    response_trace_id=request_trace_id,
                 )
                 feedback_store.write_merge_train_pr_feedback_record(feedback_record)
                 result = {"feedback": feedback_record.model_dump(mode="json")}
