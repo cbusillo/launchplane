@@ -9800,7 +9800,16 @@ def create_launchplane_service_app(
                                         "stack_discovery": stack_discovery.model_dump(mode="json"),
                                     }
                                     driver_result = result
-                                elif dry_run_result.intended_next_action not in {"merge", "idle"}:
+                                elif dry_run_result.intended_next_action == "idle":
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run",
+                                        "controller_action": "idle",
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                                elif dry_run_result.intended_next_action != "merge":
                                     result = {
                                         "repository": controller_request.repository,
                                         "base_branch": controller_request.base_branch,
