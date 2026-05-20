@@ -430,6 +430,9 @@ jobs:
             --response-file "$response_file" \
             > "$feedback_payloads"
           feedback_count="$(jq 'length' "$feedback_payloads")"
+          if [ "$MERGE_TRAIN_MUTATE" != "true" ]; then
+            feedback_count=0
+          fi
           if [ "$feedback_count" -gt 0 ]; then
             feedback_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train/pr-feedback"
             feedback_index=0

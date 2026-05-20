@@ -318,6 +318,8 @@ the Level 1 `run-once` route. Manual dispatch or the scheduled repository
 variable `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE=controller` switches an admitted
 pass to one full-controller `run-once` call instead. This keeps activation
 explicit after setting `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`.
+Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
+is reserved for mutate runs and explicit manual phase workflows.
 Workflow dispatches may select at most one non-`none` phase input across
 batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
