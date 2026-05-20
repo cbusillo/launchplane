@@ -268,6 +268,12 @@ jobs:
               ;;
           esac
 
+      - name: Checkout runner helpers
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'controller'
+        uses: actions/checkout@v6
+
       - name: Run one merge-train pass
         if: >-
           steps.admission.outputs.admission_status == 'admitted' &&
@@ -416,6 +422,34 @@ jobs:
           fi
 
           jq . "$response_file"
+          feedback_payloads="launchplane-merge-train-controller-feedback.json"
+          python3 scripts/merge_train_controller_feedback.py \
+            --response-file "$response_file" \
+            > "$feedback_payloads"
+          feedback_count="$(jq 'length' "$feedback_payloads")"
+          if [ "$feedback_count" -gt 0 ]; then
+            feedback_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train/pr-feedback"
+            feedback_index=0
+            while IFS= read -r feedback_payload; do
+              feedback_index="$((feedback_index + 1))"
+              feedback_response="launchplane-merge-train-feedback-${feedback_index}.json"
+              feedback_status="$(curl -sS \
+                -o "$feedback_response" \
+                -w '%{http_code}' \
+                -X POST \
+                -H "Authorization: Bearer ${oidc_token}" \
+                -H 'Content-Type: application/json' \
+                --data "$feedback_payload" \
+                "$feedback_url")"
+              if [ "$feedback_status" != "202" ]; then
+                cat "$feedback_response" >&2
+                echo "Merge-train PR feedback failed" \
+                  "with HTTP ${feedback_status}." >&2
+                exit 1
+              fi
+              jq . "$feedback_response"
+            done < <(jq -c '.[]' "$feedback_payloads")
+          fi
           {
             echo
             echo '## Launchplane merge train controller'
@@ -440,6 +474,7 @@ jobs:
             echo "- Candidate record: ${candidate_record}"
             echo "- Landing-plan record: ${landing_record}"
             echo "- Stack-collapse record: ${stack_record}"
+            echo "- Feedback payloads: ${feedback_count}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run one batch-candidate phase
