@@ -257,6 +257,23 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_action, "build_candidate")
         self.assertEqual(decision.controller_candidate_record_id, candidate_record.record_id)
 
+    def test_ignores_stale_policy_controller_records_for_admission(self) -> None:
+        candidate_record = _candidate_record(status="planned")
+        store = _RunHistoryStore(None, candidate_records=(candidate_record,))
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256="new-policy-digest",
+        )
+
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.controller_action, "idle")
+        self.assertEqual(decision.controller_candidate_record_id, "")
+
     def test_builds_controller_status_read_model_from_store_records(self) -> None:
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)
@@ -282,6 +299,30 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(read_model.controller_records[0].merged_count, 1)
         self.assertEqual(read_model.controller_records[1].record_type, "batch_candidate")
         self.assertEqual(read_model.controller_records[1].pull_request_numbers, (42,))
+
+    def test_controller_status_marks_stale_policy_records_without_action(self) -> None:
+        candidate_record = _candidate_record(status="planned")
+        store = _RunHistoryStore(None, candidate_records=(candidate_record,))
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256="new-policy-digest",
+        )
+
+        self.assertEqual(read_model.current_policy_key, candidate_record.candidate.policy_key)
+        self.assertEqual(read_model.current_policy_sha256, "new-policy-digest")
+        self.assertEqual(read_model.admission.controller_action, "idle")
+        self.assertEqual(len(read_model.controller_records), 1)
+        self.assertEqual(read_model.controller_records[0].record_id, candidate_record.record_id)
+        self.assertEqual(read_model.controller_records[0].policy_status, "stale")
+        self.assertEqual(
+            read_model.controller_records[0].stale_reason,
+            "policy_digest_mismatch",
+        )
 
 
 def _run_record(

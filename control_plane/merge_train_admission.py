@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +15,8 @@ from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+
+MergeTrainControllerPolicyStatus = Literal["current", "stale", "unchecked"]
 
 
 class MergeTrainControllerRecords(BaseModel):
@@ -32,6 +34,10 @@ class MergeTrainControllerRecordSummary(BaseModel):
     record_type: str
     status: str
     updated_at: str
+    policy_key: str = ""
+    policy_sha256: str = ""
+    policy_status: MergeTrainControllerPolicyStatus = "unchecked"
+    stale_reason: str = ""
     batch_id: str = ""
     pull_request_numbers: tuple[int, ...] = ()
     candidate_sha: str = ""
@@ -50,6 +56,8 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     repository: str
     base_branch: str
     generated_at: str
+    current_policy_key: str = ""
+    current_policy_sha256: str = ""
     admission: MergeTrainAdmissionDecision
     latest_run: MergeTrainRunRecord | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
@@ -94,16 +102,23 @@ def evaluate_merge_train_admission_from_store(
     repository: str,
     base_branch: str,
     requested_at: str,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
 ) -> MergeTrainAdmissionDecision:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    actionable_records = _filter_actionable_controller_records(
+        controller_records=controller_records,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    )
     controller_decision = build_merge_train_controller_admission_decision(
-        candidate_records=controller_records.candidate_records,
-        landing_plan_records=controller_records.landing_plan_records,
-        stack_collapse_plan_records=controller_records.stack_collapse_plan_records,
+        candidate_records=actionable_records.candidate_records,
+        landing_plan_records=actionable_records.landing_plan_records,
+        stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
     )
     return evaluate_merge_train_admission(
         repository=repository,
@@ -125,16 +140,23 @@ def build_merge_train_controller_status_read_model(
     repository: str,
     base_branch: str,
     generated_at: str,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
 ) -> MergeTrainControllerStatusReadModel:
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    actionable_records = _filter_actionable_controller_records(
+        controller_records=controller_records,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    )
     controller_decision = build_merge_train_controller_admission_decision(
-        candidate_records=controller_records.candidate_records,
-        landing_plan_records=controller_records.landing_plan_records,
-        stack_collapse_plan_records=controller_records.stack_collapse_plan_records,
+        candidate_records=actionable_records.candidate_records,
+        landing_plan_records=actionable_records.landing_plan_records,
+        stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
     )
     latest_run = store.latest_merge_train_run_record(
         repository=repository,
@@ -153,10 +175,14 @@ def build_merge_train_controller_status_read_model(
         repository=repository,
         base_branch=base_branch,
         generated_at=generated_at,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
         admission=admission,
         latest_run=latest_run,
         controller_records=_summarize_controller_records(
             controller_records=controller_records,
+            current_policy_key=current_policy_key,
+            current_policy_sha256=current_policy_sha256,
         ),
     )
 
@@ -187,13 +213,34 @@ def _list_active_controller_records(
 
 
 def _summarize_controller_records(
-    *, controller_records: MergeTrainControllerRecords
+    *,
+    controller_records: MergeTrainControllerRecords,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
 ) -> tuple[MergeTrainControllerRecordSummary, ...]:
     summaries = [
-        *(_candidate_summary(record) for record in controller_records.candidate_records),
-        *(_landing_plan_summary(record) for record in controller_records.landing_plan_records),
         *(
-            _stack_collapse_summary(record)
+            _candidate_summary(
+                record,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
+            for record in controller_records.candidate_records
+        ),
+        *(
+            _landing_plan_summary(
+                record,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
+            for record in controller_records.landing_plan_records
+        ),
+        *(
+            _stack_collapse_summary(
+                record,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
             for record in controller_records.stack_collapse_plan_records
         ),
     ]
@@ -204,13 +251,26 @@ def _summarize_controller_records(
 
 def _candidate_summary(
     record: MergeTrainBatchCandidateRecord,
+    *,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
 ) -> MergeTrainControllerRecordSummary:
     candidate = record.candidate
+    policy_status, stale_reason = _policy_status_fields(
+        policy_key=candidate.policy_key,
+        policy_sha256=candidate.policy_sha256,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
         record_type="batch_candidate",
         status=candidate.status,
         updated_at=record.updated_at,
+        policy_key=candidate.policy_key,
+        policy_sha256=candidate.policy_sha256,
+        policy_status=policy_status,
+        stale_reason=stale_reason,
         batch_id=candidate.batch_id,
         pull_request_numbers=tuple(entry.pull_request_number for entry in candidate.entries),
         candidate_sha=candidate.candidate_sha,
@@ -220,16 +280,30 @@ def _candidate_summary(
 
 def _landing_plan_summary(
     record: MergeTrainBatchLandingPlanRecord,
+    *,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
 ) -> MergeTrainControllerRecordSummary:
     entries = record.landing_plan.entries
+    plan = record.landing_plan
+    policy_status, stale_reason = _policy_status_fields(
+        policy_key=plan.policy_key,
+        policy_sha256=plan.policy_sha256,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
         record_type="batch_landing_plan",
         status=_dominant_landing_status(record),
         updated_at=record.updated_at,
-        batch_id=record.landing_plan.batch_id,
+        policy_key=plan.policy_key,
+        policy_sha256=plan.policy_sha256,
+        policy_status=policy_status,
+        stale_reason=stale_reason,
+        batch_id=plan.batch_id,
         pull_request_numbers=tuple(entry.pull_request_number for entry in entries),
-        candidate_sha=record.landing_plan.candidate_sha,
+        candidate_sha=plan.candidate_sha,
         planned_count=sum(1 for entry in entries if entry.status == "planned"),
         merged_count=sum(1 for entry in entries if entry.status == "merged"),
         blocked_count=sum(1 for entry in entries if entry.status == "blocked"),
@@ -240,13 +314,26 @@ def _landing_plan_summary(
 
 def _stack_collapse_summary(
     record: MergeTrainStackCollapsePlanRecord,
+    *,
+    current_policy_key: str = "",
+    current_policy_sha256: str = "",
 ) -> MergeTrainControllerRecordSummary:
     plan = record.plan
+    policy_status, stale_reason = _policy_status_fields(
+        policy_key=plan.policy_key,
+        policy_sha256=plan.policy_sha256,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    )
     return MergeTrainControllerRecordSummary(
         record_id=record.record_id,
         record_type="stack_collapse_plan",
         status=plan.status,
         updated_at=record.updated_at,
+        policy_key=plan.policy_key,
+        policy_sha256=plan.policy_sha256,
+        policy_status=policy_status,
+        stale_reason=stale_reason,
         pull_request_numbers=tuple(entry.pull_request_number for entry in plan.entries),
         planned_count=sum(1 for mutation in plan.mutations if mutation.status == "planned"),
         merged_count=sum(1 for mutation in plan.mutations if mutation.status == "mutated"),
@@ -263,3 +350,76 @@ def _dominant_landing_status(record: MergeTrainBatchLandingPlanRecord) -> str:
         if status in statuses:
             return status
     return "merged"
+
+
+def _filter_actionable_controller_records(
+    *,
+    controller_records: MergeTrainControllerRecords,
+    current_policy_key: str,
+    current_policy_sha256: str,
+) -> MergeTrainControllerRecords:
+    if not current_policy_key and not current_policy_sha256:
+        return controller_records
+    return MergeTrainControllerRecords(
+        candidate_records=tuple(
+            record
+            for record in controller_records.candidate_records
+            if _policy_is_current(
+                policy_key=record.candidate.policy_key,
+                policy_sha256=record.candidate.policy_sha256,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
+        ),
+        landing_plan_records=tuple(
+            record
+            for record in controller_records.landing_plan_records
+            if _policy_is_current(
+                policy_key=record.landing_plan.policy_key,
+                policy_sha256=record.landing_plan.policy_sha256,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
+        ),
+        stack_collapse_plan_records=tuple(
+            record
+            for record in controller_records.stack_collapse_plan_records
+            if _policy_is_current(
+                policy_key=record.plan.policy_key,
+                policy_sha256=record.plan.policy_sha256,
+                current_policy_key=current_policy_key,
+                current_policy_sha256=current_policy_sha256,
+            )
+        ),
+    )
+
+
+def _policy_status_fields(
+    *,
+    policy_key: str,
+    policy_sha256: str,
+    current_policy_key: str,
+    current_policy_sha256: str,
+) -> tuple[MergeTrainControllerPolicyStatus, str]:
+    if not current_policy_key and not current_policy_sha256:
+        return "unchecked", ""
+    if _policy_is_current(
+        policy_key=policy_key,
+        policy_sha256=policy_sha256,
+        current_policy_key=current_policy_key,
+        current_policy_sha256=current_policy_sha256,
+    ):
+        return "current", ""
+    if policy_key != current_policy_key:
+        return "stale", "policy_key_mismatch"
+    return "stale", "policy_digest_mismatch"
+
+
+def _policy_is_current(
+    *,
+    policy_key: str,
+    policy_sha256: str,
+    current_policy_key: str,
+    current_policy_sha256: str,
+) -> bool:
+    return policy_key == current_policy_key and policy_sha256 == current_policy_sha256

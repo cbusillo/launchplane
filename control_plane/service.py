@@ -7871,6 +7871,8 @@ def create_launchplane_service_app(
                         repository=admission_request.repository,
                         base_branch=admission_request.base_branch,
                         requested_at=_utc_now_timestamp(),
+                        current_policy_key=repository_policy.policy_key,
+                        current_policy_sha256=policy_record.policy_sha256,
                     )
                     return _json_response(
                         start_response=start_response,
@@ -7917,6 +7919,8 @@ def create_launchplane_service_app(
                         repository=status_request.repository,
                         base_branch=status_request.base_branch,
                         generated_at=_utc_now_timestamp(),
+                        current_policy_key=repository_policy.policy_key,
+                        current_policy_sha256=policy_record.policy_sha256,
                     )
                     return _json_response(
                         start_response=start_response,

@@ -244,7 +244,9 @@ mutation.
 model for the same repository/base branch. It uses the same authorization as the
 policy route, performs no GitHub reads, and composes stored scheduler admission,
 latest Level 1 run history, active batch candidates, landing plans, and
-stack-collapse plans. Operators can use this route to see the current controller
+stack-collapse plans. Only records that match the active repository policy key
+and digest can drive the advertised controller action; stale records stay visible
+with a stale reason. Operators can use this route to see the current controller
 action, durable record ids, PR numbers, candidate SHA/check state, and compact
 entry counts without invoking a worker mutation.
 
