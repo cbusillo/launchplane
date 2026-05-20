@@ -484,8 +484,11 @@ Operator views can read the broader stored controller state from
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
 That route returns the same admission decision plus the latest Level 1 run record
 and compact summaries for active batch candidates, landing plans, and stack
-collapse plans. It is also store-only, so it can power dashboards and status
-summaries without consuming GitHub API capacity or advancing the train.
+collapse plans. Stored controller records only influence the advertised
+controller action when their policy key and digest match the active repository
+policy; stale records remain visible in the summaries with a stale reason. It is
+also store-only, so it can power dashboards and status summaries without
+consuming GitHub API capacity or advancing the train.
 
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` uses
 that admission route before every worker call. It defaults to the Level 1
