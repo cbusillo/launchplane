@@ -12,6 +12,7 @@ import { SkeletonRows, StateBlock, StatusIcon, StatusPill } from "./status-ui";
 import type {
   MergeTrainControllerRecordSummary,
   MergeTrainControllerStatus,
+  MergeTrainDryRunQueueEntrySummary,
   MergeTrainPolicyTarget,
   ProductSiteOverview,
   Status,
@@ -271,6 +272,9 @@ export function MergeTrainControllerPanel({
               <code>{formatTime(status.latest_run.recorded_at)}</code>
             </div>
           ) : null}
+          {status.latest_dry_run ? (
+            <MergeTrainDryRunSummary status={status} />
+          ) : null}
           <div className="merge-train-record-list">
             {status.controller_records.length ? (
               status.controller_records
@@ -288,6 +292,67 @@ export function MergeTrainControllerPanel({
         </>
       ) : null}
     </section>
+  );
+}
+
+function MergeTrainDryRunSummary({
+  status,
+}: {
+  status: MergeTrainControllerStatus;
+}) {
+  const dryRun = status.latest_dry_run;
+  if (!dryRun) {
+    return null;
+  }
+  const visibleEntries = dryRun.queue_entries.slice(0, 3);
+  return (
+    <div className="merge-train-dry-run">
+      <span>
+        <Route size={15} aria-hidden="true" />
+        <strong>
+          {dryRun.next_action_detail || dryRun.intended_next_action}
+        </strong>
+        <code>{dryRun.intended_next_action}</code>
+      </span>
+      <span className="merge-train-record-meta">
+        <code>{dryRun.queue_count} queued</code>
+        <code>{dryRun.eligible_count} eligible</code>
+        {dryRun.selected_pr_number ? (
+          <code>selected PR {dryRun.selected_pr_number}</code>
+        ) : null}
+      </span>
+      {visibleEntries.length ? (
+        <div className="merge-train-dry-run-entries">
+          {visibleEntries.map((entry) => (
+            <MergeTrainDryRunEntry
+              key={entry.pull_request_number}
+              entry={entry}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MergeTrainDryRunEntry({
+  entry,
+}: {
+  entry: MergeTrainDryRunQueueEntrySummary;
+}) {
+  return (
+    <span className="merge-train-dry-run-entry" data-eligible={entry.eligible}>
+      <StatusIcon status={entry.eligible ? "pass" : "blocked"} />
+      <strong>PR {entry.pull_request_number}</strong>
+      <span>{entry.title}</span>
+      <code>
+        {entry.eligible
+          ? `${entry.mergeable || "mergeable"} / ${
+              entry.required_checks_status || "checks unknown"
+            }`
+          : entry.ineligible_reasons.join(", ") || "not eligible"}
+      </code>
+    </span>
   );
 }
 

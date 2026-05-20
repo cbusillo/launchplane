@@ -465,6 +465,42 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             {"batch_candidate", "batch_landing_plan", "stack_collapse_plan"},
         )
 
+    def test_controller_status_summarizes_latest_dry_run_queue(self) -> None:
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+        store = _RunHistoryStore(latest_run)
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertIsNotNone(read_model.latest_dry_run)
+        assert read_model.latest_dry_run is not None
+        self.assertEqual(read_model.latest_dry_run.intended_next_action, "idle")
+        self.assertEqual(read_model.latest_dry_run.queue_count, 1)
+        self.assertEqual(read_model.latest_dry_run.eligible_count, 0)
+        self.assertIsNone(read_model.latest_dry_run.selected_pr_number)
+        self.assertEqual(
+            read_model.latest_dry_run.queue_entries[0].pull_request_number,
+            42,
+        )
+
+    def test_controller_status_omits_latest_dry_run_summary_for_mutations(self) -> None:
+        store = _RunHistoryStore(
+            _run_record(recorded_at="2026-05-09T02:10:00Z", mutation="wait")
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertIsNone(read_model.latest_dry_run)
+
 
 def _run_record(
     *,
@@ -507,7 +543,31 @@ def _run_record(
 
 
 def _idle_run_record(*, recorded_at: str) -> MergeTrainRunRecord:
-    return _run_record(recorded_at=recorded_at).model_copy(
+    run_record = _run_record(recorded_at=recorded_at)
+    queue = run_record.dry_run_result.get("queue")
+    idle_queue = (
+        tuple(
+            {
+                **entry,
+                "eligible": False,
+                "ineligible_reasons": ("missing ready-to-merge label",),
+                "labels": (),
+            }
+            for entry in queue
+            if isinstance(entry, dict)
+        )
+        if isinstance(queue, list | tuple)
+        else ()
+    )
+    dry_run_result = {
+        **run_record.dry_run_result,
+        "intended_next_action": "idle",
+        "next_action_detail": "No eligible pull requests are queued.",
+        "queue_order": [],
+        "queue": idle_queue,
+        "selected_pr": None,
+    }
+    return run_record.model_copy(
         update={
             "status": "idle",
             "intended_next_action": "idle",
@@ -515,6 +575,7 @@ def _idle_run_record(*, recorded_at: str) -> MergeTrainRunRecord:
             "selected_head_sha": "",
             "selected_mergeable": "",
             "selected_required_checks_status": "",
+            "dry_run_result": dry_run_result,
         }
     )
 

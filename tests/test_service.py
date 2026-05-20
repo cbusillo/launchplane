@@ -4693,6 +4693,39 @@ class LaunchplaneServiceTests(unittest.TestCase):
             [1],
         )
 
+    def test_merge_train_controller_status_service_reports_dry_run_queue(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir)
+            _seed_merge_train_policy(state_dir)
+            run_record = _merge_train_run_record(recorded_at="2026-05-20T12:00:00Z")
+            store.write_merge_train_run_record(run_record)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                side_effect=AssertionError("status must not read GitHub"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/work-graph/merge-train/controller/status",
+                    query_string="repository=cbusillo/sellyouroutboard&base_branch=main",
+                )
+
+        self.assertEqual(status_code, 200)
+        latest_dry_run = payload["controller_status"]["latest_dry_run"]
+        self.assertEqual(latest_dry_run["intended_next_action"], "merge")
+        self.assertEqual(latest_dry_run["queue_count"], 1)
+        self.assertEqual(latest_dry_run["eligible_count"], 1)
+        self.assertEqual(latest_dry_run["selected_pr_number"], 1)
+        self.assertEqual(latest_dry_run["queue_entries"][0]["pull_request_number"], 1)
+        self.assertEqual(latest_dry_run["queue_entries"][0]["eligible"], True)
+
     def test_merge_train_controller_status_service_marks_stale_policy_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
