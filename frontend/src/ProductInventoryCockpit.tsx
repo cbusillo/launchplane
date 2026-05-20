@@ -10,6 +10,7 @@ import type {
   EveryCodeWorkRequestRecord,
   ProductSiteOverview,
   MergeTrainControllerStatus,
+  MergeTrainPolicyTarget,
   WorkGraphQueueItem,
 } from "./types";
 import {
@@ -32,6 +33,7 @@ export function ProductInventoryCockpit({
   onWorkGraphFilterChange,
   onWorkGraphModeChange,
   readMergeTrainStatus,
+  readMergeTrainPolicyTargets,
 }: {
   products: ProductSiteOverview[];
   selectedProduct: ProductSiteOverview | null;
@@ -50,6 +52,9 @@ export function ProductInventoryCockpit({
     baseBranch: string,
     signal?: AbortSignal,
   ) => Promise<{ controller_status: MergeTrainControllerStatus }>;
+  readMergeTrainPolicyTargets?: (
+    signal?: AbortSignal,
+  ) => Promise<{ targets: MergeTrainPolicyTarget[] }>;
 }) {
   const activeWork = workRequests.filter((request) =>
     ["queued", "claimed", "running", "blocked"].includes(request.state),
@@ -159,6 +164,7 @@ export function ProductInventoryCockpit({
         workGraphItems={workGraphItems}
         loading={loading}
         readStatus={readMergeTrainStatus}
+        readPolicyTargets={readMergeTrainPolicyTargets}
       />
       <EveryCodeQueue requests={activeWork} loading={loading} />
     </section>

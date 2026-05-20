@@ -461,6 +461,34 @@ def _seed_merge_train_policy(
     return record
 
 
+def _merge_train_policy_table(repository: str, base_branch: str = "main") -> str:
+    return f"""[[policies]]
+repository = "{repository}"
+base_branch = "{base_branch}"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
+merge_method = "merge"
+failure_policy = "pause_train"
+
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GH_TOKEN"
+"""
+
+
 def _merge_train_run_record(
     *,
     recorded_at: str,
@@ -4038,6 +4066,78 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["admission"]["repository"], "cbusillo/codex-skills")
         self.assertEqual(payload["admission"]["base_branch"], "main")
         self.assertEqual(payload["admission"]["status"], "admitted")
+
+    def test_merge_train_policy_targets_service_lists_authorized_policy_targets(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-targets-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=parse_merge_train_policy_toml(
+                        "\n\n".join(
+                            (
+                                "schema_version = 1",
+                                _merge_train_policy_table(
+                                    "cbusillo/sellyouroutboard", "release"
+                                ),
+                                _merge_train_policy_table(
+                                    "cbusillo/codex-skills", "main"
+                                ),
+                            )
+                        )
+                    ),
+                ),
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                side_effect=AssertionError("policy target reads must not read GitHub"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/work-graph/merge-train/policy-targets",
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["policy"]["record_id"], policy_record.record_id)
+        self.assertEqual(payload["policy"]["policy_sha256"], policy_record.policy_sha256)
+        self.assertEqual(
+            payload["targets"],
+            [
+                {
+                    "repository": "cbusillo/codex-skills",
+                    "base_branch": "main",
+                    "policy_key": "cbusillo/codex-skills:main",
+                    "service_authz": {
+                        "action": "merge_train.run_once",
+                        "product": "launchplane",
+                        "context": "launchplane",
+                    },
+                },
+                {
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "release",
+                    "policy_key": "cbusillo/sellyouroutboard:release",
+                    "service_authz": {
+                        "action": "merge_train.run_once",
+                        "product": "launchplane",
+                        "context": "launchplane",
+                    },
+                },
+            ],
+        )
 
     def test_merge_train_admission_service_admits_without_prior_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

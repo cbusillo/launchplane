@@ -11,6 +11,7 @@ import type {
   GenericWebPromotionWorkflowRequest,
   LogoutPayload,
   MergeTrainControllerStatusPayload,
+  MergeTrainPolicyTargetsPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
   ProductConfigApplyResponsePayload,
@@ -172,6 +173,17 @@ export function readMergeTrainControllerStatus(
   });
   return requestJson<MergeTrainControllerStatusPayload>(
     `/v1/work-graph/merge-train/controller/status?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function readMergeTrainPolicyTargets(
+  signal?: AbortSignal,
+): Promise<MergeTrainPolicyTargetsPayload> {
+  return requestJson<MergeTrainPolicyTargetsPayload>(
+    "/v1/work-graph/merge-train/policy-targets",
     "GET",
     undefined,
     signal,

@@ -1,13 +1,18 @@
 import { GitMerge, ListChecks, RefreshCw, Route } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-import { LaunchplaneApiError, readMergeTrainControllerStatus } from "./api";
+import {
+  LaunchplaneApiError,
+  readMergeTrainControllerStatus,
+  readMergeTrainPolicyTargets,
+} from "./api";
 import { formatTime } from "./format";
 import { MetricTile, PanelHead } from "./panel-ui";
 import { SkeletonRows, StateBlock, StatusIcon, StatusPill } from "./status-ui";
 import type {
   MergeTrainControllerRecordSummary,
   MergeTrainControllerStatus,
+  MergeTrainPolicyTarget,
   ProductSiteOverview,
   Status,
   WorkGraphQueueItem,
@@ -23,8 +28,9 @@ type MergeTrainStatusReader = (
   baseBranch: string,
   signal?: AbortSignal,
 ) => Promise<{ controller_status: MergeTrainControllerStatus }>;
-
-const DEFAULT_BASE_BRANCH = "main";
+type MergeTrainPolicyTargetsReader = (
+  signal?: AbortSignal,
+) => Promise<{ targets: MergeTrainPolicyTarget[] }>;
 
 export function MergeTrainControllerPanel({
   products,
@@ -32,16 +38,22 @@ export function MergeTrainControllerPanel({
   workGraphItems,
   loading,
   readStatus = readMergeTrainControllerStatus,
+  readPolicyTargets = readMergeTrainPolicyTargets,
 }: {
   products: ProductSiteOverview[];
   selectedProduct: ProductSiteOverview | null;
   workGraphItems: WorkGraphQueueItem[];
   loading: boolean;
   readStatus?: MergeTrainStatusReader;
+  readPolicyTargets?: MergeTrainPolicyTargetsReader;
 }) {
+  const [policyTargets, setPolicyTargets] = useState<MergeTrainPolicyTarget[]>(
+    [],
+  );
+  const [targetsLoading, setTargetsLoading] = useState(false);
   const targets = useMemo(
-    () => mergeTrainTargets(products, workGraphItems),
-    [products, workGraphItems],
+    () => mergeTrainTargets(policyTargets, products, workGraphItems),
+    [policyTargets, products, workGraphItems],
   );
   const preferredTarget = preferredMergeTrainTarget(targets, selectedProduct);
   const [targetKey, setTargetKey] = useState(() =>
@@ -52,6 +64,42 @@ export function MergeTrainControllerPanel({
   const [error, setError] = useState("");
   const [traceId, setTraceId] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setTargetsLoading(true);
+    setError("");
+    setTraceId("");
+    readPolicyTargets(controller.signal)
+      .then((payload) => {
+        if (!controller.signal.aborted) {
+          setPolicyTargets(payload.targets);
+        }
+      })
+      .catch((apiError: unknown) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setPolicyTargets([]);
+        setStatus(null);
+        if (apiError instanceof LaunchplaneApiError) {
+          setError(apiError.message);
+          setTraceId(apiError.traceId);
+        } else if (apiError instanceof Error) {
+          setError(apiError.message);
+          setTraceId("");
+        } else {
+          setError("Merge train policy target request failed.");
+          setTraceId("");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setTargetsLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [readPolicyTargets, refreshKey]);
 
   useEffect(() => {
     if (!targets.length) {
@@ -123,7 +171,10 @@ export function MergeTrainControllerPanel({
   );
 
   return (
-    <section className="merge-train-panel" aria-busy={loading || statusLoading}>
+    <section
+      className="merge-train-panel"
+      aria-busy={loading || targetsLoading || statusLoading}
+    >
       <PanelHead
         eyebrow="merge train"
         title="Controller status"
@@ -135,7 +186,7 @@ export function MergeTrainControllerPanel({
           <select
             value={selectedTarget ? targetKeyFor(selectedTarget) : ""}
             onChange={(event) => setTargetKey(event.target.value)}
-            disabled={!targets.length || statusLoading}
+            disabled={!targets.length || targetsLoading || statusLoading}
             aria-label="Merge train repository"
           >
             {targets.map((target) => (
@@ -151,13 +202,16 @@ export function MergeTrainControllerPanel({
           title="Refresh merge train controller status"
           aria-label="Refresh merge train controller status"
           onClick={() => setRefreshKey((value) => value + 1)}
-          disabled={!selectedTarget || statusLoading}
+          disabled={targetsLoading || statusLoading}
         >
-          <RefreshCw size={16} className={statusLoading ? "spin" : ""} />
+          <RefreshCw
+            size={16}
+            className={targetsLoading || statusLoading ? "spin" : ""}
+          />
         </button>
       </div>
-      {loading || statusLoading ? <SkeletonRows /> : null}
-      {!selectedTarget && !loading ? (
+      {loading || targetsLoading || statusLoading ? <SkeletonRows /> : null}
+      {!selectedTarget && !loading && !targetsLoading ? (
         <StateBlock icon={<Route size={18} />} title="No merge train target" />
       ) : null}
       {error ? (
@@ -273,44 +327,67 @@ function MergeTrainRecordRow({
 }
 
 function mergeTrainTargets(
+  policyTargets: MergeTrainPolicyTarget[],
   products: ProductSiteOverview[],
   workGraphItems: WorkGraphQueueItem[],
 ): MergeTrainTarget[] {
-  const targetByKey = new Map<string, MergeTrainTarget>();
+  const labelsByRepository = mergeTrainLabelsByRepository(
+    products,
+    workGraphItems,
+  );
+  return policyTargets
+    .filter((target) => target.repository.trim() && target.base_branch.trim())
+    .map((target) => ({
+      repository: target.repository.trim(),
+      baseBranch: target.base_branch.trim(),
+      label: targetLabel(target, labelsByRepository),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function mergeTrainLabelsByRepository(
+  products: ProductSiteOverview[],
+  workGraphItems: WorkGraphQueueItem[],
+): Map<string, string> {
+  const labelsByRepository = new Map<string, string>();
   for (const product of products) {
-    addTarget(targetByKey, {
-      repository: product.repository,
-      baseBranch: DEFAULT_BASE_BRANCH,
-      label: product.display_name || product.product || product.repository,
-    });
+    setRepositoryLabel(
+      labelsByRepository,
+      product.repository,
+      product.display_name || product.product || product.repository,
+    );
   }
   for (const item of workGraphItems) {
-    addTarget(targetByKey, {
-      repository: item.repository,
-      baseBranch: DEFAULT_BASE_BRANCH,
-      label: item.product_display_name || item.product || item.repository,
-    });
+    setRepositoryLabel(
+      labelsByRepository,
+      item.repository,
+      item.product_display_name || item.product || item.repository,
+    );
   }
-  return [...targetByKey.values()].sort((left, right) =>
-    left.label.localeCompare(right.label),
+  return labelsByRepository;
+}
+
+function setRepositoryLabel(
+  labelsByRepository: Map<string, string>,
+  repository: string,
+  label: string,
+) {
+  const normalizedRepository = repository.trim();
+  if (!normalizedRepository || labelsByRepository.has(normalizedRepository)) {
+    return;
+  }
+  labelsByRepository.set(
+    normalizedRepository,
+    label.trim() || normalizedRepository,
   );
 }
 
-function addTarget(
-  targetByKey: Map<string, MergeTrainTarget>,
-  target: MergeTrainTarget,
-) {
-  if (!target.repository.trim()) {
-    return;
-  }
-  const key = targetKeyFor(target);
-  if (!targetByKey.has(key)) {
-    targetByKey.set(key, {
-      repository: target.repository.trim(),
-      baseBranch: target.baseBranch.trim() || DEFAULT_BASE_BRANCH,
-      label: target.label.trim() || target.repository.trim(),
-    });
-  }
+function targetLabel(
+  target: MergeTrainPolicyTarget,
+  labelsByRepository: Map<string, string>,
+): string {
+  const label = labelsByRepository.get(target.repository) ?? target.repository;
+  return `${label} (${target.base_branch})`;
 }
 
 function preferredMergeTrainTarget(
