@@ -36,6 +36,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -3735,6 +3736,62 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["admission"]["latest_run_id"], wait_record.run_id)
         self.assertEqual(payload["admission"]["latest_run_status"], "waiting")
         self.assertEqual(payload["admission"]["next_allowed_at"], "2999-01-01T00:01:00Z")
+
+    def test_merge_train_admission_service_reports_controller_record_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir)
+            _seed_merge_train_policy(state_dir)
+            policy = build_test_merge_train_policy()
+            snapshot = _FakeMergeTrainSnapshotReader(transport=object()).read_merge_train_snapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )
+            dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+            candidate = build_merge_train_batch_candidate(
+                dry_run_result=dry_run_result,
+                base_sha=snapshot.base_sha,
+                policy_sha256=policy.policy_sha256,
+                created_at="2026-05-20T12:00:00Z",
+            ).model_copy(
+                update={
+                    "candidate_sha": "candidate-sha",
+                    "required_checks_status": "pending",
+                    "status": "ready_for_checks",
+                    "updated_at": "2026-05-20T12:01:00Z",
+                }
+            )
+            candidate_record = build_merge_train_batch_candidate_record(
+                candidate=candidate,
+                source="test:admission-controller-state",
+                updated_at="2026-05-20T12:01:00Z",
+            )
+            store.write_merge_train_batch_candidate_record(candidate_record)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                side_effect=AssertionError("admission must not read GitHub"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/work-graph/merge-train/admission",
+                    query_string="repository=cbusillo/sellyouroutboard&base_branch=main",
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["admission"]["status"], "admitted")
+        self.assertEqual(payload["admission"]["controller_action"], "observe_candidate")
+        self.assertEqual(
+            payload["admission"]["controller_candidate_record_id"],
+            candidate_record.record_id,
+        )
+        self.assertEqual(payload["admission"]["controller_landing_plan_record_id"], "")
 
     def test_merge_train_admission_service_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
