@@ -558,12 +558,16 @@ def _execute_destroy(
         for domain_id in domain_ids:
             _delete_domain(host=host, token=token, domain_id=domain_id)
             steps.append(_step("domain_delete", domain_id))
-        _delete_compose(
-            host=host,
-            token=token,
-            compose_id=compose_id,
-            delete_volumes=plan.delete_volumes,
-        )
+        try:
+            _delete_compose(
+                host=host,
+                token=token,
+                compose_id=compose_id,
+                delete_volumes=plan.delete_volumes,
+            )
+        except click.ClickException as exc:
+            if domain_ids or not _is_compose_delete_not_found(exc):
+                raise
         steps.append(_step("compose_delete", compose_id))
         return _apply_result(
             request=request,
@@ -659,6 +663,11 @@ def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: b
         method="POST",
         payload={"composeId": compose_id, "deleteVolumes": delete_volumes},
     )
+
+
+def _is_compose_delete_not_found(exc: click.ClickException) -> bool:
+    message = str(exc).lower()
+    return "/api/compose.delete" in message and "404" in message
 
 
 def _rollback_created_runtime(

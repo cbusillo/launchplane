@@ -224,25 +224,50 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "odoo",
                 "odoo_artifact_publish_inputs.read",
                 "deploy:odoo-opw-preview-artifact-publish-inputs-manual-grant",
-            ),
+            ): ["workflow_dispatch"],
             (
                 "odoo",
                 "odoo_artifact_publish.write",
                 "deploy:odoo-opw-preview-artifact-publish-grant",
-            ),
+            ): ["workflow_dispatch"],
+            (
+                "odoo-tenant-opw",
+                "preview_refresh.execute",
+                "deploy:odoo-opw-preview-refresh-grant",
+            ): ["pull_request"],
+            (
+                "odoo-tenant-opw",
+                "preview_pr_feedback.write",
+                "deploy:odoo-opw-preview-pr-feedback-grant",
+            ): ["pull_request"],
+            (
+                "odoo-tenant-opw",
+                "preview_pr_feedback.write",
+                "deploy:odoo-opw-preview-unsupported-feedback-grant",
+            ): ["pull_request_target"],
+            (
+                "odoo-tenant-opw",
+                "preview_destroy.execute",
+                "deploy:odoo-opw-preview-destroy-pr-grant",
+            ): ["pull_request"],
+            (
+                "odoo-tenant-opw",
+                "preview_destroy.execute",
+                "deploy:odoo-opw-preview-destroy-manual-grant",
+            ): ["workflow_dispatch"],
             (
                 "odoo-tenant-opw",
                 "odoo_preview_apply.execute",
                 "deploy:odoo-opw-preview-apply-manual-grant",
-            ),
+            ): ["workflow_dispatch"],
         }
 
-        self.assertLessEqual(expected_grants, set(grant_index))
-        for key in expected_grants:
+        self.assertLessEqual(set(expected_grants), set(grant_index))
+        for key, event_names in expected_grants.items():
             grant = grant_index[key]
             self.assertEqual(grant["repository"], "cbusillo/odoo-tenant-opw")
             self.assertEqual(grant["contexts"], ["opw"])
-            self.assertEqual(grant["event_names"], ["workflow_dispatch"])
+            self.assertEqual(grant["event_names"], event_names)
             self.assertEqual(
                 grant["workflow_refs"],
                 ["cbusillo/odoo-tenant-opw/.github/workflows/odoo-preview.yml@*"],
