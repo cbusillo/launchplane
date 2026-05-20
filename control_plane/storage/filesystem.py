@@ -29,6 +29,9 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_pr_feedback_record import (
+    MergeTrainPrFeedbackRecord,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -183,6 +186,36 @@ class FilesystemRecordStore:
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
         return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+
+    def write_merge_train_pr_feedback_record(
+        self, record: MergeTrainPrFeedbackRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_pr_feedback", record.feedback_id, record
+        )
+
+    def list_merge_train_pr_feedback_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainPrFeedbackRecord,
+                "launchplane_merge_train_pr_feedback",
+            )
+            if (not repository or record.repository == repository)
+            and (not base_branch or record.base_branch == base_branch)
+            and (pr_number is None or record.pull_request_number == pr_number)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.feedback_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def write_merge_train_batch_candidate_record(
         self, record: MergeTrainBatchCandidateRecord

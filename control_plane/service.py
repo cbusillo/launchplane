@@ -97,6 +97,12 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_pr_feedback_record import (
+    MergeTrainPrFeedbackEvent,
+    MergeTrainPrFeedbackRecord,
+    build_merge_train_pr_feedback_id,
+    merge_train_pr_feedback_marker,
+)
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
 from control_plane.merge_train_policy_source import (
@@ -299,9 +305,13 @@ from control_plane.workflows.preview_pr_feedback import (
     handle_every_code_preview_validation_comment,
 )
 from control_plane.workflows.launchplane import (
+    create_github_issue_comment,
+    find_github_issue_comment_by_marker,
     find_preview_record,
+    _github_comment_url,
     launchplane_anchor_repo_context,
     resolve_launchplane_github_token,
+    update_github_issue_comment,
     verify_github_webhook_signature,
 )
 from control_plane.workflows.odoo_artifact_publish import (
@@ -387,6 +397,7 @@ _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
+_MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
 
@@ -540,6 +551,36 @@ class MergeTrainAdmissionEnvelope(BaseModel):
             raise ValueError("merge train repository must be owner/name")
         if not self.base_branch:
             raise ValueError("merge train admission requires base_branch")
+        return self
+
+
+class MergeTrainPrFeedbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    repository: str
+    base_branch: str = "main"
+    pull_request_number: int = Field(gt=0)
+    event: MergeTrainPrFeedbackEvent
+    source: str = ""
+    controller_action: str = ""
+    controller_record_id: str = ""
+    message: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainPrFeedbackEnvelope":
+        self.repository = self.repository.strip()
+        self.base_branch = self.base_branch.strip()
+        self.source = self.source.strip()
+        self.controller_action = self.controller_action.strip()
+        self.controller_record_id = self.controller_record_id.strip()
+        self.message = self.message.strip()
+        if not self.repository:
+            raise ValueError("merge train PR feedback requires repository")
+        if "/" not in self.repository:
+            raise ValueError("merge train repository must be owner/name")
+        if not self.base_branch:
+            raise ValueError("merge train PR feedback requires base_branch")
         return self
 
 
@@ -2599,6 +2640,7 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
+        _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
@@ -2902,6 +2944,31 @@ def _merge_train_stack_collapse_plan_record_store(
     raise TypeError("record store does not support merge train stack collapse plans")
 
 
+class _MergeTrainPrFeedbackRecordStore(Protocol):
+    def write_merge_train_pr_feedback_record(
+        self, record: MergeTrainPrFeedbackRecord
+    ) -> object: ...
+
+    def list_merge_train_pr_feedback_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPrFeedbackRecord, ...]: ...
+
+
+def _merge_train_pr_feedback_record_store(
+    record_store: object,
+) -> _MergeTrainPrFeedbackRecordStore:
+    if hasattr(record_store, "write_merge_train_pr_feedback_record") and hasattr(
+        record_store, "list_merge_train_pr_feedback_records"
+    ):
+        return cast(_MergeTrainPrFeedbackRecordStore, record_store)
+    raise TypeError("record store does not support merge train PR feedback records")
+
+
 def _merge_train_snapshot_has_stack_topology(
     *, snapshot: MergeTrainDryRunSnapshot, dry_run_result: MergeTrainDryRunResult
 ) -> bool:
@@ -2920,6 +2987,138 @@ def _merge_train_snapshot_has_stack_topology(
             )
         )
     return False
+
+
+def _build_merge_train_pr_feedback_record(
+    *,
+    request: MergeTrainPrFeedbackEnvelope,
+    policy_key: str,
+    policy_sha256: str,
+    token: str,
+    recorded_at: str,
+) -> MergeTrainPrFeedbackRecord:
+    marker = merge_train_pr_feedback_marker(
+        repository=request.repository,
+        base_branch=request.base_branch,
+        pull_request_number=request.pull_request_number,
+    )
+    comment_markdown = _render_merge_train_pr_feedback_markdown(
+        marker=marker,
+        request=request,
+    )
+    delivery_status: Literal["delivered", "skipped", "failed"] = "skipped"
+    delivery_action = ""
+    comment_id = 0
+    comment_url = ""
+    error_message = ""
+    owner, repo = request.repository.split("/", 1)
+    if not token:
+        error_message = "Configured merge train GitHub token is not available."
+    else:
+        try:
+            existing_comment = find_github_issue_comment_by_marker(
+                owner=owner,
+                repo=repo,
+                issue_number=request.pull_request_number,
+                token=token,
+                marker=marker,
+            )
+            if existing_comment is not None:
+                existing_comment_id = existing_comment.get("id")
+                if not isinstance(existing_comment_id, int):
+                    raise click.ClickException(
+                        "Existing merge train feedback comment is missing a numeric id."
+                    )
+                updated_comment = update_github_issue_comment(
+                    owner=owner,
+                    repo=repo,
+                    comment_id=existing_comment_id,
+                    token=token,
+                    body=comment_markdown,
+                )
+                delivery_action = "updated_comment"
+                comment_id = existing_comment_id
+                comment_url = _github_comment_url(updated_comment)
+            else:
+                created_comment = create_github_issue_comment(
+                    owner=owner,
+                    repo=repo,
+                    issue_number=request.pull_request_number,
+                    token=token,
+                    body=comment_markdown,
+                )
+                created_comment_id = created_comment.get("id")
+                delivery_action = "created_comment"
+                comment_id = created_comment_id if isinstance(created_comment_id, int) else 0
+                comment_url = _github_comment_url(created_comment)
+            delivery_status = "delivered"
+        except click.ClickException as exc:
+            delivery_status = "failed"
+            error_message = str(exc)
+    return MergeTrainPrFeedbackRecord(
+        feedback_id=build_merge_train_pr_feedback_id(
+            repository=request.repository,
+            base_branch=request.base_branch,
+            pull_request_number=request.pull_request_number,
+            event=request.event,
+            marker=marker,
+            recorded_at=recorded_at,
+        ),
+        repository=request.repository,
+        base_branch=request.base_branch,
+        pull_request_number=request.pull_request_number,
+        pull_request_url=(
+            f"https://github.com/{request.repository}/pull/{request.pull_request_number}"
+        ),
+        event=request.event,
+        marker=marker,
+        comment_markdown=comment_markdown,
+        source=request.source or "service:merge-train-pr-feedback",
+        recorded_at=recorded_at,
+        policy_key=policy_key,
+        policy_sha256=policy_sha256,
+        controller_action=request.controller_action,
+        controller_record_id=request.controller_record_id,
+        delivery_status=delivery_status,
+        delivery_action=delivery_action,
+        comment_id=comment_id,
+        comment_url=comment_url,
+        error_message=error_message,
+    )
+
+
+def _render_merge_train_pr_feedback_markdown(
+    *, marker: str, request: MergeTrainPrFeedbackEnvelope
+) -> str:
+    event_titles = {
+        "queued": "Launchplane queued this pull request in the merge train.",
+        "building": "Launchplane is building a merge-train candidate.",
+        "waiting": "Launchplane is waiting before the next merge-train step.",
+        "blocked": "Launchplane blocked the merge-train step for this pull request.",
+        "stale_policy": "Launchplane parked this merge-train record because policy changed.",
+        "completed": "Launchplane completed the merge-train step for this pull request.",
+    }
+    lines = [
+        marker,
+        event_titles[request.event],
+        "",
+        f"- Repository: `{request.repository}`",
+        f"- Base branch: `{request.base_branch}`",
+        f"- Pull request: #{request.pull_request_number}",
+    ]
+    if request.controller_action:
+        lines.append(f"- Controller action: `{request.controller_action}`")
+    if request.controller_record_id:
+        lines.append(f"- Controller record: `{request.controller_record_id}`")
+    if request.message:
+        lines.extend(["", request.message])
+    lines.extend(
+        [
+            "",
+            "Launchplane manages this comment and will update it as the train moves.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _read_merge_train_batch_candidate_record(
@@ -8395,6 +8594,71 @@ def create_launchplane_service_app(
                 )
                 record_store.write_merge_train_run_record(run_record)
                 result["merge_train_run_id"] = run_record.run_id
+            elif path == _MERGE_TRAIN_PR_FEEDBACK_ROUTE:
+                feedback_request = MergeTrainPrFeedbackEnvelope.model_validate(payload)
+                policy_record = resolve_merge_train_policy_record(record_store)
+                policy = policy_record.policy
+                repository_policy = policy.find_repository_policy(
+                    repository=feedback_request.repository,
+                    base_branch=feedback_request.base_branch,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action=repository_policy.service_authz.action,
+                    product=repository_policy.service_authz.product,
+                    context=repository_policy.service_authz.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write merge train PR feedback.",
+                            },
+                        },
+                    )
+                token_env = repository_policy.github_token.env_var
+                if not token_env:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Merge train policy does not define a GitHub token environment variable.",
+                            },
+                        },
+                    )
+                token = os.environ.get(token_env, "").strip()
+                if not token:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Configured merge train GitHub token is not available.",
+                            },
+                        },
+                    )
+                feedback_store = _merge_train_pr_feedback_record_store(record_store)
+                feedback_record = _build_merge_train_pr_feedback_record(
+                    request=feedback_request,
+                    policy_key=repository_policy.policy_key,
+                    policy_sha256=policy_record.policy_sha256,
+                    token=token,
+                    recorded_at=_utc_now_timestamp(),
+                )
+                feedback_store.write_merge_train_pr_feedback_record(feedback_record)
+                result = {"feedback": feedback_record.model_dump(mode="json")}
+                driver_result = {"feedback": feedback_record.model_dump(mode="json")}
             elif path == _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE:
                 batch_request = MergeTrainBatchCandidateRunOnceEnvelope.model_validate(payload)
                 policy_record = resolve_merge_train_policy_record(record_store)

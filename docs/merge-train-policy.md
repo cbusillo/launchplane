@@ -456,6 +456,17 @@ stop on terminal or attention states: `batch_landed`, `candidate_failed`,
 should include `error.code`, `trace_id`, and the retry/stop recommendation, not
 the original request body.
 
+Schedulers and operators report train progress through
+`POST /v1/work-graph/merge-train/pr-feedback`. The route accepts a
+repository/base selector, pull request number, feedback event, and optional
+controller action, record id, and message. Launchplane renders one managed
+comment per PR with a hidden marker and updates that same comment as the train
+moves through queued, waiting, blocked, stale-policy, and completed states. Each
+call also writes a `launchplane_merge_train_pr_feedback` record so delivery
+status, rendered markdown, and GitHub comment identity remain auditable. Callers
+must keep the message public-safe: no tokens, raw headers, private API base URLs,
+local paths, or unchecked provider responses.
+
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
 landing phase. It accepts `mode: plan` with a passed candidate record id and

@@ -766,6 +766,13 @@ preflights.
   metadata, trace id, recorded timestamp, and optional one-step worker result.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
+- Merge train pull-request feedback is persisted as
+  `launchplane_merge_train_pr_feedback` records. Each record stores the
+  repository/base branch, PR number/url, feedback event, hidden managed-comment
+  marker, rendered public markdown, policy key and digest, controller action
+  metadata, delivery status, GitHub comment id/url, and error detail when
+  delivery fails. These records are audit evidence for the PR-facing feedback
+  surface; the current PR comment remains managed through GitHub by marker.
 - Full batch train candidates are persisted as
   `launchplane_merge_train_batch_candidates` records. Each record stores the
   repository/base branch, observed base SHA, ordered PR entries, candidate ref,
