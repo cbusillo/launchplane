@@ -306,6 +306,61 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_landing_plan_record_id, "")
         self.assertEqual(decision.controller_stack_collapse_plan_record_id, "")
 
+    def test_latest_idle_run_supersedes_older_controller_records_for_admission(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record)
+        stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+        store = _RunHistoryStore(
+            latest_run,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            stack_collapse_plan_records=(stack_collapse_record,),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.controller_action, "idle")
+        self.assertEqual(decision.controller_landing_plan_record_id, "")
+        self.assertEqual(decision.controller_stack_collapse_plan_record_id, "")
+
+    def test_older_idle_run_does_not_supersede_newer_controller_records(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record)
+        stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:00:00Z")
+        store = _RunHistoryStore(
+            latest_run,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            stack_collapse_plan_records=(stack_collapse_record,),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.controller_action, "land_batch")
+        self.assertEqual(decision.controller_landing_plan_record_id, landing_plan_record.record_id)
+        self.assertEqual(
+            decision.controller_stack_collapse_plan_record_id,
+            stack_collapse_record.record_id,
+        )
+
     def test_builds_controller_status_read_model_from_store_records(self) -> None:
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)
@@ -383,6 +438,33 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             {"batch_candidate", "batch_landing_plan", "stack_collapse_plan"},
         )
 
+    def test_controller_status_keeps_idle_superseded_records_visible(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record)
+        stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
+        store = _RunHistoryStore(
+            _idle_run_record(recorded_at="2026-05-09T02:10:00Z"),
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            stack_collapse_plan_records=(stack_collapse_record,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertEqual(read_model.admission.controller_action, "idle")
+        self.assertEqual(len(read_model.controller_records), 3)
+        self.assertEqual(
+            {summary.record_type for summary in read_model.controller_records},
+            {"batch_candidate", "batch_landing_plan", "stack_collapse_plan"},
+        )
+
 
 def _run_record(
     *,
@@ -421,6 +503,19 @@ def _run_record(
         snapshot=snapshot,
         dry_run_result=dry_run_result,
         worker_step_result=worker_step_result,
+    )
+
+
+def _idle_run_record(*, recorded_at: str) -> MergeTrainRunRecord:
+    return _run_record(recorded_at=recorded_at).model_copy(
+        update={
+            "status": "idle",
+            "intended_next_action": "idle",
+            "selected_pr_number": None,
+            "selected_head_sha": "",
+            "selected_mergeable": "",
+            "selected_required_checks_status": "",
+        }
     )
 
 
