@@ -84,6 +84,7 @@ def build_merge_train_pr_feedback_id(
     event: MergeTrainPrFeedbackEvent,
     marker: str,
     recorded_at: str,
+    response_trace_id: str = "",
 ) -> str:
     normalized_repository = _normalize_repository(repository).replace("/", "-")
     normalized_base = _slug(base_branch)
@@ -94,6 +95,7 @@ def build_merge_train_pr_feedback_id(
         event=event,
         marker=marker,
         recorded_at=recorded_at,
+        response_trace_id=response_trace_id,
     )
     return (
         "merge-train-pr-feedback-"
@@ -126,6 +128,7 @@ def _feedback_identity_digest(
     event: str,
     marker: str,
     recorded_at: str,
+    response_trace_id: str = "",
 ) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -136,6 +139,7 @@ def _feedback_identity_digest(
                 "event": event.strip(),
                 "marker": marker.strip(),
                 "recorded_at": _normalize_required_value(recorded_at, "recorded_at"),
+                "response_trace_id": response_trace_id.strip(),
             },
             sort_keys=True,
             separators=(",", ":"),

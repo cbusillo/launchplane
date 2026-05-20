@@ -1926,6 +1926,142 @@ class LaunchplaneServiceTests(unittest.TestCase):
         update_comment.assert_called_once()
         create_comment.assert_not_called()
 
+    def test_merge_train_pr_feedback_service_replays_idempotent_request(self) -> None:
+        request_payload = {
+            "schema_version": 1,
+            "repository": "cbusillo/sellyouroutboard",
+            "base_branch": "main",
+            "pull_request_number": 7,
+            "event": "waiting",
+            "controller_action": "observe_candidate",
+            "controller_record_id": "candidate-1",
+            "message": "Waiting for required checks to settle.",
+        }
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ) as find_comment,
+                patch(
+                    "control_plane.service.create_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-123",
+                    },
+                ) as create_comment,
+            ):
+                first_status, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/pr-feedback",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "merge-train-pr-feedback-7-waiting"},
+                )
+                replay_status, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/pr-feedback",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "merge-train-pr-feedback-7-waiting"},
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(replay_status, 202)
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(
+            replay_payload["result"]["feedback"]["feedback_id"],
+            first_payload["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 1)
+        find_comment.assert_called_once()
+        create_comment.assert_called_once()
+
+    def test_merge_train_pr_feedback_service_preserves_same_second_updates(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.find_github_issue_comment_by_marker",
+                    return_value={"id": 456, "body": "old body"},
+                ),
+                patch(
+                    "control_plane.service.update_github_issue_comment",
+                    return_value={
+                        "id": 456,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/7#issuecomment-456",
+                    },
+                ),
+                patch(
+                    "control_plane.service._utc_now_timestamp",
+                    return_value="2026-05-20T15:00:00Z",
+                ),
+            ):
+                first_status, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/pr-feedback",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                    },
+                )
+                second_status, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/pr-feedback",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "waiting",
+                        "message": "Still waiting after a rerun.",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(second_status, 202)
+        self.assertNotEqual(
+            first_payload["result"]["feedback"]["feedback_id"],
+            second_payload["result"]["feedback"]["feedback_id"],
+        )
+        self.assertEqual(len(records), 2)
+
     def test_merge_train_pr_feedback_service_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -14220,9 +14356,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
 
             self.assertEqual(status_code, 400)
-            self.assertEqual(
-                payload["error"]["code"], "odoo_preview_runtime_config_incomplete"
-            )
+            self.assertEqual(payload["error"]["code"], "odoo_preview_runtime_config_incomplete")
             self.assertEqual(payload["details"]["context"], "cm")
             self.assertEqual(payload["details"]["instance"], "testing")
             self.assertEqual(

@@ -436,11 +436,18 @@ jobs:
             while IFS= read -r feedback_payload; do
               feedback_index="$((feedback_index + 1))"
               feedback_response="launchplane-merge-train-feedback-${feedback_index}.json"
+              feedback_payload_digest="$(
+                printf '%s' "$feedback_payload" | sha256sum | cut -d' ' -f1
+              )"
+              feedback_idempotency_key="merge-train-feedback:controller"
+              feedback_idempotency_key="${feedback_idempotency_key}:${GITHUB_RUN_ID}"
+              feedback_idempotency_key="${feedback_idempotency_key}:${feedback_payload_digest}"
               feedback_status="$(curl -sS \
                 -o "$feedback_response" \
                 -w '%{http_code}' \
                 -X POST \
                 -H "Authorization: Bearer ${oidc_token}" \
+                -H "Idempotency-Key: ${feedback_idempotency_key}" \
                 -H 'Content-Type: application/json' \
                 --data "$feedback_payload" \
                 "$feedback_url")"
@@ -815,11 +822,18 @@ jobs:
             while IFS= read -r feedback_payload; do
               feedback_index="$((feedback_index + 1))"
               feedback_response="launchplane-manual-phase-feedback-${feedback_index}.json"
+              feedback_payload_digest="$(
+                printf '%s' "$feedback_payload" | sha256sum | cut -d' ' -f1
+              )"
+              feedback_idempotency_key="merge-train-feedback:${phase}"
+              feedback_idempotency_key="${feedback_idempotency_key}:${GITHUB_RUN_ID}"
+              feedback_idempotency_key="${feedback_idempotency_key}:${feedback_payload_digest}"
               feedback_status="$(curl -sS \
                 -o "$feedback_response" \
                 -w '%{http_code}' \
                 -X POST \
                 -H "Authorization: Bearer ${oidc_token}" \
+                -H "Idempotency-Key: ${feedback_idempotency_key}" \
                 -H 'Content-Type: application/json' \
                 --data "$feedback_payload" \
                 "$feedback_url")"
