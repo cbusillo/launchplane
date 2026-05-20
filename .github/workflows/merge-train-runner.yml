@@ -22,6 +22,16 @@ name: Merge Train Runner
         type: boolean
         required: false
         default: false
+      runner_mode:
+        description: >-
+          Which admitted scheduler entrypoint to call: level1 or controller.
+          Scheduled runs use LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE instead.
+        type: choice
+        required: false
+        default: level1
+        options:
+          - level1
+          - controller
       batch_candidate_mode:
         description: >-
           Optional batch-candidate phase to run instead of the Level 1 worker:
@@ -108,6 +118,12 @@ jobs:
             github.event_name != 'schedule' && inputs.mutate
           ) && 'true' ||
           'false'
+        }}
+      MERGE_TRAIN_RUNNER_MODE: >-
+        ${{
+          github.event_name == 'schedule' &&
+          (vars.LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE || 'level1') ||
+          (inputs.runner_mode || 'level1')
         }}
       MERGE_TRAIN_BATCH_CANDIDATE_MODE: >-
         ${{
@@ -232,13 +248,30 @@ jobs:
             echo
             echo "- Repository: ${MERGE_TRAIN_REPOSITORY}"
             echo "- Base branch: ${MERGE_TRAIN_BASE_BRANCH}"
+            echo "- Runner mode: ${MERGE_TRAIN_RUNNER_MODE}"
             echo "- Status: ${admission_status}"
             echo "- Reason: ${reason_code}"
             echo "- Next allowed: ${next_allowed_at}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run one merge-train pass
+      - name: Validate merge-train runner mode
         if: steps.admission.outputs.admission_status == 'admitted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$MERGE_TRAIN_RUNNER_MODE" in
+            level1|controller) ;;
+            *)
+              echo "Unsupported merge-train runner mode:" \
+                "${MERGE_TRAIN_RUNNER_MODE}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Run one merge-train pass
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'level1'
         shell: bash
         env:
           SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
@@ -323,11 +356,91 @@ jobs:
             selected_modes+=("stack-collapse:${MERGE_TRAIN_STACK_COLLAPSE_MODE}")
           fi
 
+          if [ "${MERGE_TRAIN_RUNNER_MODE}" = "controller" ] && \
+             [ "${#selected_modes[@]}" -gt 0 ]; then
+            echo "Controller mode cannot be combined with phase inputs." >&2
+            printf 'Selected modes: %s\n' "${selected_modes[*]}" >&2
+            exit 1
+          fi
+
           if [ "${#selected_modes[@]}" -gt 1 ]; then
             echo "Only one merge-train phase may run per workflow dispatch." >&2
             printf 'Selected modes: %s\n' "${selected_modes[*]}" >&2
             exit 1
           fi
+
+      - name: Run one merge-train controller action
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_RUNNER_MODE == 'controller'
+        shell: bash
+        env:
+          SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
+          SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          request_payload="$({
+            jq -n \
+              --arg repository "$MERGE_TRAIN_REPOSITORY" \
+              --arg base_branch "$MERGE_TRAIN_BASE_BRANCH" \
+              --argjson mutate "$MERGE_TRAIN_MUTATE" \
+              '{
+                schema_version: 1,
+                repository: $repository,
+                base_branch: $base_branch,
+                mutate: $mutate
+              }'
+          })"
+          response_file="launchplane-merge-train-controller-run-once.json"
+          controller_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train"
+          controller_url="${controller_url}/controller/run-once"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            --data "$request_payload" \
+            "$controller_url")"
+          if [ "$status_code" != "202" ]; then
+            cat "$response_file" >&2
+            echo "Merge-train controller run-once failed" \
+              "with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          jq . "$response_file"
+          {
+            echo
+            echo '## Launchplane merge train controller'
+            echo
+            echo "- Mode: $(jq -r '.result.mode' "$response_file")"
+            controller_action="$(
+              jq -r '.result.controller_action // "unknown"' "$response_file"
+            )"
+            candidate_record="$(
+              jq -r '.records.merge_train_batch_candidate_record_id // ""' \
+                "$response_file"
+            )"
+            landing_record="$(
+              jq -r '.records.merge_train_batch_landing_plan_record_id // ""' \
+                "$response_file"
+            )"
+            stack_record="$(
+              jq -r '.records.merge_train_stack_collapse_plan_record_id // ""' \
+                "$response_file"
+            )"
+            echo "- Controller action: ${controller_action}"
+            echo "- Candidate record: ${candidate_record}"
+            echo "- Landing-plan record: ${landing_record}"
+            echo "- Stack-collapse record: ${stack_record}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run one batch-candidate phase
         if: >-
