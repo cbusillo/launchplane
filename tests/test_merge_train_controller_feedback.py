@@ -119,3 +119,60 @@ class MergeTrainControllerFeedbackTests(TestCase):
         }
 
         self.assertEqual([], feedback.build_feedback_payloads(response=response))
+
+    def test_build_feedback_payloads_infers_candidate_plan_action(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "mode": "plan",
+                "candidate": {
+                    "status": "planned",
+                    "entries": [{"pull_request_number": 7}],
+                },
+            },
+            "records": {"merge_train_batch_candidate_record_id": "candidate-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response, phase="batch-candidate")
+
+        self.assertEqual(1, len(payloads))
+        self.assertEqual("plan_candidate", payloads[0]["controller_action"])
+
+    def test_build_feedback_payloads_infers_stack_plan_action(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "mode": "plan",
+                "stack_collapse_plan": {
+                    "status": "planned",
+                    "entries": [{"pull_request_number": 7}],
+                },
+            },
+            "records": {"merge_train_stack_collapse_plan_record_id": "stack-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response, phase="batch-candidate")
+
+        self.assertEqual(1, len(payloads))
+        self.assertEqual("plan_stack_collapse", payloads[0]["controller_action"])
+
+    def test_build_feedback_payloads_infers_landing_action(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "mode": "plan",
+                "landing_plan": {
+                    "status": "planned",
+                    "entries": [{"pull_request_number": 7, "status": "planned"}],
+                },
+            },
+            "records": {"merge_train_batch_landing_plan_record_id": "landing-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response, phase="batch-landing")
+
+        self.assertEqual(1, len(payloads))
+        self.assertEqual("plan_landing", payloads[0]["controller_action"])

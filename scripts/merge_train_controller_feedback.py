@@ -34,10 +34,15 @@ def main() -> int:
     )
     parser.add_argument("--response-file", required=True, type=Path)
     parser.add_argument("--source", default="workflow:merge-train-runner")
+    parser.add_argument(
+        "--phase",
+        choices=("controller", "batch-candidate", "stack-collapse", "batch-landing"),
+        default="controller",
+    )
     args = parser.parse_args()
 
     response = json.loads(args.response_file.read_text(encoding="utf-8"))
-    payloads = build_feedback_payloads(response=response, source=args.source)
+    payloads = build_feedback_payloads(response=response, source=args.source, phase=args.phase)
     json.dump(payloads, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     print(f"Rendered {len(payloads)} feedback payload(s).", file=sys.stderr)
@@ -45,13 +50,16 @@ def main() -> int:
 
 
 def build_feedback_payloads(
-    *, response: dict[str, Any], source: str = "workflow:merge-train-runner"
+    *,
+    response: dict[str, Any],
+    source: str = "workflow:merge-train-runner",
+    phase: str = "controller",
 ) -> list[dict[str, object]]:
     result = _as_dict(response.get("result"))
     records = _as_dict(response.get("records"))
     repository = _required_string(result.get("repository"), "repository")
     base_branch = _required_string(result.get("base_branch"), "base_branch")
-    controller_action = _required_string(result.get("controller_action"), "controller_action")
+    controller_action = _controller_action(result=result, phase=phase)
     event = _feedback_event(controller_action=controller_action, result=result)
     if event == "skip":
         return []
@@ -81,6 +89,33 @@ def build_feedback_payloads(
         }
         for pull_request_number in pull_request_numbers
     ]
+
+
+def _controller_action(*, result: dict[str, Any], phase: str) -> str:
+    explicit_action = _string(result.get("controller_action"))
+    if explicit_action:
+        return explicit_action
+
+    mode = _required_string(result.get("mode"), "mode")
+    phase_actions: dict[tuple[str, str], str] = {
+        ("batch-candidate", "plan"): _batch_candidate_plan_action(result),
+        ("batch-candidate", "build"): "build_candidate",
+        ("batch-candidate", "observe"): "observe_candidate",
+        ("stack-collapse", "execute"): "execute_stack_collapse",
+        ("stack-collapse", "admit"): "admit_collapsed_root",
+        ("batch-landing", "plan"): "plan_landing",
+        ("batch-landing", "land"): "land_batch",
+    }
+    action = phase_actions.get((phase, mode))
+    if not action:
+        raise ValueError(f"unsupported merge train feedback phase/mode {phase}:{mode}")
+    return action
+
+
+def _batch_candidate_plan_action(result: dict[str, Any]) -> str:
+    if _as_dict(result.get("stack_collapse_plan")):
+        return "plan_stack_collapse"
+    return "plan_candidate"
 
 
 def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
