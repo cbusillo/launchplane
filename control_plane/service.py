@@ -12975,7 +12975,21 @@ def create_launchplane_service_app(
                 trace_id=request_trace_id,
                 path=path,
             )
-        except ValidationError:
+        except ValidationError as error:
+            if path == _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE:
+                message = str(error).strip() or "Request payload failed validation."
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "merge_train_controller_invalid_state",
+                            "message": message,
+                        },
+                    },
+                )
             return _json_response(
                 start_response=start_response,
                 status_code=400,
@@ -13045,7 +13059,21 @@ def create_launchplane_service_app(
                     },
                 },
             )
-        except (ValueError, click.ClickException):
+        except (ValueError, click.ClickException) as error:
+            if path == _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE:
+                message = str(error).strip() or "Merge train controller request could not be completed."
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "merge_train_controller_invalid_state",
+                            "message": message,
+                        },
+                    },
+                )
             return _json_response(
                 start_response=start_response,
                 status_code=400,

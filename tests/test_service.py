@@ -2881,7 +2881,40 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertIn("merge_train_stack_collapse_plan_record_id", plan_payload["records"])
         self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
+        self.assertEqual(
+            payload["error"]["message"],
+            "merge train stack collapse policy digest no longer matches",
+        )
+
+    def test_merge_train_controller_reports_validation_error_message(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/controller/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "not-a-repository",
+                    "base_branch": "main",
+                    "mutate": False,
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
+        self.assertIn(
+            "merge train repository must be owner/name", payload["error"]["message"]
+        )
 
     def test_merge_train_stack_collapse_service_executes_existing_plan_record(self) -> None:
         with (
