@@ -506,8 +506,11 @@ that admission route before every worker call. It defaults to the Level 1
 `run-once` route for compatibility, and can call the full controller exactly
 once per admitted pass when manual dispatch sets `runner_mode: controller` or a
 scheduled run sets the repository variable `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE`
-to `controller`. The scheduler still writes at most one Launchplane worker
-result per pass; the five-minute schedule is the retry loop.
+to `controller`. Controller-mode runs render conservative PR feedback payloads
+from the controller response and post them through the managed feedback endpoint,
+so queued PRs get one evolving Launchplane status comment as the train builds,
+waits, blocks, or completes. The scheduler still writes at most one Launchplane
+worker result per pass; the five-minute schedule is the retry loop.
 
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
