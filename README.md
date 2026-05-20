@@ -68,6 +68,10 @@ uv run python -m unittest
 Frontend validation currently covers TypeScript and the production Vite build.
 Lint, formatting, and component tests are not introduced yet.
 
+When checking the served operator UI, use a browser or `GET /ui` request. Some
+server paths may not answer `HEAD /ui` the same way as the app shell, so a
+failed `HEAD` probe is not enough evidence that the UI is unavailable.
+
 Runtime authority should come from Launchplane DB records in steady state.
 Launchplane-managed secrets, runtime-environment records, tracked Dokploy
 target records, and Dokploy target-id records are DB-backed concerns;
