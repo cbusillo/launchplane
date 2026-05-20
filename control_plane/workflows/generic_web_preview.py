@@ -36,29 +36,7 @@ from control_plane.workflows.ship import generate_deployment_record_id, utc_now_
 
 
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
-_ODOO_COMPOSE_STAGE_PREVIEW_DRIVER_ID = "odoo"
-_ODOO_COMPOSE_STAGE_PREVIEW_MODE = "bootstrap"
-_ODOO_COMPOSE_STAGE_PREVIEW_TARGET_TYPE = "compose"
-_ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
-_ODOO_COMPOSE_STAGE_PREVIEW_REQUIRED_ENV_KEYS = (
-    "ODOO_DB_NAME",
-    "ODOO_DB_USER",
-    "ODOO_DB_PASSWORD",
-    "ODOO_DATA_VOLUME",
-    "ODOO_LOG_VOLUME",
-    "ODOO_DB_VOLUME",
-    "ODOO_MASTER_PASSWORD",
-    "ODOO_ADMIN_PASSWORD",
-)
-_ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS = 30
-_ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS = 120
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
-_ODOO_COMPOSE_STAGE_PREVIEW_SMOKE_PATHS = (
-    ("web_health", "/web/health"),
-    ("cm_website_health", "/cm-website/health"),
-    ("cell_mechanic_page", "/cell-mechanic"),
-)
-_ODOO_COMPOSE_STAGE_PREVIEW_MODULE_KEYS = ("ODOO_INSTALL_MODULES", "ODOO_UPDATE_MODULES")
 
 
 class GenericWebPreviewProfileStore(Protocol):
@@ -625,111 +603,6 @@ def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
     )
 
 
-def _ensure_compose_domain(
-    *, host: str, token: str, compose_id: str, preview_host: str, runtime_port: int
-) -> tuple[str, tuple[str, ...]]:
-    raw_domains = control_plane_dokploy.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byComposeId",
-        query={"composeId": compose_id},
-    )
-    domains = raw_domains if isinstance(raw_domains, list) else []
-    existing: JsonObject | None = None
-    stale_domain_ids: list[str] = []
-    for raw_domain in domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
-        if domain is None:
-            continue
-        domain_host = str(domain.get("host") or "").strip()
-        domain_id = str(domain.get("domainId") or "").strip()
-        if domain_host == preview_host and domain_id:
-            existing = domain
-            continue
-        if domain_id:
-            stale_domain_ids.append(domain_id)
-    payload: JsonObject = {
-        "host": preview_host,
-        "path": "/",
-        "internalPath": "/",
-        "port": runtime_port,
-        "https": True,
-        "applicationId": None,
-        "certificateType": "none",
-        "customCertResolver": None,
-        "composeId": compose_id,
-        "serviceName": "web",
-        "domainType": "compose",
-        "previewDeploymentId": None,
-        "stripPath": False,
-    }
-    if existing is not None:
-        existing_domain_id = str(existing.get("domainId") or "").strip()
-        update_payload: JsonObject = {"domainId": existing_domain_id, **payload}
-        control_plane_dokploy.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/domain.update",
-            method="POST",
-            payload=update_payload,
-        )
-        return "", tuple(stale_domain_ids)
-    created = control_plane_dokploy.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.create",
-        method="POST",
-        payload=payload,
-    )
-    created_domain = control_plane_dokploy.as_json_object(created)
-    return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
-
-
-def _preview_slug_from_compose_domain(
-    *, profile: LaunchplaneProductProfileRecord, domain_host: str
-) -> str:
-    host = domain_host.strip().split(":", 1)[0]
-    slug_prefix = _preview_slug_prefix(profile.preview.slug_template)
-    if not host.startswith(slug_prefix):
-        return ""
-    slug = host.split(".", 1)[0]
-    if (
-        preview_pr_number_from_slug(
-            preview_slug=slug,
-            slug_template=profile.preview.slug_template,
-        )
-        is None
-    ):
-        return ""
-    return slug
-
-
-def _compose_preview_domains(
-    *, host: str, token: str, compose_id: str, profile: LaunchplaneProductProfileRecord
-) -> tuple[JsonObject, ...]:
-    raw_domains = control_plane_dokploy.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byComposeId",
-        query={"composeId": compose_id},
-    )
-    if not isinstance(raw_domains, list):
-        return ()
-    domains: list[JsonObject] = []
-    for raw_domain in raw_domains:
-        domain = control_plane_dokploy.as_json_object(raw_domain)
-        if domain is None:
-            continue
-        domain_host = str(domain.get("host") or "").strip()
-        domain_id = str(domain.get("domainId") or "").strip()
-        if domain_id and _preview_slug_from_compose_domain(
-            profile=profile,
-            domain_host=domain_host,
-        ):
-            domains.append(domain)
-    return tuple(domains)
-
-
 def _delete_application(*, host: str, token: str, application_id: str) -> None:
     control_plane_dokploy.dokploy_request(
         host=host,
@@ -796,7 +669,6 @@ def _read_template_payload(
     *,
     control_plane_root: Path,
     template_lane: ProductLaneProfile,
-    allow_compose_template: bool = False,
 ) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, JsonObject | None, str]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -814,18 +686,17 @@ def _read_template_payload(
             None,
             f"No Dokploy target definition found for {template_lane.context}/{template_lane.instance}.",
         )
-    if target_definition.target_type == "compose" and not allow_compose_template:
+    if target_definition.target_type == "compose":
         return (
             target_definition,
             None,
             "Generic web preview readiness requires the template lane to be a Dokploy application.",
         )
-    if target_definition.target_type not in {"application", "compose"}:
+    if target_definition.target_type != "application":
         return (
             target_definition,
             None,
-            "Generic web preview readiness requires the template lane to be a "
-            "Dokploy application or an explicitly supported staged Odoo compose target.",
+            "Generic web preview readiness requires the template lane to be a Dokploy application.",
         )
     if not target_definition.target_id.strip():
         return (
@@ -841,25 +712,6 @@ def _read_template_payload(
         target_id=target_definition.target_id,
     )
     return target_definition, payload, ""
-
-
-def _profile_allows_odoo_compose_stage_preview(*, profile: LaunchplaneProductProfileRecord) -> bool:
-    return (
-        profile.driver_id.strip() == _ODOO_COMPOSE_STAGE_PREVIEW_DRIVER_ID
-        and profile.preview.data_transport_mode == _ODOO_COMPOSE_STAGE_PREVIEW_MODE
-    )
-
-
-def _uses_odoo_compose_stage_preview(
-    *,
-    profile: LaunchplaneProductProfileRecord,
-    target_definition: control_plane_dokploy.DokployTargetDefinition | None,
-) -> bool:
-    return (
-        _profile_allows_odoo_compose_stage_preview(profile=profile)
-        and target_definition is not None
-        and target_definition.target_type == _ODOO_COMPOSE_STAGE_PREVIEW_TARGET_TYPE
-    )
 
 
 def _transport_summary(
@@ -958,61 +810,6 @@ def _render_preview_env_text(
         "",
         updates=updates,
     )
-
-
-def _render_odoo_compose_stage_preview_env_text(
-    *,
-    control_plane_root: Path,
-    profile: LaunchplaneProductProfileRecord,
-    template_lane: ProductLaneProfile,
-    template_payload: JsonObject,
-    preview_url: str,
-    image_reference: str,
-    runtime_identity: RuntimeIdentity | None = None,
-) -> str:
-    template_env = control_plane_dokploy.parse_dokploy_env_text(
-        str(template_payload.get("env") or "")
-    )
-    desired_env = dict(template_env)
-    desired_env.update(
-        _optional_runtime_environment_values(
-            control_plane_root=control_plane_root,
-            context_name=template_lane.context,
-            instance_name=template_lane.instance,
-        )
-    )
-    desired_env.update(profile.preview.override_env)
-    desired_env[_ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = image_reference
-    preview_host = _preview_host(preview_url)
-    for key in profile.preview.preview_url_env_keys:
-        desired_env[key] = preview_url
-    for key in profile.preview.preview_domain_env_keys:
-        desired_env[key] = preview_host
-    if runtime_identity is not None:
-        desired_env.update(runtime_identity_env(runtime_identity))
-    return control_plane_dokploy.serialize_dokploy_env_text(desired_env)
-
-
-def _optional_runtime_environment_values(
-    *, control_plane_root: Path, context_name: str, instance_name: str
-) -> dict[str, str]:
-    try:
-        return control_plane_runtime_environments.resolve_runtime_environment_values(
-            control_plane_root=control_plane_root,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
-    except click.ClickException as exc:
-        message = str(exc)
-        if message.startswith("Missing Launchplane runtime environment authority"):
-            return {}
-        if message.startswith("Missing DB-backed Launchplane runtime environment records"):
-            return {}
-        if message.startswith("Runtime environments file has no context definition"):
-            return {}
-        if message.startswith("Runtime environments file has no instance definition"):
-            return {}
-        raise
 
 
 def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
@@ -1128,149 +925,6 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
     raise click.ClickException(f"Timed out waiting for {health_url} to report healthy.")
 
 
-def _preview_url_with_path(*, preview_url: str, path: str) -> str:
-    parsed = urlparse(preview_url.rstrip("/"))
-    return parsed._replace(path=path, params="", query="", fragment="").geturl()
-
-
-def _fetch_preview_smoke_path(*, preview_url: str, path: str, timeout_seconds: int) -> None:
-    smoke_url = _preview_url_with_path(preview_url=preview_url, path=path)
-    request = Request(
-        smoke_url,
-        headers={
-            "Accept": "application/json, text/html, text/plain, */*",
-            "Cache-Control": "no-store",
-        },
-    )
-    deadline = timeout_seconds
-    last_error = "is not reachable"
-    while deadline > 0:
-        try:
-            with urlopen(request, timeout=min(15, deadline)) as response:
-                response.read()
-            if 200 <= response.status < 400:
-                return
-            last_error = f"returned HTTP {response.status}"
-        except HTTPError as exc:
-            last_error = f"returned HTTP {exc.code}"
-        except (TimeoutError, URLError, ValueError):
-            last_error = "is not reachable"
-        sleep_seconds = min(5, deadline)
-        time.sleep(sleep_seconds)
-        deadline -= sleep_seconds
-    raise click.ClickException(f"Odoo preview smoke path {path} {last_error}.")
-
-
-def _pass_smoke_check(*, check_id: str, message: str) -> GenericWebPreviewSmokeCheck:
-    return GenericWebPreviewSmokeCheck(check_id=check_id, status="pass", message=message)
-
-
-def _fail_smoke_check(*, check_id: str, message: str) -> GenericWebPreviewSmokeCheck:
-    return GenericWebPreviewSmokeCheck(check_id=check_id, status="fail", message=message)
-
-
-def _failure_summary_from_smoke_checks(checks: tuple[GenericWebPreviewSmokeCheck, ...]) -> str:
-    for check in checks:
-        if check.status == "fail":
-            return f"Odoo preview smoke failed: {check.message}"
-    return "Odoo preview smoke failed."
-
-
-def _odoo_compose_stage_preview_smoke_result(
-    *,
-    checked_at: str,
-    request: GenericWebPreviewRefreshRequest,
-    env_text: str,
-    preview_url: str,
-    timeout_seconds: int,
-) -> GenericWebPreviewSmokeResult:
-    checks: list[GenericWebPreviewSmokeCheck] = []
-    if request.image_reference.strip():
-        checks.append(
-            _pass_smoke_check(
-                check_id="artifact_image_reference",
-                message="Preview image artifact reference is present.",
-            )
-        )
-    else:
-        checks.append(
-            _fail_smoke_check(
-                check_id="artifact_image_reference",
-                message="Preview image artifact reference is missing.",
-            )
-        )
-    if request.anchor_head_sha.strip():
-        checks.append(
-            _pass_smoke_check(
-                check_id="anchor_head_sha",
-                message="Preview source revision is present.",
-            )
-        )
-    else:
-        checks.append(
-            _fail_smoke_check(
-                check_id="anchor_head_sha",
-                message="Preview source revision is missing.",
-            )
-        )
-
-    rendered_env = control_plane_dokploy.parse_dokploy_env_text(env_text)
-    configured_module_keys = tuple(
-        key for key in _ODOO_COMPOSE_STAGE_PREVIEW_MODULE_KEYS if rendered_env.get(key, "").strip()
-    )
-    if configured_module_keys:
-        checks.append(
-            _pass_smoke_check(
-                check_id="module_install_update_evidence",
-                message="Odoo module install/update evidence is captured in rendered env.",
-            )
-        )
-    else:
-        checks.append(
-            _fail_smoke_check(
-                check_id="module_install_update_evidence",
-                message="Odoo module install/update evidence is missing.",
-            )
-        )
-
-    for check_id, path in _ODOO_COMPOSE_STAGE_PREVIEW_SMOKE_PATHS:
-        try:
-            if path == "/web/health":
-                _wait_for_preview_health(
-                    preview_url=preview_url,
-                    health_path=path,
-                    timeout_seconds=timeout_seconds,
-                )
-            else:
-                _fetch_preview_smoke_path(
-                    preview_url=preview_url,
-                    path=path,
-                    timeout_seconds=timeout_seconds,
-                )
-        except click.ClickException as exc:
-            checks.append(_fail_smoke_check(check_id=check_id, message=str(exc)))
-        else:
-            checks.append(
-                _pass_smoke_check(
-                    check_id=check_id,
-                    message=f"Odoo preview smoke path {path} responded successfully.",
-                )
-            )
-
-    smoke_checks = tuple(checks)
-    smoke_status: Literal["pass", "fail"] = (
-        "fail" if any(check.status == "fail" for check in smoke_checks) else "pass"
-    )
-    return GenericWebPreviewSmokeResult(
-        smoke_status=smoke_status,
-        checked_at=checked_at,
-        checks=smoke_checks,
-        failure_summary=""
-        if smoke_status == "pass"
-        else _failure_summary_from_smoke_checks(smoke_checks),
-    )
-
-
 def evaluate_generic_web_preview_readiness(
     *,
     control_plane_root: Path,
@@ -1320,9 +974,6 @@ def evaluate_generic_web_preview_readiness(
         target_definition, template_payload, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
             template_lane=template_lane,
-            allow_compose_template=_profile_allows_odoo_compose_stage_preview(
-                profile=resolved_profile
-            ),
         )
     except click.ClickException as exc:
         target_error = str(exc)
@@ -1359,61 +1010,18 @@ def evaluate_generic_web_preview_readiness(
 
     assert target_definition is not None
     assert template_payload is not None
-    uses_odoo_compose_stage_preview = _uses_odoo_compose_stage_preview(
-        profile=resolved_profile,
-        target_definition=target_definition,
-    )
-    if target_definition.target_type == "compose" and not uses_odoo_compose_stage_preview:
-        checks.append(
-            GenericWebPreviewReadinessCheck(
-                check_id="template_target",
-                status="blocked",
-                message=(
-                    "Compose template lanes are supported only for the staged Odoo "
-                    "bootstrap preview path."
-                ),
-            )
-        )
-        return GenericWebPreviewReadinessResult(
-            readiness_status="blocked",
-            checked_at=checked_at,
-            product=resolved_profile.product,
-            context=resolved_profile.preview.context,
-            template_context=template_lane.context,
-            template_instance=template_lane.instance,
-            template_target_type=target_definition.target_type,
-            template_target_id=target_definition.target_id,
-            template_target_name=target_definition.target_name,
-            source=request.source,
-            missing_template_env_keys=(),
-            missing_provider_fields=(),
-            transport=_transport_summary(profile=resolved_profile),
-            checks=tuple(checks),
-        )
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(template_payload.get("env") or ""))
-    if uses_odoo_compose_stage_preview:
-        env_map.update(
-            _optional_runtime_environment_values(
-                control_plane_root=control_plane_root,
-                context_name=template_lane.context,
-                instance_name=template_lane.instance,
-            )
-        )
     required_env_parts = (
         *resolved_profile.preview.required_template_env_keys,
         *resolved_profile.preview.copied_env_keys,
     )
-    if uses_odoo_compose_stage_preview:
-        required_env_parts = (*required_env_parts, *_ODOO_COMPOSE_STAGE_PREVIEW_REQUIRED_ENV_KEYS)
     required_env_keys = tuple(dict.fromkeys(required_env_parts))
     missing_env_keys = tuple(key for key in required_env_keys if not env_map.get(key, "").strip())
-    missing_provider_fields: tuple[str, ...] = ()
-    if not uses_odoo_compose_stage_preview:
-        missing_provider_fields = tuple(
-            field
-            for field in resolved_profile.preview.required_provider_fields
-            if _is_blank(_field_value(template_payload, field))
-        )
+    missing_provider_fields = tuple(
+        field
+        for field in resolved_profile.preview.required_provider_fields
+        if _is_blank(_field_value(template_payload, field))
+    )
 
     if missing_env_keys:
         checks.append(
@@ -1446,11 +1054,7 @@ def evaluate_generic_web_preview_readiness(
             GenericWebPreviewReadinessCheck(
                 check_id="template_provider_fields",
                 status="pass",
-                message=(
-                    "Staged Odoo compose preview uses Launchplane-rendered compose source."
-                    if uses_odoo_compose_stage_preview
-                    else "Template lane includes required provider fields."
-                ),
+                message="Template lane includes required provider fields.",
             )
         )
     checks.append(
@@ -1558,51 +1162,10 @@ def execute_generic_web_preview_refresh(
         target_definition, template_application, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
             template_lane=template_lane,
-            allow_compose_template=_profile_allows_odoo_compose_stage_preview(
-                profile=resolved_profile
-            ),
         )
         if target_error or template_application is None or target_definition is None:
             raise click.ClickException(
                 target_error or "Generic web preview template payload is unavailable."
-            )
-        if _uses_odoo_compose_stage_preview(
-            profile=resolved_profile,
-            target_definition=target_definition,
-        ):
-            application_id, smoke = _execute_odoo_compose_stage_preview_refresh(
-                control_plane_root=control_plane_root,
-                record_store=record_store,
-                request=request,
-                profile=resolved_profile,
-                template_lane=template_lane,
-                target_definition=target_definition,
-                template_payload=template_application,
-                preview_url=preview_url,
-                runtime_identity=_build_preview_runtime_identity(
-                    profile=resolved_profile,
-                    preview_slug=request.preview_slug,
-                    image_reference=request.image_reference,
-                    anchor_head_sha=request.anchor_head_sha,
-                ),
-            )
-            finished_at = utc_now_timestamp()
-            refresh_status: Literal["pass", "blocked", "fail"] = (
-                "pass" if smoke.smoke_status == "pass" else "fail"
-            )
-            return GenericWebPreviewRefreshResult(
-                refresh_status=refresh_status,
-                refresh_started_at=started_at,
-                refresh_finished_at=finished_at,
-                product=resolved_profile.product,
-                context=resolved_profile.preview.context,
-                preview_slug=request.preview_slug,
-                application_name=application_name,
-                application_id=application_id,
-                preview_url=preview_url,
-                readiness=readiness,
-                smoke=smoke,
-                error_message="" if refresh_status == "pass" else smoke.failure_summary,
             )
         _enforce_preview_copied_runtime_key_safety(
             record_store=record_store,
@@ -1720,107 +1283,6 @@ def execute_generic_web_preview_refresh(
         preview_url=preview_url,
         readiness=readiness,
     )
-
-
-def _execute_odoo_compose_stage_preview_refresh(
-    *,
-    control_plane_root: Path,
-    record_store: GenericWebPreviewProfileStore,
-    request: GenericWebPreviewRefreshRequest,
-    profile: LaunchplaneProductProfileRecord,
-    template_lane: ProductLaneProfile,
-    target_definition: control_plane_dokploy.DokployTargetDefinition,
-    template_payload: JsonObject,
-    preview_url: str,
-    runtime_identity: RuntimeIdentity | None = None,
-) -> tuple[str, GenericWebPreviewSmokeResult]:
-    _enforce_preview_copied_runtime_key_safety(
-        record_store=record_store,
-        profile=profile,
-        template_lane=template_lane,
-        template_application=template_payload,
-        preview_slug=request.preview_slug,
-    )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    compose_name = (
-        target_definition.target_name.strip()
-        or str(template_payload.get("name") or "").strip()
-        or f"{template_lane.context}-{template_lane.instance}"
-    )
-    compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-        image_reference=request.image_reference
-    )
-    control_plane_dokploy.sync_dokploy_compose_raw_source(
-        host=host,
-        token=token,
-        compose_id=target_definition.target_id,
-        compose_name=compose_name,
-        target_payload=template_payload,
-        compose_file=compose_file,
-    )
-    env_text = _render_odoo_compose_stage_preview_env_text(
-        control_plane_root=control_plane_root,
-        profile=profile,
-        template_lane=template_lane,
-        template_payload=template_payload,
-        preview_url=preview_url,
-        image_reference=request.image_reference,
-        runtime_identity=runtime_identity,
-    )
-    control_plane_dokploy.update_dokploy_target_env(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=target_definition.target_id,
-        target_payload=template_payload,
-        env_text=env_text,
-    )
-    _ensure_compose_domain(
-        host=host,
-        token=token,
-        compose_id=target_definition.target_id,
-        preview_host=_preview_host(preview_url),
-        runtime_port=profile.runtime_port,
-    )
-    latest_before = control_plane_dokploy.latest_deployment_for_target(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=target_definition.target_id,
-    )
-    control_plane_dokploy.trigger_deployment(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=target_definition.target_id,
-        no_cache=request.no_cache,
-    )
-    health_timeout_seconds = min(
-        request.timeout_seconds,
-        _ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS,
-    )
-    deployment_timeout_seconds = max(
-        _ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS,
-        request.timeout_seconds - health_timeout_seconds,
-    )
-    control_plane_dokploy.wait_for_target_deployment(
-        host=host,
-        token=token,
-        target_type="compose",
-        target_id=target_definition.target_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
-        timeout_seconds=deployment_timeout_seconds,
-    )
-    smoke = _odoo_compose_stage_preview_smoke_result(
-        checked_at=utc_now_timestamp(),
-        request=request,
-        env_text=env_text,
-        preview_url=preview_url,
-        timeout_seconds=health_timeout_seconds,
-    )
-    return target_definition.target_id, smoke
-
-
 def discover_generic_web_preview_desired_state(
     *,
     control_plane_root: Path,
@@ -1865,50 +1327,6 @@ def execute_generic_web_preview_inventory(
         )
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    template_lane = _template_lane(profile=resolved_profile)
-    if template_lane is not None and _profile_allows_odoo_compose_stage_preview(
-        profile=resolved_profile
-    ):
-        target_definition, _template_payload, target_error = _read_template_payload(
-            control_plane_root=control_plane_root,
-            template_lane=template_lane,
-            allow_compose_template=True,
-        )
-        if target_error:
-            raise click.ClickException(target_error)
-        if target_definition is not None and _uses_odoo_compose_stage_preview(
-            profile=resolved_profile,
-            target_definition=target_definition,
-        ):
-            compose_preview_items: list[GenericWebPreviewInventoryItem] = []
-            for domain in _compose_preview_domains(
-                host=host,
-                token=token,
-                compose_id=target_definition.target_id,
-                profile=resolved_profile,
-            ):
-                domain_host = str(domain.get("host") or "").strip()
-                compose_preview_items.append(
-                    GenericWebPreviewInventoryItem(
-                        applicationId=target_definition.target_id,
-                        applicationName=target_definition.target_name,
-                        previewSlug=_preview_slug_from_compose_domain(
-                            profile=resolved_profile,
-                            domain_host=domain_host,
-                        ),
-                        providerType="compose-domain",
-                        domainId=str(domain.get("domainId") or "").strip(),
-                        domainHost=domain_host,
-                    )
-                )
-            return GenericWebPreviewInventoryResult(
-                product=resolved_profile.product,
-                context=resolved_profile.preview.context,
-                source=request.source,
-                app_name_prefix=app_name_prefix,
-                previews=tuple(sorted(compose_preview_items, key=lambda item: item.previewSlug)),
-            )
-
     raw_projects = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -1964,74 +1382,6 @@ def execute_generic_web_preview_destroy(
         preview_slug=request.preview_slug,
     )
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    template_lane = _template_lane(profile=resolved_profile)
-    if template_lane is not None and _profile_allows_odoo_compose_stage_preview(
-        profile=resolved_profile
-    ):
-        target_definition, _template_payload, target_error = _read_template_payload(
-            control_plane_root=control_plane_root,
-            template_lane=template_lane,
-            allow_compose_template=True,
-        )
-        if target_error:
-            raise click.ClickException(target_error)
-        if target_definition is not None and _uses_odoo_compose_stage_preview(
-            profile=resolved_profile,
-            target_definition=target_definition,
-        ):
-            compose_cleanup_errors: list[str] = []
-            deleted_domain_ids: list[str] = []
-            for domain in _compose_preview_domains(
-                host=host,
-                token=token,
-                compose_id=target_definition.target_id,
-                profile=resolved_profile,
-            ):
-                domain_host = str(domain.get("host") or "").strip()
-                if (
-                    _preview_slug_from_compose_domain(
-                        profile=resolved_profile,
-                        domain_host=domain_host,
-                    )
-                    != request.preview_slug
-                ):
-                    continue
-                domain_id = str(domain.get("domainId") or "").strip()
-                if not domain_id:
-                    continue
-                try:
-                    _delete_domain(host=host, token=token, domain_id=domain_id)
-                    deleted_domain_ids.append(domain_id)
-                except click.ClickException as exc:
-                    compose_cleanup_errors.append(f"domain cleanup failed: {exc}")
-            finished_at = utc_now_timestamp()
-            if compose_cleanup_errors:
-                return GenericWebPreviewDestroyResult(
-                    destroy_status="fail",
-                    destroy_started_at=started_at,
-                    destroy_finished_at=finished_at,
-                    product=resolved_profile.product,
-                    context=resolved_profile.preview.context,
-                    preview_slug=request.preview_slug,
-                    application_name=application_name,
-                    application_id=target_definition.target_id,
-                    provider_type="compose-domain",
-                    domain_ids=tuple(deleted_domain_ids),
-                    error_message="; ".join(compose_cleanup_errors),
-                )
-            return GenericWebPreviewDestroyResult(
-                destroy_status="pass",
-                destroy_started_at=started_at,
-                destroy_finished_at=finished_at,
-                product=resolved_profile.product,
-                context=resolved_profile.preview.context,
-                preview_slug=request.preview_slug,
-                application_name=application_name,
-                application_id=target_definition.target_id,
-                provider_type="compose-domain",
-                domain_ids=tuple(deleted_domain_ids),
-            )
-
     application = _find_application_by_name(
         host=host,
         token=token,
