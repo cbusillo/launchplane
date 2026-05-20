@@ -278,12 +278,15 @@ PR head.
 
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
-reads admission, and calls `run-once` only when the decision is `admitted`.
-Repository and base-branch selection come from workflow inputs or repository
-variables, not service code. Manual dispatch defaults to dry-run mode; scheduled
-runs also dry-run unless the repository variable `LAUNCHPLANE_MERGE_TRAIN_MUTATE`
-is set to `true`. This keeps activation explicit after setting
-`LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`.
+reads admission, and calls one worker entrypoint only when the decision is
+`admitted`. Repository and base-branch selection come from workflow inputs or
+repository variables, not service code. Manual dispatch defaults to dry-run mode;
+scheduled runs also dry-run unless the repository variable
+`LAUNCHPLANE_MERGE_TRAIN_MUTATE` is set to `true`. The default runner mode calls
+the Level 1 `run-once` route. Manual dispatch or the scheduled repository
+variable `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE=controller` switches an admitted
+pass to one full-controller `run-once` call instead. This keeps activation
+explicit after setting `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`.
 Workflow dispatches may select at most one non-`none` phase input across
 batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
