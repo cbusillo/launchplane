@@ -845,6 +845,25 @@ export interface MergeTrainRunRecord {
   poll_required?: boolean;
 }
 
+export interface MergeTrainDryRunQueueEntrySummary {
+  pull_request_number: number;
+  title: string;
+  url: string;
+  eligible: boolean;
+  ineligible_reasons: string[];
+  mergeable: string;
+  required_checks_status: string;
+}
+
+export interface MergeTrainLatestDryRunSummary {
+  intended_next_action: string;
+  next_action_detail: string;
+  queue_count: number;
+  eligible_count: number;
+  selected_pr_number: number | null;
+  queue_entries: MergeTrainDryRunQueueEntrySummary[];
+}
+
 export interface MergeTrainControllerRecordSummary {
   record_id: string;
   record_type: string;
@@ -874,6 +893,7 @@ export interface MergeTrainControllerStatus {
   current_policy_sha256: string;
   admission: MergeTrainAdmissionDecision;
   latest_run: MergeTrainRunRecord | null;
+  latest_dry_run: MergeTrainLatestDryRunSummary | null;
   controller_records: MergeTrainControllerRecordSummary[];
 }
 

@@ -1535,6 +1535,33 @@ function fixtureMergeTrainControllerStatus(
         reread_required: false,
         poll_required: true,
       },
+      latest_dry_run: {
+        intended_next_action: "wait_for_checks",
+        next_action_detail: "Candidate checks are still pending.",
+        queue_count: 3,
+        eligible_count: 3,
+        selected_pr_number: 762,
+        queue_entries: [
+          {
+            pull_request_number: 762,
+            title: "Post merge train controller feedback",
+            url: "https://github.com/cbusillo/launchplane/pull/762",
+            eligible: true,
+            ineligible_reasons: [],
+            mergeable: "mergeable",
+            required_checks_status: "pending",
+          },
+          {
+            pull_request_number: 763,
+            title: "Post feedback for manual merge train phases",
+            url: "https://github.com/cbusillo/launchplane/pull/763",
+            eligible: true,
+            ineligible_reasons: [],
+            mergeable: "mergeable",
+            required_checks_status: "pass",
+          },
+        ],
+      },
       controller_records: [
         {
           record_id: "merge-train-batch-candidate-fixture",

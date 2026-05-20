@@ -49,6 +49,29 @@ class MergeTrainControllerRecordSummary(BaseModel):
     skipped_count: int = 0
 
 
+class MergeTrainDryRunQueueEntrySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pull_request_number: int
+    title: str = ""
+    url: str = ""
+    eligible: bool = False
+    ineligible_reasons: tuple[str, ...] = ()
+    mergeable: str = ""
+    required_checks_status: str = ""
+
+
+class MergeTrainLatestDryRunSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intended_next_action: str
+    next_action_detail: str
+    queue_count: int
+    eligible_count: int
+    selected_pr_number: int | None = None
+    queue_entries: tuple[MergeTrainDryRunQueueEntrySummary, ...] = ()
+
+
 class MergeTrainControllerStatusReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,6 +83,7 @@ class MergeTrainControllerStatusReadModel(BaseModel):
     current_policy_sha256: str = ""
     admission: MergeTrainAdmissionDecision
     latest_run: MergeTrainRunRecord | None = None
+    latest_dry_run: MergeTrainLatestDryRunSummary | None = None
     controller_records: tuple[MergeTrainControllerRecordSummary, ...]
 
 
@@ -182,6 +206,7 @@ def build_merge_train_controller_status_read_model(
         current_policy_sha256=current_policy_sha256,
         admission=admission,
         latest_run=latest_run,
+        latest_dry_run=_summarize_latest_dry_run(latest_run),
         controller_records=_summarize_controller_records(
             controller_records=controller_records,
             current_policy_key=current_policy_key,
@@ -213,6 +238,74 @@ def _list_active_controller_records(
             limit=25,
         ),
     )
+
+
+def _summarize_latest_dry_run(
+    latest_run: MergeTrainRunRecord | None,
+) -> MergeTrainLatestDryRunSummary | None:
+    if latest_run is None or latest_run.mode != "dry_run":
+        return None
+    dry_run_result = latest_run.dry_run_result
+    queue_payload = dry_run_result.get("queue")
+    queue_entries = _summarize_dry_run_queue(queue_payload)
+    return MergeTrainLatestDryRunSummary(
+        intended_next_action=_string_field(dry_run_result, "intended_next_action"),
+        next_action_detail=_string_field(dry_run_result, "next_action_detail"),
+        queue_count=len(queue_entries),
+        eligible_count=sum(1 for entry in queue_entries if entry.eligible),
+        selected_pr_number=_selected_pr_number(dry_run_result.get("selected_pr")),
+        queue_entries=queue_entries,
+    )
+
+
+def _summarize_dry_run_queue(payload: object) -> tuple[MergeTrainDryRunQueueEntrySummary, ...]:
+    if not isinstance(payload, list | tuple):
+        return ()
+    entries: list[MergeTrainDryRunQueueEntrySummary] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        entries.append(
+            MergeTrainDryRunQueueEntrySummary(
+                pull_request_number=_int_field(item, "number"),
+                title=_string_field(item, "title"),
+                url=_string_field(item, "url"),
+                eligible=_bool_field(item, "eligible"),
+                ineligible_reasons=_string_tuple_field(item, "ineligible_reasons"),
+                mergeable=_string_field(item, "mergeable"),
+                required_checks_status=_string_field(item, "required_checks_status"),
+            )
+        )
+    return tuple(entries)
+
+
+def _selected_pr_number(payload: object) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("number")
+    return value if isinstance(value, int) else None
+
+
+def _string_field(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _bool_field(payload: dict[str, object], key: str) -> bool:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else False
+
+
+def _int_field(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _string_tuple_field(payload: dict[str, object], key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list | tuple):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
 
 
 def _summarize_controller_records(
