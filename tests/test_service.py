@@ -4139,6 +4139,48 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ],
         )
 
+    def test_merge_train_policy_targets_service_allows_local_operator_visibility(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-targets-local-operator-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-read",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/work-graph/merge-train/policy-targets",
+                    authorization="Bearer local-token",
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(
+            [(target["repository"], target["base_branch"]) for target in payload["targets"]],
+            [("cbusillo/codex-skills", "main"), ("cbusillo/sellyouroutboard", "main")],
+        )
+
     def test_merge_train_admission_service_admits_without_prior_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"

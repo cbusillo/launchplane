@@ -8138,13 +8138,20 @@ def create_launchplane_service_app(
                 if action == "merge_train.policy_targets":
                     policy_record = resolve_merge_train_policy_record(record_store)
                     targets = []
+                    local_operator_can_read_targets = authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    )
                     for repository_policy in policy_record.policy.policies:
-                        if not authz_policy.allows(
+                        service_authz_allowed = authz_policy.allows(
                             identity=identity,
                             action=repository_policy.service_authz.action,
                             product=repository_policy.service_authz.product,
                             context=repository_policy.service_authz.context,
-                        ):
+                        )
+                        if not service_authz_allowed and not local_operator_can_read_targets:
                             continue
                         targets.append(
                             {

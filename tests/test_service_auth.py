@@ -629,6 +629,14 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
                 context="launchplane",
             )
         )
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="merge_train.policy_targets",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
         self.assertFalse(
             policy.allows(
                 identity=identity,
