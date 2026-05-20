@@ -15,7 +15,7 @@ from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
-from click import Command
+from click import ClickException, Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -1925,6 +1925,59 @@ class LaunchplaneServiceTests(unittest.TestCase):
         find_comment.assert_called_once()
         update_comment.assert_called_once()
         create_comment.assert_not_called()
+
+    def test_merge_train_pr_feedback_service_rejects_comment_delivery_failure(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.service.create_github_issue_comment",
+                    side_effect=ClickException("GitHub API returned 502"),
+                ) as create_comment,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/pr-feedback",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_request_number": 7,
+                        "event": "blocked",
+                    },
+                )
+            records = FilesystemRecordStore(state_dir).list_merge_train_pr_feedback_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pr_number=7,
+            )
+
+        self.assertEqual(status_code, 502)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "github_comment_delivery_failed")
+        self.assertIn("GitHub API returned 502", payload["error"]["message"])
+        feedback = payload["result"]["feedback"]
+        self.assertEqual(feedback["delivery_status"], "failed")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].delivery_status, "failed")
+        create_comment.assert_called_once()
 
     def test_merge_train_pr_feedback_service_replays_idempotent_request(self) -> None:
         request_payload = {
