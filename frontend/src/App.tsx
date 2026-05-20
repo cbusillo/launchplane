@@ -1370,6 +1370,7 @@ function StateFixtureGallery({
           onWorkGraphFilterChange={setFixtureWorkGraphFilter}
           onWorkGraphModeChange={setFixtureWorkGraphMode}
           readMergeTrainStatus={fixtureMergeTrainControllerStatus}
+          readMergeTrainPolicyTargets={fixtureMergeTrainPolicyTargets}
         />
       </div>
       <div className="fixture-grid">
@@ -1556,6 +1557,40 @@ function fixtureMergeTrainControllerStatus(
         },
       ],
     },
+  });
+}
+
+function fixtureMergeTrainPolicyTargets() {
+  return Promise.resolve({
+    status: "ok",
+    trace_id: "fixture-trace-merge-train-policy-targets",
+    policy: {
+      record_id: "merge-train-policy-fixture",
+      updated_at: "2026-05-20T16:18:00Z",
+      policy_sha256: "fixture-policy-sha256",
+    },
+    targets: [
+      {
+        repository: "cbusillo/launchplane",
+        base_branch: "main",
+        policy_key: "cbusillo/launchplane:main",
+        service_authz: {
+          action: "merge_train.run_once",
+          product: "launchplane",
+          context: "launchplane",
+        },
+      },
+      {
+        repository: "cbusillo/sellyouroutboard",
+        base_branch: "release",
+        policy_key: "cbusillo/sellyouroutboard:release",
+        service_authz: {
+          action: "merge_train.run_once",
+          product: "launchplane",
+          context: "launchplane",
+        },
+      },
+    ],
   });
 }
 

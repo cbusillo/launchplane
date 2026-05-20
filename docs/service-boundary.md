@@ -77,6 +77,7 @@ VeriReel product paths:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
+  - `GET /v1/work-graph/merge-train/policy-targets`
   - `GET /v1/work-graph/merge-train/admission`
   - `GET /v1/work-graph/merge-train/controller/status`
   - `POST /v1/work-graph/rank`
@@ -244,6 +245,12 @@ GitHub comment id/url. The route fails closed when authorization or token
 configuration is missing; callers should use it for queued, waiting, blocked,
 stale-policy, and completed transition summaries instead of writing ad hoc
 comments from scheduler scripts.
+
+`GET /v1/work-graph/merge-train/policy-targets` returns the authorized
+repository/base-branch targets from the active DB-backed merge-train policy. It
+performs no GitHub reads or mutations and is the source of truth for operator UI
+target selection; callers should not infer merge-train targets from product
+inventory or work-graph awareness items.
 
 `GET /v1/work-graph/merge-train/admission` returns the stored-history scheduler
 admission decision for a requested `repository` and `base_branch`. It uses the

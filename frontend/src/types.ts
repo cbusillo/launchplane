@@ -883,6 +883,28 @@ export interface MergeTrainControllerStatusPayload {
   controller_status: MergeTrainControllerStatus;
 }
 
+export interface MergeTrainPolicyTarget {
+  repository: string;
+  base_branch: string;
+  policy_key: string;
+  service_authz: {
+    action: string;
+    product: string;
+    context: string;
+  };
+}
+
+export interface MergeTrainPolicyTargetsPayload {
+  status: "ok";
+  trace_id: string;
+  policy: {
+    record_id: string;
+    updated_at: string;
+    policy_sha256: string;
+  };
+  targets: MergeTrainPolicyTarget[];
+}
+
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;
   product: string;

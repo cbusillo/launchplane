@@ -393,6 +393,7 @@ _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
 _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE = "/v1/work-graph/merge-train/controller/status"
+_MERGE_TRAIN_POLICY_TARGETS_ROUTE = "/v1/work-graph/merge-train/policy-targets"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
@@ -2560,6 +2561,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "merge_train.admission", {}
     if path == _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE:
         return "merge_train.controller_status", {}
+    if path == _MERGE_TRAIN_POLICY_TARGETS_ROUTE:
+        return "merge_train.policy_targets", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
@@ -8130,6 +8133,44 @@ def create_launchplane_service_app(
                             "status": "ok",
                             "trace_id": request_trace_id,
                             "controller_status": read_model.model_dump(mode="json"),
+                        },
+                    )
+                if action == "merge_train.policy_targets":
+                    policy_record = resolve_merge_train_policy_record(record_store)
+                    targets = []
+                    for repository_policy in policy_record.policy.policies:
+                        if not authz_policy.allows(
+                            identity=identity,
+                            action=repository_policy.service_authz.action,
+                            product=repository_policy.service_authz.product,
+                            context=repository_policy.service_authz.context,
+                        ):
+                            continue
+                        targets.append(
+                            {
+                                "repository": repository_policy.repository,
+                                "base_branch": repository_policy.base_branch,
+                                "policy_key": repository_policy.policy_key,
+                                "service_authz": repository_policy.service_authz.model_dump(
+                                    mode="json"
+                                ),
+                            }
+                        )
+                    targets.sort(
+                        key=lambda target: (target["repository"], target["base_branch"])
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "policy": {
+                                "record_id": policy_record.record_id,
+                                "updated_at": policy_record.updated_at,
+                                "policy_sha256": policy_record.policy_sha256,
+                            },
+                            "targets": targets,
                         },
                     )
                 if action == "product_profile.read":
