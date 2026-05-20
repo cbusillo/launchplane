@@ -974,8 +974,17 @@ post_grant \
   launchplane \
   launchplane \
   merge_train.run_once \
-  deploy:merge-train-runner-grant \
-  merge-train-runner
+  deploy:merge-train-runner-manual-grant \
+  merge-train-runner-manual
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  merge-train-runner.yml \
+  launchplane \
+  launchplane \
+  merge_train.run_once \
+  deploy:merge-train-runner-schedule-grant \
+  merge-train-runner-schedule \
+  schedule
 post_grant \
   "$GITHUB_REPOSITORY" \
   merge-train-policy-import.yml \
