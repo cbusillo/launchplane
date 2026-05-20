@@ -133,6 +133,10 @@ as a compatibility alias. Built assets live under `/ui/assets/...`, while
 `/ui/*` falls back to the app shell so the frontend can own client-side routes.
 Versioned API ingress remains under `/v1`.
 
+Validate the operator UI shell with browser navigation or `GET /ui`. Do not use
+`HEAD /ui` as the only availability check, because static app-shell fallback
+behavior can differ between request methods.
+
 `POST /v1/every-code/github-webhook` is the only unauthenticated write route.
 It trusts the request body through GitHub webhook HMAC verification instead of
 OIDC. The route requires `X-Hub-Signature-256`, `X-GitHub-Delivery`, and
