@@ -1,6 +1,7 @@
 import { PanelsTopLeft } from "lucide-react";
 
 import { EveryCodeQueue } from "./EveryCodeQueue";
+import { MergeTrainControllerPanel } from "./MergeTrainControllerPanel";
 import { MetricTile, PanelHead } from "./panel-ui";
 import { StateBlock, SkeletonRows, StatusPill } from "./status-ui";
 import { TrustBadge } from "./TrustBadge";
@@ -8,6 +9,7 @@ import { TrustBadge } from "./TrustBadge";
 import type {
   EveryCodeWorkRequestRecord,
   ProductSiteOverview,
+  MergeTrainControllerStatus,
   WorkGraphQueueItem,
 } from "./types";
 import {
@@ -29,6 +31,7 @@ export function ProductInventoryCockpit({
   onSelectProduct,
   onWorkGraphFilterChange,
   onWorkGraphModeChange,
+  readMergeTrainStatus,
 }: {
   products: ProductSiteOverview[];
   selectedProduct: ProductSiteOverview | null;
@@ -42,6 +45,11 @@ export function ProductInventoryCockpit({
   onSelectProduct: (product: ProductSiteOverview) => void;
   onWorkGraphFilterChange: (filter: WorkGraphFilter) => void;
   onWorkGraphModeChange: (mode: WorkGraphMode) => void;
+  readMergeTrainStatus?: (
+    repository: string,
+    baseBranch: string,
+    signal?: AbortSignal,
+  ) => Promise<{ controller_status: MergeTrainControllerStatus }>;
 }) {
   const activeWork = workRequests.filter((request) =>
     ["queued", "claimed", "running", "blocked"].includes(request.state),
@@ -144,6 +152,13 @@ export function ProductInventoryCockpit({
         loading={loading}
         onFilterChange={onWorkGraphFilterChange}
         onModeChange={onWorkGraphModeChange}
+      />
+      <MergeTrainControllerPanel
+        products={products}
+        selectedProduct={selectedProduct}
+        workGraphItems={workGraphItems}
+        loading={loading}
+        readStatus={readMergeTrainStatus}
       />
       <EveryCodeQueue requests={activeWork} loading={loading} />
     </section>

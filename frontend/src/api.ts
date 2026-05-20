@@ -10,6 +10,7 @@ import type {
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
   LogoutPayload,
+  MergeTrainControllerStatusPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
   ProductConfigApplyResponsePayload,
@@ -158,6 +159,23 @@ export function rankWorkGraphSnapshot(
     snapshot,
     limit,
   });
+}
+
+export function readMergeTrainControllerStatus(
+  repository: string,
+  baseBranch: string,
+  signal?: AbortSignal,
+): Promise<MergeTrainControllerStatusPayload> {
+  const params = new URLSearchParams({
+    repository,
+    base_branch: baseBranch,
+  });
+  return requestJson<MergeTrainControllerStatusPayload>(
+    `/v1/work-graph/merge-train/controller/status?${params.toString()}`,
+    "GET",
+    undefined,
+    signal,
+  );
 }
 
 export function applyProductConfig(

@@ -293,7 +293,7 @@ p {
   display: grid;
   grid-template-columns:
     minmax(220px, 0.64fr) minmax(280px, 1.08fr) minmax(280px, 1fr)
-    minmax(260px, 0.82fr);
+    minmax(280px, 1fr) minmax(260px, 0.82fr);
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--hair);
@@ -303,6 +303,7 @@ p {
 .cockpit-summary,
 .product-inventory-table,
 .work-graph-queue,
+.merge-train-panel,
 .every-code-queue {
   min-width: 0;
   background: var(--bg-1);
@@ -322,6 +323,7 @@ p {
 
 .product-inventory-table,
 .work-graph-queue,
+.merge-train-panel,
 .every-code-queue {
   display: grid;
   align-content: start;
@@ -547,6 +549,188 @@ p {
 
 .work-graph-hidden {
   color: var(--fg-faint);
+}
+
+.merge-train-panel {
+  grid-template-rows: auto auto auto;
+}
+
+.merge-train-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.merge-train-target {
+  display: grid;
+  gap: 4px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.merge-train-target select {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  padding: 0 9px;
+}
+
+.merge-train-alert,
+.merge-train-summary,
+.merge-train-latest-run,
+.merge-train-record-row {
+  min-width: 0;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+}
+
+.merge-train-alert {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  color: var(--fg-muted);
+  padding: 9px;
+}
+
+.merge-train-alert code {
+  grid-column: 2;
+  overflow: hidden;
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-train-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--hair-soft);
+}
+
+.merge-train-summary {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+}
+
+.merge-train-summary > span:first-child,
+.merge-train-latest-run,
+.merge-train-record-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.merge-train-summary span,
+.merge-train-summary strong,
+.merge-train-summary code,
+.merge-train-latest-run span,
+.merge-train-latest-run strong,
+.merge-train-latest-run code,
+.merge-train-record-row span,
+.merge-train-record-row strong,
+.merge-train-record-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-train-summary > span:nth-child(2) {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.merge-train-summary code,
+.merge-train-latest-run code,
+.merge-train-record-row code {
+  color: var(--fg-faint);
+}
+
+.merge-train-latest-run {
+  padding: 9px;
+}
+
+.merge-train-latest-run > span:first-of-type {
+  display: grid;
+  gap: 2px;
+}
+
+.merge-train-latest-run > span:nth-of-type(2) {
+  color: var(--fg-muted);
+}
+
+.merge-train-latest-run > code {
+  grid-column: 2 / -1;
+}
+
+.merge-train-record-list {
+  display: grid;
+  gap: 7px;
+}
+
+.merge-train-record-row {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  padding: 9px;
+}
+
+.merge-train-record-row[data-policy="stale"] {
+  border-color: color-mix(in oklab, var(--status-fail) 44%, var(--hair));
+}
+
+.merge-train-record-row > span:first-of-type {
+  display: grid;
+  gap: 2px;
+}
+
+.merge-train-record-meta,
+.merge-train-record-progress,
+.merge-train-record-row > code {
+  grid-column: 2;
+}
+
+.merge-train-record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.merge-train-record-meta code {
+  max-width: 100%;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  background: var(--bg-1);
+  padding: 2px 7px;
+  font-size: 10px;
+}
+
+.merge-train-record-progress {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .merge-train-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .merge-train-summary > span:nth-child(2),
+  .merge-train-record-progress {
+    overflow: visible;
+    white-space: normal;
+  }
 }
 
 .lane-grid {

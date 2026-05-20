@@ -814,6 +814,75 @@ export interface WorkGraphRankPayload {
   };
 }
 
+export interface MergeTrainAdmissionDecision {
+  schema_version: number;
+  repository: string;
+  base_branch: string;
+  status: "admitted" | "deferred" | string;
+  reason_code: string;
+  requested_at: string;
+  next_allowed_at: string;
+  latest_run_id: string;
+  latest_run_status: string;
+  latest_run_recorded_at: string;
+  controller_action: string;
+  controller_reason: string;
+  controller_candidate_record_id: string;
+  controller_landing_plan_record_id: string;
+  controller_stack_collapse_plan_record_id: string;
+  detail: string;
+}
+
+export interface MergeTrainRunRecord {
+  run_id: string;
+  repository: string;
+  base_branch: string;
+  mode: string;
+  status: string;
+  recorded_at: string;
+  required_checks_status: string;
+  reread_required?: boolean;
+  poll_required?: boolean;
+}
+
+export interface MergeTrainControllerRecordSummary {
+  record_id: string;
+  record_type: string;
+  status: string;
+  updated_at: string;
+  policy_key: string;
+  policy_sha256: string;
+  policy_status: "current" | "stale" | "unchecked" | string;
+  stale_reason: string;
+  batch_id: string;
+  pull_request_numbers: number[];
+  candidate_sha: string;
+  required_checks_status: string;
+  planned_count: number;
+  merged_count: number;
+  blocked_count: number;
+  stale_count: number;
+  skipped_count: number;
+}
+
+export interface MergeTrainControllerStatus {
+  schema_version: number;
+  repository: string;
+  base_branch: string;
+  generated_at: string;
+  current_policy_key: string;
+  current_policy_sha256: string;
+  admission: MergeTrainAdmissionDecision;
+  latest_run: MergeTrainRunRecord | null;
+  controller_records: MergeTrainControllerRecordSummary[];
+}
+
+export interface MergeTrainControllerStatusPayload {
+  status: "ok";
+  trace_id: string;
+  controller_status: MergeTrainControllerStatus;
+}
+
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;
   product: string;

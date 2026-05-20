@@ -1369,6 +1369,7 @@ function StateFixtureGallery({
           onSelectProduct={() => undefined}
           onWorkGraphFilterChange={setFixtureWorkGraphFilter}
           onWorkGraphModeChange={setFixtureWorkGraphMode}
+          readMergeTrainStatus={fixtureMergeTrainControllerStatus}
         />
       </div>
       <div className="fixture-grid">
@@ -1486,6 +1487,76 @@ function StateFixtureGallery({
       />
     </section>
   );
+}
+
+function fixtureMergeTrainControllerStatus(
+  repository = "cbusillo/launchplane",
+  baseBranch = "main",
+) {
+  const policyKey = `${repository}:${baseBranch}`;
+  return Promise.resolve({
+    status: "ok",
+    trace_id: "fixture-trace-merge-train-status",
+    controller_status: {
+      schema_version: 1,
+      repository,
+      base_branch: baseBranch,
+      generated_at: "2026-05-20T16:20:00Z",
+      current_policy_key: policyKey,
+      current_policy_sha256: "fixture-policy-sha256",
+      admission: {
+        schema_version: 1,
+        repository,
+        base_branch: baseBranch,
+        status: "admitted",
+        reason_code: "poll_interval_elapsed",
+        requested_at: "2026-05-20T16:20:00Z",
+        next_allowed_at: "2026-05-20T16:20:00Z",
+        latest_run_id: "merge-train-run-fixture",
+        latest_run_status: "waiting",
+        latest_run_recorded_at: "2026-05-20T16:14:00Z",
+        controller_action: "observe_candidate",
+        controller_reason: "candidate checks are still pending",
+        controller_candidate_record_id: "merge-train-batch-candidate-fixture",
+        controller_landing_plan_record_id: "",
+        controller_stack_collapse_plan_record_id: "",
+        detail:
+          "Merge-train poll interval has elapsed for the latest wait boundary.",
+      },
+      latest_run: {
+        run_id: "merge-train-run-fixture",
+        repository,
+        base_branch: baseBranch,
+        mode: "mutate",
+        status: "waiting",
+        recorded_at: "2026-05-20T16:14:00Z",
+        required_checks_status: "pending",
+        reread_required: false,
+        poll_required: true,
+      },
+      controller_records: [
+        {
+          record_id: "merge-train-batch-candidate-fixture",
+          record_type: "batch_candidate",
+          status: "active",
+          updated_at: "2026-05-20T16:14:00Z",
+          policy_key: policyKey,
+          policy_sha256: "fixture-policy-sha256",
+          policy_status: "current",
+          stale_reason: "",
+          batch_id: "merge-train-batch-fixture",
+          pull_request_numbers: [762, 763, 764],
+          candidate_sha: "abc123fixture",
+          required_checks_status: "pending",
+          planned_count: 3,
+          merged_count: 1,
+          blocked_count: 0,
+          stale_count: 0,
+          skipped_count: 0,
+        },
+      ],
+    },
+  });
 }
 
 function fixtureGenericWebPromotionDryRun(): Promise<GenericWebProdPromotionPayload> {
