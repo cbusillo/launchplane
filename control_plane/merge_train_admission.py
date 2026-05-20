@@ -110,8 +110,13 @@ def evaluate_merge_train_admission_from_store(
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    latest_run = store.latest_merge_train_run_record(
+        repository=repository,
+        base_branch=base_branch,
+    )
     actionable_records = _filter_actionable_controller_records(
         controller_records=controller_records,
+        latest_run=latest_run,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
     )
@@ -124,10 +129,7 @@ def evaluate_merge_train_admission_from_store(
         repository=repository,
         base_branch=base_branch,
         requested_at=requested_at,
-        latest_run=store.latest_merge_train_run_record(
-            repository=repository,
-            base_branch=base_branch,
-        ),
+        latest_run=latest_run,
         controller_decision=controller_decision,
         poll_interval_seconds=poll_interval_seconds,
         backoff_seconds=backoff_seconds,
@@ -148,8 +150,13 @@ def build_merge_train_controller_status_read_model(
     controller_records = _list_active_controller_records(
         store=store, repository=repository, base_branch=base_branch
     )
+    latest_run = store.latest_merge_train_run_record(
+        repository=repository,
+        base_branch=base_branch,
+    )
     actionable_records = _filter_actionable_controller_records(
         controller_records=controller_records,
+        latest_run=latest_run,
         current_policy_key=current_policy_key,
         current_policy_sha256=current_policy_sha256,
     )
@@ -157,10 +164,6 @@ def build_merge_train_controller_status_read_model(
         candidate_records=actionable_records.candidate_records,
         landing_plan_records=actionable_records.landing_plan_records,
         stack_collapse_plan_records=actionable_records.stack_collapse_plan_records,
-    )
-    latest_run = store.latest_merge_train_run_record(
-        repository=repository,
-        base_branch=base_branch,
     )
     admission = evaluate_merge_train_admission(
         repository=repository,
@@ -355,9 +358,19 @@ def _dominant_landing_status(record: MergeTrainBatchLandingPlanRecord) -> str:
 def _filter_actionable_controller_records(
     *,
     controller_records: MergeTrainControllerRecords,
+    latest_run: MergeTrainRunRecord | None,
     current_policy_key: str,
     current_policy_sha256: str,
 ) -> MergeTrainControllerRecords:
+    if _latest_idle_run_supersedes_controller_records(
+        latest_run=latest_run,
+        controller_records=controller_records,
+    ):
+        return MergeTrainControllerRecords(
+            candidate_records=(),
+            landing_plan_records=(),
+            stack_collapse_plan_records=(),
+        )
     if not current_policy_key and not current_policy_sha256:
         return _filter_terminal_candidate_stop_records(controller_records)
     policy_current_records = MergeTrainControllerRecords(
@@ -393,6 +406,30 @@ def _filter_actionable_controller_records(
         ),
     )
     return _filter_terminal_candidate_stop_records(policy_current_records)
+
+
+def _latest_idle_run_supersedes_controller_records(
+    *,
+    latest_run: MergeTrainRunRecord | None,
+    controller_records: MergeTrainControllerRecords,
+) -> bool:
+    if latest_run is None or latest_run.status != "idle" or latest_run.intended_next_action != "idle":
+        return False
+    latest_record_update = _latest_controller_record_update(controller_records)
+    if not latest_record_update:
+        return False
+    return latest_run.recorded_at >= latest_record_update
+
+
+def _latest_controller_record_update(controller_records: MergeTrainControllerRecords) -> str:
+    updated_at_values = (
+        tuple(record.updated_at for record in controller_records.candidate_records)
+        + tuple(record.updated_at for record in controller_records.landing_plan_records)
+        + tuple(record.updated_at for record in controller_records.stack_collapse_plan_records)
+    )
+    if not updated_at_values:
+        return ""
+    return max(updated_at_values)
 
 
 def _filter_terminal_candidate_stop_records(
