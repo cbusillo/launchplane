@@ -420,6 +420,10 @@ def _execute_refresh(
     domain_id = ""
     steps: list[OdooPreviewDokployApplyStep] = []
     try:
+        if creating_compose and not plan.template_compose_id:
+            raise click.ClickException(
+                "Odoo preview compose create requires template_compose_id."
+            )
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
         target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
             host=host,
@@ -476,7 +480,6 @@ def _execute_refresh(
             compose_id=compose_id,
             domain_host=plan.domain_host,
             runtime_port=plan.runtime_port,
-            certificate_type="letsencrypt",
         )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
