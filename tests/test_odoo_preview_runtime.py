@@ -362,10 +362,43 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             compose_id="compose-cm-pr-45",
             domain_host="pr-45.cm-preview.example.test",
             runtime_port=8069,
-            certificate_type="letsencrypt",
         )
         wait_deploy.assert_called_once()
         smoke_check.assert_called_once()
+
+    def test_apply_create_blocks_missing_template_compose_id_before_provider_fetch(
+        self,
+    ) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        ).model_copy(update={"template_compose_id": ""})
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.fetch_dokploy_target_payload",
+            ) as fetch_target_payload,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=ANY,
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("template_compose_id", result.error_message)
+        fetch_target_payload.assert_not_called()
 
     def test_apply_blocks_missing_runtime_env_before_provider_calls(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
