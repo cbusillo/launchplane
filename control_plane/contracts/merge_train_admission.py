@@ -5,7 +5,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapsePlanRecord,
+)
+from control_plane.workflows.merge_train_controller import (
+    MergeTrainControllerDecision,
+)
+from control_plane.workflows.merge_train_controller import (
+    decide_merge_train_controller_record_action,
+)
 
 
 MergeTrainAdmissionStatus = Literal["admitted", "deferred"]
@@ -33,6 +44,11 @@ class MergeTrainAdmissionDecision(BaseModel):
     latest_run_id: str = ""
     latest_run_status: str = ""
     latest_run_recorded_at: str = ""
+    controller_action: str = ""
+    controller_reason: str = ""
+    controller_candidate_record_id: str = ""
+    controller_landing_plan_record_id: str = ""
+    controller_stack_collapse_plan_record_id: str = ""
     detail: str
 
     @model_validator(mode="after")
@@ -52,6 +68,13 @@ class MergeTrainAdmissionDecision(BaseModel):
         self.latest_run_id = self.latest_run_id.strip()
         self.latest_run_status = self.latest_run_status.strip()
         self.latest_run_recorded_at = self.latest_run_recorded_at.strip()
+        self.controller_action = self.controller_action.strip()
+        self.controller_reason = self.controller_reason.strip()
+        self.controller_candidate_record_id = self.controller_candidate_record_id.strip()
+        self.controller_landing_plan_record_id = self.controller_landing_plan_record_id.strip()
+        self.controller_stack_collapse_plan_record_id = (
+            self.controller_stack_collapse_plan_record_id.strip()
+        )
         self.detail = _normalize_required_value(
             self.detail, "merge train admission decision requires detail"
         )
@@ -68,6 +91,7 @@ def evaluate_merge_train_admission(
     base_branch: str,
     requested_at: str,
     latest_run: MergeTrainRunRecord | None,
+    controller_decision: MergeTrainControllerDecision | None = None,
     poll_interval_seconds: int = 60,
     backoff_seconds: int = 300,
 ) -> MergeTrainAdmissionDecision:
@@ -92,6 +116,7 @@ def evaluate_merge_train_admission(
             reason_code="no_prior_run",
             requested_at=normalized_requested_at,
             next_allowed_at=normalized_requested_at,
+            controller_decision=controller_decision,
             detail="No prior merge-train run exists for this repository/base branch.",
         )
 
@@ -109,6 +134,7 @@ def evaluate_merge_train_admission(
             requested_at=normalized_requested_at,
             next_allowed_at=normalized_requested_at,
             latest_run=latest_run,
+            controller_decision=controller_decision,
             detail="Latest merge-train record is dry-run evidence and does not throttle the scheduler.",
         )
 
@@ -121,6 +147,7 @@ def evaluate_merge_train_admission(
             requested_at=normalized_requested_at,
             next_allowed_at=normalized_requested_at,
             latest_run=latest_run,
+            controller_decision=controller_decision,
             detail="Latest merge-train mutation requires a fresh read before another decision.",
         )
 
@@ -131,6 +158,7 @@ def evaluate_merge_train_admission(
             requested_time=requested_time,
             requested_at=normalized_requested_at,
             latest_run=latest_run,
+            controller_decision=controller_decision,
             interval_seconds=poll_interval_seconds,
             elapsed_reason_code="poll_interval_elapsed",
             pending_reason_code="poll_interval_pending",
@@ -144,6 +172,7 @@ def evaluate_merge_train_admission(
         requested_time=requested_time,
         requested_at=normalized_requested_at,
         latest_run=latest_run,
+        controller_decision=controller_decision,
         interval_seconds=backoff_seconds,
         elapsed_reason_code="backoff_elapsed",
         pending_reason_code="backoff_pending",
@@ -159,6 +188,7 @@ def _interval_decision(
     requested_time: datetime,
     requested_at: str,
     latest_run: MergeTrainRunRecord,
+    controller_decision: MergeTrainControllerDecision | None,
     interval_seconds: int,
     elapsed_reason_code: MergeTrainAdmissionReason,
     pending_reason_code: MergeTrainAdmissionReason,
@@ -176,6 +206,7 @@ def _interval_decision(
             requested_at=requested_at,
             next_allowed_at=_format_timestamp(requested_time),
             latest_run=latest_run,
+            controller_decision=controller_decision,
             detail=elapsed_detail,
         )
     return _decision(
@@ -186,6 +217,7 @@ def _interval_decision(
         requested_at=requested_at,
         next_allowed_at=_format_timestamp(next_allowed_time),
         latest_run=latest_run,
+        controller_decision=controller_decision,
         detail=pending_detail,
     )
 
@@ -200,6 +232,7 @@ def _decision(
     next_allowed_at: str,
     detail: str,
     latest_run: MergeTrainRunRecord | None = None,
+    controller_decision: MergeTrainControllerDecision | None = None,
 ) -> MergeTrainAdmissionDecision:
     return MergeTrainAdmissionDecision(
         repository=repository,
@@ -211,7 +244,31 @@ def _decision(
         latest_run_id=latest_run.run_id if latest_run is not None else "",
         latest_run_status=latest_run.status if latest_run is not None else "",
         latest_run_recorded_at=latest_run.recorded_at if latest_run is not None else "",
+        controller_action=controller_decision.action if controller_decision else "",
+        controller_reason=controller_decision.reason if controller_decision else "",
+        controller_candidate_record_id=controller_decision.candidate_record_id
+        if controller_decision
+        else "",
+        controller_landing_plan_record_id=controller_decision.landing_plan_record_id
+        if controller_decision
+        else "",
+        controller_stack_collapse_plan_record_id=(
+            controller_decision.stack_collapse_plan_record_id if controller_decision else ""
+        ),
         detail=detail,
+    )
+
+
+def build_merge_train_controller_admission_decision(
+    *,
+    candidate_records: tuple[MergeTrainBatchCandidateRecord, ...],
+    landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...],
+    stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...],
+) -> MergeTrainControllerDecision:
+    return decide_merge_train_controller_record_action(
+        candidate_records=candidate_records,
+        landing_plan_records=landing_plan_records,
+        stack_collapse_plan_records=stack_collapse_plan_records,
     )
 
 
