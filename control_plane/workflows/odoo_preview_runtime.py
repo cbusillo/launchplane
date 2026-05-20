@@ -566,7 +566,7 @@ def _execute_destroy(
                 delete_volumes=plan.delete_volumes,
             )
         except click.ClickException as exc:
-            if domain_ids or not _is_compose_delete_not_found(exc):
+            if not _is_compose_delete_not_found(exc):
                 raise
         steps.append(_step("compose_delete", compose_id))
         return _apply_result(

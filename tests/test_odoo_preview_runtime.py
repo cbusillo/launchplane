@@ -623,6 +623,57 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ["/api/domain.byComposeId", "/api/compose.delete"],
         )
 
+    def test_apply_destroy_treats_missing_compose_after_domain_delete_as_clean(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-pr-45",
+                        "host": "pr-45.cm-preview.example.test",
+                    }
+                ]
+            if kwargs["path"] == "/api/compose.delete":
+                raise click.ClickException(
+                    "Dokploy API POST /api/compose.delete failed (404): Not Found"
+                )
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=ANY,
+                request=OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    environment_values=_environment_values(),
+                ),
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.domain_id, "domain-pr-45")
+        self.assertEqual(result.error_message, "")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/domain.byComposeId", "/api/domain.delete", "/api/compose.delete"],
+        )
+
     def test_smoke_check_retries_transient_http_404(self) -> None:
         responses: list[HTTPError | _SmokeResponse] = [
             HTTPError(

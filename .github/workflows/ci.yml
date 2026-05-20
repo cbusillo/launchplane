@@ -32,7 +32,11 @@ jobs:
         run: uv run --extra dev mypy control_plane tests
 
       - name: Audit Python dependencies
-        run: uv run --with pip-audit pip-audit
+        run: |
+          # PyJWT is only used for GitHub OIDC RS256 verification; this
+          # disputed advisory has no fixed release and concerns app-chosen
+          # weak symmetric keys.
+          uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183
 
   static_checks_fork:
     if: >-
@@ -56,7 +60,11 @@ jobs:
         run: uv run --extra dev mypy control_plane tests
 
       - name: Audit Python dependencies
-        run: uv run --with pip-audit pip-audit
+        run: |
+          # PyJWT is only used for GitHub OIDC RS256 verification; this
+          # disputed advisory has no fixed release and concerns app-chosen
+          # weak symmetric keys.
+          uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183
 
   container_scan:
     if: >-
