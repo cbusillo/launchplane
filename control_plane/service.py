@@ -1006,6 +1006,10 @@ class OdooPreviewApplyConfigError(click.ClickException):
         self.missing_keys = tuple(sorted(missing_keys))
 
 
+class MergeTrainControllerRequestError(ValueError):
+    pass
+
+
 def _odoo_preview_service_environment_values(
     *,
     control_plane_root_path: Path,
@@ -3198,6 +3202,7 @@ def _latest_merge_train_batch_candidate_record(
 def _latest_passed_merge_train_batch_candidate_record(
     *,
     record_store: _MergeTrainBatchCandidateRecordStore,
+    landing_plan_record_store: _MergeTrainBatchLandingPlanRecordStore,
     repository: str,
     base_branch: str,
 ) -> MergeTrainBatchCandidateRecord | None:
@@ -3211,6 +3216,15 @@ def _latest_passed_merge_train_batch_candidate_record(
     if latest_record is None:
         return None
     if latest_record.candidate.status != "passed":
+        return None
+    completed_landing_record = _latest_completed_merge_train_batch_landing_plan_record(
+        record_store=landing_plan_record_store,
+        repository=repository,
+        base_branch=base_branch,
+        batch_id=latest_record.candidate.batch_id,
+        candidate_sha=latest_record.candidate.candidate_sha,
+    )
+    if completed_landing_record is not None:
         return None
     return latest_record
 
@@ -9296,11 +9310,14 @@ def create_launchplane_service_app(
                     base_branch=controller_request.base_branch,
                 )
                 if active_landing_record is not None:
-                    _validate_merge_train_landing_record_for_controller(
-                        landing_record=active_landing_record,
-                        policy_key=repository_policy.policy_key,
-                        policy_sha256=policy_record.policy_sha256,
-                    )
+                    try:
+                        _validate_merge_train_landing_record_for_controller(
+                            landing_record=active_landing_record,
+                            policy_key=repository_policy.policy_key,
+                            policy_sha256=policy_record.policy_sha256,
+                        )
+                    except ValueError as error:
+                        raise MergeTrainControllerRequestError(str(error)) from error
                     collapse_record = _latest_merge_train_stack_collapse_plan_record(
                         record_store=collapse_store,
                         repository=controller_request.repository,
@@ -9308,11 +9325,14 @@ def create_launchplane_service_app(
                         plan_status="waiting_for_root_checks",
                     )
                     if collapse_record is not None:
-                        _validate_stack_collapse_record_for_landing(
-                            collapse_record=collapse_record,
-                            landing_plan=active_landing_record.landing_plan,
-                            policy_sha256=policy_record.policy_sha256,
-                        )
+                        try:
+                            _validate_stack_collapse_record_for_landing(
+                                collapse_record=collapse_record,
+                                landing_plan=active_landing_record.landing_plan,
+                                policy_sha256=policy_record.policy_sha256,
+                            )
+                        except ValueError as error:
+                            raise MergeTrainControllerRequestError(str(error)) from error
                         if not repository_policy.stack_child_disposition_label:
                             raise ValueError(
                                 "merge train stack child disposition requires stack_child_disposition_label policy"
@@ -9396,15 +9416,19 @@ def create_launchplane_service_app(
                     if active_candidate_record is None:
                         passed_candidate_record = _latest_passed_merge_train_batch_candidate_record(
                             record_store=candidate_store,
+                            landing_plan_record_store=landing_store,
                             repository=controller_request.repository,
                             base_branch=controller_request.base_branch,
                         )
                     if active_candidate_record is not None:
-                        _validate_merge_train_candidate_record_for_controller(
-                            candidate_record=active_candidate_record,
-                            policy_key=repository_policy.policy_key,
-                            policy_sha256=policy_record.policy_sha256,
-                        )
+                        try:
+                            _validate_merge_train_candidate_record_for_controller(
+                                candidate_record=active_candidate_record,
+                                policy_key=repository_policy.policy_key,
+                                policy_sha256=policy_record.policy_sha256,
+                            )
+                        except ValueError as error:
+                            raise MergeTrainControllerRequestError(str(error)) from error
                         if active_candidate_record.candidate.status == "failed":
                             result = {
                                 "repository": controller_request.repository,
@@ -9461,11 +9485,14 @@ def create_launchplane_service_app(
                             result["candidate"] = candidate.model_dump(mode="json")
                             driver_result = result
                     elif passed_candidate_record is not None:
-                        _validate_merge_train_candidate_record_for_controller(
-                            candidate_record=passed_candidate_record,
-                            policy_key=repository_policy.policy_key,
-                            policy_sha256=policy_record.policy_sha256,
-                        )
+                        try:
+                            _validate_merge_train_candidate_record_for_controller(
+                                candidate_record=passed_candidate_record,
+                                policy_key=repository_policy.policy_key,
+                                policy_sha256=policy_record.policy_sha256,
+                            )
+                        except ValueError as error:
+                            raise MergeTrainControllerRequestError(str(error)) from error
                         completed_landing_record = (
                             _latest_completed_merge_train_batch_landing_plan_record(
                                 record_store=landing_store,
@@ -9476,11 +9503,16 @@ def create_launchplane_service_app(
                             )
                         )
                         if completed_landing_record is not None:
-                            _validate_merge_train_landing_record_for_controller(
-                                landing_record=completed_landing_record,
-                                policy_key=repository_policy.policy_key,
-                                policy_sha256=policy_record.policy_sha256,
-                            )
+                            try:
+                                _validate_merge_train_landing_record_for_controller(
+                                    landing_record=completed_landing_record,
+                                    policy_key=repository_policy.policy_key,
+                                    policy_sha256=policy_record.policy_sha256,
+                                )
+                            except ValueError as error:
+                                raise MergeTrainControllerRequestError(
+                                    str(error)
+                                ) from error
                             result = {
                                 "repository": controller_request.repository,
                                 "base_branch": controller_request.base_branch,
@@ -9533,11 +9565,6 @@ def create_launchplane_service_app(
                             plan_status="waiting_for_root_checks",
                         )
                         if waiting_collapse_record is not None:
-                            _validate_merge_train_stack_collapse_record_for_controller(
-                                collapse_record=waiting_collapse_record,
-                                policy_key=repository_policy.policy_key,
-                                policy_sha256=policy_record.policy_sha256,
-                            )
                             snapshot = GitHubMergeTrainSnapshotReader(
                                 transport=transport
                             ).read_merge_train_snapshot(
@@ -9553,67 +9580,78 @@ def create_launchplane_service_app(
                                 ),
                                 None,
                             )
-                            if root_pull_request is None:
-                                raise ValueError("merge train stack collapse root PR is missing")
-                            if root_pull_request.head_sha != _stack_collapse_expected_root_head_sha(
-                                waiting_collapse_record.plan
+                            if (
+                                root_pull_request is None
+                                or root_pull_request.head_sha
+                                != _stack_collapse_expected_root_head_sha(
+                                    waiting_collapse_record.plan
+                                )
                             ):
-                                raise ValueError(
-                                    "merge train stack collapse root PR head no longer matches"
-                                )
-                            root_snapshot = snapshot.model_copy(
-                                update={"pull_requests": (root_pull_request,)}
-                            )
-                            dry_run_result = build_merge_train_dry_run_result(
-                                policy=policy, snapshot=root_snapshot
-                            )
-                            if dry_run_result.intended_next_action != "merge":
-                                result = {
-                                    "repository": controller_request.repository,
-                                    "base_branch": controller_request.base_branch,
-                                    "mode": "dry-run",
-                                    "controller_action": "wait_for_root_checks",
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                }
-                                driver_result = result
-                            elif not controller_request.mutate:
-                                result = {
-                                    "repository": controller_request.repository,
-                                    "base_branch": controller_request.base_branch,
-                                    "mode": "dry-run",
-                                    "controller_action": "admit_collapsed_root",
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                }
-                                driver_result = result
+                                waiting_collapse_record = None
                             else:
-                                candidate = build_merge_train_batch_candidate(
-                                    dry_run_result=dry_run_result,
-                                    base_sha=root_snapshot.base_sha,
-                                    policy_sha256=policy_record.policy_sha256,
-                                    created_at=recorded_at,
+                                try:
+                                    _validate_merge_train_stack_collapse_record_for_controller(
+                                        collapse_record=waiting_collapse_record,
+                                        policy_key=repository_policy.policy_key,
+                                        policy_sha256=policy_record.policy_sha256,
+                                    )
+                                except ValueError as error:
+                                    raise MergeTrainControllerRequestError(
+                                        str(error)
+                                    ) from error
+                                root_snapshot = snapshot.model_copy(
+                                    update={"pull_requests": (root_pull_request,)}
                                 )
-                                candidate_record = build_merge_train_batch_candidate_record(
-                                    candidate=candidate,
-                                    source=f"service:controller:stack-collapse-admit:{request_trace_id}",
-                                    updated_at=recorded_at,
+                                dry_run_result = build_merge_train_dry_run_result(
+                                    policy=policy, snapshot=root_snapshot
                                 )
-                                candidate_store.write_merge_train_batch_candidate_record(
-                                    candidate_record
-                                )
-                                result = {
-                                    "merge_train_batch_candidate_record_id": candidate_record.record_id,
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "repository": candidate.repository,
-                                    "base_branch": candidate.base_branch,
-                                    "mode": "admit_collapsed_root",
-                                    "controller_action": "admit_collapsed_root",
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                    "candidate": candidate.model_dump(mode="json"),
-                                }
-                                driver_result = result
-                        else:
+                                if dry_run_result.intended_next_action != "merge":
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run",
+                                        "controller_action": "wait_for_root_checks",
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                                elif not controller_request.mutate:
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run",
+                                        "controller_action": "admit_collapsed_root",
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                                else:
+                                    candidate = build_merge_train_batch_candidate(
+                                        dry_run_result=dry_run_result,
+                                        base_sha=root_snapshot.base_sha,
+                                        policy_sha256=policy_record.policy_sha256,
+                                        created_at=recorded_at,
+                                    )
+                                    candidate_record = build_merge_train_batch_candidate_record(
+                                        candidate=candidate,
+                                        source=f"service:controller:stack-collapse-admit:{request_trace_id}",
+                                        updated_at=recorded_at,
+                                    )
+                                    candidate_store.write_merge_train_batch_candidate_record(
+                                        candidate_record
+                                    )
+                                    result = {
+                                        "merge_train_batch_candidate_record_id": candidate_record.record_id,
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "repository": candidate.repository,
+                                        "base_branch": candidate.base_branch,
+                                        "mode": "admit_collapsed_root",
+                                        "controller_action": "admit_collapsed_root",
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                        "candidate": candidate.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                        if waiting_collapse_record is None:
                             planned_collapse_record = (
                                 _latest_merge_train_stack_collapse_plan_record(
                                     record_store=collapse_store,
@@ -9623,46 +9661,73 @@ def create_launchplane_service_app(
                                 )
                             )
                             if planned_collapse_record is not None:
-                                _validate_merge_train_stack_collapse_record_for_controller(
-                                    collapse_record=planned_collapse_record,
-                                    policy_key=repository_policy.policy_key,
-                                    policy_sha256=policy_record.policy_sha256,
+                                snapshot = GitHubMergeTrainSnapshotReader(
+                                    transport=transport
+                                ).read_merge_train_snapshot(
+                                    repository=controller_request.repository,
+                                    base_branch=controller_request.base_branch,
                                 )
-                                result = {
-                                    "repository": controller_request.repository,
-                                    "base_branch": controller_request.base_branch,
-                                    "mode": "dry-run"
-                                    if not controller_request.mutate
-                                    else "execute_stack_collapse",
-                                    "controller_action": "execute_stack_collapse",
-                                    "merge_train_stack_collapse_plan_record_id": planned_collapse_record.record_id,
-                                }
-                                if controller_request.mutate:
-                                    executed_plan = execute_merge_train_stack_collapse_plan(
-                                        plan=planned_collapse_record.plan,
-                                        branch_client=github_client,
-                                        updated_at=recorded_at,
-                                    )
-                                    executed_record = build_merge_train_stack_collapse_plan_record(
-                                        plan=executed_plan,
-                                        source=f"service:controller:stack-collapse-execute:{request_trace_id}",
-                                        updated_at=recorded_at,
-                                    )
-                                    collapse_store.write_merge_train_stack_collapse_plan_record(
-                                        executed_record
-                                    )
-                                    result["merge_train_stack_collapse_plan_record_id"] = (
-                                        executed_record.record_id
-                                    )
-                                    result["stack_collapse_plan"] = executed_plan.model_dump(
-                                        mode="json"
-                                    )
+                                root_pull_request = next(
+                                    (
+                                        pull_request
+                                        for pull_request in snapshot.pull_requests
+                                        if pull_request.number
+                                        == planned_collapse_record.plan.root_pull_request_number
+                                    ),
+                                    None,
+                                )
+                                if (
+                                    root_pull_request is None
+                                    or root_pull_request.head_sha
+                                    != planned_collapse_record.plan.root_initial_head_sha
+                                ):
+                                    planned_collapse_record = None
                                 else:
-                                    result["stack_collapse_plan"] = (
-                                        planned_collapse_record.plan.model_dump(mode="json")
-                                    )
-                                driver_result = result
-                            else:
+                                    try:
+                                        _validate_merge_train_stack_collapse_record_for_controller(
+                                            collapse_record=planned_collapse_record,
+                                            policy_key=repository_policy.policy_key,
+                                            policy_sha256=policy_record.policy_sha256,
+                                        )
+                                    except ValueError as error:
+                                        raise MergeTrainControllerRequestError(
+                                            str(error)
+                                        ) from error
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run"
+                                        if not controller_request.mutate
+                                        else "execute_stack_collapse",
+                                        "controller_action": "execute_stack_collapse",
+                                        "merge_train_stack_collapse_plan_record_id": planned_collapse_record.record_id,
+                                    }
+                                    if controller_request.mutate:
+                                        executed_plan = execute_merge_train_stack_collapse_plan(
+                                            plan=planned_collapse_record.plan,
+                                            branch_client=github_client,
+                                            updated_at=recorded_at,
+                                        )
+                                        executed_record = build_merge_train_stack_collapse_plan_record(
+                                            plan=executed_plan,
+                                            source=f"service:controller:stack-collapse-execute:{request_trace_id}",
+                                            updated_at=recorded_at,
+                                        )
+                                        collapse_store.write_merge_train_stack_collapse_plan_record(
+                                            executed_record
+                                        )
+                                        result["merge_train_stack_collapse_plan_record_id"] = (
+                                            executed_record.record_id
+                                        )
+                                        result["stack_collapse_plan"] = executed_plan.model_dump(
+                                            mode="json"
+                                        )
+                                    else:
+                                        result["stack_collapse_plan"] = (
+                                            planned_collapse_record.plan.model_dump(mode="json")
+                                        )
+                                    driver_result = result
+                            if planned_collapse_record is None:
                                 snapshot = GitHubMergeTrainSnapshotReader(
                                     transport=transport
                                 ).read_merge_train_snapshot(
@@ -13056,6 +13121,20 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "merge_train_policy_not_configured",
                         "message": "No active DB-backed merge train policy record is configured.",
+                    },
+                },
+            )
+        except MergeTrainControllerRequestError as error:
+            message = str(error).strip() or "Merge train controller request could not be completed."
+            return _json_response(
+                start_response=start_response,
+                status_code=400,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "merge_train_controller_invalid_state",
+                        "message": message,
                     },
                 },
             )

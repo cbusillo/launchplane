@@ -506,12 +506,68 @@ that admission route before every worker call. It defaults to the Level 1
 `run-once` route for compatibility, and can call the full controller exactly
 once per admitted pass when manual dispatch sets `runner_mode: controller` or a
 scheduled run sets the repository variable `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE`
-to `controller`. Controller-mode runs and manually dispatched batch-candidate,
-stack-collapse, or batch-landing phases render conservative PR feedback payloads
-from their worker responses and post them through the managed feedback endpoint,
-so queued PRs get one evolving Launchplane status comment as the train builds,
-waits, blocks, or completes. The scheduler still writes at most one Launchplane
+to `controller`. Controller-mode mutate runs and manually dispatched
+batch-candidate, stack-collapse, or batch-landing phases render conservative PR
+feedback payloads from their worker responses and post them through the managed
+feedback endpoint, so queued PRs get one evolving Launchplane status comment as
+the train builds, waits, blocks, or completes. Controller-mode dry-runs do not
+deliver feedback comments. The scheduler still writes at most one Launchplane
 worker result per pass; the five-minute schedule is the retry loop.
+
+## Scheduler rollout runbook
+
+Roll out controller-mode scheduling as an operator-controlled lane. The service
+must already have an active merge-train policy for the target repository/base
+branch, the deployed authz grants must allow `.github/workflows/merge-train-runner.yml`
+to read admission and run the selected worker route, and the target repository
+should have low-risk candidate pull requests whose checks and labels make the
+expected train behavior easy to inspect.
+
+To opt a repository into observation, set the scheduler repository variables in
+the Launchplane repo:
+
+- `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY=owner/name`
+- `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE=controller`
+- `LAUNCHPLANE_MERGE_TRAIN_MUTATE=false`
+
+Scheduled runs currently use the workflow's default base branch input unless the
+workflow dispatch path supplies another base. Use a repository/base branch that
+is present in the active merge-train policy, and add explicit non-`main`
+scheduled-base support before relying on a non-default base branch for cron
+rollout.
+
+Observe at least two scheduled dry-run passes before enabling mutation. A healthy
+observation pass has a successful GitHub Actions run, an admitted or explicitly
+deferred admission response, `runner_mode=controller`, `mutate=false`, and a
+controller result whose mode is `dry-run`. Dry-run controller passes may render
+feedback payloads for inspection, but they must report zero delivered feedback
+comments and must not create or update Launchplane-managed PR comments. The
+operator UI controller status panel or the controller-status route should show
+the same active records, stale-record reasons, latest run result, and next
+controller action without requiring a GitHub read.
+
+Enable mutation only after an operator explicitly chooses to promote the dry-run
+lane. Set `LAUNCHPLANE_MERGE_TRAIN_MUTATE=true` for that promotion and confirm
+that service deploy health, required checks, runner capacity, and target PR
+heads are still current. A mutate run still performs at most one controller
+action per scheduled pass. Managed PR feedback comments are allowed in mutate
+mode and should summarize whether a PR is queued, blocked, waiting, stale, or
+completed.
+
+To stop mutation without removing visibility, set
+`LAUNCHPLANE_MERGE_TRAIN_MUTATE=false`. To disarm the scheduled lane entirely,
+remove `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`; scheduled runs without a target
+repository should skip before admission. Removing
+`LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE` returns the workflow to the Level 1
+compatibility worker for any later scheduled activation. Operators should not
+edit service code, delete durable train records, or change policy as an
+emergency stop when the repository variables can disable the lane.
+
+Every rollout or rollback should leave evidence in the planning issue: the
+target repository/base branch, the scheduler variables, the relevant run IDs,
+the latest controller/admission state, whether PR feedback was delivered, and
+the post-merge Launchplane CI, Security, CodeQL, and deploy status that carried
+the rollout behavior.
 
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
