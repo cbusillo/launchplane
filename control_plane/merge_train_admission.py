@@ -359,8 +359,8 @@ def _filter_actionable_controller_records(
     current_policy_sha256: str,
 ) -> MergeTrainControllerRecords:
     if not current_policy_key and not current_policy_sha256:
-        return _filter_controller_records_by_actionability(controller_records)
-    return MergeTrainControllerRecords(
+        return _filter_terminal_candidate_stop_records(controller_records)
+    policy_current_records = MergeTrainControllerRecords(
         candidate_records=tuple(
             record
             for record in controller_records.candidate_records
@@ -370,7 +370,6 @@ def _filter_actionable_controller_records(
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
             )
-            and _candidate_record_is_actionable(record)
         ),
         landing_plan_records=tuple(
             record
@@ -381,7 +380,6 @@ def _filter_actionable_controller_records(
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
             )
-            and _landing_plan_record_is_actionable(record)
         ),
         stack_collapse_plan_records=tuple(
             record
@@ -392,43 +390,50 @@ def _filter_actionable_controller_records(
                 current_policy_key=current_policy_key,
                 current_policy_sha256=current_policy_sha256,
             )
-            and _stack_collapse_record_is_actionable(record)
         ),
     )
+    return _filter_terminal_candidate_stop_records(policy_current_records)
 
 
-def _filter_controller_records_by_actionability(
+def _filter_terminal_candidate_stop_records(
     controller_records: MergeTrainControllerRecords,
 ) -> MergeTrainControllerRecords:
+    candidate_records = controller_records.candidate_records
+    latest_candidate_record = _latest_candidate_progress_record(candidate_records)
+    if latest_candidate_record is not None and latest_candidate_record.candidate.status in {
+        "blocked",
+        "stale",
+    }:
+        candidate_records = ()
     return MergeTrainControllerRecords(
-        candidate_records=tuple(
-            record
-            for record in controller_records.candidate_records
-            if _candidate_record_is_actionable(record)
-        ),
-        landing_plan_records=tuple(
-            record
-            for record in controller_records.landing_plan_records
-            if _landing_plan_record_is_actionable(record)
-        ),
-        stack_collapse_plan_records=tuple(
-            record
-            for record in controller_records.stack_collapse_plan_records
-            if _stack_collapse_record_is_actionable(record)
-        ),
+        candidate_records=candidate_records,
+        landing_plan_records=controller_records.landing_plan_records,
+        stack_collapse_plan_records=controller_records.stack_collapse_plan_records,
     )
 
 
-def _candidate_record_is_actionable(record: MergeTrainBatchCandidateRecord) -> bool:
-    return record.candidate.status != "passed"
-
-
-def _landing_plan_record_is_actionable(record: MergeTrainBatchLandingPlanRecord) -> bool:
-    return any(entry.status == "planned" for entry in record.landing_plan.entries)
-
-
-def _stack_collapse_record_is_actionable(record: MergeTrainStackCollapsePlanRecord) -> bool:
-    return record.plan.status in {"planned", "waiting_for_root_checks"}
+def _latest_candidate_progress_record(
+    records: tuple[MergeTrainBatchCandidateRecord, ...],
+) -> MergeTrainBatchCandidateRecord | None:
+    if not records:
+        return None
+    status_rank = {
+        "planned": 0,
+        "building": 1,
+        "ready_for_checks": 2,
+        "passed": 3,
+        "failed": 4,
+        "stale": 4,
+        "blocked": 4,
+    }
+    return max(
+        records,
+        key=lambda record: (
+            record.updated_at,
+            status_rank[record.candidate.status],
+            record.record_id,
+        ),
+    )
 
 
 def _policy_status_fields(
