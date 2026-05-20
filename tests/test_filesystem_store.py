@@ -30,6 +30,9 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.merge_train_pr_feedback_record import (
+    MergeTrainPrFeedbackRecord,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseEntry,
     MergeTrainStackCollapseMutation,
@@ -238,6 +241,70 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_and_list_merge_train_pr_feedback_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = MergeTrainPrFeedbackRecord(
+                feedback_id="merge-train-pr-feedback-example-repo-main-pr-7-old",
+                repository="example/repo",
+                base_branch="main",
+                pull_request_number=7,
+                pull_request_url="https://github.com/example/repo/pull/7",
+                event="queued",
+                marker="<!-- launchplane-merge-train:abc -->",
+                comment_markdown="<!-- launchplane-merge-train:abc -->\nQueued.",
+                source="test",
+                recorded_at="2026-05-20T12:00:00Z",
+                delivery_status="delivered",
+                delivery_action="created_comment",
+                comment_id=100,
+                comment_url="https://github.com/example/repo/pull/7#issuecomment-100",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "feedback_id": "merge-train-pr-feedback-example-repo-main-pr-7-new",
+                    "event": "waiting",
+                    "recorded_at": "2026-05-20T12:05:00Z",
+                    "delivery_action": "updated_comment",
+                    "comment_id": 101,
+                    "comment_url": "https://github.com/example/repo/pull/7#issuecomment-101",
+                }
+            )
+            other_record = older_record.model_copy(
+                update={
+                    "feedback_id": "merge-train-pr-feedback-example-repo-main-pr-8",
+                    "pull_request_number": 8,
+                    "pull_request_url": "https://github.com/example/repo/pull/8",
+                    "recorded_at": "2026-05-20T12:10:00Z",
+                }
+            )
+
+            written_path = store.write_merge_train_pr_feedback_record(older_record)
+            store.write_merge_train_pr_feedback_record(newer_record)
+            store.write_merge_train_pr_feedback_record(other_record)
+            listed_records = store.list_merge_train_pr_feedback_records(
+                repository="example/repo",
+                base_branch="main",
+                pr_number=7,
+            )
+            limited_records = store.list_merge_train_pr_feedback_records(
+                repository="example/repo",
+                base_branch="main",
+                limit=1,
+            )
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_pr_feedback/"
+            "merge-train-pr-feedback-example-repo-main-pr-7-old.json",
+        )
+        self.assertEqual(
+            [record.feedback_id for record in listed_records],
+            [newer_record.feedback_id, older_record.feedback_id],
+        )
+        self.assertEqual([record.feedback_id for record in limited_records], [other_record.feedback_id])
+
     def test_write_and_list_every_code_preview_gate_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

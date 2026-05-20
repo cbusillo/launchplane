@@ -48,6 +48,9 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_pr_feedback_record import (
+    MergeTrainPrFeedbackRecord,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
@@ -640,6 +643,28 @@ class LaunchplaneMergeTrainPolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainPrFeedbackRow(Base):
+    __tablename__ = "launchplane_merge_train_pr_feedback"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_pr_feedback_pr_idx",
+            "repository",
+            "base_branch",
+            "pull_request_number",
+            desc("recorded_at"),
+        ),
+    )
+
+    feedback_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1927,6 +1952,48 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def write_merge_train_pr_feedback_record(
+        self, record: MergeTrainPrFeedbackRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainPrFeedbackRow(
+                feedback_id=record.feedback_id,
+                repository=record.repository,
+                base_branch=record.base_branch,
+                pull_request_number=record.pull_request_number,
+                event=record.event,
+                delivery_status=record.delivery_status,
+                recorded_at=record.recorded_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_pr_feedback_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainPrFeedbackRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainPrFeedbackRow.base_branch == base_branch)
+        if pr_number is not None:
+            filters.append(LaunchplaneMergeTrainPrFeedbackRow.pull_request_number == pr_number)
+        return self._list_models(
+            model_type=MergeTrainPrFeedbackRecord,
+            orm_model=LaunchplaneMergeTrainPrFeedbackRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainPrFeedbackRow.recorded_at.desc(),
+                LaunchplaneMergeTrainPrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def write_merge_train_batch_candidate_record(
         self, record: MergeTrainBatchCandidateRecord
     ) -> None:
@@ -3046,6 +3113,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_pr_feedback": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
+            "merge_train_pr_feedback": 0,
             "merge_train_batch_candidates": 0,
             "merge_train_batch_landing_plans": 0,
             "merge_train_stack_collapse_plans": 0,
@@ -3121,6 +3189,10 @@ class PostgresRecordStore(HumanSessionStore):
             for run_record in filesystem_store.list_merge_train_run_records():
                 self.write_merge_train_run_record(run_record)
                 counts["merge_train_runs"] += 1
+        if hasattr(filesystem_store, "list_merge_train_pr_feedback_records"):
+            for feedback_record in filesystem_store.list_merge_train_pr_feedback_records():
+                self.write_merge_train_pr_feedback_record(feedback_record)
+                counts["merge_train_pr_feedback"] += 1
         if hasattr(filesystem_store, "list_merge_train_batch_candidate_records"):
             for candidate_record in filesystem_store.list_merge_train_batch_candidate_records():
                 self.write_merge_train_batch_candidate_record(candidate_record)
