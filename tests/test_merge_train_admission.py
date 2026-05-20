@@ -14,7 +14,11 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapseEntry,
+    MergeTrainStackCollapseMutation,
+    MergeTrainStackCollapsePlan,
     MergeTrainStackCollapsePlanRecord,
+    build_merge_train_stack_collapse_id,
 )
 from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -58,10 +62,12 @@ class _RunHistoryStore:
         *,
         candidate_records: tuple[MergeTrainBatchCandidateRecord, ...] = (),
         landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...] = (),
+        stack_collapse_plan_records: tuple[MergeTrainStackCollapsePlanRecord, ...] = (),
     ) -> None:
         self.latest_run = latest_run
         self.candidate_records = candidate_records
         self.landing_plan_records = landing_plan_records
+        self.stack_collapse_plan_records = stack_collapse_plan_records
         self.requests: list[tuple[str, str]] = []
 
     def latest_merge_train_run_record(
@@ -98,7 +104,7 @@ class _RunHistoryStore:
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
-        return ()
+        return self.stack_collapse_plan_records
 
 
 class MergeTrainAdmissionTests(unittest.TestCase):
@@ -274,6 +280,32 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_action, "idle")
         self.assertEqual(decision.controller_candidate_record_id, "")
 
+    def test_ignores_terminal_controller_records_for_admission(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record, entry_status="merged")
+        stack_collapse_record = _stack_collapse_record(status="stale")
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            stack_collapse_plan_records=(stack_collapse_record,),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.controller_action, "idle")
+        self.assertEqual(decision.controller_candidate_record_id, "")
+        self.assertEqual(decision.controller_landing_plan_record_id, "")
+        self.assertEqual(decision.controller_stack_collapse_plan_record_id, "")
+
     def test_builds_controller_status_read_model_from_store_records(self) -> None:
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)
@@ -322,6 +354,33 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(
             read_model.controller_records[0].stale_reason,
             "policy_digest_mismatch",
+        )
+
+    def test_controller_status_keeps_terminal_records_visible_without_action(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record, entry_status="merged")
+        stack_collapse_record = _stack_collapse_record(status="stale")
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+            stack_collapse_plan_records=(stack_collapse_record,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertEqual(read_model.admission.controller_action, "idle")
+        self.assertEqual(len(read_model.controller_records), 3)
+        self.assertEqual(
+            {summary.record_type for summary in read_model.controller_records},
+            {"batch_candidate", "batch_landing_plan", "stack_collapse_plan"},
         )
 
 
@@ -397,6 +456,8 @@ def _candidate_record(*, status: str) -> MergeTrainBatchCandidateRecord:
 
 def _landing_plan_record(
     candidate_record: MergeTrainBatchCandidateRecord,
+    *,
+    entry_status: str = "planned",
 ) -> MergeTrainBatchLandingPlanRecord:
     candidate = candidate_record.candidate
     plan = MergeTrainBatchLandingPlan(
@@ -415,7 +476,8 @@ def _landing_plan_record(
                 expected_head_sha="head-42",
                 expected_base_sha=candidate.base_sha,
                 merge_method="merge",
-                status="planned",
+                status=entry_status,  # type: ignore[arg-type]
+                merge_commit_sha="merge-42" if entry_status == "merged" else "",
             ),
             MergeTrainBatchLandingEntry(
                 pull_request_number=43,
@@ -433,6 +495,61 @@ def _landing_plan_record(
         landing_plan=plan,
         source="test:admission-controller-landing-plan",
         updated_at="2026-05-09T02:05:00Z",
+    )
+
+
+def _stack_collapse_record(*, status: str) -> MergeTrainStackCollapsePlanRecord:
+    entries = (
+        MergeTrainStackCollapseEntry(
+            pull_request_number=42,
+            position=1,
+            head_sha="head-42",
+            head_ref="feature/root",
+            base_ref="main",
+        ),
+        MergeTrainStackCollapseEntry(
+            pull_request_number=43,
+            position=2,
+            head_sha="head-43",
+            head_ref="feature/child",
+            base_ref="feature/root",
+        ),
+    )
+    policy = build_test_merge_train_policy()
+    collapse_id = build_merge_train_stack_collapse_id(
+        repository="cbusillo/sellyouroutboard",
+        base_branch="main",
+        root_pull_request_number=42,
+        entry_head_shas=tuple(entry.head_sha for entry in entries),
+    )
+    return MergeTrainStackCollapsePlanRecord(
+        record_id="merge-train-stack-collapse-plan-test",
+        source="test:admission-controller-stack-collapse",
+        updated_at="2026-05-09T02:05:00Z",
+        plan=MergeTrainStackCollapsePlan(
+            collapse_id=collapse_id,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            root_pull_request_number=42,
+            root_initial_head_sha="head-42",
+            root_head_ref="feature/root",
+            policy_key="cbusillo/sellyouroutboard:main",
+            policy_sha256=policy.policy_sha256,
+            status=status,  # type: ignore[arg-type]
+            entries=entries,
+            mutations=(
+                MergeTrainStackCollapseMutation(
+                    child_pull_request_number=43,
+                    parent_pull_request_number=42,
+                    child_head_sha="head-43",
+                    expected_parent_head_sha="head-42",
+                    parent_head_ref="feature/root",
+                    status="stale" if status == "stale" else "planned",
+                ),
+            ),
+            created_at="2026-05-09T02:04:00Z",
+            updated_at="2026-05-09T02:05:00Z",
+        ),
     )
 
 
