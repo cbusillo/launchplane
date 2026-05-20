@@ -92,18 +92,12 @@ def decide_merge_train_controller_record_action(
             batch_id=passed_candidate_record.candidate.batch_id,
             candidate_sha=passed_candidate_record.candidate.candidate_sha,
         )
-        if completed_landing_record is not None:
+        if completed_landing_record is None:
             return MergeTrainControllerDecision(
-                action="batch_landed",
-                reason="passed candidate already has a completed landing plan",
+                action="plan_landing",
+                reason="latest passed candidate needs a landing plan",
                 candidate_record_id=passed_candidate_record.record_id,
-                landing_plan_record_id=completed_landing_record.record_id,
             )
-        return MergeTrainControllerDecision(
-            action="plan_landing",
-            reason="latest passed candidate needs a landing plan",
-            candidate_record_id=passed_candidate_record.record_id,
-        )
 
     waiting_collapse_record = latest_merge_train_stack_collapse_plan_record(
         stack_collapse_plan_records,

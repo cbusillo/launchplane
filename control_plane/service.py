@@ -3198,6 +3198,7 @@ def _latest_merge_train_batch_candidate_record(
 def _latest_passed_merge_train_batch_candidate_record(
     *,
     record_store: _MergeTrainBatchCandidateRecordStore,
+    landing_plan_record_store: _MergeTrainBatchLandingPlanRecordStore,
     repository: str,
     base_branch: str,
 ) -> MergeTrainBatchCandidateRecord | None:
@@ -3211,6 +3212,15 @@ def _latest_passed_merge_train_batch_candidate_record(
     if latest_record is None:
         return None
     if latest_record.candidate.status != "passed":
+        return None
+    completed_landing_record = _latest_completed_merge_train_batch_landing_plan_record(
+        record_store=landing_plan_record_store,
+        repository=repository,
+        base_branch=base_branch,
+        batch_id=latest_record.candidate.batch_id,
+        candidate_sha=latest_record.candidate.candidate_sha,
+    )
+    if completed_landing_record is not None:
         return None
     return latest_record
 
@@ -9396,6 +9406,7 @@ def create_launchplane_service_app(
                     if active_candidate_record is None:
                         passed_candidate_record = _latest_passed_merge_train_batch_candidate_record(
                             record_store=candidate_store,
+                            landing_plan_record_store=landing_store,
                             repository=controller_request.repository,
                             base_branch=controller_request.base_branch,
                         )
