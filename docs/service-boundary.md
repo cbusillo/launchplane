@@ -78,8 +78,10 @@ VeriReel product paths:
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
   - `GET /v1/work-graph/merge-train/admission`
+  - `GET /v1/work-graph/merge-train/controller/status`
   - `POST /v1/work-graph/rank`
   - `POST /v1/work-graph/merge-train/run-once`
+  - `POST /v1/work-graph/merge-train/controller/run-once`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -237,6 +239,14 @@ same merge-train repository policy and `service_authz` scope as `run-once`, but
 performs no GitHub reads and no storage writes. Schedulers use this route to
 pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
 mutation.
+
+`GET /v1/work-graph/merge-train/controller/status` returns the operator read
+model for the same repository/base branch. It uses the same authorization as the
+policy route, performs no GitHub reads, and composes stored scheduler admission,
+latest Level 1 run history, active batch candidates, landing plans, and
+stack-collapse plans. Operators can use this route to see the current controller
+action, durable record ids, PR numbers, candidate SHA/check state, and compact
+entry counts without invoking a worker mutation.
 
 `POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
 one-action controller for the full batch train. Request payloads name

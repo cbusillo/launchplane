@@ -4,6 +4,9 @@ from control_plane.contracts.merge_train_admission import (
     build_merge_train_controller_admission_decision,
 )
 from control_plane.contracts.merge_train_admission import evaluate_merge_train_admission
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan_record
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
@@ -13,6 +16,7 @@ from control_plane.contracts.merge_train_run_record import build_merge_train_run
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapsePlanRecord,
 )
+from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
@@ -53,9 +57,11 @@ class _RunHistoryStore:
         latest_run: MergeTrainRunRecord | None,
         *,
         candidate_records: tuple[MergeTrainBatchCandidateRecord, ...] = (),
+        landing_plan_records: tuple[MergeTrainBatchLandingPlanRecord, ...] = (),
     ) -> None:
         self.latest_run = latest_run
         self.candidate_records = candidate_records
+        self.landing_plan_records = landing_plan_records
         self.requests: list[tuple[str, str]] = []
 
     def latest_merge_train_run_record(
@@ -82,7 +88,7 @@ class _RunHistoryStore:
         status: str = "",
         limit: int | None = None,
     ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
-        return ()
+        return self.landing_plan_records
 
     def list_merge_train_stack_collapse_plan_records(
         self,
@@ -251,6 +257,32 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_action, "build_candidate")
         self.assertEqual(decision.controller_candidate_record_id, candidate_record.record_id)
 
+    def test_builds_controller_status_read_model_from_store_records(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record)
+        latest_run = _run_record(recorded_at="2026-05-09T02:00:00Z")
+        store = _RunHistoryStore(
+            latest_run,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+        )
+
+        read_model = build_merge_train_controller_status_read_model(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            generated_at="2026-05-09T02:10:00Z",
+        )
+
+        self.assertEqual(read_model.admission.controller_action, "land_batch")
+        self.assertEqual(read_model.latest_run, latest_run)
+        self.assertEqual(len(read_model.controller_records), 2)
+        self.assertEqual(read_model.controller_records[0].record_type, "batch_landing_plan")
+        self.assertEqual(read_model.controller_records[0].planned_count, 1)
+        self.assertEqual(read_model.controller_records[0].merged_count, 1)
+        self.assertEqual(read_model.controller_records[1].record_type, "batch_candidate")
+        self.assertEqual(read_model.controller_records[1].pull_request_numbers, (42,))
+
 
 def _run_record(
     *,
@@ -319,6 +351,47 @@ def _candidate_record(*, status: str) -> MergeTrainBatchCandidateRecord:
         candidate=candidate,
         source="test:admission-controller-record",
         updated_at="2026-05-09T02:00:00Z",
+    )
+
+
+def _landing_plan_record(
+    candidate_record: MergeTrainBatchCandidateRecord,
+) -> MergeTrainBatchLandingPlanRecord:
+    candidate = candidate_record.candidate
+    plan = MergeTrainBatchLandingPlan(
+        plan_id="merge-train-landing-plan-test",
+        batch_id=candidate.batch_id,
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        candidate_ref=candidate.candidate_ref,
+        candidate_sha=candidate.candidate_sha or "candidate-sha",
+        policy_key=candidate.policy_key,
+        policy_sha256=candidate.policy_sha256,
+        entries=(
+            MergeTrainBatchLandingEntry(
+                pull_request_number=42,
+                position=1,
+                expected_head_sha="head-42",
+                expected_base_sha=candidate.base_sha,
+                merge_method="merge",
+                status="planned",
+            ),
+            MergeTrainBatchLandingEntry(
+                pull_request_number=43,
+                position=2,
+                expected_head_sha="head-43",
+                expected_base_sha=candidate.base_sha,
+                merge_method="merge",
+                status="merged",
+                merge_commit_sha="merge-43",
+            ),
+        ),
+        created_at="2026-05-09T02:05:00Z",
+    )
+    return build_merge_train_batch_landing_plan_record(
+        landing_plan=plan,
+        source="test:admission-controller-landing-plan",
+        updated_at="2026-05-09T02:05:00Z",
     )
 
 

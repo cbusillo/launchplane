@@ -97,6 +97,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
@@ -381,6 +382,7 @@ from control_plane.workflows.verireel_preview_driver import (
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
+_MERGE_TRAIN_CONTROLLER_STATUS_ROUTE = "/v1/work-graph/merge-train/controller/status"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
@@ -2515,6 +2517,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "launchplane_service.read", {}
     if path == _MERGE_TRAIN_ADMISSION_ROUTE:
         return "merge_train.admission", {}
+    if path == _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE:
+        return "merge_train.controller_status", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
@@ -7875,6 +7879,52 @@ def create_launchplane_service_app(
                             "status": "ok",
                             "trace_id": request_trace_id,
                             "admission": admission_decision.model_dump(mode="json"),
+                        },
+                    )
+                if action == "merge_train.controller_status":
+                    status_request = MergeTrainAdmissionEnvelope.model_validate(
+                        {
+                            "repository": str((query.get("repository") or [""])[0] or ""),
+                            "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
+                        }
+                    )
+                    policy_record = resolve_merge_train_policy_record(record_store)
+                    policy = policy_record.policy
+                    repository_policy = policy.find_repository_policy(
+                        repository=status_request.repository,
+                        base_branch=status_request.base_branch,
+                    )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=repository_policy.service_authz.action,
+                        product=repository_policy.service_authz.product,
+                        context=repository_policy.service_authz.context,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read the requested merge train controller status.",
+                                },
+                            },
+                        )
+                    read_model = build_merge_train_controller_status_read_model(
+                        store=record_store,
+                        repository=status_request.repository,
+                        base_branch=status_request.base_branch,
+                        generated_at=_utc_now_timestamp(),
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "controller_status": read_model.model_dump(mode="json"),
                         },
                     )
                 if action == "product_profile.read":
