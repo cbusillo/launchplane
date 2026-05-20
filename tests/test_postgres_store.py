@@ -2463,6 +2463,7 @@ env_var = "GH_TOKEN"
                     "preview_pr_feedback": 1,
                     "every_code_preview_gates": 0,
                     "agent_write_intents": 0,
+                    "merge_train_pr_feedback": 0,
                     "merge_train_batch_candidates": 1,
                     "merge_train_batch_landing_plans": 1,
                     "merge_train_stack_collapse_plans": 1,
