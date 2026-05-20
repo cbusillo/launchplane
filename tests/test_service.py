@@ -2769,6 +2769,71 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "closed",
         )
 
+    def test_merge_train_controller_ignores_stale_waiting_stack_root(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeStackedMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMovedRootStackedMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["controller_action"], "plan_stack_collapse")
+        self.assertNotIn("merge_train_stack_collapse_plan_record_id", payload["result"])
+
     def test_merge_train_controller_rejects_candidate_after_policy_digest_changes(
         self,
     ) -> None:

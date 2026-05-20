@@ -9564,67 +9564,68 @@ def create_launchplane_service_app(
                                 ),
                                 None,
                             )
-                            if root_pull_request is None:
-                                raise ValueError("merge train stack collapse root PR is missing")
-                            if root_pull_request.head_sha != _stack_collapse_expected_root_head_sha(
-                                waiting_collapse_record.plan
+                            if (
+                                root_pull_request is None
+                                or root_pull_request.head_sha
+                                != _stack_collapse_expected_root_head_sha(
+                                    waiting_collapse_record.plan
+                                )
                             ):
-                                raise ValueError(
-                                    "merge train stack collapse root PR head no longer matches"
-                                )
-                            root_snapshot = snapshot.model_copy(
-                                update={"pull_requests": (root_pull_request,)}
-                            )
-                            dry_run_result = build_merge_train_dry_run_result(
-                                policy=policy, snapshot=root_snapshot
-                            )
-                            if dry_run_result.intended_next_action != "merge":
-                                result = {
-                                    "repository": controller_request.repository,
-                                    "base_branch": controller_request.base_branch,
-                                    "mode": "dry-run",
-                                    "controller_action": "wait_for_root_checks",
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                }
-                                driver_result = result
-                            elif not controller_request.mutate:
-                                result = {
-                                    "repository": controller_request.repository,
-                                    "base_branch": controller_request.base_branch,
-                                    "mode": "dry-run",
-                                    "controller_action": "admit_collapsed_root",
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                }
-                                driver_result = result
+                                waiting_collapse_record = None
                             else:
-                                candidate = build_merge_train_batch_candidate(
-                                    dry_run_result=dry_run_result,
-                                    base_sha=root_snapshot.base_sha,
-                                    policy_sha256=policy_record.policy_sha256,
-                                    created_at=recorded_at,
+                                root_snapshot = snapshot.model_copy(
+                                    update={"pull_requests": (root_pull_request,)}
                                 )
-                                candidate_record = build_merge_train_batch_candidate_record(
-                                    candidate=candidate,
-                                    source=f"service:controller:stack-collapse-admit:{request_trace_id}",
-                                    updated_at=recorded_at,
+                                dry_run_result = build_merge_train_dry_run_result(
+                                    policy=policy, snapshot=root_snapshot
                                 )
-                                candidate_store.write_merge_train_batch_candidate_record(
-                                    candidate_record
-                                )
-                                result = {
-                                    "merge_train_batch_candidate_record_id": candidate_record.record_id,
-                                    "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
-                                    "repository": candidate.repository,
-                                    "base_branch": candidate.base_branch,
-                                    "mode": "admit_collapsed_root",
-                                    "controller_action": "admit_collapsed_root",
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                    "candidate": candidate.model_dump(mode="json"),
-                                }
-                                driver_result = result
-                        else:
+                                if dry_run_result.intended_next_action != "merge":
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run",
+                                        "controller_action": "wait_for_root_checks",
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                                elif not controller_request.mutate:
+                                    result = {
+                                        "repository": controller_request.repository,
+                                        "base_branch": controller_request.base_branch,
+                                        "mode": "dry-run",
+                                        "controller_action": "admit_collapsed_root",
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                                else:
+                                    candidate = build_merge_train_batch_candidate(
+                                        dry_run_result=dry_run_result,
+                                        base_sha=root_snapshot.base_sha,
+                                        policy_sha256=policy_record.policy_sha256,
+                                        created_at=recorded_at,
+                                    )
+                                    candidate_record = build_merge_train_batch_candidate_record(
+                                        candidate=candidate,
+                                        source=f"service:controller:stack-collapse-admit:{request_trace_id}",
+                                        updated_at=recorded_at,
+                                    )
+                                    candidate_store.write_merge_train_batch_candidate_record(
+                                        candidate_record
+                                    )
+                                    result = {
+                                        "merge_train_batch_candidate_record_id": candidate_record.record_id,
+                                        "merge_train_stack_collapse_plan_record_id": waiting_collapse_record.record_id,
+                                        "repository": candidate.repository,
+                                        "base_branch": candidate.base_branch,
+                                        "mode": "admit_collapsed_root",
+                                        "controller_action": "admit_collapsed_root",
+                                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                        "candidate": candidate.model_dump(mode="json"),
+                                    }
+                                    driver_result = result
+                        if waiting_collapse_record is None:
                             planned_collapse_record = (
                                 _latest_merge_train_stack_collapse_plan_record(
                                     record_store=collapse_store,
