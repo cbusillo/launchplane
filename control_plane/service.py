@@ -8671,6 +8671,26 @@ def create_launchplane_service_app(
                     response_trace_id=request_trace_id,
                 )
                 feedback_store.write_merge_train_pr_feedback_record(feedback_record)
+                if feedback_record.delivery_status == "failed":
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=502,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_comment_delivery_failed",
+                                "message": feedback_record.error_message
+                                or "Merge train PR feedback comment delivery failed.",
+                            },
+                            "records": {
+                                "merge_train_pr_feedback_id": feedback_record.feedback_id,
+                            },
+                            "result": {
+                                "feedback": feedback_record.model_dump(mode="json"),
+                            },
+                        },
+                    )
                 result = {"feedback": feedback_record.model_dump(mode="json")}
                 driver_result = {"feedback": feedback_record.model_dump(mode="json")}
             elif path == _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE:
