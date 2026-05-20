@@ -155,16 +155,12 @@ Launchplane preview and preview-generation records as generic-web previews.
 The preview-verification route accepts optional checked URL evidence and returns
 a typed `odoo_preview_verification` result while only mutating Launchplane
 preview-generation records.
-Odoo's staged compose preview MVP is now historical compatibility evidence, not
-the target runtime architecture. That path updated and deployed the configured
-compose target when the product profile used `preview.data_transport_mode =
-"bootstrap"` and its template lane was a Dokploy `compose` target; inventory and
-destroy read compose domains with `/api/domain.byComposeId` and deleted only
-domains whose hostnames matched the preview slug template. This exception remains
-route-scoped to Odoo preview refresh, inventory, destroy, and readiness while the
-isolated runtime migration lands; it does not grant Odoo products access to
-stable generic-web deploy or promotion routes, and it does not make compose
-templates valid for generic-web products.
+Odoo's staged compose preview MVP is now retired. Generic-web preview readiness
+blocks compose template lanes, including historical Odoo bootstrap-mode compose
+profiles; Odoo PR previews must enter through `plan_odoo_preview_runtime` and
+`execute_odoo_preview_dokploy_apply`. Historical inventory and destroy evidence
+may still contain `providerType="compose-domain"`, but new Odoo preview provider
+mutation is isolated-runtime only.
 The isolated Odoo preview replacement starts with the
 `plan_odoo_preview_runtime` contract. It must return `ready` before provider
 apply code can create, update, deploy, or destroy a PR runtime. The planner fails
@@ -202,13 +198,13 @@ the compose missing, destroy treats the runtime as already clean. The adapter is
 not a generic local fallback: shared/provider execution still needs an approved
 non-production target and a caller surface that sources Launchplane-managed
 Dokploy credentials without printing secret values.
-For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
-owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
-source revision evidence, module install/update evidence from rendered Odoo env,
-`/web/health`, `/cm-website/health`, and `/cell-mechanic`. Passing smoke records
-the preview generation as `ready` with deploy, verify, and overall health status
-`pass`; failed smoke records a concise verification failure so PR feedback does
-not advertise ready before the checks pass.
+Odoo isolated preview apply also runs Launchplane-owned smoke before reporting a
+ready apply result. The apply path requires image artifact evidence, source
+revision evidence, rendered Odoo module evidence, and successful preview health
+checks. Passing smoke records the preview generation as `ready` with deploy,
+verify, and overall health status `pass`; failed smoke records a concise
+verification failure so PR feedback does not advertise ready before the checks
+pass.
 The verification route is a Launchplane-owned evidence ingress for follow-up
 browser or product smoke checks: it marks the latest preview generation ready or
 failed through the same preview-generation records without mutating provider

@@ -722,7 +722,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(manifest.preview.template_instance, "testing")
         self.assertEqual(manifest.preview.override_env["ODOO_INSTALL_MODULES"], "opw_custom")
         self.assertEqual(manifest.preview.preview_url_env_keys, ("WEB_BASE_URL",))
-        self.assertEqual(manifest.preview.data_transport_mode, "bootstrap")
+        self.assertEqual(manifest.preview.data_transport_mode, "driver")
         policies = {lane.instance: lane.odoo_prelaunch_rebuild for lane in manifest.lanes}
         for instance in ("testing", "prod"):
             self.assertTrue(policies[instance].enabled)

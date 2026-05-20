@@ -474,7 +474,7 @@ apply_odoo_cm_onboarding() {
               ODOO_INSTALL_MODULES: "cm_custom,cm_website"
             },
             preview_url_env_keys: ["WEB_BASE_URL"],
-            data_transport_mode: "bootstrap"
+            data_transport_mode: "driver"
           },
           dokploy_targets: (
             (if ($target_id | length) > 0 then
@@ -605,7 +605,7 @@ apply_odoo_opw_onboarding() {
               ODOO_INSTALL_MODULES: "opw_custom"
             },
             preview_url_env_keys: ["WEB_BASE_URL"],
-            data_transport_mode: "bootstrap"
+            data_transport_mode: "driver"
           },
           dokploy_targets: (
             (if ($testing_target_id | length) > 0 then
