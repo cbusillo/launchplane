@@ -194,10 +194,11 @@ preview composes on that template compose's Dokploy server, deploys the compose,
 and returns redacted step evidence. Destroy looks up domains for the matching
 preview compose, deletes the matching preview hostname, then deletes the compose
 with `deleteVolumes`; if the domain lookup is already empty and Dokploy reports
-the compose missing, destroy treats the runtime as already clean. The adapter is
-not a generic local fallback: shared/provider execution still needs an approved
-non-production target and a caller surface that sources Launchplane-managed
-Dokploy credentials without printing secret values.
+the compose missing, or if a matching preview domain was deleted immediately
+before the missing-compose response, destroy treats the runtime as already clean.
+The adapter is not a generic local fallback: shared/provider execution still
+needs an approved non-production target and a caller surface that sources
+Launchplane-managed Dokploy credentials without printing secret values.
 Odoo isolated preview apply also runs Launchplane-owned smoke before reporting a
 ready apply result. The apply path requires image artifact evidence, source
 revision evidence, rendered Odoo module evidence, and successful preview health
