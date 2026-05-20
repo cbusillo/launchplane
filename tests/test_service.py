@@ -2946,7 +2946,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertIn("merge_train_stack_collapse_plan_record_id", plan_payload["records"])
         self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["code"], "merge_train_controller_invalid_state")
+        self.assertEqual(
+            payload["error"]["message"],
+            "merge train stack collapse policy digest no longer matches",
+        )
 
     def test_merge_train_stack_collapse_service_executes_existing_plan_record(self) -> None:
         with (
