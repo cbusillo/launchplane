@@ -136,6 +136,19 @@ def _manifest_payload() -> dict[str, object]:
 
 
 class ProductOnboardingTests(unittest.TestCase):
+    def test_deploy_authz_grants_include_scheduled_merge_train_runner(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("deploy:merge-train-runner-manual-grant", script_text)
+        self.assertIn("merge-train-runner-manual", script_text)
+        self.assertIn("deploy:merge-train-runner-schedule-grant", script_text)
+        self.assertIn("merge-train-runner-schedule", script_text)
+        self.assertIn("schedule", script_text)
+
     def test_deploy_authz_grants_include_opw_manual_preview_workflow(
         self,
     ) -> None:
