@@ -3,6 +3,15 @@ import os
 from html import escape
 from pathlib import Path
 
+from control_plane.contracts.preview_request_metadata import (
+    LAUNCHPLANE_ALLOWED_COMPANION_REPOS,
+    LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
+)
+from control_plane.workflows.launchplane import (
+    DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL,
+    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+)
+
 
 def status_tone(value: str) -> str:
     normalized_value = value.strip().lower()
@@ -359,4 +368,253 @@ def build_launchplane_environment_ship_recipe_script(
             'cat "$SHIP_REQUEST_FILE"',
             'uv run launchplane ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
         )
+    )
+
+
+def render_launchplane_preview_policy_page_html(
+    payload: dict[str, object],
+    *,
+    eligible_contexts: tuple[tuple[str, str], ...] = (),
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", ""))
+    preview_rows = json_object_items(payload.get("previews"))
+    active_preview_count = sum(
+        1 for row in preview_rows if str(row.get("state", "")).strip().lower() != "destroyed"
+    )
+    retained_preview_count = sum(
+        1 for row in preview_rows if str(row.get("state", "")).strip().lower() == "destroyed"
+    )
+    overview_href = escape((nav_links or {}).get("overview", "index.html") or "index.html")
+    context_distribution_rows = []
+    for context_value in sorted(
+        {
+            str(row.get("context", "")).strip()
+            for row in preview_rows
+            if str(row.get("context", "")).strip()
+        }
+    ):
+        matching_rows = [
+            row for row in preview_rows if str(row.get("context", "")).strip() == context_value
+        ]
+        active_count = sum(
+            1 for row in matching_rows if str(row.get("state", "")).strip().lower() != "destroyed"
+        )
+        retained_count = sum(
+            1 for row in matching_rows if str(row.get("state", "")).strip().lower() == "destroyed"
+        )
+        context_link = f"{overview_href}#scope=context:{escape(context_value)}"
+        context_distribution_rows.append(
+            "<tr>"
+            f'<td><a href="{context_link}">{escape(context_value)}</a></td>'
+            f"<td>{len(matching_rows)}</td>"
+            f"<td>{active_count}</td>"
+            f"<td>{retained_count}</td>"
+            "</tr>"
+        )
+    context_distribution_html = ""
+    if len(context_distribution_rows) > 1:
+        context_distribution_html = f"""
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Fleet footprint</div>
+      <h2>Context distribution</h2>
+      <p>When Launchplane is showing more than one tenant context, this page should still reveal how the current preview fleet is distributed across those contexts.</p>
+      <table>
+        <thead><tr><th>Context</th><th>Total</th><th>Active</th><th>Retained</th></tr></thead>
+        <tbody>{"".join(context_distribution_rows)}</tbody>
+      </table>
+    </section>
+    """
+    eligible_context_rows = "".join(
+        f"<tr><td>{escape(repo)}</td><td>{escape(context)}</td></tr>"
+        for repo, context in sorted(eligible_contexts)
+    )
+    companion_items = "".join(
+        f"<li><code>{escape(repo)}</code></li>" for repo in LAUNCHPLANE_ALLOWED_COMPANION_REPOS
+    )
+    preview_label_example = escape("<context>/<anchor-repo>/pr-<number>")
+    preview_route_example = escape("/previews/<context>/<anchor-repo>/pr-<number>")
+
+    body_html = f"""
+    <section class=\"policy-mast\">
+      <div class=\"section-label\">Read-only policy</div>
+      <h2>How Launchplane decides what becomes a preview</h2>
+      <p>This page exposes the current preview contract as operator evidence. GitHub supplies PR events and identity; Launchplane decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Current queue</div>
+        <h3>Observed state</h3>
+        <dl class=\"policy-stats\">
+          <div><dt>Context</dt><dd>{escape(context_name) or "all contexts"}</dd></div>
+          <div><dt>Active previews</dt><dd>{active_preview_count}</dd></div>
+          <div><dt>Retained evidence</dt><dd>{retained_preview_count}</dd></div>
+          <div><dt>Total records</dt><dd>{len(preview_rows)}</dd></div>
+        </dl>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Enablement</div>
+        <h3>Preview request gate</h3>
+        <p>Launchplane can enable a PR preview from the anchor PR label <code>{escape(LAUNCHPLANE_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Launchplane-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
+      </article>
+    </section>
+
+    {context_distribution_html}
+
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Anchor policy</div>
+      <h2>Eligible anchor repositories</h2>
+      <p>Launchplane only anchors preview identities from tenant repositories that resolve to a known control-plane context.</p>
+      <table>
+        <thead><tr><th>Anchor repo</th><th>Context</th></tr></thead>
+        <tbody>{eligible_context_rows}</tbody>
+      </table>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Preview metadata</div>
+        <h3>PR body contract</h3>
+        <p>Launchplane reads one fenced metadata block from the anchor PR body using info string <code>{escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)}</code>.</p>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Companions</div>
+        <h3>Allowlisted companion repos</h3>
+        <p>Companion refs are explicit, PR-based, and allowlisted. Launchplane does not accept raw branch-name or SHA overrides here.</p>
+        <ul class=\"policy-list\">{companion_items or "<li>None</li>"}</ul>
+      </article>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Identity</div>
+        <h3>Preview naming</h3>
+        <p>Human-readable preview labels follow <code>{preview_label_example}</code>. Launchplane keeps one stable preview identity per anchor PR and rotates generations behind it.</p>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Routing</div>
+        <h3>Stable review route</h3>
+        <p>Preview URLs are expected to follow a routed path shape such as <code>{preview_route_example}</code> rather than creating a new permanent environment lane.</p>
+      </article>
+    </section>
+
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Lifecycle stance</div>
+      <h2>Retention and cleanup</h2>
+      <ul class=\"policy-list\">
+        <li>Stable long-lived lanes such as local, testing, and prod remain distinct from preview traffic.</li>
+        <li>Destroyed previews remain visible as retained evidence instead of disappearing from the operator surface.</li>
+        <li>Launchplane treats preview records and generation records as canonical control-plane evidence, not transient UI state.</li>
+      </ul>
+    </section>
+    """
+
+    extra_css = """
+    .policy-mast,
+    .policy-section {
+      border-top: 1px solid var(--line);
+      padding-top: 22px;
+    }
+    .policy-mast { border-top: 0; padding-top: 0; }
+    .policy-mast h2,
+    .policy-section h2,
+    .policy-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.06;
+    }
+    .policy-mast h2,
+    .policy-section h2 { font-size: 34px; }
+    .policy-card h3 { font-size: 24px; }
+    .policy-mast p,
+    .policy-section p,
+    .policy-card p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+      max-width: 64ch;
+    }
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .policy-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+      margin-top: 30px;
+    }
+    .policy-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .policy-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 0;
+    }
+    .policy-stats dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .policy-stats dd {
+      margin: 8px 0 0;
+      font-family: var(--serif);
+      font-size: 28px;
+      overflow-wrap: anywhere;
+    }
+    .policy-list {
+      margin: 16px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 10px;
+      line-height: 1.6;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    code { font-family: var(--mono); font-size: 12px; }
+    @media (max-width: 900px) {
+      .policy-grid,
+      .policy-stats { grid-template-columns: 1fr; }
+    }
+    """
+
+    return render_launchplane_shell_document(
+        page_title=f"Launchplane preview policy{' · ' + context_name if context_name else ''}",
+        context_name=context_name,
+        active_nav="policy",
+        body_class="index-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
     )
