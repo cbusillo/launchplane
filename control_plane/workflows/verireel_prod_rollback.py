@@ -6,6 +6,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import time
+from typing import Protocol
 from urllib.error import HTTPError, URLError
 
 import click
@@ -19,12 +20,8 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
     RollbackExecutionEvidence,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
-from control_plane.workflows.verireel_prod_promotion import (
-    _read_backup_gate_record,
-)
 from control_plane.workflows.verireel_rollout import (
     DEFAULT_ROLLOUT_INTERVAL_SECONDS,
     DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
@@ -129,9 +126,17 @@ WORKER_RUNTIME_ENV_KEYS = (
 )
 
 
+class VeriReelProdRollbackStore(Protocol):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> Path | None: ...
+
+
 def _read_promotion_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdRollbackStore,
     record_id: str,
 ) -> PromotionRecord:
     try:
@@ -142,9 +147,22 @@ def _read_promotion_record(
         ) from exc
 
 
+def _read_backup_gate_record(
+    *,
+    record_store: VeriReelProdRollbackStore,
+    record_id: str,
+) -> BackupGateRecord:
+    try:
+        return record_store.read_backup_gate_record(record_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"VeriReel prod rollback requires stored backup gate record '{record_id}'."
+        ) from exc
+
+
 def _resolve_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdRollbackStore,
     request: VeriReelProdRollbackRequest,
 ) -> BackupGateRecord:
     backup_gate_record = _read_backup_gate_record(
@@ -257,7 +275,7 @@ def _build_health_evidence(
 
 def _write_promotion_rollback_state(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdRollbackStore,
     promotion_record: PromotionRecord,
     request: VeriReelProdRollbackRequest,
     snapshot_name: str,
@@ -394,7 +412,7 @@ def _run_delegated_worker(
 def execute_verireel_prod_rollback(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdRollbackStore,
     request: VeriReelProdRollbackRequest,
 ) -> VeriReelProdRollbackResult:
     try:
