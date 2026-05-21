@@ -84,6 +84,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
+from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -3075,9 +3076,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 base_branch="main",
             )
 
-        replacement_record_id = reflow_payload["result"][
-            "merge_train_batch_candidate_record_id"
-        ]
+        replacement_record_id = reflow_payload["result"]["merge_train_batch_candidate_record_id"]
         replacement_record = next(
             record for record in candidate_records if record.record_id == replacement_record_id
         )
@@ -3164,7 +3163,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 status="superseded",
             )
 
-        self.assertEqual([record.record_id for record in active_records], [replacement_record.record_id])
+        self.assertEqual(
+            [record.record_id for record in active_records], [replacement_record.record_id]
+        )
         self.assertEqual(len(superseded_records), 30)
 
     def test_merge_train_controller_keeps_failed_candidate_when_reflow_write_fails(
@@ -9169,6 +9170,95 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 app,
                 method="GET",
                 path="/v1/work-graph/snapshot",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_work_graph_issue_inbox_returns_provider_payload(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+                work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "project_configured": True,
+                        "repository_count": 1,
+                        "issue_count": 1,
+                        "repositories": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "issue_count": 1,
+                                "present_in_project_count": 0,
+                                "missing_from_project_count": 1,
+                                "issues": [
+                                    {
+                                        "key": "cbusillo/launchplane#697",
+                                        "repository": "cbusillo/launchplane",
+                                        "number": 697,
+                                        "title": "Add read-only grouped GitHub issue inbox",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/697",
+                                        "state": "OPEN",
+                                        "project_status": "missing",
+                                        "present_in_project": False,
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/github/issues",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertTrue(payload["configured"])
+        inbox = payload["inbox"]
+        self.assertEqual(inbox["repository_count"], 1)
+        self.assertEqual(inbox["repositories"][0]["issues"][0]["key"], "cbusillo/launchplane#697")
+        self.assertIs(inbox["repositories"][0]["issues"][0]["present_in_project"], False)
+
+    def test_work_graph_issue_inbox_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+                work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "repository_count": 0,
+                        "issue_count": 0,
+                    }
+                ),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/github/issues",
             )
 
         self.assertEqual(status_code, 403)

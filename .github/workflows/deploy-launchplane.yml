@@ -63,6 +63,8 @@ jobs:
       LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER }}
       LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT }}
+      LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES: ${{ vars.LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES }}
+      LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_GH_BINARY: ${{ vars.LAUNCHPLANE_WORK_GRAPH_GH_BINARY }}
       LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS: ${{ vars.LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS }}
       DISCORD_BLUE_DOKPLOY_TARGET_ID: ${{ vars.DISCORD_BLUE_DOKPLOY_TARGET_ID }}
@@ -251,6 +253,8 @@ jobs:
                 --arg work_graph_project_number "${LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER:-}" \
                 --arg work_graph_project_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT:-}" \
                 --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
+                --arg work_graph_issue_inbox_repositories "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES:-}" \
+                --arg work_graph_issue_inbox_limit "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
                 --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
@@ -305,6 +309,8 @@ jobs:
                         LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
                         LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
                         LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
+                        LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES: $work_graph_issue_inbox_repositories,
+                        LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT: $work_graph_issue_inbox_limit,
                         LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
                         GH_TOKEN: $work_graph_gh_token
                       }

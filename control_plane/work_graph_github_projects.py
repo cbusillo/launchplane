@@ -51,6 +51,23 @@ class GitHubProjectPlanningFactsConfig:
 def build_github_project_planning_facts(
     config: GitHubProjectPlanningFactsConfig,
 ) -> tuple[WorkGraphPlanningIssueFacts, ...]:
+    facts = _load_github_project_planning_facts(config)
+    return _enrich_planning_facts_with_github_signals(config=config, facts=facts)
+
+
+def build_github_project_issue_keys(
+    config: GitHubProjectPlanningFactsConfig,
+) -> tuple[str, ...]:
+    return tuple(
+        f"{fact.repository}#{fact.number}"
+        for fact in _load_github_project_planning_facts(config)
+        if not fact.is_pull_request
+    )
+
+
+def _load_github_project_planning_facts(
+    config: GitHubProjectPlanningFactsConfig,
+) -> tuple[WorkGraphPlanningIssueFacts, ...]:
     payload = _run_gh_json(
         (
             config.gh_binary,
@@ -76,7 +93,7 @@ def build_github_project_planning_facts(
         fact = _project_item_to_planning_facts(item)
         if fact is not None:
             facts.append(fact)
-    return _enrich_planning_facts_with_github_signals(config=config, facts=tuple(facts))
+    return tuple(facts)
 
 
 def load_github_project_planning_facts_config_from_env(
@@ -397,3 +414,9 @@ def _string(value: object) -> str:
 
 def _as_object(value: object) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
+
+
+github_labels = _labels
+github_positive_int = _positive_int
+github_string = _string
+github_as_object = _as_object
