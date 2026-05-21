@@ -968,6 +968,10 @@ post_grant \
   work_graph.rank \
   deploy:work-graph-snapshot-validate-grant \
   work-graph-snapshot-validate
+post_product_config_human_grant \
+  work_graph.issue_inbox.reconcile \
+  deploy:work-graph-issue-inbox-human-reconcile-grant \
+  work-graph-issue-inbox-human-reconcile
 post_grant \
   "$GITHUB_REPOSITORY" \
   merge-train-runner.yml \

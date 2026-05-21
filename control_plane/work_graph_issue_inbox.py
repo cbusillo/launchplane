@@ -62,6 +62,41 @@ class GitHubIssueInboxReadModel(BaseModel):
     repositories: tuple[GitHubIssueInboxRepositoryGroup, ...] = ()
 
 
+class GitHubIssueInboxReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry_run", "apply"] = "dry_run"
+
+
+class GitHubIssueInboxReconcileItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    repository: str
+    number: int = Field(ge=1)
+    title: str = ""
+    url: str = ""
+    action: Literal["would_add", "added", "already_present", "failed", "skipped"]
+    detail: str = ""
+
+
+class GitHubIssueInboxReconcileResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    generated_at: str
+    mode: Literal["dry_run", "apply"]
+    repository_count: int = Field(ge=0)
+    issue_count: int = Field(ge=0)
+    added_count: int = Field(default=0, ge=0)
+    already_present_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+    would_add_count: int = Field(default=0, ge=0)
+    items: tuple[GitHubIssueInboxReconcileItem, ...] = ()
+
+
 @dataclass(frozen=True)
 class GitHubIssueInboxConfig:
     repositories: tuple[str, ...]
@@ -124,6 +159,54 @@ def build_github_issue_inbox_read_model(
         repository_count=len(groups),
         issue_count=sum(group.issue_count for group in groups),
         repositories=groups,
+    )
+
+
+def reconcile_github_issue_inbox(
+    *,
+    generated_at: str,
+    config: GitHubIssueInboxConfig,
+    request: GitHubIssueInboxReconcileRequest,
+) -> GitHubIssueInboxReconcileResult:
+    if config.project_config is None:
+        raise click.ClickException(
+            "Configure LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER and "
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER before reconciling the issue inbox."
+        )
+    inbox = build_github_issue_inbox_read_model(generated_at=generated_at, config=config)
+    open_project_issues = tuple(
+        issue
+        for group in inbox.repositories
+        for issue in group.issues
+        if issue.present_in_project is not None
+    )
+    if request.mode == "dry_run":
+        items = tuple(
+            _reconcile_item(issue=issue, action="would_add")
+            for issue in open_project_issues
+            if issue.present_in_project is False
+        )
+    else:
+        current_issue_keys = _project_issue_keys(config.project_config)
+        items = tuple(
+            _apply_issue_reconcile_item(
+                config=config,
+                issue=issue,
+                current_issue_keys=current_issue_keys,
+            )
+            for issue in open_project_issues
+        )
+    return GitHubIssueInboxReconcileResult(
+        generated_at=generated_at,
+        mode=request.mode,
+        repository_count=inbox.repository_count,
+        issue_count=inbox.issue_count,
+        added_count=sum(1 for item in items if item.action == "added"),
+        already_present_count=sum(1 for item in items if item.action == "already_present"),
+        skipped_count=sum(1 for item in items if item.action == "skipped"),
+        failed_count=sum(1 for item in items if item.action == "failed"),
+        would_add_count=sum(1 for item in items if item.action == "would_add"),
+        items=items,
     )
 
 
@@ -219,6 +302,85 @@ def _project_issue_keys(
     if project_config is None:
         return frozenset()
     return frozenset(key.lower() for key in build_github_project_issue_keys(project_config))
+
+
+def _apply_issue_reconcile_item(
+    *,
+    config: GitHubIssueInboxConfig,
+    issue: GitHubIssueInboxIssue,
+    current_issue_keys: frozenset[str],
+) -> GitHubIssueInboxReconcileItem:
+    if issue.key.lower() in current_issue_keys:
+        return _reconcile_item(issue=issue, action="already_present")
+    if not issue.url.strip():
+        return _reconcile_item(
+            issue=issue,
+            action="skipped",
+            detail="GitHub issue has no URL to add to the configured Project.",
+        )
+    try:
+        _project_item_add(config=config, issue=issue)
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            "GitHub CLI is required for work graph issue inbox reconciliation."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        return _reconcile_item(
+            issue=issue,
+            action="failed",
+            detail=_redacted_gh_error(error),
+        )
+    return _reconcile_item(issue=issue, action="added")
+
+
+def _project_item_add(*, config: GitHubIssueInboxConfig, issue: GitHubIssueInboxIssue) -> None:
+    assert config.project_config is not None
+    subprocess.run(
+        (
+            config.gh_binary,
+            "project",
+            "item-add",
+            str(config.project_config.project_number),
+            "--owner",
+            config.project_config.owner,
+            "--url",
+            issue.url,
+            "--format",
+            "json",
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _reconcile_item(
+    *,
+    issue: GitHubIssueInboxIssue,
+    action: Literal["would_add", "added", "already_present", "failed", "skipped"],
+    detail: str = "",
+) -> GitHubIssueInboxReconcileItem:
+    return GitHubIssueInboxReconcileItem(
+        key=issue.key,
+        repository=issue.repository,
+        number=issue.number,
+        title=issue.title,
+        url=issue.url,
+        action=action,
+        detail=detail,
+    )
+
+
+def _redacted_gh_error(error: subprocess.CalledProcessError) -> str:
+    detail = (error.stderr or error.stdout or str(error)).strip()
+    return (
+        re.sub(
+            r"(?i)(gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|bearer\s+[A-Za-z0-9._-]+)",
+            "[redacted]",
+            detail,
+        )
+        or "GitHub Project item-add failed."
+    )
 
 
 def _run_gh_json_array(command: Sequence[str]) -> list[object]:

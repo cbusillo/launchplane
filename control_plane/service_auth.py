@@ -79,6 +79,7 @@ LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset(
         "merge_train.policy_targets",
         "product_config.plan",
         "product_config.apply",
+        "work_graph.issue_inbox.reconcile",
     }
 )
 
@@ -324,7 +325,11 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
         return "prod"
     if normalized_action.endswith(".read") or normalized_action == "work_graph.rank":
         return "read"
-    if normalized_action.endswith(".write") or "rerun" in action_parts:
+    if (
+        normalized_action.endswith(".write")
+        or "rerun" in action_parts
+        or "reconcile" in action_parts
+    ):
         return "safe_write"
     return "mutation"
 
