@@ -85,6 +85,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
+from control_plane.work_graph_issue_inbox import GitHubIssueInboxReconcileResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -9263,6 +9264,161 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_work_graph_issue_inbox_reconcile_dry_run_returns_missing_items(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+                work_graph_issue_inbox_reconcile_provider=lambda request: (
+                    GitHubIssueInboxReconcileResult.model_validate(
+                        {
+                            "generated_at": "2026-05-21T12:00:00Z",
+                            "mode": request.mode,
+                            "repository_count": 1,
+                            "issue_count": 1,
+                            "would_add_count": 1,
+                            "items": [
+                                {
+                                    "key": "cbusillo/launchplane#698",
+                                    "repository": "cbusillo/launchplane",
+                                    "number": 698,
+                                    "title": "Reconcile missing GitHub issues into Code Plans",
+                                    "url": "https://github.com/cbusillo/launchplane/issues/698",
+                                    "action": "would_add",
+                                }
+                            ],
+                        }
+                    )
+                ),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/github/issues/reconcile",
+                payload={"mode": "dry_run"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["reconcile"]["mode"], "dry_run")
+        self.assertEqual(payload["result"]["reconcile"]["items"][0]["action"], "would_add")
+
+    def test_work_graph_issue_inbox_reconcile_apply_requires_reconcile_action(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+                work_graph_issue_inbox_reconcile_provider=lambda request: (
+                    GitHubIssueInboxReconcileResult.model_validate(
+                        {
+                            "generated_at": "2026-05-21T12:00:00Z",
+                            "mode": request.mode,
+                            "repository_count": 0,
+                            "issue_count": 0,
+                        }
+                    )
+                ),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/github/issues/reconcile",
+                payload={"mode": "apply"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_work_graph_issue_inbox_reconcile_apply_returns_counts(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.issue_inbox.reconcile"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+                work_graph_issue_inbox_reconcile_provider=lambda request: (
+                    GitHubIssueInboxReconcileResult.model_validate(
+                        {
+                            "generated_at": "2026-05-21T12:00:00Z",
+                            "mode": request.mode,
+                            "repository_count": 1,
+                            "issue_count": 1,
+                            "added_count": 1,
+                            "items": [
+                                {
+                                    "key": "cbusillo/launchplane#698",
+                                    "repository": "cbusillo/launchplane",
+                                    "number": 698,
+                                    "url": "https://github.com/cbusillo/launchplane/issues/698",
+                                    "action": "added",
+                                }
+                            ],
+                        }
+                    )
+                ),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/github/issues/reconcile",
+                payload={"mode": "apply"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["reconcile"]["added_count"], 1)
+        self.assertEqual(payload["result"]["reconcile"]["items"][0]["action"], "added")
 
     def test_repo_product_mapping_returns_managed_and_awareness_repos(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(

@@ -23,10 +23,17 @@ from control_plane.contracts.work_graph_read_model import (
     build_work_graph_snapshot_from_repo_mapping,
 )
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
+from control_plane.work_graph_issue_inbox import (
+    GitHubIssueInboxReconcileRequest,
+    GitHubIssueInboxReconcileResult,
+)
 
 
 WorkGraphPlanningFactsProvider = Callable[[], tuple[WorkGraphPlanningIssueFacts, ...]]
 WorkGraphIssueInboxProvider = Callable[[], GitHubIssueInboxReadModel]
+WorkGraphIssueInboxReconcileProvider = Callable[
+    [GitHubIssueInboxReconcileRequest], GitHubIssueInboxReconcileResult
+]
 
 
 class WorkGraphWorkRequestStore(Protocol):

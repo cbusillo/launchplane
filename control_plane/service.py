@@ -228,9 +228,11 @@ from control_plane.work_graph_github_projects import (
 from control_plane.work_graph_issue_inbox import (
     build_github_issue_inbox_read_model,
     load_github_issue_inbox_config_from_env,
+    reconcile_github_issue_inbox,
 )
 from control_plane.work_graph_service import (
     WorkGraphIssueInboxProvider,
+    WorkGraphIssueInboxReconcileProvider,
     WorkGraphPlanningFactsProvider,
 )
 from control_plane.work_graph_http import (
@@ -238,6 +240,8 @@ from control_plane.work_graph_http import (
     handle_repo_product_mapping_read,
     handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
+    reconcile_work_graph_issue_inbox,
+    work_graph_issue_inbox_reconcile_denied_response,
     work_graph_rank_denied_response,
 )
 from control_plane.merge_train import MergeTrainDryRunResult
@@ -2668,6 +2672,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
         "/v1/every-code/preview-gates",
+        "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
@@ -7227,6 +7232,7 @@ def create_launchplane_service_app(
     human_session_store: HumanSessionStore | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
+    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -10202,6 +10208,21 @@ def create_launchplane_service_app(
                     )
                 result = work_graph_rank_result.result
                 driver_result = work_graph_rank_result.driver_result
+            elif path == "/v1/work-graph/github/issues/reconcile":
+                reconcile_result = reconcile_work_graph_issue_inbox(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    payload=payload,
+                    issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
+                )
+                if reconcile_result is None:
+                    return work_graph_issue_inbox_reconcile_denied_response(
+                        trace_id=request_trace_id,
+                        json_response=_json_response,
+                        start_response=start_response,
+                    )
+                result = reconcile_result.model_dump(mode="json")
+                driver_result = {"reconcile": result}
             elif path == "/v1/evidence/deployments":
                 deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -13417,6 +13438,17 @@ def serve_launchplane_service(
         if work_graph_issue_inbox_config is not None
         else None
     )
+    work_graph_issue_inbox_reconcile_provider = (
+        (
+            lambda request: reconcile_github_issue_inbox(
+                generated_at=_utc_now_timestamp(),
+                config=work_graph_issue_inbox_config,
+                request=request,
+            )
+        )
+        if work_graph_issue_inbox_config is not None
+        else None
+    )
     application = create_launchplane_service_app(
         state_dir=state_dir,
         verifier=verifier,
@@ -13424,6 +13456,7 @@ def serve_launchplane_service(
         database_url=database_url,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
+        work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
     )
     with make_server(
         host,

@@ -148,8 +148,8 @@ fields.
 
 ## GitHub Issue Inbox
 
-Launchplane can also expose a read-only grouped GitHub issue inbox for an
-explicit repository inventory:
+Launchplane can expose a read-only grouped GitHub issue inbox for an explicit
+repository inventory:
 
 ```sh
 GET /v1/work-graph/github/issues
@@ -178,8 +178,36 @@ issue is marked with `present_in_project: true` and
 
 Forks and private repositories are supported only through explicit inventory and
 the runtime `GH_TOKEN` permissions. Launchplane does not owner-wide search,
-fetch issue bodies, infer product ownership from inbox membership, or mutate
-Project membership from this read model.
+fetch issue bodies, or infer product ownership from inbox membership.
+
+When Code Plans Project env is configured, Launchplane can also reconcile the
+inbox into that Project:
+
+```sh
+POST /v1/work-graph/github/issues/reconcile
+```
+
+The request is a small mode selector:
+
+```json
+{"mode": "dry_run"}
+```
+
+`dry_run` uses `work_graph.rank` authorization and returns the missing open
+issues that would be added. `apply` requires
+`work_graph.issue_inbox.reconcile`, rechecks Project membership before each
+issue add, and shells out to:
+
+```sh
+gh project item-add <project-number> --owner <project-owner> --url <issue-url> \
+  --format json
+```
+
+Apply responses record counts for `added`, `already_present`, `skipped`, and
+`failed` items. Re-running apply against an already reconciled inbox reports
+`already_present` instead of creating duplicate Project items. GitHub CLI
+failures are reported per item with redacted stderr/stdout detail so one failed
+issue does not hide successful additions for the same reconciliation pass.
 
 ## Boundary
 
