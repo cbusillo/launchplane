@@ -34,6 +34,7 @@ launchplane_policy_file="${LAUNCHPLANE_POLICY_FILE:-}"
 launchplane_service_host="${LAUNCHPLANE_SERVICE_HOST:-0.0.0.0}"
 launchplane_service_port="${LAUNCHPLANE_SERVICE_PORT:-8080}"
 launchplane_service_audience="${LAUNCHPLANE_SERVICE_AUDIENCE:-localhost}"
+launchplane_database_url="${LAUNCHPLANE_DATABASE_URL:-}"
 policy_file=""
 
 mkdir -p "$state_dir"
@@ -65,6 +66,28 @@ esac
 if [ ! -f "$policy_file" ]; then
   echo "Launchplane policy file does not exist: $policy_file" >&2
   exit 1
+fi
+
+case "$launchplane_service_host" in
+  127.0.0.1|localhost|::1)
+    ;;
+  *)
+    if [ -z "$launchplane_database_url" ]; then
+      echo "Launchplane service refuses hosted startup without LAUNCHPLANE_DATABASE_URL." >&2
+      echo "Filesystem state is local-only; hosted/shared service runs must use Postgres-backed Launchplane storage." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+if [ -n "$launchplane_database_url" ]; then
+  exec uv run launchplane service serve \
+    --host "$launchplane_service_host" \
+    --port "$launchplane_service_port" \
+    --state-dir "$state_dir" \
+    --database-url "$launchplane_database_url" \
+    --policy-file "$policy_file" \
+    --audience "$launchplane_service_audience"
 fi
 
 exec uv run launchplane service serve \

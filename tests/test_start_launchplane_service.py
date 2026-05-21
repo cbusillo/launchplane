@@ -90,6 +90,7 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
                         "UV_CAPTURE_FILE": str(capture_file),
                         "LAUNCHPLANE_APP_ROOT": str(app_root),
                         "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                        "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
                         "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode(
                             "ascii"
                         ),
@@ -103,6 +104,69 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
             self.assertIn("--policy-file", captured_args)
             self.assertIn(str(policy_path), captured_args)
             self.assertEqual(policy_path.read_text(encoding="utf-8"), "schema_version = 1\n")
+        finally:
+            policy_path.unlink(missing_ok=True)
+
+    def test_rejects_hosted_filesystem_startup_without_database_url(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            app_root.mkdir()
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                    "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
+                    "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
+                    "LAUNCHPLANE_DATABASE_URL": "",
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("refuses hosted startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+
+    def test_forwards_database_url_for_hosted_startup(self) -> None:
+        policy_path = Path("/tmp/launchplane-authz.toml")
+        policy_path.unlink(missing_ok=True)
+
+        try:
+            with TemporaryDirectory() as temporary_directory_name:
+                temporary_directory = Path(temporary_directory_name)
+                app_root = temporary_directory / "app"
+                bin_dir = temporary_directory / "bin"
+                capture_file = temporary_directory / "uv-args.txt"
+                app_root.mkdir()
+                bin_dir.mkdir()
+                self._write_fake_uv(bin_dir)
+
+                result = subprocess.run(
+                    [str(self.script_path)],
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                        "UV_CAPTURE_FILE": str(capture_file),
+                        "LAUNCHPLANE_APP_ROOT": str(app_root),
+                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                        "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
+                        "LAUNCHPLANE_SERVICE_HOST": "0.0.0.0",
+                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
+                    },
+                    check=False,
+                )
+
+                captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("--database-url", captured_args)
+            self.assertIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
         finally:
             policy_path.unlink(missing_ok=True)
 
