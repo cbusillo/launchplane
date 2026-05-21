@@ -39,6 +39,10 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
+from control_plane.contracts.merge_train_stack_collapse import (
+    build_merge_train_stack_collapse_plan,
+    build_merge_train_stack_collapse_plan_record,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
@@ -81,6 +85,7 @@ from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssue
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import discover_merge_train_stack
 from control_plane.service import OdooPreviewVerificationRequest, create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -2645,6 +2650,116 @@ class LaunchplaneServiceTests(unittest.TestCase):
             next_observe_payload["result"]["landing_plan"]["batch_id"],
             superseding_candidate.batch_id,
         )
+
+    def test_merge_train_controller_ignores_stale_stack_record_when_landing_batch(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _, landing_plan_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                stale_stack_snapshot = _FakeStackedMergeTrainSnapshotReader(
+                    transport=object()
+                ).read_merge_train_snapshot(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+                stale_stack_plan = build_merge_train_stack_collapse_plan(
+                    discovery_result=discover_merge_train_stack(
+                        snapshot=stale_stack_snapshot,
+                        root_pull_request_number=1,
+                    ),
+                    policy_key=_merge_train_policy_with_label()
+                    .find_repository_policy(
+                        repository="cbusillo/sellyouroutboard", base_branch="main"
+                    )
+                    .policy_key,
+                    policy_sha256=policy_record.policy_sha256,
+                    created_at="9999-01-01T00:00:00Z",
+                ).model_copy(update={"status": "waiting_for_root_checks"})
+                stale_stack_record = build_merge_train_stack_collapse_plan_record(
+                    plan=stale_stack_plan,
+                    source="test:stale-stack-record",
+                    updated_at="9999-01-01T00:00:00Z",
+                )
+                FilesystemRecordStore(state_dir).write_merge_train_stack_collapse_plan_record(
+                    stale_stack_record
+                )
+                land_status, land_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+
+        self.assertEqual(landing_plan_payload["result"]["controller_action"], "plan_landing")
+        self.assertEqual(land_status, 202)
+        self.assertEqual(land_payload["result"]["controller_action"], "land_batch")
+        self.assertEqual(land_payload["result"]["landing_plan"]["entries"][0]["status"], "merged")
+        self.assertNotIn("merge_train_stack_collapse_plan_record_id", land_payload["result"])
 
     def test_merge_train_controller_stops_after_candidate_failure(self) -> None:
         with (

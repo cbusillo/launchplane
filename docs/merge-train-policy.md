@@ -110,6 +110,11 @@ must match the recorded landing plan. If GitHub state changes, Launchplane must
 stop, re-read, and rebuild or requeue rather than continuing from stale batch
 evidence.
 
+Stack-collapse records participate in landing only when their repository, base
+branch, policy digest, root PR, and expected root head match the landing plan.
+Older waiting stack-collapse records stay visible as status evidence, but they
+must not block or annotate an unrelated unstacked batch landing.
+
 Directly merging the candidate branch into the protected base branch is not the
 preferred first implementation because it hides the normal PR-by-PR merge UX and
 can make repository history and GitHub review state harder to inspect. It should

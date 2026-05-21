@@ -3300,6 +3300,49 @@ def _latest_merge_train_stack_collapse_plan_record(
     return latest_record
 
 
+def _latest_merge_train_stack_collapse_plan_record_for_landing(
+    *,
+    record_store: _MergeTrainStackCollapsePlanRecordStore,
+    repository: str,
+    base_branch: str,
+    landing_plan: MergeTrainBatchLandingPlan,
+    policy_sha256: str,
+) -> MergeTrainStackCollapsePlanRecord | None:
+    records = record_store.list_merge_train_stack_collapse_plan_records(
+        repository=repository,
+        base_branch=base_branch,
+        status="active",
+        limit=25,
+    )
+    compatible_records = tuple(
+        record
+        for record in records
+        if _merge_train_stack_collapse_record_matches_landing_plan(
+            collapse_record=record,
+            landing_plan=landing_plan,
+            policy_sha256=policy_sha256,
+        )
+    )
+    return _latest_merge_train_stack_collapse_progress_record(compatible_records)
+
+
+def _merge_train_stack_collapse_record_matches_landing_plan(
+    *,
+    collapse_record: MergeTrainStackCollapsePlanRecord,
+    landing_plan: MergeTrainBatchLandingPlan,
+    policy_sha256: str,
+) -> bool:
+    try:
+        _validate_stack_collapse_record_for_landing(
+            collapse_record=collapse_record,
+            landing_plan=landing_plan,
+            policy_sha256=policy_sha256,
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def _validate_merge_train_candidate_record_for_controller(
     *,
     candidate_record: MergeTrainBatchCandidateRecord,
@@ -9338,11 +9381,12 @@ def create_launchplane_service_app(
                         )
                     except ValueError as error:
                         raise MergeTrainControllerRequestError(str(error)) from error
-                    collapse_record = _latest_merge_train_stack_collapse_plan_record(
+                    collapse_record = _latest_merge_train_stack_collapse_plan_record_for_landing(
                         record_store=collapse_store,
                         repository=controller_request.repository,
                         base_branch=controller_request.base_branch,
-                        plan_status="waiting_for_root_checks",
+                        landing_plan=active_landing_record.landing_plan,
+                        policy_sha256=policy_record.policy_sha256,
                     )
                     if collapse_record is not None:
                         try:
