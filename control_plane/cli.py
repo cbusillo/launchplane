@@ -98,7 +98,7 @@ from control_plane.launchplane_rendering import (
     relative_href as _relative_href,
     render_launchplane_action_recipe as _render_launchplane_action_recipe,
     render_launchplane_preview_policy_page_html as _render_launchplane_preview_policy_page_html,
-    render_launchplane_promotion_status_page_html as _render_launchplane_promotion_status_page_html,
+    render_launchplane_promotion_status_page_html,
     render_launchplane_shell_document as _render_launchplane_shell_document,
     status_label as _status_label,
     status_tone as _status_tone,
@@ -144,6 +144,7 @@ from control_plane.workflows.ship import (
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
+_render_launchplane_promotion_status_page_html = render_launchplane_promotion_status_page_html
 _LEGACY_MONOREPO_MARKER = "odoo-ai"
 _RUNTIME_CONTRACT_ENV_KEYS = (
     ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
