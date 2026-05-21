@@ -3312,6 +3312,28 @@ def _validate_merge_train_candidate_record_for_controller(
         raise ValueError("merge train candidate policy digest no longer matches")
 
 
+def _merge_train_candidate_matches_dry_run_queue(
+    *, candidate: MergeTrainBatchCandidate, dry_run_result: MergeTrainDryRunResult, base_sha: str
+) -> bool:
+    if candidate.repository != dry_run_result.repository:
+        return False
+    if candidate.base_branch != dry_run_result.base_branch:
+        return False
+    if candidate.base_sha != base_sha:
+        return False
+    candidate_entries = tuple(
+        (entry.pull_request_number, entry.head_sha) for entry in candidate.entries
+    )
+    queue_by_number = {entry.number: entry for entry in dry_run_result.queue}
+    current_entries: list[tuple[int, str]] = []
+    for pull_request_number in dry_run_result.queue_order:
+        queue_entry = queue_by_number[pull_request_number]
+        if not queue_entry.eligible:
+            return False
+        current_entries.append((queue_entry.number, queue_entry.head_sha))
+    return candidate_entries == tuple(current_entries)
+
+
 def _validate_merge_train_landing_record_for_controller(
     *,
     landing_record: MergeTrainBatchLandingPlanRecord,
@@ -8177,9 +8199,7 @@ def create_launchplane_service_app(
                                 ),
                             }
                         )
-                    targets.sort(
-                        key=lambda target: (target["repository"], target["base_branch"])
-                    )
+                    targets.sort(key=lambda target: (target["repository"], target["base_branch"]))
                     return _json_response(
                         start_response=start_response,
                         status_code=200,
@@ -9430,17 +9450,88 @@ def create_launchplane_service_app(
                         except ValueError as error:
                             raise MergeTrainControllerRequestError(str(error)) from error
                         if active_candidate_record.candidate.status == "failed":
-                            result = {
-                                "repository": controller_request.repository,
-                                "base_branch": controller_request.base_branch,
-                                "mode": "dry-run",
-                                "controller_action": "candidate_failed",
-                                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                                "candidate": active_candidate_record.candidate.model_dump(
-                                    mode="json"
-                                ),
-                            }
-                            driver_result = result
+                            snapshot = GitHubMergeTrainSnapshotReader(
+                                transport=transport
+                            ).read_merge_train_snapshot(
+                                repository=controller_request.repository,
+                                base_branch=controller_request.base_branch,
+                            )
+                            dry_run_result = build_merge_train_dry_run_result(
+                                policy=policy, snapshot=snapshot
+                            )
+                            if (
+                                dry_run_result.intended_next_action == "merge"
+                                and not _merge_train_candidate_matches_dry_run_queue(
+                                    candidate=active_candidate_record.candidate,
+                                    dry_run_result=dry_run_result,
+                                    base_sha=snapshot.base_sha,
+                                )
+                            ):
+                                controller_action = "plan_candidate"
+                                candidate = build_merge_train_batch_candidate(
+                                    dry_run_result=dry_run_result,
+                                    base_sha=snapshot.base_sha,
+                                    policy_sha256=policy_record.policy_sha256,
+                                    created_at=recorded_at,
+                                )
+                                result = {
+                                    "repository": candidate.repository,
+                                    "base_branch": candidate.base_branch,
+                                    "mode": "dry-run"
+                                    if not controller_request.mutate
+                                    else controller_action,
+                                    "controller_action": controller_action,
+                                    "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    "candidate": candidate.model_dump(mode="json"),
+                                }
+                                if controller_request.mutate:
+                                    batch_records = (
+                                        candidate_store.list_merge_train_batch_candidate_records(
+                                            repository=controller_request.repository,
+                                            base_branch=controller_request.base_branch,
+                                            status="active",
+                                            limit=25,
+                                        )
+                                    )
+                                    for batch_record in batch_records:
+                                        if (
+                                            batch_record.candidate.batch_id
+                                            == active_candidate_record.candidate.batch_id
+                                        ):
+                                            candidate_store.write_merge_train_batch_candidate_record(
+                                                batch_record.model_copy(
+                                                    update={"status": "superseded"}
+                                                )
+                                            )
+                                    candidate_record = build_merge_train_batch_candidate_record(
+                                        candidate=candidate,
+                                        source=(
+                                            "service:controller:candidate-reflow:"
+                                            f"{request_trace_id}"
+                                        ),
+                                        updated_at=recorded_at,
+                                    )
+                                    candidate_store.write_merge_train_batch_candidate_record(
+                                        candidate_record
+                                    )
+                                    result["merge_train_batch_candidate_record_id"] = (
+                                        candidate_record.record_id
+                                    )
+                                driver_result = result
+                            else:
+                                result = {
+                                    "repository": controller_request.repository,
+                                    "base_branch": controller_request.base_branch,
+                                    "mode": "dry-run",
+                                    "controller_action": "candidate_failed",
+                                    "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
+                                    "candidate": active_candidate_record.candidate.model_dump(
+                                        mode="json"
+                                    ),
+                                }
+                                driver_result = result
                         else:
                             if active_candidate_record.candidate.status in {
                                 "planned",
@@ -9510,9 +9601,7 @@ def create_launchplane_service_app(
                                     policy_sha256=policy_record.policy_sha256,
                                 )
                             except ValueError as error:
-                                raise MergeTrainControllerRequestError(
-                                    str(error)
-                                ) from error
+                                raise MergeTrainControllerRequestError(str(error)) from error
                             result = {
                                 "repository": controller_request.repository,
                                 "base_branch": controller_request.base_branch,
@@ -9596,9 +9685,7 @@ def create_launchplane_service_app(
                                         policy_sha256=policy_record.policy_sha256,
                                     )
                                 except ValueError as error:
-                                    raise MergeTrainControllerRequestError(
-                                        str(error)
-                                    ) from error
+                                    raise MergeTrainControllerRequestError(str(error)) from error
                                 root_snapshot = snapshot.model_copy(
                                     update={"pull_requests": (root_pull_request,)}
                                 )
@@ -13149,7 +13236,9 @@ def create_launchplane_service_app(
             )
         except (ValueError, click.ClickException) as error:
             if path == _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE:
-                message = str(error).strip() or "Merge train controller request could not be completed."
+                message = (
+                    str(error).strip() or "Merge train controller request could not be completed."
+                )
                 return _json_response(
                     start_response=start_response,
                     status_code=400,

@@ -149,6 +149,12 @@ smaller batches/one-at-a-time validation to identify the blocking PR. Once a
 blocker is identified, Launchplane applies `blocked_label` and either pauses or
 reflows later entries according to `failure_policy`.
 
+A failed candidate remains a stop state while the current eligible queue and
+base SHA still match that candidate. If the eligible queue changes, for example
+because a new queued PR repairs train validation, the controller may supersede
+the failed candidate batch lineage and plan a replacement candidate from the
+fresh snapshot.
+
 ## Example Policy Entries
 
 The example below is documentation/import material only. It is not packaged as a
@@ -432,8 +438,10 @@ Controller actions have these retry/stop semantics:
   Mutate once, then call again.
 - `observe_candidate`: A built candidate needs check observation. Mutate or
   dry-run later until checks pass, fail, or remain pending.
-- `candidate_failed`: Candidate checks failed. Stop and surface the candidate
-  record id and failed check evidence.
+- `candidate_failed`: Candidate checks failed and still matches the current
+  eligible queue. Stop and surface the candidate record id and failed check
+  evidence. If the eligible queue/base changes, the next controller action may
+  become `plan_candidate` for a superseding candidate.
 - `plan_landing`: A passed candidate is ready for PR-native landing-plan
   creation. Mutate once, then call again.
 - `land_batch`: A landing plan is ready to merge original PRs in order. Mutate
