@@ -9530,6 +9530,20 @@ def create_launchplane_service_app(
                                     "candidate": candidate.model_dump(mode="json"),
                                 }
                                 if controller_request.mutate:
+                                    candidate_record = build_merge_train_batch_candidate_record(
+                                        candidate=candidate,
+                                        source=(
+                                            "service:controller:candidate-reflow:"
+                                            f"{request_trace_id}"
+                                        ),
+                                        updated_at=recorded_at,
+                                    )
+                                    candidate_store.write_merge_train_batch_candidate_record(
+                                        candidate_record
+                                    )
+                                    result["merge_train_batch_candidate_record_id"] = (
+                                        candidate_record.record_id
+                                    )
                                     batch_records = (
                                         candidate_store.list_merge_train_batch_candidate_records(
                                             repository=controller_request.repository,
@@ -9548,20 +9562,6 @@ def create_launchplane_service_app(
                                                     update={"status": "superseded"}
                                                 )
                                             )
-                                    candidate_record = build_merge_train_batch_candidate_record(
-                                        candidate=candidate,
-                                        source=(
-                                            "service:controller:candidate-reflow:"
-                                            f"{request_trace_id}"
-                                        ),
-                                        updated_at=recorded_at,
-                                    )
-                                    candidate_store.write_merge_train_batch_candidate_record(
-                                        candidate_record
-                                    )
-                                    result["merge_train_batch_candidate_record_id"] = (
-                                        candidate_record.record_id
-                                    )
                                 driver_result = result
                             else:
                                 result = {
