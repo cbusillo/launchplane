@@ -55,6 +55,9 @@ from control_plane.cli_launchplane_previews import (
     register_launchplane_preview_commands,
 )
 from control_plane.cli_odoo import OdooCliCallbacks, register_odoo_commands
+from control_plane.cli_odoo import (
+    _normalize_odoo_prod_rollback_source_channel as _normalize_odoo_prod_rollback_source_channel,
+)
 from control_plane.cli_preview_workflow import register_preview_workflow_commands
 from control_plane.cli_policy_profiles import (
     PolicyProfileCliCallbacks,
@@ -112,17 +115,9 @@ from control_plane.workflows.launchplane import (
     resolve_pull_request_event_manifest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
-from control_plane.workflows.odoo_artifact_publish import (
-    OdooArtifactPublishRequest,
-    OdooArtifactPublishStore,
-    execute_odoo_artifact_publish,
-)
-from control_plane.workflows.odoo_prod_backup_gate import (
-    OdooProdBackupGateRequest,
-    execute_odoo_prod_backup_gate,
-)
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
+    OdooProdRollbackResult,
     execute_odoo_prod_rollback,
 )
 from control_plane.workflows import promotion_ship_execution
@@ -172,6 +167,25 @@ def _store(
     return FilesystemRecordStore(state_dir=state_dir)
 
 
+def _odoo_store_factory(
+    state_dir: Path, *, database_url: str | None = None
+) -> FilesystemRecordStore | PostgresRecordStore:
+    return _store(state_dir, database_url=database_url)
+
+
+def _execute_odoo_prod_rollback_from_cli(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    request: OdooProdRollbackRequest,
+) -> OdooProdRollbackResult:
+    return execute_odoo_prod_rollback(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=request,
+    )
+
+
 def _control_plane_root() -> Path:
     return shared_control_plane_root()
 
@@ -216,7 +230,6 @@ def _build_bootstrap_policy_payload(
 
 _ChoiceValue = TypeVar("_ChoiceValue", bound=str)
 OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
-OdooProdRollbackSourceChannel = Literal["testing"]
 DokployTargetType = Literal["compose", "application"]
 
 
@@ -247,19 +260,6 @@ def _normalize_odoo_apply_status(
                 "fail": "fail",
             },
             error_message="Odoo override apply status must be skipped, pending, pass, or fail.",
-        ),
-    )
-
-
-def _normalize_odoo_prod_rollback_source_channel(
-    source_channel: str,
-) -> OdooProdRollbackSourceChannel:
-    return cast(
-        OdooProdRollbackSourceChannel,
-        _normalize_cli_choice(
-            source_channel,
-            choices={"testing": "testing"},
-            error_message="Odoo prod rollback source channel must be testing.",
         ),
     )
 
@@ -3698,21 +3698,6 @@ def main() -> None:
     """Control-plane CLI."""
 
 
-@main.group("odoo-artifacts")
-def odoo_artifacts() -> None:
-    """Odoo artifact publish driver commands."""
-
-
-@main.group("odoo-backup-gates")
-def odoo_backup_gates() -> None:
-    """Odoo backup-gate driver commands."""
-
-
-@main.group("odoo-rollbacks")
-def odoo_rollbacks() -> None:
-    """Odoo rollback driver commands."""
-
-
 @main.group("work-graph")
 def work_graph() -> None:
     """Work graph recommendation commands."""
@@ -3749,6 +3734,8 @@ register_odoo_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     callbacks=OdooCliCallbacks(
         control_plane_root=_control_plane_root,
+        store_factory=_odoo_store_factory,
+        execute_odoo_prod_rollback=_execute_odoo_prod_rollback_from_cli,
         normalize_odoo_apply_status=_normalize_odoo_apply_status,
         read_dokploy_config=control_plane_dokploy.read_dokploy_config,
     ),
@@ -3822,142 +3809,6 @@ register_promotion_ship_commands(
         resolve_native_ship_request=lambda **kwargs: _resolve_native_ship_request(**kwargs),
     ),
 )
-
-
-@odoo_artifacts.command("publish")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane artifact and runtime-environment records.",
-)
-@click.option("--context", required=True)
-@click.option("--instance", default="testing", show_default=True)
-@click.option("--manifest", "manifest_path", type=click.Path(path_type=Path), required=True)
-@click.option("--devkit-root", type=click.Path(path_type=Path), required=True)
-@click.option("--image-repository", required=True)
-@click.option("--image-tag", required=True)
-@click.option("--platform", multiple=True, help="Target platform passed to odoo-devkit publish.")
-@click.option("--output-file", type=click.Path(path_type=Path), default=None)
-@click.option("--no-cache", is_flag=True, default=False)
-def odoo_artifacts_publish(
-    database_url: str,
-    context: str,
-    instance: str,
-    manifest_path: Path,
-    devkit_root: Path,
-    image_repository: str,
-    image_tag: str,
-    platform: tuple[str, ...],
-    output_file: Path | None,
-    no_cache: bool,
-) -> None:
-    record_store = _store(Path("state"), database_url=database_url)
-    result = execute_odoo_artifact_publish(
-        control_plane_root=_control_plane_root(),
-        record_store=cast(OdooArtifactPublishStore, record_store),
-        request=OdooArtifactPublishRequest(
-            context=context,
-            instance=instance,
-            manifest_path=manifest_path,
-            devkit_root=devkit_root,
-            image_repository=image_repository,
-            image_tag=image_tag,
-            platforms=platform,
-            output_file=output_file,
-            no_cache=no_cache,
-        ),
-    )
-    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    if result.status != "pass":
-        raise click.ClickException(result.error_message or "Odoo artifact publish failed.")
-
-
-@odoo_backup_gates.command("capture")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane backup-gate and Dokploy target records.",
-)
-@click.option("--context", required=True)
-@click.option("--instance", default="prod", show_default=True)
-@click.option("--backup-record-id", required=True)
-@click.option("--timeout", "timeout_seconds", type=int, default=None)
-def odoo_backup_gates_capture(
-    database_url: str,
-    context: str,
-    instance: str,
-    backup_record_id: str,
-    timeout_seconds: int | None,
-) -> None:
-    result = execute_odoo_prod_backup_gate(
-        control_plane_root=_control_plane_root(),
-        record_store=_store(Path("state"), database_url=database_url),
-        request=OdooProdBackupGateRequest(
-            context=context,
-            instance=instance,
-            backup_record_id=backup_record_id,
-            timeout_seconds=timeout_seconds,
-        ),
-    )
-    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    if result.backup_status != "pass":
-        raise click.ClickException(result.error_message or "Odoo backup gate failed.")
-
-
-@odoo_rollbacks.command("execute")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane rollback records.",
-)
-@click.option("--context", required=True)
-@click.option("--instance", default="prod", show_default=True)
-@click.option("--source-channel", default="testing", show_default=True)
-@click.option("--promotion-record-id", default="")
-@click.option("--artifact-id", default="")
-@click.option("--reason", default="")
-@click.option("--wait/--no-wait", default=True, show_default=True)
-@click.option("--timeout", "timeout_seconds", type=int, default=None)
-@click.option("--verify-health/--no-verify-health", default=True, show_default=True)
-@click.option("--health-timeout", "health_timeout_seconds", type=int, default=None)
-@click.option("--no-cache", is_flag=True, default=False)
-def odoo_rollbacks_execute(
-    database_url: str,
-    context: str,
-    instance: str,
-    source_channel: str,
-    promotion_record_id: str,
-    artifact_id: str,
-    reason: str,
-    wait: bool,
-    timeout_seconds: int | None,
-    verify_health: bool,
-    health_timeout_seconds: int | None,
-    no_cache: bool,
-) -> None:
-    result = execute_odoo_prod_rollback(
-        control_plane_root=_control_plane_root(),
-        record_store=_store(Path("state"), database_url=database_url),
-        request=OdooProdRollbackRequest(
-            context=context,
-            instance=instance,
-            source_channel=_normalize_odoo_prod_rollback_source_channel(source_channel),
-            promotion_record_id=promotion_record_id,
-            artifact_id=artifact_id,
-            reason=reason,
-            wait=wait,
-            timeout_seconds=timeout_seconds,
-            verify_health=verify_health,
-            health_timeout_seconds=health_timeout_seconds,
-            no_cache=no_cache,
-        ),
-    )
-    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
-    if result.rollback_status != "pass":
-        raise click.ClickException(result.error_message or "Odoo prod rollback failed.")
 
 
 register_launchplane_preview_commands(
