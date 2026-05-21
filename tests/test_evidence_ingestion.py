@@ -30,6 +30,9 @@ class _FakeEvidenceStore:
     def write_promotion_record(self, record: PromotionRecord) -> None:
         self.promotions[record.record_id] = record
 
+    def read_promotion_record(self, promotion_record_id: str) -> PromotionRecord:
+        return self.promotions[promotion_record_id]
+
     def write_environment_inventory(self, inventory: EnvironmentInventory) -> None:
         self.inventories[(inventory.context, inventory.instance)] = inventory
 
