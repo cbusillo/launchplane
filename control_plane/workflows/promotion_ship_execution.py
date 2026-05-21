@@ -7,6 +7,8 @@ from typing import Protocol
 
 import click
 
+from control_plane import dokploy as control_plane_dokploy
+from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -14,6 +16,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.workflows.runtime_identity_health import wait_for_healthcheck_with_retry
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.ship import generate_deployment_record_id
 from control_plane.workflows.ship import utc_now_timestamp
@@ -36,6 +39,78 @@ class ShipExecutionCallbacks:
     verify_ship_healthchecks: Callable[..., None]
     write_environment_inventory: Callable[..., object]
     write_release_tuple_from_deployment: Callable[..., object]
+
+
+def verify_ship_healthchecks(
+    *,
+    request: ShipRequest,
+    wait_for_healthcheck: Callable[..., None],
+) -> None:
+    if not request.wait or not request.verify_health:
+        return
+    if not request.destination_health.urls:
+        raise click.ClickException(
+            "Healthcheck verification requested but no target domain/URL was resolved. "
+            "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
+        )
+    if request.destination_health.timeout_seconds is None:
+        raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
+    healthcheck_errors: list[str] = []
+    for healthcheck_url in request.destination_health.urls:
+        try:
+            wait_for_healthcheck(
+                url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds
+            )
+            return
+        except click.ClickException as error:
+            healthcheck_errors.append(str(error))
+    if healthcheck_errors:
+        raise click.ClickException(
+            "Healthcheck verification failed for all resolved URLs:\n"
+            + "\n".join(healthcheck_errors)
+        )
+
+
+def wait_for_ship_healthcheck(
+    *,
+    url: str,
+    timeout_seconds: int,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> None:
+    wait_for_healthcheck_with_retry(
+        url=url,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+
+
+def execute_dokploy_deploy(
+    *,
+    host: str,
+    token: str,
+    request: ShipRequest,
+    resolved_target: ResolvedTargetEvidence,
+    deploy_timeout_seconds: int,
+) -> None:
+    if request.wait:
+        control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            deploy_timeout_seconds=deploy_timeout_seconds,
+            no_cache=request.no_cache,
+        )
+        return
+    control_plane_dokploy.trigger_deployment(
+        host=host,
+        token=token,
+        target_type=resolved_target.target_type,
+        target_id=resolved_target.target_id,
+        no_cache=request.no_cache,
+    )
 
 
 def execute_ship(
