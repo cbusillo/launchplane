@@ -6,13 +6,13 @@ from pathlib import Path
 import shlex
 import subprocess
 import threading
+from typing import Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 
@@ -38,6 +38,12 @@ WORKER_RUNTIME_ENV_KEYS = (
     "VERIREEL_TESTING_BASE_URL",
     "VERIREEL_PROD_OPERATOR_BASE_URL",
 )
+
+
+class VeriReelProdBackupGateStore(Protocol):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> Path | None: ...
 
 
 class VeriReelProdBackupGateRequest(BaseModel):
@@ -272,7 +278,7 @@ def _result_from_backup_gate_record(
 
 def _read_existing_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdBackupGateStore,
     record_id: str,
 ) -> BackupGateRecord | None:
     try:
@@ -284,7 +290,7 @@ def _read_existing_backup_gate_record(
 def _run_backup_gate_worker_and_store(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdBackupGateStore,
     request: VeriReelProdBackupGateRequest,
 ) -> None:
     try:
@@ -314,7 +320,7 @@ def _run_backup_gate_worker_and_store(
 def _ensure_async_backup_gate_worker(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdBackupGateStore,
     request: VeriReelProdBackupGateRequest,
 ) -> None:
     with _ACTIVE_BACKUP_GATES_LOCK:
@@ -337,7 +343,7 @@ def _ensure_async_backup_gate_worker(
 def execute_verireel_prod_backup_gate(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdBackupGateStore,
     request: VeriReelProdBackupGateRequest,
     run_async: bool = False,
 ) -> VeriReelProdBackupGateResult:
