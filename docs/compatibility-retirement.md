@@ -96,6 +96,10 @@ records.
 - Any public doc that shows a product/tenant operator mutating live state through
   local JSON files should be rewritten to use service ingress, DB-backed
   operator commands, or a clearly labeled local-only rehearsal.
+- Static operator pages may still render shell recipes for local rehearsal and
+  incident inspection, but those snippets must label `--state-dir` paths as
+  local-only and must not present file-backed writes as shared-service mutation
+  authority.
 
 ### Delete Later
 
