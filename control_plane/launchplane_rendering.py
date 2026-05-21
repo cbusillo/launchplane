@@ -1510,3 +1510,1009 @@ def render_launchplane_environment_status_page_html(
         extra_css=extra_css,
         nav_links=nav_links,
     )
+
+
+def render_launchplane_preview_status_page_html(
+    payload: dict[str, object],
+    *,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    preview = json_object(payload.get("preview")) or {}
+    trust_summary = json_object(payload.get("trust_summary")) or {}
+    health_summary = json_object(payload.get("health_summary")) or {}
+    input_summary = json_object(payload.get("input_summary")) or {}
+    lifecycle_summary = json_object(payload.get("lifecycle_summary")) or {}
+    links = json_object(payload.get("links")) or {}
+    recent_generations = json_object_items(payload.get("recent_generations"))
+    source_map = json_object_items(input_summary.get("source_map"))
+    companions = json_object_items(input_summary.get("companions"))
+    serving_generation = json_object(payload.get("serving_generation")) or {}
+    latest_generation = json_object(payload.get("latest_generation")) or {}
+
+    preview_label = escape(str(preview.get("preview_label", "Launchplane preview")))
+    context_name = escape(str(preview.get("context", "")))
+    anchor_repo_name = escape(str(preview.get("anchor_repo", "")))
+    anchor_pr_number = escape(str(preview.get("anchor_pr_number", "")))
+    canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
+    anchor_pr_url = escape(str(links.get("anchor_pr_url", "")))
+    preview_state = str(preview.get("state", "unknown"))
+    status_summary = escape(
+        str(health_summary.get("status_summary", "No Launchplane preview summary available."))
+    )
+    next_action = escape(str(lifecycle_summary.get("next_action", "")))
+    artifact_id = escape(str(trust_summary.get("artifact_id", "")))
+    manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
+    destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
+    active_generation_id = escape(
+        str(trust_summary.get("active_generation_id", preview.get("active_generation_id", "")))
+    )
+    paused_at = escape(str(preview.get("paused_at", "")))
+    destroyed_at = escape(
+        str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", "")))
+    )
+    destroy_reason = escape(
+        str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", "")))
+    )
+    overall_health_status = str(health_summary.get("overall_health_status", "pending"))
+    raw_payload_json = escape(json.dumps(payload, indent=2, sort_keys=True))
+    serving_matches_latest = bool(health_summary.get("serving_matches_latest", False))
+    latest_failure_summary = escape(str(latest_generation.get("failure_summary", "")))
+    latest_failure_stage = escape(str(latest_generation.get("failure_stage", "")))
+    latest_generation_id = escape(str(latest_generation.get("generation_id", "")))
+    latest_generation_state = str(latest_generation.get("state", ""))
+    latest_requested_at = escape(str(latest_generation.get("requested_at", "")))
+    serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
+    no_serving_preview = bool(latest_generation) and not serving_generation
+    display_health_status = "unavailable" if no_serving_preview else overall_health_status
+    summary_text = next_action or status_summary or "No next action recorded."
+    healthy_live_preview = (
+        preview_state.strip().lower() == "active"
+        and serving_matches_latest
+        and bool(serving_generation)
+        and latest_generation_state.strip().lower() == "ready"
+        and overall_health_status.strip().lower() == "pass"
+    )
+    generation_label = "Serving generation"
+    generation_value = serving_generation_id or "Unavailable"
+    primary_cta_label = "Open preview URL"
+    primary_cta_href = canonical_url
+    secondary_cta_label = "Anchor pull request"
+    secondary_cta_href = anchor_pr_url
+    if not latest_generation:
+        generation_label = "Latest generation"
+        generation_value = "Not created yet"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Preview route (not live yet)"
+        secondary_cta_href = canonical_url
+    elif no_serving_preview:
+        generation_label = "Latest generation"
+        generation_value = latest_generation_id or "Unavailable"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Preview route (not serving yet)"
+        secondary_cta_href = canonical_url
+    if preview_state.strip().lower() == "destroyed":
+        generation_label = "Retained generation"
+        generation_value = latest_generation_id or "Unavailable"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Retained preview URL"
+        secondary_cta_href = canonical_url
+    replacement_failed = (
+        preview_state.strip().lower() != "destroyed"
+        and not serving_matches_latest
+        and latest_generation
+        and latest_generation_state.strip().lower() == "failed"
+    )
+
+    banner_label = f"{status_label(preview_state).upper()}"
+    banner_note = f"Health {status_label(display_health_status)}"
+    banner_tone = status_tone(display_health_status)
+    if preview_state.strip().lower() == "destroyed":
+        banner_label = "DESTROYED"
+        banner_note = "Preview evidence retained"
+        banner_tone = "neutral"
+    elif preview_state.strip().lower() == "paused":
+        banner_label = "PAUSED"
+        banner_note = "Preview intentionally held"
+        banner_tone = "warn"
+    elif preview_state.strip().lower() == "teardown_pending":
+        banner_label = "TEARDOWN PENDING"
+        banner_note = "Preview teardown pending"
+        banner_tone = "warn"
+    elif not latest_generation:
+        banner_label = "STARTUP PENDING"
+        banner_note = "Preview record created; no generation requested"
+        banner_tone = "neutral"
+    elif generation_in_progress(latest_generation_state):
+        banner_label = (
+            "REPLACEMENT IN FLIGHT" if serving_generation_id else "FIRST GENERATION IN FLIGHT"
+        )
+        banner_note = (
+            "Current preview still serving"
+            if serving_generation_id
+            else "Launchplane is preparing the first preview"
+        )
+        banner_tone = "warn"
+    elif no_serving_preview:
+        banner_label = "AVAILABILITY GAP"
+        banner_note = "Health unavailable"
+        banner_tone = "bad"
+    elif replacement_failed:
+        banner_label = "FAILED REPLACEMENT"
+        banner_note = "Older preview still serving"
+        banner_tone = "bad"
+    elif healthy_live_preview:
+        banner_label = "LIVE PASS"
+        banner_note = "Serving the latest requested generation."
+        banner_tone = "good"
+
+    callout_tone = banner_tone
+    callout_eyebrow = "Current condition"
+    callout_title = status_summary
+    callout_summary = summary_text
+    callout_items: list[tuple[str, str]] = []
+    callout_detail = ""
+
+    if preview_state.strip().lower() == "destroyed":
+        callout_eyebrow = "Historical evidence"
+        callout_title = "This preview has already been destroyed. Launchplane is retaining the record as evidence."
+        callout_summary = status_summary
+        callout_items = [
+            ("Destroyed at", destroyed_at or "Unavailable"),
+            ("Destroy reason", destroy_reason or "Unavailable"),
+            ("Retained generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+        ]
+        callout_tone = "neutral"
+    elif preview_state.strip().lower() == "paused":
+        callout_eyebrow = "Paused state"
+        callout_title = "This preview is intentionally paused. Launchplane is holding the current review evidence in place."
+        callout_summary = status_summary
+        callout_items = [
+            ("Paused at", paused_at or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code>",
+            ),
+            ("Resume behavior", "Blocked until Launchplane resumes the preview."),
+        ]
+        callout_tone = "warn"
+    elif preview_state.strip().lower() == "teardown_pending":
+        callout_eyebrow = "Scheduled cleanup"
+        callout_title = "This preview is queued for teardown. Launchplane is keeping the current runtime available until cleanup completes."
+        callout_summary = summary_text
+        callout_items = [
+            ("Destroy after", destroy_after or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code>",
+            ),
+            ("Evidence retained", "Anchor PR and generation history remain after runtime cleanup."),
+        ]
+        callout_tone = "warn"
+    elif not latest_generation:
+        callout_eyebrow = "Startup pending"
+        callout_title = "Launchplane has created this preview record, but the first generation has not been requested yet."
+        callout_summary = summary_text
+        callout_items = [
+            ("Preview route", canonical_url or "Unavailable"),
+            ("Generation status", "Not created yet"),
+            (
+                "What happens next",
+                "Launchplane needs the first generation request before this preview becomes live.",
+            ),
+        ]
+        callout_tone = "neutral"
+    elif generation_in_progress(latest_generation_state):
+        callout_eyebrow = "Replacement in flight"
+        callout_title = (
+            "A replacement generation is in progress. Launchplane is still serving the current preview."
+            if serving_generation_id
+            else "The first preview generation is in progress. Launchplane is preparing this preview now."
+        )
+        callout_summary = (
+            summary_text
+            or "Launchplane is advancing the latest generation toward a reviewable preview."
+        )
+        callout_items = [
+            ("Current stage", escape(status_label(latest_generation_state)) or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or 'No serving preview yet'}</code>",
+            ),
+            ("Requested at", latest_requested_at or "Unavailable"),
+        ]
+        callout_tone = "warn"
+    elif no_serving_preview:
+        callout_eyebrow = "Availability gap"
+        callout_title = (
+            "Launchplane has generation evidence for this preview, but nothing is serving yet."
+        )
+        callout_summary = summary_text
+        callout_items = [
+            ("Latest generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+            ("Current state", escape(status_label(latest_generation_state)) or "Unavailable"),
+            ("Requested at", latest_requested_at or "Unavailable"),
+        ]
+        callout_tone = "bad"
+    elif replacement_failed:
+        callout_eyebrow = "Replacement status"
+        callout_title = "Latest replacement failed. Launchplane is still serving the older preview."
+        callout_summary = status_summary
+        callout_items = [
+            ("Serving now", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
+            ("Failed replacement", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+            ("Failure stage", latest_failure_stage or "Unavailable"),
+        ]
+        callout_detail = (
+            latest_failure_summary
+            or "Launchplane recorded a failed replacement without an additional summary."
+        )
+        callout_tone = "bad"
+    elif healthy_live_preview:
+        callout_eyebrow = "Review is live"
+        callout_title = "This preview is live at the stable Launchplane route and serving the latest requested generation."
+        callout_summary = summary_text
+        callout_items = [
+            ("Serving generation", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
+            ("Artifact", f"<code>{artifact_id or 'Unavailable'}</code>"),
+            ("Destroy after", destroy_after or "Unavailable"),
+        ]
+        callout_tone = "good"
+
+    callout_rows = "".join(
+        f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in callout_items
+    )
+    callout_detail_html = (
+        f'<p class="callout-detail">{callout_detail}</p>' if callout_detail else ""
+    )
+    callout_html = f"""
+    <article class=\"preview-condition-card detail-card tone-{callout_tone}\">
+      <div class=\"section-label\">{callout_eyebrow}</div>
+      <h2>{callout_title}</h2>
+      <p>{callout_summary}</p>
+      <dl>{callout_rows}</dl>
+      {callout_detail_html}
+    </article>
+    """
+
+    source_map_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{escape(str(item.get('repo', '')))}</td>"
+            f"<td><code>{escape(str(item.get('git_sha', '')))}</code></td>"
+            f"<td>{escape(str(item.get('selection', '')))}</td>"
+            "</tr>"
+        )
+        for item in source_map
+        if isinstance(item, dict)
+    )
+    companion_items = "".join(
+        f"<li><span>{escape(str(item.get('repo', '')))}</span><span><code>PR {escape(str(item.get('pr_number', '')))}</code></span></li>"
+        for item in companions
+        if isinstance(item, dict)
+    )
+    companions_section_html = ""
+    if companion_items:
+        companions_section_html = f"""
+    <section class=\"preview-detail-section\">
+      <div class=\"section-label\">Linked pull requests</div>
+      <h2>Companion refs</h2>
+      <p>Companion intent stays explicit and secondary to the anchor preview narrative.</p>
+      <ul class=\"simple-list\">{companion_items}</ul>
+    </section>
+    """
+
+    generation_rows = []
+    for item in recent_generations:
+        if not isinstance(item, dict):
+            continue
+        generation_id_value = escape(str(item.get("generation_id", "")))
+        generation_state_value = str(item.get("state", ""))
+        state_label = escape(status_label(generation_state_value)) or "Unavailable"
+        requested_at_value = escape(str(item.get("requested_at", ""))) or "Unavailable"
+        role_parts: list[str] = []
+        if generation_id_value and generation_id_value == serving_generation_id:
+            role_parts.append("serving")
+        if generation_id_value and generation_id_value == latest_generation_id:
+            role_parts.append("latest")
+        if generation_id_value and generation_id_value == active_generation_id:
+            role_parts.append("active")
+        role_label = escape(" / ".join(role_parts) if role_parts else "historical")
+        serving_marker = (
+            "&bull; "
+            if generation_id_value and generation_id_value == serving_generation_id
+            else ""
+        )
+        state_class = f"state-{status_tone(generation_state_value)}"
+        generation_rows.append(
+            "<tr>"
+            f'<td><code title="{generation_id_value}">{serving_marker}{generation_id_value or "Unavailable"}</code></td>'
+            f"<td>{role_label}</td>"
+            f'<td class="{state_class}">{state_label}</td>'
+            f"<td>{requested_at_value}</td>"
+            "</tr>"
+        )
+        failure_stage_value = escape(str(item.get("failure_stage", "")))
+        if generation_state_value.strip().lower() == "failed" and failure_stage_value:
+            generation_rows.append(
+                '<tr class="row-note">'
+                "<td></td>"
+                f'<td colspan="3">Failure stage {failure_stage_value}.</td>'
+                "</tr>"
+            )
+    recent_generation_rows = "".join(generation_rows)
+
+    metadata_items = [
+        ("Artifact", f"<code>{artifact_id or 'Unavailable'}</code>"),
+        ("Manifest", f"<code>{manifest_fingerprint or 'Unavailable'}</code>"),
+        (generation_label, f"<code>{generation_value}</code>"),
+        ("Destroy after", destroy_after or "Unavailable"),
+    ]
+    metadata_rows = "".join(
+        f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in metadata_items
+    )
+
+    route_line_items = []
+    if canonical_url:
+        route_line_items.append(
+            f'<div class="route-item"><span>Stable route</span><a href="{canonical_url}">{canonical_url}</a></div>'
+        )
+    if anchor_pr_url:
+        route_line_items.append(
+            f'<div class="route-item"><span>Anchor PR</span><a href="{anchor_pr_url}">{anchor_pr_url}</a></div>'
+        )
+    route_line = (
+        "".join(route_line_items) or '<div class="route-item">No preview route recorded.</div>'
+    )
+    mast_title = preview_label
+    if anchor_repo_name and anchor_pr_number:
+        mast_title = f"{anchor_repo_name} PR {anchor_pr_number}"
+    identity_bits = []
+    if context_name:
+        identity_bits.append(f"Context {context_name}")
+    if preview_label and mast_title != preview_label:
+        identity_bits.append(f"<code>{preview_label}</code>")
+    identity_html = ""
+    if identity_bits:
+        identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
+
+    action_slug = launchplane_action_slug(preview_label)
+    raw_anchor_head_sha = str(
+        (json_object(input_summary.get("anchor")) or {}).get("head_sha", "")
+    ).strip()
+    raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
+    raw_source_map = source_map
+    raw_companions = companions
+    raw_context_name = str(preview.get("context", "")).strip()
+    raw_anchor_repo = str(preview.get("anchor_repo", "")).strip()
+    raw_anchor_pr_number = int_from_json_value(preview.get("anchor_pr_number", 0))
+    raw_anchor_pr_url = str(preview.get("anchor_pr_url", links.get("anchor_pr_url", ""))).strip()
+    raw_latest_generation_id = str(latest_generation.get("generation_id", "")).strip()
+    raw_latest_requested_reason = str(latest_generation.get("requested_reason", "")).strip()
+    raw_latest_requested_at = str(latest_generation.get("requested_at", "")).strip()
+    raw_latest_artifact_id = str(latest_generation.get("artifact_id", "")).strip()
+    raw_latest_manifest_fingerprint = str(
+        latest_generation.get("resolved_manifest_fingerprint", "")
+    ).strip()
+    operator_actions: list[str] = []
+    if preview_state.strip().lower() != "destroyed":
+        destroy_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int_from_json_value(preview.get("anchor_pr_number", 0)),
+            "destroyed_at": "<utc-timestamp>",
+            "destroy_reason": "operator_requested",
+        }
+        destroy_script = build_launchplane_action_script(
+            command_name="destroy-preview",
+            file_payloads=(
+                (
+                    "ACTION_FILE",
+                    f"/tmp/launchplane-{action_slug}-destroy-preview.json",
+                    destroy_payload,
+                ),
+            ),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        operator_actions.append(
+            render_launchplane_action_recipe(
+                title="Destroy preview",
+                summary="Tear down this preview explicitly while retaining Launchplane evidence for the record.",
+                tone="bad",
+                script=destroy_script,
+                command_label="destroy-preview",
+                recipe_id=f"action-{action_slug}-destroy",
+            )
+        )
+        request_generation_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": raw_anchor_pr_number,
+            "anchor_pr_url": raw_anchor_pr_url,
+            "state": preview_state.strip().lower() or "pending",
+            "updated_at": "<utc-timestamp>",
+        }
+        generation_request_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": raw_anchor_pr_number,
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "state": "resolving",
+            "requested_reason": "operator_requested_refresh",
+            "requested_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id,
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "pending",
+            "verify_status": "pending",
+            "overall_health_status": "pending",
+        }
+        request_script = build_launchplane_action_script(
+            command_name="request-generation",
+            file_payloads=(
+                (
+                    "PREVIEW_FILE",
+                    f"/tmp/launchplane-{action_slug}-preview.json",
+                    request_generation_payload,
+                ),
+                (
+                    "GENERATION_FILE",
+                    f"/tmp/launchplane-{action_slug}-generation.json",
+                    generation_request_payload,
+                ),
+            ),
+            command_args=(
+                "--preview-input-file",
+                '"$PREVIEW_FILE"',
+                "--generation-input-file",
+                '"$GENERATION_FILE"',
+            ),
+        )
+        operator_actions.insert(
+            0,
+            render_launchplane_action_recipe(
+                title="Request replacement generation",
+                summary="Queue a fresh Launchplane generation for this preview using the current record as the starting template.",
+                tone="warn",
+                script=request_script,
+                command_label="request-generation",
+                recipe_id=f"action-{action_slug}-request-generation",
+            ),
+        )
+    if raw_latest_generation_id and generation_in_progress(latest_generation_state):
+        ready_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": raw_anchor_pr_number,
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "generation_id": raw_latest_generation_id,
+            "state": "ready",
+            "requested_reason": raw_latest_requested_reason or "operator_requested_refresh",
+            "requested_at": raw_latest_requested_at or "<requested-at>",
+            "ready_at": "<utc-timestamp>",
+            "finished_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id or "<artifact-id>",
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "pass",
+            "verify_status": "pass",
+            "overall_health_status": "pass",
+        }
+        ready_script = build_launchplane_action_script(
+            command_name="mark-generation-ready",
+            file_payloads=(
+                ("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-ready.json", ready_payload),
+            ),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        failed_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": raw_anchor_pr_number,
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "generation_id": raw_latest_generation_id,
+            "state": "failed",
+            "requested_reason": raw_latest_requested_reason or "operator_requested_refresh",
+            "requested_at": raw_latest_requested_at or "<requested-at>",
+            "failed_at": "<utc-timestamp>",
+            "finished_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id,
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "fail",
+            "verify_status": "pending",
+            "overall_health_status": "fail",
+            "failure_stage": latest_failure_stage or "<failure-stage>",
+            "failure_summary": latest_failure_summary or "<failure-summary>",
+        }
+        failed_script = build_launchplane_action_script(
+            command_name="mark-generation-failed",
+            file_payloads=(
+                ("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-failed.json", failed_payload),
+            ),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        operator_actions.insert(
+            0,
+            render_launchplane_action_recipe(
+                title="Mark latest generation failed",
+                summary="Record a failed in-flight generation while preserving any still-serving preview evidence.",
+                tone="bad",
+                script=failed_script,
+                command_label="mark-generation-failed",
+                recipe_id=f"action-{action_slug}-mark-failed",
+            ),
+        )
+        operator_actions.insert(
+            0,
+            render_launchplane_action_recipe(
+                title="Mark latest generation ready",
+                summary="Advance the current in-flight generation into Launchplane's ready/serving path once deploy and verify evidence are complete.",
+                tone="good",
+                script=ready_script,
+                command_label="mark-generation-ready",
+                recipe_id=f"action-{action_slug}-mark-ready",
+            ),
+        )
+    operator_actions_html = "".join(operator_actions)
+    if not operator_actions_html:
+        operator_actions_html = '<p class="action-empty">No write-side recipe is exposed for this retained preview state.</p>'
+    operator_actions_section_html = f"""
+    <section class=\"preview-detail-section\" id=\"operator-actions\">
+      <div class=\"section-label\">Operator actions</div>
+      <h2>Write-side Launchplane recipes</h2>
+      <p>Launchplane still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
+      <div class=\"action-stack\">{operator_actions_html}</div>
+    </section>
+    """
+
+    body_html = f"""
+    <section class=\"preview-detail-mast\">
+      <div>
+        <div class=\"section-label\">Preview detail</div>
+        <h2>{mast_title}</h2>
+        {identity_html}
+      </div>
+      <aside class=\"preview-detail-brief\">
+        <div class=\"banner tone-{banner_tone}\"><strong>{escape(banner_label)}</strong><span>{escape(banner_note)}</span></div>
+        <p>{summary_text}</p>
+        <div class=\"actions\">
+          <a class=\"primary-action\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
+          <a class=\"secondary-link\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
+        </div>
+      </aside>
+    </section>
+
+    <section class=\"preview-detail-grid\">
+      <article class=\"detail-card detail-card-primary\">
+        <div class=\"section-label\">Current preview evidence</div>
+        <h3>Stable route and generation state</h3>
+        <dl class=\"detail-meta\">{metadata_rows}</dl>
+        <div class=\"route-line\">{route_line}</div>
+      </article>
+      {callout_html}
+    </section>
+
+    {operator_actions_section_html}
+
+    <section class=\"preview-detail-section\">
+      <div class=\"section-label\">Exact inputs</div>
+      <h2>Serving manifest evidence</h2>
+      <p>Launchplane keeps the exact repo-to-SHA map visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
+      <table>
+        <thead><tr><th>Repo</th><th>SHA</th><th>Selection</th></tr></thead>
+        <tbody>{source_map_rows or '<tr><td colspan="3">No source map recorded.</td></tr>'}</tbody>
+      </table>
+    </section>
+
+    {companions_section_html}
+
+    <section class=\"preview-detail-section\">
+      <div class=\"section-label\">Recent activity</div>
+      <h2>Generation ledger</h2>
+      <p>Generation history stays visible as evidence, but the stable preview route remains the primary narrative.</p>
+      <table>
+        <thead><tr><th>Generation</th><th>Role</th><th>State</th><th>Requested at</th></tr></thead>
+        <tbody>{recent_generation_rows or '<tr><td colspan="4">No recent generations recorded.</td></tr>'}</tbody>
+      </table>
+    </section>
+
+    <section class=\"preview-detail-section\">
+      <div class=\"section-label\">Lifecycle evidence</div>
+      <h2>Control-plane record</h2>
+      <details>
+        <summary>Raw payload JSON</summary>
+        <pre>{raw_payload_json}</pre>
+      </details>
+    </section>
+    <script>
+    (() => {{
+      const buttons = Array.from(document.querySelectorAll('[data-copy-target]'));
+      if (!buttons.length) {{
+        return;
+      }}
+      const fallbackCopy = (text) => {{
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'absolute';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return copied;
+      }};
+      const selectRecipe = (target) => {{
+        const details = target.closest('details');
+        if (details) {{
+          details.open = true;
+        }}
+        const selection = window.getSelection();
+        if (!selection) {{
+          return false;
+        }}
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        target.scrollIntoView({{block: 'nearest'}});
+        return true;
+      }};
+      buttons.forEach((button) => {{
+        button.addEventListener('click', async () => {{
+          const targetId = button.getAttribute('data-copy-target');
+          if (!targetId) {{
+            return;
+          }}
+          const target = document.getElementById(targetId);
+          if (!target) {{
+            return;
+          }}
+          try {{
+            const text = target.textContent || '';
+            if (navigator.clipboard && window.isSecureContext) {{
+              await navigator.clipboard.writeText(text);
+            }} else if (!fallbackCopy(text)) {{
+              throw new Error('fallback-copy-failed');
+            }}
+            const original = button.textContent || 'Copy';
+            button.textContent = 'Copied';
+            window.setTimeout(() => {{
+              button.textContent = original;
+            }}, 1200);
+          }} catch (_error) {{
+            const text = target.textContent || '';
+            if (fallbackCopy(text)) {{
+              const original = button.textContent || 'Copy';
+              button.textContent = 'Copied';
+              window.setTimeout(() => {{
+                button.textContent = original;
+              }}, 1200);
+            }} else {{
+              const original = button.textContent || 'Copy';
+              if (selectRecipe(target)) {{
+                button.textContent = 'Selected';
+                window.setTimeout(() => {{
+                  button.textContent = original;
+                }}, 1400);
+              }} else {{
+                button.textContent = 'Copy failed';
+              }}
+            }}
+          }}
+        }});
+      }});
+    }})();
+    </script>
+    """
+
+    extra_css = """
+    .preview-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
+    .identity-line {
+      margin: 10px 0 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .identity-line code {
+      font-size: 12px;
+    }
+    .preview-detail-mast h2,
+    .detail-card h3,
+    .preview-detail-section h2,
+    .preview-condition-card h2,
+    .action-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .preview-detail-mast h2 {
+      font-size: 40px;
+    }
+    .preview-detail-mast p,
+    .preview-detail-brief p,
+    .detail-card p,
+    .preview-detail-section p,
+    .action-card p,
+    .action-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .preview-detail-brief,
+    .detail-card,
+    .preview-detail-section,
+    .action-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 16px 18px 18px;
+    }
+    .preview-detail-brief {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .preview-detail-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 16px;
+      margin-top: 18px;
+      align-items: start;
+    }
+    .preview-detail-section { margin-top: 18px; }
+    .route-line {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .route-item { display: flex; flex-wrap: wrap; gap: 8px; }
+    .route-item span { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .route-line a,
+    .secondary-link,
+    details summary { color: inherit; }
+    .route-line a,
+    .secondary-link { text-underline-offset: 0.18em; }
+    .banner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-radius: 4px;
+      color: #f5f2ec;
+      font-family: var(--mono);
+    }
+    .banner strong { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .banner span { font-size: 12px; opacity: 0.92; }
+    .tone-good { background: var(--good); }
+    .tone-warn { background: var(--warn); }
+    .tone-bad { background: var(--bad); }
+    .tone-neutral { background: var(--neutral); }
+    .actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+    .primary-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 16px;
+      border-radius: 4px;
+      background: var(--text);
+      color: #f6f3ec;
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    .secondary-link { font-family: var(--mono); font-size: 13px; }
+    .action-stack {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .action-card { display: grid; gap: 12px; }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 { font-size: 22px; }
+    .action-script-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover {
+      background: #e7dfd0;
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .preview-condition-card { border-left: 3px solid var(--neutral); }
+    .preview-condition-card.tone-good,
+    .preview-condition-card.tone-warn,
+    .preview-condition-card.tone-bad,
+    .preview-condition-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .preview-condition-card.tone-good { border-left-color: var(--good); }
+    .preview-condition-card.tone-warn { border-left-color: var(--warn); }
+    .preview-condition-card.tone-bad { border-left-color: var(--bad); }
+    .preview-condition-card.tone-neutral { border-left-color: var(--neutral); }
+    .preview-condition-card h2,
+    .preview-detail-section h2 { font-size: 26px; }
+    .detail-card h3 { font-size: 24px; }
+    .preview-condition-card dl,
+    .detail-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin: 18px 0 0;
+    }
+    .detail-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .preview-condition-card dt,
+    .detail-meta dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .preview-condition-card dd,
+    .detail-meta dd { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .callout-detail { color: var(--text); }
+    table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 14px; background: transparent; }
+    th, td { text-align: left; padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .simple-list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }
+    .simple-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    code { font-family: var(--mono); font-size: 12px; }
+    .state-good { color: var(--good); }
+    .state-warn { color: var(--warn); }
+    .state-bad { color: var(--bad); }
+    .row-note td { color: var(--muted); font-size: 13px; padding-top: 0; }
+    details { margin-top: 18px; }
+    summary { cursor: pointer; color: var(--muted); font-family: var(--mono); }
+    pre { overflow: auto; padding: 18px; background: #13110f; color: #e7e0d4; border-radius: 4px; font-size: 12px; }
+    @media (max-width: 900px) {
+      .preview-detail-mast,
+      .preview-detail-grid,
+      .action-stack,
+      .preview-condition-card dl,
+      .detail-meta {
+        grid-template-columns: 1fr;
+      }
+      .preview-detail-mast h2 { font-size: 32px; }
+      .identity-line {
+        gap: 6px;
+        font-size: 12px;
+      }
+      .route-line {
+        gap: 6px;
+        padding-top: 12px;
+        font-size: 13px;
+      }
+      .action-card-head { flex-direction: column; }
+    }
+    """
+
+    return render_launchplane_shell_document(
+        page_title=f"{preview_label} · Launchplane status",
+        context_name=str(preview.get("context", "")),
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
