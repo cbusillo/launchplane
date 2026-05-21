@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,11 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.ship import (
     build_deployment_record,
@@ -31,6 +31,10 @@ from control_plane.workflows.verireel_rollout import (
 
 
 StableInstanceName = Literal["testing", "prod"]
+
+
+class VeriReelStableDeployStore(Protocol):
+    def write_deployment_record(self, record: DeploymentRecord) -> Path | None: ...
 
 
 class VeriReelStableDeployRequest(BaseModel):
@@ -241,7 +245,7 @@ def _verify_rollout(
 def execute_verireel_stable_deploy(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelStableDeployStore,
     request: VeriReelStableDeployRequest,
 ) -> VeriReelStableDeployResult:
     record_id = generate_deployment_record_id(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
+from typing import Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -19,7 +20,6 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
@@ -31,6 +31,16 @@ from control_plane.workflows.verireel_rollout import (
     resolve_verireel_rollout_base_urls,
     verify_verireel_rollout,
 )
+
+
+class VeriReelProdPromotionStore(Protocol):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+    def write_deployment_record(self, record: DeploymentRecord) -> Path | None: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> Path | None: ...
 
 
 class VeriReelProdPromotionRequest(BaseModel):
@@ -128,7 +138,7 @@ def _default_migration_schedule_name() -> str:
 
 def _read_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdPromotionStore,
     record_id: str,
 ) -> BackupGateRecord:
     try:
@@ -141,7 +151,7 @@ def _read_backup_gate_record(
 
 def _resolve_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdPromotionStore,
     request: VeriReelProdPromotionRequest,
 ) -> BackupGateRecord:
     backup_gate_record = _read_backup_gate_record(
@@ -269,7 +279,7 @@ def _build_destination_health(
 
 def _write_failed_promotion_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdPromotionStore,
     request: VeriReelProdPromotionRequest,
     backup_gate_record: BackupGateRecord | None,
     error_message: str,
@@ -537,7 +547,7 @@ def _run_prisma_migrations(
 def execute_verireel_prod_promotion(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: VeriReelProdPromotionStore,
     request: VeriReelProdPromotionRequest,
 ) -> VeriReelProdPromotionResult:
     try:
