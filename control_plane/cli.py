@@ -103,6 +103,7 @@ from control_plane.cli_runtime_environments import (
     register_runtime_environment_commands,
     summarize_runtime_environment_record,
 )
+from control_plane.cli_records import RecordsCliCallbacks, register_record_commands
 from control_plane.cli_service import ServiceCliCallbacks, register_service_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
 from control_plane.cli_work_graph import register_work_graph_core_commands
@@ -9022,11 +9023,6 @@ def main() -> None:
     """Control-plane CLI."""
 
 
-@main.group()
-def artifacts() -> None:
-    """Artifact manifest commands."""
-
-
 @main.group("odoo-artifacts")
 def odoo_artifacts() -> None:
     """Odoo artifact publish driver commands."""
@@ -9092,41 +9088,23 @@ register_service_commands(
         inspect_local_launchplane_config_boundary=_inspect_local_launchplane_config_boundary,
     ),
 )
-
-
-@artifacts.command("write")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+register_record_commands(
+    cast(click.Group, main),  # type: ignore[redundant-cast]
+    callbacks=RecordsCliCallbacks(
+        store_factory=_store,
+        load_json_file=_load_json_file,
+        summarize_backup_gate_record=_summarize_backup_gate_record,
+        summarize_promotion_record=_summarize_promotion_record,
+        summarize_deployment_record=_summarize_deployment_record,
+        write_environment_inventory=_write_environment_inventory,
+        write_environment_inventory_from_promotion=_write_environment_inventory_from_promotion,
+        read_source_release_tuple_for_promotion_record=_read_source_release_tuple_for_promotion_record,
+        write_promoted_release_tuple=_write_promoted_release_tuple,
+        build_environment_status_payload=_build_environment_status_payload,
+        build_environment_overview_payloads=_build_environment_overview_payloads,
+        summarize_environment_inventory=_summarize_environment_inventory,
+    ),
 )
-@click.option("--database-url", default="", show_default=False)
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_write(state_dir: Path, database_url: str, input_file: Path) -> None:
-    manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
-    click.echo(record_path)
-
-
-@artifacts.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--artifact-id", required=True)
-def artifacts_show(state_dir: Path, database_url: str, artifact_id: str) -> None:
-    manifest = _store(state_dir, database_url=database_url).read_artifact_manifest(artifact_id)
-    click.echo(json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@artifacts.command("ingest")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_ingest(state_dir: Path, database_url: str, input_file: Path) -> None:
-    manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
-    click.echo(record_path)
 
 
 @odoo_artifacts.command("publish")
@@ -9263,359 +9241,6 @@ def odoo_rollbacks_execute(
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     if result.rollback_status != "pass":
         raise click.ClickException(result.error_message or "Odoo prod rollback failed.")
-
-
-@main.group("release-tuples")
-def release_tuples() -> None:
-    """Release tuple state commands."""
-
-
-@release_tuples.command("list")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-def release_tuples_list(state_dir: Path, database_url: str) -> None:
-    records = _store(state_dir, database_url=database_url).list_release_tuple_records()
-    click.echo(
-        json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
-    )
-
-
-@release_tuples.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", required=True)
-@click.option("--channel", "channel_name", required=True)
-def release_tuples_show(
-    state_dir: Path, database_url: str, context_name: str, channel_name: str
-) -> None:
-    record = _store(state_dir, database_url=database_url).read_release_tuple_record(
-        context_name=context_name,
-        channel_name=channel_name,
-    )
-    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@release_tuples.command("export-catalog")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--output-file", type=click.Path(path_type=Path), default=None)
-def release_tuples_export_catalog(
-    state_dir: Path, database_url: str, output_file: Path | None
-) -> None:
-    records = _store(state_dir, database_url=database_url).list_release_tuple_records()
-    if not records:
-        raise click.ClickException("No release tuple records found to export.")
-    rendered_catalog = control_plane_release_tuples.render_release_tuple_catalog_toml(records)
-    if output_file is None:
-        click.echo(rendered_catalog, nl=False)
-        return
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(rendered_catalog, encoding="utf-8")
-    click.echo(output_file)
-
-
-@release_tuples.command("write-from-promotion")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def release_tuples_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
-    promotion_record = record_store.read_promotion_record(record_id)
-    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
-        promotion_record.from_instance
-    ) or not control_plane_release_tuples.should_mint_release_tuple_for_channel(
-        promotion_record.to_instance
-    ):
-        raise click.ClickException(
-            "Release tuple promotion only supports stable remote channels testing, prod."
-        )
-    deployment_record_id = promotion_record.deployment_record_id.strip()
-    if not deployment_record_id:
-        raise click.ClickException(
-            "Promotion record is missing deployment_record_id. "
-            "Write a promotion record with explicit deployment linkage before minting a promoted release tuple."
-        )
-    deployment_record = record_store.read_deployment_record(deployment_record_id)
-    source_tuple = _read_source_release_tuple_for_promotion_record(
-        record_store=record_store,
-        promotion_record=promotion_record,
-    )
-    tuple_path = _write_promoted_release_tuple(
-        record_store=record_store,
-        source_tuple=source_tuple,
-        deployment_record=deployment_record,
-        promotion_record=promotion_record,
-    )
-    if tuple_path is None:
-        raise click.ClickException(
-            "Promotion record did not produce a stable release tuple destination."
-        )
-    click.echo(tuple_path)
-
-
-@main.group("backup-gates")
-def backup_gates() -> None:
-    """Backup gate record commands."""
-
-
-@backup_gates.command("write")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def backup_gates_write(state_dir: Path, database_url: str, input_file: Path) -> None:
-    record = BackupGateRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_backup_gate_record(record)
-    click.echo(record_path)
-
-
-@backup_gates.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def backup_gates_show(state_dir: Path, database_url: str, record_id: str) -> None:
-    record = _store(state_dir, database_url=database_url).read_backup_gate_record(record_id)
-    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@backup_gates.command("list")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", default="")
-@click.option("--instance", "instance_name", default="")
-@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
-def backup_gates_list(
-    state_dir: Path, database_url: str, context_name: str, instance_name: str, limit: int
-) -> None:
-    records = _store(state_dir, database_url=database_url).list_backup_gate_records(
-        context_name=context_name,
-        instance_name=instance_name,
-        limit=limit,
-    )
-    click.echo(
-        json.dumps(
-            [_summarize_backup_gate_record(record) for record in records], indent=2, sort_keys=True
-        )
-    )
-
-
-@main.group()
-def promotions() -> None:
-    """Promotion record commands."""
-
-
-@promotions.command("write")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def promotions_write(state_dir: Path, database_url: str, input_file: Path) -> None:
-    record = PromotionRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_promotion_record(record)
-    click.echo(record_path)
-
-
-@promotions.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def promotions_show(state_dir: Path, database_url: str, record_id: str) -> None:
-    record = _store(state_dir, database_url=database_url).read_promotion_record(record_id)
-    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@promotions.command("list")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", default="")
-@click.option("--from-instance", "from_instance_name", default="")
-@click.option("--to-instance", "to_instance_name", default="")
-@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
-def promotions_list(
-    state_dir: Path,
-    database_url: str,
-    context_name: str,
-    from_instance_name: str,
-    to_instance_name: str,
-    limit: int,
-) -> None:
-    records = _store(state_dir, database_url=database_url).list_promotion_records(
-        context_name=context_name,
-        from_instance_name=from_instance_name,
-        to_instance_name=to_instance_name,
-        limit=limit,
-    )
-    click.echo(
-        json.dumps(
-            [_summarize_promotion_record(record) for record in records], indent=2, sort_keys=True
-        )
-    )
-
-
-@main.group()
-def deployments() -> None:
-    """Deployment record commands."""
-
-
-@deployments.command("write")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def deployments_write(state_dir: Path, database_url: str, input_file: Path) -> None:
-    record = DeploymentRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_deployment_record(record)
-    click.echo(record_path)
-
-
-@deployments.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def deployments_show(state_dir: Path, database_url: str, record_id: str) -> None:
-    record = _store(state_dir, database_url=database_url).read_deployment_record(record_id)
-    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@deployments.command("list")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", default="")
-@click.option("--instance", "instance_name", default="")
-@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
-def deployments_list(
-    state_dir: Path, database_url: str, context_name: str, instance_name: str, limit: int
-) -> None:
-    records = _store(state_dir, database_url=database_url).list_deployment_records(
-        context_name=context_name,
-        instance_name=instance_name,
-        limit=limit,
-    )
-    click.echo(
-        json.dumps(
-            [_summarize_deployment_record(record) for record in records], indent=2, sort_keys=True
-        )
-    )
-
-
-@main.group()
-def inventory() -> None:
-    """Environment inventory commands."""
-
-
-@inventory.command("write-from-deployment")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def inventory_write_from_deployment(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
-    deployment_record = record_store.read_deployment_record(record_id)
-    inventory_path = _write_environment_inventory(
-        record_store=record_store,
-        deployment_record=deployment_record,
-    )
-    click.echo(inventory_path)
-
-
-@inventory.command("write-from-promotion")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--record-id", required=True)
-def inventory_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
-    promotion_record = record_store.read_promotion_record(record_id)
-    inventory_path = _write_environment_inventory_from_promotion(
-        record_store=record_store,
-        promotion_record=promotion_record,
-    )
-    click.echo(inventory_path)
-
-
-@inventory.command("show")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", required=True)
-@click.option("--instance", "instance_name", required=True)
-def inventory_show(
-    state_dir: Path, database_url: str, context_name: str, instance_name: str
-) -> None:
-    record = _store(state_dir, database_url=database_url).read_environment_inventory(
-        context_name=context_name, instance_name=instance_name
-    )
-    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
-
-
-@inventory.command("list")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-def inventory_list(state_dir: Path, database_url: str) -> None:
-    records = _store(state_dir, database_url=database_url).list_environment_inventory()
-    click.echo(
-        json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
-    )
-
-
-@inventory.command("overview")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", default="")
-def inventory_overview(state_dir: Path, database_url: str, context_name: str) -> None:
-    payload = _build_environment_overview_payloads(
-        record_store=_store(state_dir, database_url=database_url),
-        context_name=context_name,
-    )
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@inventory.command("status")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option("--database-url", default="", show_default=False)
-@click.option("--context", "context_name", required=True)
-@click.option("--instance", "instance_name", required=True)
-def inventory_status(
-    state_dir: Path, database_url: str, context_name: str, instance_name: str
-) -> None:
-    payload = _build_environment_status_payload(
-        record_store=_store(state_dir, database_url=database_url),
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @main.group("launchplane-previews")
