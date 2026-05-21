@@ -979,7 +979,7 @@ def _build_launchplane_promotion_action_payload(
                 backup_record_id=backup_record_id,
             )
             execute_recipe = _build_launchplane_promotion_execute_recipe_script(
-                state_dir="/path/to/state"
+                state_dir="/path/to/local-state"
             )
         else:
             promotion_status = "blocked"

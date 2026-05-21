@@ -92,7 +92,7 @@ def render_launchplane_action_recipe(
         <button class=\"copy-button\" type=\"button\" data-copy-target=\"{escape(recipe_id)}\">Copy recipe</button>
       </div>
       <details class=\"action-details\">
-        <summary>Show shell recipe</summary>
+        <summary>Show local rehearsal recipe</summary>
         <pre id=\"{escape(recipe_id)}\" class=\"action-pre\">{escape(script)}</pre>
       </details>
       {footer_html}
@@ -106,7 +106,11 @@ def build_launchplane_action_script(
     file_payloads: tuple[tuple[str, str, dict[str, object]], ...],
     command_args: tuple[str, ...],
 ) -> str:
-    lines = ['STATE_DIR="/path/to/state"']
+    lines = [
+        "# Local rehearsal only. Shared/live mutations must use the deployed "
+        "Launchplane service API or DB-backed operator flows.",
+        'STATE_DIR="/path/to/local-state"',
+    ]
     for variable_name, file_path, payload in file_payloads:
         lines.append(f'{variable_name}="{file_path}"')
         lines.append(f"cat >\"${variable_name}\" <<'JSON'")
@@ -333,7 +337,9 @@ def build_launchplane_backup_gate_write_recipe_script(
         "evidence": evidence or {"snapshot": "s3://path/to/prod-backup"},
     }
     lines = [
-        'STATE_DIR="/path/to/state"',
+        "# Local rehearsal only. Shared/live mutations must use the deployed "
+        "Launchplane service API or DB-backed operator flows.",
+        'STATE_DIR="/path/to/local-state"',
         'BACKUP_GATE_FILE="/tmp/launchplane-backup-gate.json"',
         "cat >\"$BACKUP_GATE_FILE\" <<'JSON'",
         json.dumps(payload, indent=2, sort_keys=True),
@@ -346,7 +352,9 @@ def build_launchplane_backup_gate_write_recipe_script(
 def build_launchplane_promotion_execute_recipe_script(*, state_dir: str) -> str:
     return "\n".join(
         (
-            f'STATE_DIR="{state_dir or "/path/to/state"}"',
+            "# Local rehearsal only. Shared/live mutations must use the deployed "
+            "Launchplane service API or DB-backed operator flows.",
+            f'STATE_DIR="{state_dir or "/path/to/local-state"}"',
             'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
             'uv run launchplane promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
         )
@@ -363,7 +371,9 @@ def build_launchplane_environment_ship_recipe_script(
     request_file = f"/tmp/launchplane-{context_name}-{instance_name}-ship-request.json"
     return "\n".join(
         (
-            'STATE_DIR="/path/to/state"',
+            "# Local rehearsal only. Shared/live mutations must use the deployed "
+            "Launchplane service API or DB-backed operator flows.",
+            'STATE_DIR="/path/to/local-state"',
             f'SHIP_REQUEST_FILE="{request_file}"',
             f'uv run launchplane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
             'cat "$SHIP_REQUEST_FILE"',
@@ -3986,7 +3996,7 @@ def render_launchplane_preview_status_page_html(
     <section class=\"preview-detail-section\" id=\"operator-actions\">
       <div class=\"section-label\">Operator actions</div>
       <h2>Write-side Launchplane recipes</h2>
-      <p>Launchplane still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
+      <p>Launchplane still renders as a static operator surface here, so each action is shown as a local rehearsal recipe for this preview identity. Shared and production mutations should use the deployed service API or DB-backed operator flows.</p>
       <div class=\"action-stack\">{operator_actions_html}</div>
     </section>
     """
