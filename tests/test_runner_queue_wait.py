@@ -194,7 +194,10 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
 
         with (
             patch("control_plane.cli.UrllibMergeTrainGitHubTransport", return_value=object()),
-            patch("control_plane.cli.GitHubRunnerQueueWaitReader", _FakeQueueWaitReader),
+            patch(
+                "control_plane.cli_runner_lanes.GitHubRunnerQueueWaitReader",
+                _FakeQueueWaitReader,
+            ),
             patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
