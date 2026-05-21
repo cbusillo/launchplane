@@ -3,14 +3,33 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+
+
+class OdooProdPromotionStore(Protocol):
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def read_release_tuple_record(
+        self, *, context_name: str, channel_name: str
+    ) -> ReleaseTupleRecord: ...
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> Path | None: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> Path | None: ...
+
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> Path | None: ...
 
 
 class OdooProdPromotionRequest(BaseModel):
@@ -73,7 +92,7 @@ def execute_odoo_prod_promotion(
     control_plane_root: Path,
     state_dir: Path,
     database_url: str | None,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdPromotionStore,
     request: OdooProdPromotionRequest,
 ) -> OdooProdPromotionResult:
     del control_plane_root

@@ -6,7 +6,7 @@ import os
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, TypeVar, cast, overload
+from typing import Literal, Protocol, TypeVar, cast, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -147,6 +147,38 @@ _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
 )
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
+
+
+class ArtifactManifestReadStore(Protocol):
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+
+class BackupGateReadStore(Protocol):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+
+class EnvironmentInventoryWriteStore(Protocol):
+    def write_environment_inventory(self, record: EnvironmentInventory) -> Path | None: ...
+
+
+class DeploymentRecordReadStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+
+class ReleaseTupleReadStore(Protocol):
+    def read_release_tuple_record(
+        self, *, context_name: str, channel_name: str
+    ) -> ReleaseTupleRecord: ...
+
+
+class ReleaseTupleWriteStore(Protocol):
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> Path | None: ...
+
+
+class EnvironmentInventoryRefreshStore(
+    DeploymentRecordReadStore, EnvironmentInventoryWriteStore, Protocol
+):
+    pass
 
 
 @overload
@@ -2820,7 +2852,7 @@ def _require_artifact_id(*, requested_artifact_id: str) -> str:
 
 def _read_artifact_manifest(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: ArtifactManifestReadStore,
     artifact_id: str,
 ) -> ArtifactIdentityManifest:
     try:
@@ -2833,7 +2865,7 @@ def _read_artifact_manifest(
 
 def _read_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: BackupGateReadStore,
     record_id: str,
 ) -> BackupGateRecord:
     try:
@@ -2847,7 +2879,7 @@ def _read_backup_gate_record(
 def _resolve_backup_gate_for_promotion(
     *,
     request: PromotionRequest,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: BackupGateReadStore,
 ) -> tuple[PromotionRequest, BackupGateRecord | None]:
     if not request.backup_gate.required:
         resolved_request = request.model_copy(
@@ -3340,7 +3372,7 @@ def _build_runtime_environment_sync_evidence(
 
 def _write_environment_inventory(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: EnvironmentInventoryWriteStore,
     deployment_record: DeploymentRecord,
     promotion_record_id: str = "",
     promoted_from_instance: str = "",
@@ -3356,7 +3388,7 @@ def _write_environment_inventory(
 
 def _write_environment_inventory_from_promotion(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: EnvironmentInventoryRefreshStore,
     promotion_record: PromotionRecord,
 ) -> Path | None:
     deployment_record_id = promotion_record.deployment_record_id.strip()
@@ -3397,7 +3429,7 @@ def _write_environment_inventory_from_promotion(
 
 def _write_release_tuple_from_deployment(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: ReleaseTupleWriteStore,
     deployment_record: DeploymentRecord,
     artifact_manifest: ArtifactIdentityManifest,
 ) -> Path | None:
@@ -3417,7 +3449,7 @@ def _write_release_tuple_from_deployment(
 
 def _read_source_release_tuple_for_promotion(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: ReleaseTupleReadStore,
     request: PromotionRequest,
 ) -> ReleaseTupleRecord | None:
     if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
@@ -3444,7 +3476,7 @@ def _read_source_release_tuple_for_promotion(
 
 def _read_source_release_tuple_for_promotion_record(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: ReleaseTupleReadStore,
     promotion_record: PromotionRecord,
 ) -> ReleaseTupleRecord:
     artifact_id = _artifact_id_or_empty(promotion_record.artifact_identity)
@@ -3472,7 +3504,7 @@ def _read_source_release_tuple_for_promotion_record(
 
 def _write_promoted_release_tuple(
     *,
-    record_store: FilesystemRecordStore | PostgresRecordStore,
+    record_store: ReleaseTupleWriteStore,
     source_tuple: ReleaseTupleRecord | None,
     deployment_record: DeploymentRecord,
     promotion_record: PromotionRecord,
