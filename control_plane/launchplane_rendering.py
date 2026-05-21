@@ -1052,3 +1052,461 @@ def render_launchplane_promotion_status_page_html(
         extra_css=extra_css,
         nav_links=nav_links,
     )
+
+
+def render_launchplane_environment_status_page_html(
+    payload: dict[str, object],
+    *,
+    action_payload: dict[str, object] | None = None,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", "")).strip()
+    instance_name = str(payload.get("instance", "")).strip() or "environment"
+    live_payload = json_object(payload.get("live")) or {}
+    live_promotion = json_object(payload.get("live_promotion"))
+    authorized_backup_gate = json_object(payload.get("authorized_backup_gate"))
+    latest_promotion = json_object(payload.get("latest_promotion"))
+    latest_deployment = json_object(payload.get("latest_deployment"))
+    recent_promotions = json_object_items(payload.get("recent_promotions"))
+    recent_deployments = json_object_items(payload.get("recent_deployments"))
+
+    lane_title = f"{context_name}/{instance_name}" if context_name else instance_name
+    role_summary = (
+        "Testing carries the integration artifact Launchplane would promote next."
+        if instance_name == "testing"
+        else "Prod is the customer-facing lane Launchplane protects and promotes into deliberately."
+    )
+    live_tone = status_tone(
+        str(live_payload.get("destination_health_status", "pending") or "pending")
+    )
+    deploy_status = str(live_payload.get("deploy_status", "pending") or "pending")
+    health_status = str(live_payload.get("destination_health_status", "pending") or "pending")
+    action_status = (
+        str(action_payload.get("status", "")) if isinstance(action_payload, dict) else ""
+    )
+
+    live_promotion_html = ""
+    if live_promotion is not None:
+        live_promotion_html = f"""
+        <article class=\"detail-note\">
+          <div class=\"section-label\">Attached promotion</div>
+          <h3>Current lane inventory is backed by a promotion record.</h3>
+          <dl class=\"detail-meta\">
+            <div><dt>Promotion record</dt><dd><code>{escape(str(live_promotion.get("record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Artifact</dt><dd><code>{escape(str(live_promotion.get("artifact_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Backup gate</dt><dd><code>{escape(str(live_promotion.get("backup_record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Finished</dt><dd>{escape(str(live_promotion.get("finished_at", "")) or "Unavailable")}</dd></div>
+          </dl>
+        </article>
+        """
+    else:
+        live_promotion_html = """
+        <article class=\"detail-note detail-note-muted\">
+          <div class=\"section-label\">Attached promotion</div>
+          <h3>No live promotion record is attached to this lane inventory.</h3>
+          <p>Launchplane can still show recent promotion history below, but the current environment inventory does not point at one canonical promotion record yet.</p>
+        </article>
+        """
+
+    backup_gate_html = ""
+    if authorized_backup_gate is not None:
+        backup_gate_evidence = json_object(authorized_backup_gate.get("evidence")) or {}
+        evidence_entries = "".join(
+            f"<li><code>{escape(str(key))}</code> {escape(str(value))}</li>"
+            for key, value in sorted(backup_gate_evidence.items())
+        )
+        backup_gate_html = f"""
+        <article class=\"detail-note\">
+          <div class=\"section-label\">Authorized backup gate</div>
+          <h3>Launchplane has a recorded backup gate for this lane.</h3>
+          <dl class=\"detail-meta\">
+            <div><dt>Record</dt><dd><code>{escape(str(authorized_backup_gate.get("record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Status</dt><dd>{escape(str(authorized_backup_gate.get("status", "unknown")) or "unknown")}</dd></div>
+            <div><dt>Source</dt><dd>{escape(str(authorized_backup_gate.get("source", "")) or "Unavailable")}</dd></div>
+            <div><dt>Created</dt><dd>{escape(str(authorized_backup_gate.get("created_at", "")) or "Unavailable")}</dd></div>
+          </dl>
+          <ul class=\"detail-list\">{evidence_entries or "<li>No backup evidence fields recorded.</li>"}</ul>
+        </article>
+        """
+    else:
+        backup_gate_html = """
+        <article class=\"detail-note detail-note-muted\">
+          <div class=\"section-label\">Authorized backup gate</div>
+          <h3>No authorized backup gate is attached to this lane yet.</h3>
+          <p>This is normal for `testing` and is still a useful warning for `prod` when Launchplane cannot prove the current lane from attached backup evidence alone.</p>
+        </article>
+        """
+
+    action_html = """
+    <article class=\"detail-note detail-note-muted\">
+      <div class=\"section-label\">Lane action</div>
+      <h3>No typed lane action is available.</h3>
+      <p>Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.</p>
+    </article>
+    """
+    if isinstance(action_payload, dict):
+        if action_status == "actionable":
+            action_html = render_launchplane_action_recipe(
+                title=str(
+                    action_payload.get("headline", f"Re-ship current {instance_name} artifact")
+                ),
+                summary=str(action_payload.get("summary", "")),
+                tone=str(action_payload.get("tone", "neutral")),
+                script=str(action_payload.get("recipe", "")),
+                command_label="ship resolve -> ship execute",
+                recipe_id=f"environment-detail-{launchplane_action_slug(lane_title)}-ship",
+            )
+        else:
+            action_html = f"""
+            <article class=\"detail-note detail-note-muted\">
+              <div class=\"section-label\">Lane action</div>
+              <h3>{escape(str(action_payload.get("headline", "No typed lane action is available.")))}</h3>
+              <p>{escape(str(action_payload.get("summary", "Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.")))}</p>
+            </article>
+            """
+
+    def render_activity_table(rows: list[dict[str, object]], *, table_kind: str) -> str:
+        if table_kind == "deployments":
+            if not rows:
+                return (
+                    '<p class="table-empty">No deployment history recorded for this lane yet.</p>'
+                )
+            table_rows = "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+                f"<td><code>{escape(str(row.get('source_git_ref', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('deploy_status', 'unknown')) or 'unknown')}</td>"
+                f"<td>{escape(str(row.get('destination_health_status', 'unknown')) or 'unknown')}</td>"
+                f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in rows
+                if isinstance(row, dict)
+            )
+            return (
+                "<table><thead><tr><th>Deployment record</th><th>Artifact</th><th>Source ref</th><th>Deploy</th><th>Health</th><th>Finished</th></tr></thead>"
+                f"<tbody>{table_rows}</tbody></table>"
+            )
+        if not rows:
+            return '<p class="table-empty">No promotion history recorded into this lane yet.</p>'
+        table_rows = "".join(
+            "<tr>"
+            f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+            f"<td>{escape(str(row.get('from_instance', '')) or 'Unavailable')}</td>"
+            f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+            f"<td>{escape(str(row.get('backup_status', 'unknown')) or 'unknown')}</td>"
+            f"<td>{escape(str(row.get('destination_health_status', 'unknown')) or 'unknown')}</td>"
+            f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+            "</tr>"
+            for row in rows
+            if isinstance(row, dict)
+        )
+        return (
+            "<table><thead><tr><th>Promotion record</th><th>From lane</th><th>Artifact</th><th>Backup</th><th>Health</th><th>Finished</th></tr></thead>"
+            f"<tbody>{table_rows}</tbody></table>"
+        )
+
+    latest_deployment_summary = "No deployment record is attached to this lane yet."
+    if latest_deployment is not None:
+        latest_deployment_summary = (
+            f"Latest deployment finished {escape(str(latest_deployment.get('finished_at', '')) or 'recently')} "
+            f"with deploy {escape(str(latest_deployment.get('deploy_status', 'unknown')) or 'unknown')} and health "
+            f"{escape(str(latest_deployment.get('destination_health_status', 'unknown')) or 'unknown')}."
+        )
+    latest_promotion_summary = "Launchplane has not recorded a recent promotion into this lane yet."
+    if latest_promotion is not None:
+        latest_promotion_summary = (
+            f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
+            f"from {escape(str(latest_promotion.get('from_instance', '')) or 'another lane')} into {escape(instance_name)}."
+        )
+
+    body_html = f"""
+    <section class=\"environment-detail-mast\">
+      <div>
+        <div class=\"section-label\">Environment detail</div>
+        <h2>{escape(lane_title)}</h2>
+        <p>{role_summary}</p>
+      </div>
+      <aside class=\"environment-detail-brief\">
+        <span class=\"tone-pill tone-{live_tone}\">Deploy {status_label(deploy_status)}</span>
+        <span class=\"tone-pill tone-{status_tone(health_status)}\">Health {status_label(health_status)}</span>
+        <p>{latest_deployment_summary}</p>
+      </aside>
+    </section>
+
+    <section class=\"environment-detail-grid\">
+      <article class=\"detail-card detail-card-primary\">
+        <div class=\"section-label\">Live lane snapshot</div>
+        <h3>Current environment evidence</h3>
+        <dl class=\"detail-meta\">
+          <div><dt>Artifact</dt><dd><code>{escape(str(live_payload.get("artifact_id", "")) or "Unavailable")}</code></dd></div>
+          <div><dt>Source ref</dt><dd><code>{escape(str(live_payload.get("source_git_ref", "")) or "Unavailable")}</code></dd></div>
+          <div><dt>Updated</dt><dd>{escape(str(live_payload.get("updated_at", "")) or "Unavailable")}</dd></div>
+          <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
+          <div><dt>Deploy status</dt><dd>{escape(status_label(deploy_status))}</dd></div>
+          <div><dt>Health status</dt><dd>{escape(status_label(health_status))}</dd></div>
+          <div><dt>Promoted from</dt><dd>{escape(str(live_payload.get("promoted_from_instance", "")) or "Unavailable")}</dd></div>
+          <div><dt>Promotion record</dt><dd><code>{escape(str(live_payload.get("promotion_record_id", "")) or "Unavailable")}</code></dd></div>
+        </dl>
+      </article>
+      <article class=\"detail-card\">
+        <div class=\"section-label\">Recent changes</div>
+        <h3>What Launchplane saw last</h3>
+        <p>{latest_promotion_summary}</p>
+        <p class=\"detail-secondary\">{latest_deployment_summary}</p>
+      </article>
+    </section>
+
+    <section class=\"environment-detail-ops\">
+      {action_html}
+      {live_promotion_html}
+      {backup_gate_html}
+    </section>
+
+    <section class=\"environment-history\">
+      <div class=\"section-label\">Deployment history</div>
+      <h3>Recent deployments</h3>
+      {render_activity_table([row for row in recent_deployments if isinstance(row, dict)], table_kind="deployments")}
+    </section>
+
+    <section class=\"environment-history\">
+      <div class=\"section-label\">Promotion history</div>
+      <h3>Recent promotions into this lane</h3>
+      {render_activity_table([row for row in recent_promotions if isinstance(row, dict)], table_kind="promotions")}
+    </section>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .environment-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
+    .environment-detail-mast h2,
+    .detail-card h3,
+    .detail-note h3,
+    .environment-history h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .environment-detail-mast h2 {
+      font-size: 40px;
+    }
+    .environment-detail-mast p,
+    .environment-detail-brief p,
+    .detail-card p,
+    .detail-note p,
+    .table-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .environment-detail-brief {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .environment-detail-grid,
+    .environment-detail-ops {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .environment-detail-ops {
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      align-items: start;
+    }
+    .detail-card,
+    .detail-note,
+    .action-card,
+    .environment-history {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+    }
+    .detail-card,
+    .detail-note,
+    .environment-history {
+      display: grid;
+      gap: 12px;
+    }
+    .detail-note-muted {
+      background: rgba(251, 250, 246, 0.72);
+    }
+    .detail-secondary {
+      color: var(--text);
+    }
+    .detail-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .detail-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .detail-meta dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .detail-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .detail-meta code,
+    table code,
+    .action-pre {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .detail-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 8px;
+      line-height: 1.55;
+    }
+    .environment-history {
+      margin-top: 18px;
+    }
+    .action-card {
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 {
+      font-size: 24px;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover {
+      background: #e7dfd0;
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      line-height: 1.55;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    @media (max-width: 900px) {
+      .environment-detail-mast,
+      .environment-detail-grid,
+      .environment-detail-ops,
+      .detail-meta {
+        grid-template-columns: 1fr;
+      }
+      .environment-detail-mast h2 {
+        font-size: 32px;
+      }
+      .action-card-head {
+        flex-direction: column;
+      }
+    }
+    """
+
+    return render_launchplane_shell_document(
+        page_title=f"Launchplane environment detail · {lane_title}",
+        context_name=context_name,
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
