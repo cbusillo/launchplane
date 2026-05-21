@@ -21,7 +21,6 @@ from control_plane import every_code_reconciliation as control_plane_every_code_
 from control_plane import every_code_webhooks as control_plane_every_code_webhooks
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
-from control_plane import product_config as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -78,7 +77,6 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
-from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -121,6 +119,7 @@ from control_plane.every_code_worker import (
 )
 from control_plane.cli_runner_lanes import register_runner_lane_commands
 from control_plane.cli_preview_workflow import register_preview_workflow_commands
+from control_plane.cli_product_config import register_product_config_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
 from control_plane.cli_work_graph import register_work_graph_core_commands
 from control_plane.launchplane_mutations import (
@@ -166,7 +165,6 @@ from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
 )
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
     OdooArtifactPublishStore,
@@ -9652,6 +9650,15 @@ register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[red
 register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_storage_secret_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_product_config_commands(
+    cast(click.Group, main),  # type: ignore[redundant-cast]
+    summarize_product_profile_record=_summarize_product_profile_record,
+    summarize_dokploy_target_record=_summarize_dokploy_target_record,
+    dokploy_target_route=_dokploy_target_route,
+    target_id_map=_target_id_map,
+    summarize_runtime_environment_record=_summarize_runtime_environment_record,
+    summarize_secret_binding_record=_summarize_secret_binding_record,
+)
 
 
 @every_code.command("run-once")
@@ -10369,61 +10376,6 @@ def _gh_current_user_login() -> str:
     if not login:
         raise click.ClickException("Could not determine GitHub user login from gh.")
     return login
-
-
-@main.group("product-config")
-def product_config() -> None:
-    """Trusted product runtime config apply commands."""
-
-
-@main.group("product-onboarding")
-def product_onboarding() -> None:
-    """Idempotent product onboarding record commands."""
-
-
-@product_config.command("apply")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string from a trusted Launchplane context.",
-)
-@click.option(
-    "--input-file",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="Operator-approved JSON bundle containing runtime_env and secrets.",
-)
-@click.option("--actor", default="cli", show_default=True)
-@click.option("--source-label", default="product-config-apply", show_default=True)
-@click.option("--dry-run", "dry_run", is_flag=True, default=False)
-@click.option("--apply", "apply_changes", is_flag=True, default=False)
-def product_config_apply(
-    database_url: str,
-    input_file: Path,
-    actor: str,
-    source_label: str,
-    dry_run: bool,
-    apply_changes: bool,
-) -> None:
-    if dry_run == apply_changes:
-        raise click.ClickException("Choose exactly one of --dry-run or --apply.")
-
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
-    try:
-        payload = control_plane_product_config.apply_product_config_bundle(
-            record_store=postgres_store,
-            payload=control_plane_product_config.load_product_config_apply_payload(input_file),
-            mode="apply" if apply_changes else "dry-run",
-            actor=actor,
-            source_label=source_label,
-        )
-    except control_plane_product_config.ProductConfigError as error:
-        raise click.ClickException(str(error)) from error
-    finally:
-        postgres_store.close()
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @service.command("serve")
@@ -13656,74 +13608,6 @@ def runtime_key_safety_evaluate(
                 "status": "ok",
                 "policy": _summarize_runtime_key_safety_policy_record(policy_record),
                 "evaluation": evaluation.model_dump(mode="json"),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-
-
-@product_onboarding.command("apply")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane product onboarding records.",
-)
-@click.option(
-    "--manifest-file",
-    type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    required=True,
-    help="Operator-approved JSON product onboarding manifest.",
-)
-@click.option("--updated-at", default="", help="Override manifest updated_at timestamp.")
-def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at: str) -> None:
-    try:
-        manifest_payload = json.loads(manifest_file.read_text())
-    except JSONDecodeError as exc:
-        raise click.ClickException(
-            f"Product onboarding manifest must be valid JSON: {exc}"
-        ) from exc
-    try:
-        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
-    except ValidationError as exc:
-        raise click.ClickException(f"Product onboarding manifest failed validation: {exc}") from exc
-
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    try:
-        result = apply_product_onboarding_manifest(
-            record_store=store,
-            manifest=manifest,
-            updated_at=updated_at,
-        )
-    finally:
-        store.close()
-
-    target_id_map = _target_id_map(result.dokploy_target_ids)
-    click.echo(
-        json.dumps(
-            {
-                "status": "ok",
-                "product": result.product,
-                "product_profile": _summarize_product_profile_record(result.product_profile),
-                "dokploy_target_count": len(result.dokploy_targets),
-                "dokploy_targets": [
-                    _summarize_dokploy_target_record(
-                        record,
-                        target_id=target_id_map.get(_dokploy_target_route(record), ""),
-                    )
-                    for record in result.dokploy_targets
-                ],
-                "runtime_environment_record_count": len(result.runtime_environments),
-                "runtime_environment_records": [
-                    _summarize_runtime_environment_record(record)
-                    for record in result.runtime_environments
-                ],
-                "secret_binding_count": len(result.secret_bindings),
-                "secret_bindings": [
-                    _summarize_secret_binding_record(binding) for binding in result.secret_bindings
-                ],
             },
             indent=2,
             sort_keys=True,
