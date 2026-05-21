@@ -36,6 +36,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
@@ -311,6 +312,28 @@ class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):
         candidate_record = cast(MergeTrainBatchCandidateRecord, record)
         if "candidate-reflow" in candidate_record.source:
             raise RuntimeError("candidate reflow persistence unavailable")
+        return super().write_merge_train_batch_candidate_record(candidate_record)
+
+
+class _SameBatchIdReflowFilesystemRecordStore(FilesystemRecordStore):
+    def write_merge_train_batch_candidate_record(self, record: object) -> Path:
+        candidate_record = cast(MergeTrainBatchCandidateRecord, record)
+        if "candidate-reflow" in candidate_record.source:
+            records = self.list_merge_train_batch_candidate_records(
+                repository=candidate_record.candidate.repository,
+                base_branch=candidate_record.candidate.base_branch,
+                status="active",
+            )
+            failed_record = next(
+                record for record in records if record.candidate.status == "failed"
+            )
+            candidate_record = candidate_record.model_copy(
+                update={
+                    "candidate": candidate_record.candidate.model_copy(
+                        update={"batch_id": failed_record.candidate.batch_id}
+                    )
+                }
+            )
         return super().write_merge_train_batch_candidate_record(candidate_record)
 
 
@@ -2959,6 +2982,190 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ],
             [1, 2],
         )
+
+    def test_merge_train_controller_reflow_keeps_replacement_with_same_batch_id(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            same_batch_store = _SameBatchIdReflowFilesystemRecordStore(state_dir)
+            with (
+                patch("control_plane.service.build_record_store", return_value=same_batch_store),
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                reflow_app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+                reflow_status, reflow_payload = _invoke_app(
+                    reflow_app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            candidate_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )
+
+        replacement_record_id = reflow_payload["result"][
+            "merge_train_batch_candidate_record_id"
+        ]
+        replacement_record = next(
+            record for record in candidate_records if record.record_id == replacement_record_id
+        )
+        old_batch_records = tuple(
+            record
+            for record in candidate_records
+            if record.candidate.batch_id == replacement_record.candidate.batch_id
+        )
+
+        self.assertEqual(reflow_status, 202)
+        self.assertEqual(replacement_record.status, "active")
+        self.assertEqual(replacement_record.candidate.status, "planned")
+        self.assertTrue(
+            any(
+                record.status == "superseded" and record.candidate.status == "failed"
+                for record in old_batch_records
+            )
+        )
+
+    def test_merge_train_reflow_supersedes_all_matching_active_candidate_records(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir)
+            candidate = MergeTrainBatchCandidate(
+                batch_id="batch-old",
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                base_sha="base-main",
+                policy_key="sellyouroutboard-main",
+                policy_sha256="policy-digest",
+                candidate_ref="launchplane/train/cbusillo-sellyouroutboard/main/batch-old",
+                status="failed",
+                entries=(
+                    MergeTrainBatchEntry(
+                        pull_request_number=1,
+                        position=1,
+                        head_sha="head-1",
+                        title="Ready PR",
+                        url="https://github.com/cbusillo/sellyouroutboard/pull/1",
+                    ),
+                ),
+                created_at="2026-05-21T00:00:00Z",
+                updated_at="2026-05-21T00:00:00Z",
+            )
+            for index in range(30):
+                old_record = build_merge_train_batch_candidate_record(
+                    candidate=candidate.model_copy(
+                        update={"updated_at": f"2026-05-21T00:{index:02d}:00Z"}
+                    ),
+                    source=f"test:old:{index}",
+                    updated_at=f"2026-05-21T00:{index:02d}:00Z",
+                )
+                store.write_merge_train_batch_candidate_record(old_record)
+            replacement_record = build_merge_train_batch_candidate_record(
+                candidate=candidate.model_copy(
+                    update={
+                        "status": "planned",
+                        "updated_at": "2026-05-21T01:00:00Z",
+                    }
+                ),
+                source="test:replacement",
+                updated_at="2026-05-21T01:00:00Z",
+            )
+            store.write_merge_train_batch_candidate_record(replacement_record)
+
+            control_plane_service._supersede_active_merge_train_batch_candidate_records(
+                record_store=store,
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                batch_id="batch-old",
+                replacement_record_id=replacement_record.record_id,
+            )
+
+            active_records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                status="active",
+            )
+            superseded_records = store.list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                status="superseded",
+            )
+
+        self.assertEqual([record.record_id for record in active_records], [replacement_record.record_id])
+        self.assertEqual(len(superseded_records), 30)
 
     def test_merge_train_controller_keeps_failed_candidate_when_reflow_write_fails(
         self,
