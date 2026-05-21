@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 from html import escape
 from pathlib import Path
 
@@ -613,6 +614,1911 @@ def render_launchplane_preview_policy_page_html(
         page_title=f"Launchplane preview policy{' · ' + context_name if context_name else ''}",
         context_name=context_name,
         active_nav="policy",
+        body_class="index-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
+
+
+def render_launchplane_preview_index_page_html(
+    payload: dict[str, object],
+    *,
+    tenant_payload: dict[str, object] | None = None,
+    detail_href_builder: Callable[[str, str, int], str] | None = None,
+    environment_detail_href_builder: Callable[[str, str], str] | None = None,
+    promotion_detail_href_builder: Callable[[str], str] | None = None,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", ""))
+    preview_rows = json_object_items(payload.get("previews"))
+
+    def preview_matches_filter(row: dict[str, object], filter_key: str) -> bool:
+        bucket = launchplane_inventory_bucket(row)
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        if filter_key == "all":
+            return True
+        if filter_key == "reviewable":
+            return bucket == "live" and bool(canonical_url and serving_id)
+        return bucket == filter_key
+
+    def row_priority(row: dict[str, object]) -> int:
+        state = str(row.get("state", "")).strip().lower()
+        health = str(row.get("overall_health_status", "")).strip().lower()
+        latest_id = str(row.get("latest_generation_id", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        if state in {"failed", "teardown_pending"} or health in {"fail", "failed", "unavailable"}:
+            return 0
+        if latest_id and not serving_id:
+            return 0
+        if state == "paused":
+            return 1
+        if state == "pending" or (latest_id and latest_id != serving_id):
+            return 2
+        if not canonical_url:
+            return 3
+        if state == "destroyed":
+            return 5
+        return 4
+
+    def row_filter_keys(row: dict[str, object]) -> list[str]:
+        keys = ["all", launchplane_inventory_bucket(row)]
+        if preview_matches_filter(row, "reviewable"):
+            keys.append("reviewable")
+        return keys
+
+    def row_scope_keys(row: dict[str, object]) -> list[str]:
+        keys = ["all"]
+        context_value = str(row.get("context", "")).strip()
+        anchor_repo_value = str(row.get("anchor_repo", "")).strip()
+        if context_value:
+            keys.append(f"context:{context_value}")
+        if anchor_repo_value:
+            keys.append(f"repo:{anchor_repo_value}")
+        return keys
+
+    def signal_badges(row: dict[str, object]) -> list[tuple[str, str]]:
+        state = str(row.get("state", "")).strip().lower()
+        latest_id = str(row.get("latest_generation_id", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        destroy_after = str(row.get("destroy_after", "")).strip()
+        destroyed_at = str(row.get("destroyed_at", "")).strip()
+        destroy_reason = str(row.get("destroy_reason", "")).strip().replace("_", " ")
+        badges: list[tuple[str, str]] = []
+        if state == "destroyed":
+            badges.append(("Evidence only", "neutral"))
+            if destroy_reason:
+                badges.append((f"Cause {destroy_reason}", "neutral"))
+            elif destroyed_at:
+                badges.append((f"Destroyed {destroyed_at}", "neutral"))
+            return badges[:2]
+        if latest_id and not serving_id:
+            badges.append(("Route gap", "bad"))
+        elif latest_id and latest_id != serving_id:
+            badges.append(("Serving older generation", "warn"))
+        elif canonical_url and serving_id:
+            badges.append(("Route live", "good"))
+        elif canonical_url:
+            badges.append(("Route reserved", "neutral"))
+        if state == "pending":
+            badges.append(("Build forming", "warn"))
+        elif state == "paused":
+            badges.append(("Operator hold", "warn"))
+        elif state == "teardown_pending":
+            badges.append(("Cleanup queued", "warn"))
+        elif state == "failed":
+            badges.append(("Needs intervention", "bad"))
+        if destroy_after:
+            badges.append((f"Cleanup {destroy_after}", "neutral"))
+        return badges[:3]
+
+    bucket_specs = (
+        (
+            "attention",
+            "Needs attention",
+            "Previews that are blocked, degraded, or no longer serving cleanly.",
+        ),
+        (
+            "in_flight",
+            "In flight",
+            "Preview generations that are still forming or replacing existing review environments.",
+        ),
+        ("live", "Live review", "Serving previews that are currently usable for review work."),
+        (
+            "retained",
+            "Retained evidence",
+            "Destroyed previews that still matter as historical evidence.",
+        ),
+    )
+    filter_specs = (
+        ("all", "All fleet", "Scan the full Launchplane queue without losing lane structure."),
+        ("attention", "Needs attention", "Surface broken, blocked, or non-serving previews first."),
+        (
+            "in_flight",
+            "In flight",
+            "Track previews that are building or rotating toward a new generation.",
+        ),
+        (
+            "reviewable",
+            "Reviewable now",
+            "Show only previews that are currently serving a stable review route.",
+        ),
+        ("retained", "Retained", "Limit the queue to historical evidence kept after cleanup."),
+    )
+    scope_specs: list[tuple[str, str, str]] = [
+        ("all", "All scopes", "Across every Launchplane context and anchor repo.")
+    ]
+    contexts = sorted(
+        {
+            str(row.get("context", "")).strip()
+            for row in preview_rows
+            if str(row.get("context", "")).strip()
+        }
+    )
+    repos = sorted(
+        {
+            str(row.get("anchor_repo", "")).strip()
+            for row in preview_rows
+            if str(row.get("anchor_repo", "")).strip()
+        }
+    )
+    if len(contexts) > 1:
+        scope_specs.extend(
+            (
+                f"context:{context_value}",
+                f"Context {context_value}",
+                f"Limit the queue to Launchplane context {context_value}.",
+            )
+            for context_value in contexts
+        )
+    if len(repos) > 1:
+        scope_specs.extend(
+            (
+                f"repo:{repo_value}",
+                f"Repo {repo_value}",
+                f"Limit the queue to anchor repo {repo_value}.",
+            )
+            for repo_value in repos
+        )
+    grouped_rows: dict[str, list[dict[str, object]]] = {key: [] for key, _, _ in bucket_specs}
+    for row in preview_rows:
+        grouped_rows[launchplane_inventory_bucket(row)].append(row)
+    for rows in grouped_rows.values():
+        rows.sort(key=lambda row: escape(str(row.get("preview_label", ""))))
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        rows.sort(key=row_priority)
+
+    summary_counts = {
+        "attention": len(grouped_rows["attention"]),
+        "in_flight": len(grouped_rows["in_flight"]),
+        "live": len(grouped_rows["live"]),
+        "retained": len(grouped_rows["retained"]),
+    }
+    filter_counts = {
+        key: sum(1 for row in preview_rows if preview_matches_filter(row, key))
+        for key, _, _ in filter_specs
+    }
+    filter_notes = {key: note for key, _, note in filter_specs}
+    scope_counts = {
+        key: sum(1 for row in preview_rows if key == "all" or key in row_scope_keys(row))
+        for key, _, _ in scope_specs
+    }
+    scope_notes = {key: note for key, _, note in scope_specs}
+    show_scope_controls = len(scope_specs) > 1
+
+    def render_preview_row(row: dict[str, object]) -> str:
+        preview_label = escape(str(row.get("preview_label", "Launchplane preview")))
+        detail_href = ""
+        if detail_href_builder is not None:
+            detail_href = str(
+                detail_href_builder(
+                    str(row.get("context", "")),
+                    str(row.get("anchor_repo", "")),
+                    int_from_json_value(row.get("anchor_pr_number", 0)),
+                )
+            )
+        canonical_url = escape(str(row.get("canonical_url", "")))
+        anchor_pr_url = escape(str(row.get("anchor_pr_url", "")))
+        state = str(row.get("state", ""))
+        health = str(row.get("overall_health_status", ""))
+        artifact_id = escape(str(row.get("artifact_id", "")))
+        manifest = escape(str(row.get("manifest_fingerprint", "")))
+        updated_at = escape(str(row.get("updated_at", "")))
+        next_action = escape(str(row.get("next_action", "")))
+        anchor_repo = escape(str(row.get("anchor_repo", "")))
+        anchor_pr_number = escape(str(row.get("anchor_pr_number", "")))
+        status_summary = escape(str(row.get("status_summary", "")))
+        state_tone = status_tone(state)
+        health_tone = status_tone(health)
+        bucket = launchplane_inventory_bucket(row)
+        filters = " ".join(row_filter_keys(row))
+        scopes = " ".join(row_scope_keys(row))
+        signal_html = "".join(
+            f'<span class="signal-chip signal-{tone}">{escape(label)}</span>'
+            for label, tone in signal_badges(row)
+        )
+        route_html = (
+            f'<a href="{canonical_url}">{canonical_url}</a>'
+            if canonical_url
+            else "No preview route recorded."
+        )
+        title_html = (
+            f'<a class="preview-row-title" href="{escape(detail_href)}">{preview_label}</a>'
+            if detail_href
+            else preview_label
+        )
+        action_links: list[str] = []
+        if detail_href:
+            action_links.append(f'<a href="{escape(detail_href)}">Detail</a>')
+            action_links.append(f'<a href="{escape(detail_href)}#operator-actions">Actions</a>')
+        if canonical_url:
+            action_links.append(f'<a href="{canonical_url}">Preview</a>')
+        if anchor_pr_url:
+            action_links.append(f'<a href="{anchor_pr_url}">PR</a>')
+        actions_html = "".join(action_links)
+        return f"""
+        <article class=\"preview-row\" data-preview-row data-bucket=\"{escape(bucket)}\" data-filters=\"{escape(filters)}\" data-scopes=\"{escape(scopes)}\">
+          <div class=\"preview-row-head\">
+            <div>
+              <h3>{title_html}</h3>
+              <p>{route_html}</p>
+            </div>
+            <div class=\"preview-row-tones\">
+              <span class=\"tone-pill tone-{state_tone}\">Preview {escape(status_label(state))}</span>
+              <span class=\"tone-pill tone-{health_tone}\">Health {escape(status_label(health))}</span>
+            </div>
+          </div>
+          <div class=\"preview-row-signals\">{signal_html}</div>
+          <p class=\"preview-row-summary\">{next_action or status_summary or "No next action recorded."}</p>
+          <div class=\"preview-row-actions\">{actions_html}</div>
+          <dl class=\"preview-row-meta\">
+            <div><dt>Anchor</dt><dd>{anchor_repo or "Unknown"} PR {anchor_pr_number or "Unknown"}</dd></div>
+            <div><dt>Artifact</dt><dd><code>{artifact_id or "Unavailable"}</code></dd></div>
+            <div><dt>Manifest</dt><dd><code>{manifest or "Unavailable"}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or "Unavailable"}</dd></div>
+          </dl>
+        </article>
+        """
+
+    lane_html = ""
+    for key, label, description in bucket_specs:
+        rows = grouped_rows[key]
+        rows_html = (
+            "".join(render_preview_row(row) for row in rows)
+            or '<p class="lane-empty">No previews in this lane.</p>'
+        )
+        lane_html += f"""
+        <section class=\"lane-section\" data-lane-section data-bucket=\"{escape(key)}\">
+          <div class=\"lane-section-head\">
+            <div>
+              <div class=\"section-label\">{label}</div>
+              <h2>{label}</h2>
+              <p>{description}</p>
+            </div>
+            <div class=\"lane-count\" data-lane-count>{len(rows)} visible</div>
+          </div>
+          <div class=\"lane-stack\">{rows_html}</div>
+        </section>
+        """
+
+    focus_controls_html = "".join(
+        (
+            f'<button class="focus-chip{" is-active" if key == "all" else ""}" '
+            f'type="button" data-filter-control="{escape(key)}" '
+            f'aria-pressed="{"true" if key == "all" else "false"}">'
+            f"<span>{escape(label)}</span><strong>{filter_counts[key]}</strong></button>"
+        )
+        for key, label, _ in filter_specs
+    )
+    scope_controls_html = "".join(
+        (
+            f'<button class="scope-chip{" is-active" if key == "all" else ""}" '
+            f'type="button" data-scope-control="{escape(key)}" '
+            f'aria-pressed="{"true" if key == "all" else "false"}">'
+            f"<span>{escape(label)}</span><strong>{scope_counts[key]}</strong></button>"
+        )
+        for key, label, _ in scope_specs
+    )
+    scope_panel_html = ""
+    if show_scope_controls:
+        scope_panel_html = f"""
+            <div class=\"scope-panel\">
+              <div class=\"section-label\">Scope</div>
+              <div class=\"scope-chip-row\" role=\"toolbar\" aria-label=\"Fleet scope filters\">{scope_controls_html}</div>
+            </div>
+        """
+    focus_status_class = (
+        "focus-status" if not show_scope_controls else "focus-status focus-status-hidden"
+    )
+    summary_strip_html = f"""
+        <dl class=\"summary-strip\">
+          <div><dt>Needs attention</dt><dd>{summary_counts["attention"]}</dd></div>
+          <div><dt>In flight</dt><dd>{summary_counts["in_flight"]}</dd></div>
+          <div><dt>Live review</dt><dd>{summary_counts["live"]}</dd></div>
+          <div><dt>Retained evidence</dt><dd>{summary_counts["retained"]}</dd></div>
+        </dl>
+    """
+    if show_scope_controls:
+        summary_strip_html = ""
+
+    def environment_tone(environment_payload: dict[str, object] | None) -> str:
+        if not isinstance(environment_payload, dict):
+            return "neutral"
+        live_payload = environment_payload.get("live")
+        if not isinstance(live_payload, dict):
+            return "neutral"
+        deploy_status = str(live_payload.get("deploy_status", "")).strip().lower()
+        destination_health = str(live_payload.get("destination_health_status", "")).strip().lower()
+        if deploy_status == "fail" or destination_health == "fail":
+            return "bad"
+        if deploy_status == "pass" and destination_health in {"pass", "skipped"}:
+            return "good"
+        if deploy_status or destination_health:
+            return "warn"
+        return "neutral"
+
+    def render_environment_lane(
+        instance_name: str, environment_payload: dict[str, object] | None
+    ) -> str:
+        lane_label = "Testing lane" if instance_name == "testing" else "Prod lane"
+        if not isinstance(environment_payload, dict):
+            return f"""
+            <section class=\"environment-lane environment-lane-empty\">
+              <div class=\"environment-lane-head\">
+                <div>
+                  <div class=\"section-label\">{lane_label}</div>
+                  <h3>{escape(instance_name)}</h3>
+                </div>
+                <span class=\"tone-pill tone-neutral\">No evidence</span>
+              </div>
+              <p class=\"environment-summary\">Launchplane has not recorded a live {escape(instance_name)} deployment for this tenant yet.</p>
+            </section>
+            """
+        detail_href = ""
+        item_context = str(environment_payload.get("context", "")).strip()
+        if environment_detail_href_builder is not None and item_context:
+            detail_href = environment_detail_href_builder(item_context, instance_name)
+        live_payload = json_object(environment_payload.get("live")) or {}
+        latest_promotion = json_object(environment_payload.get("latest_promotion"))
+        tone = environment_tone(environment_payload)
+        deploy_status = escape(str(live_payload.get("deploy_status", "pending") or "pending"))
+        destination_health = escape(
+            str(live_payload.get("destination_health_status", "pending") or "pending")
+        )
+        artifact_id = escape(str(live_payload.get("artifact_id", "")))
+        source_git_ref = escape(str(live_payload.get("source_git_ref", "")))
+        updated_at = escape(str(live_payload.get("updated_at", "")))
+        promoted_from = escape(str(live_payload.get("promoted_from_instance", "")))
+        lane_summary = (
+            "Testing carries the current integration artifact for this tenant."
+            if instance_name == "testing"
+            else "Prod is the currently promoted artifact for this tenant."
+        )
+        promotion_meta = ""
+        if latest_promotion is not None and instance_name == "prod":
+            promotion_meta = (
+                '<p class="environment-note">'
+                f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
+                f"from {escape(str(latest_promotion.get('from_instance', 'testing')) or 'testing')} into prod."
+                "</p>"
+            )
+        elif promoted_from:
+            promotion_meta = (
+                f'<p class="environment-note">This lane was last promoted from {promoted_from}.</p>'
+            )
+        detail_link_html = ""
+        if detail_href:
+            detail_link_html = (
+                '<div class="environment-links">'
+                f'<a class="lane-detail-link" href="{escape(detail_href)}">Open lane detail</a>'
+                "</div>"
+            )
+        return f"""
+        <section class=\"environment-lane\">
+          <div class=\"environment-lane-head\">
+            <div>
+              <div class=\"section-label\">{lane_label}</div>
+              <h3>{escape(instance_name)}</h3>
+            </div>
+            <div class=\"environment-tones\">
+              <span class=\"tone-pill tone-{tone}\">Deploy {deploy_status}</span>
+              <span class=\"tone-pill tone-{status_tone(destination_health)}\">Health {destination_health}</span>
+            </div>
+          </div>
+          <p class=\"environment-summary\">{lane_summary}</p>
+          {promotion_meta}
+          <dl class=\"environment-meta\">
+            <div><dt>Artifact</dt><dd><code>{artifact_id or "Unavailable"}</code></dd></div>
+            <div><dt>Source ref</dt><dd><code>{source_git_ref or "Unavailable"}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or "Unavailable"}</dd></div>
+            <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
+          </dl>
+          {detail_link_html}
+        </section>
+        """
+
+    def render_enablement_action(action_payload: dict[str, object]) -> str:
+        action_status = str(action_payload.get("status", "none")).strip()
+        action_tone = escape(str(action_payload.get("tone", "neutral")).strip() or "neutral")
+        headline = escape(str(action_payload.get("headline", "No preview action available.")))
+        summary = escape(str(action_payload.get("summary", "")))
+        if action_status == "actionable":
+            recipe = str(action_payload.get("recipe", "")).strip()
+            recipe_id = escape(
+                str(
+                    action_payload.get("recipe_id", "preview-enable-request")
+                    or "preview-enable-request"
+                )
+            )
+            return f"""
+            <div class=\"enablement-inline-action tone-{action_tone}\">
+              <div class=\"enablement-inline-action-head\">
+                <div>
+                  <div class=\"action-command\">request-generation</div>
+                  <h4>{headline}</h4>
+                  <p>{summary}</p>
+                </div>
+                <button class=\"copy-button\" type=\"button\" data-copy-target=\"{recipe_id}\">Copy recipe</button>
+              </div>
+              <details class=\"action-details\">
+                <summary>Show Launchplane request recipe</summary>
+                <pre id=\"{recipe_id}\" class=\"action-pre\">{escape(recipe)}</pre>
+              </details>
+            </div>
+            """
+        if action_status in {
+            "blocked",
+            "manual_review_required",
+            "missing_context",
+            "missing_evidence",
+        }:
+            return f"""
+            <div class=\"enablement-inline-note tone-{action_tone}\">
+              <h4>{headline}</h4>
+              <p>{summary}</p>
+            </div>
+            """
+        return ""
+
+    def render_enablement_row(item: dict[str, object]) -> str:
+        anchor_repo = str(item.get("anchor_repo", "")).strip()
+        anchor_pr_number = int_from_json_value(item.get("anchor_pr_number", 0))
+        anchor_pr_url = escape(str(item.get("anchor_pr_url", "")).strip())
+        state = escape(str(item.get("state", "candidate")).strip() or "candidate")
+        tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
+        request_source = str(item.get("request_source", "none")).strip()
+        source_label = {
+            "github_label": "GitHub label",
+            "launchplane": "Launchplane request",
+            "history": "Earlier request",
+            "none": "Not requested",
+        }.get(request_source, "Launchplane")
+        request_summary = escape(str(item.get("request_summary", "")).strip())
+        status_summary = escape(str(item.get("status_summary", "")).strip())
+        canonical_url = escape(str(item.get("canonical_url", "")).strip())
+        preview_id = escape(str(item.get("preview_id", "")).strip())
+        action_payload = json_object(item.get("action"))
+        detail_href = ""
+        if detail_href_builder is not None and anchor_repo and anchor_pr_number > 0:
+            detail_href = detail_href_builder(context_name, anchor_repo, anchor_pr_number)
+        actions = [f'<a href="{anchor_pr_url}">PR</a>'] if anchor_pr_url else []
+        if detail_href:
+            actions.append(f'<a href="{escape(detail_href)}">Detail</a>')
+        if canonical_url:
+            actions.append(f'<a href="{canonical_url}">Preview</a>')
+        if preview_id:
+            actions.append(f'<span class="enablement-meta"><code>{preview_id}</code></span>')
+        actions_html = "".join(actions)
+        action_html = render_enablement_action(action_payload) if action_payload is not None else ""
+        return f"""
+        <article class=\"enablement-row\">
+          <div class=\"enablement-row-main\">
+            <div class=\"enablement-row-head\">
+              <h3>PR #{anchor_pr_number}</h3>
+              <div class=\"enablement-row-tones\">
+                <span class=\"tone-pill tone-{tone}\">{state}</span>
+                <span class=\"signal-chip\">{escape(source_label)}</span>
+              </div>
+            </div>
+            <p>{request_summary}</p>
+            <p class=\"enablement-status\">{status_summary}</p>
+          </div>
+          <div class=\"enablement-row-actions\">{actions_html}</div>
+          {action_html}
+        </article>
+        """
+
+    def render_promotion_evidence_check(check: dict[str, object]) -> str:
+        status = str(check.get("status", "pending")).strip().lower() or "pending"
+        tone = "good" if status == "pass" else "bad" if status == "fail" else "warn"
+        return f"""
+        <article class=\"promotion-check promotion-check-{tone}\">
+          <div class=\"promotion-check-head\">
+            <h4>{escape(str(check.get("label", "Evidence")))}</h4>
+            <span class=\"signal-chip signal-{tone}\">{escape(status_label(status))}</span>
+          </div>
+          <p>{escape(str(check.get("detail", "No evidence detail recorded.")))}</p>
+        </article>
+        """
+
+    def render_promotion_action_panel(
+        promotion_action: dict[str, object],
+        *,
+        context_name: str,
+    ) -> str:
+        tone = str(promotion_action.get("tone", "neutral")).strip() or "neutral"
+        evidence_checks = json_object_items(promotion_action.get("evidence_checks"))
+        evidence_html = "".join(render_promotion_evidence_check(check) for check in evidence_checks)
+        recipe_cards: list[str] = []
+        backup_gate_recipe = str(promotion_action.get("backup_gate_recipe", "")).strip()
+        if backup_gate_recipe:
+            recipe_cards.append(
+                render_launchplane_action_recipe(
+                    title="Record prod backup gate",
+                    summary="Persist the exact backup authorization Launchplane expects before trying to promote into prod.",
+                    tone="warn",
+                    script=backup_gate_recipe,
+                    command_label="backup-gates write",
+                    recipe_id=f"promotion-{escape(context_name)}-backup-gate",
+                )
+            )
+        resolve_recipe = str(promotion_action.get("resolve_recipe", "")).strip()
+        if resolve_recipe:
+            recipe_cards.append(
+                render_launchplane_action_recipe(
+                    title="Plan promotion request",
+                    summary="Resolve Launchplane's typed promotion request from the current tenant evidence before execution.",
+                    tone=tone,
+                    script=resolve_recipe,
+                    command_label="promote resolve",
+                    recipe_id=f"promotion-{escape(context_name)}-resolve",
+                )
+            )
+        execute_recipe = str(promotion_action.get("execute_recipe", "")).strip()
+        if execute_recipe:
+            recipe_cards.append(
+                render_launchplane_action_recipe(
+                    title="Execute promotion",
+                    summary="Run the resolved promotion request once the typed payload looks correct.",
+                    tone=tone,
+                    script=execute_recipe,
+                    command_label="promote execute",
+                    recipe_id=f"promotion-{escape(context_name)}-execute",
+                )
+            )
+        detail_href = ""
+        if promotion_detail_href_builder is not None:
+            detail_href = promotion_detail_href_builder(context_name)
+        detail_link_html = ""
+        if detail_href:
+            detail_link_html = (
+                '<p class="promotion-detail-link">'
+                f'<a class="lane-detail-link" href="{escape(detail_href)}">Open promotion detail</a>'
+                "</p>"
+            )
+        latest_backup_gate = json_object(promotion_action.get("latest_backup_gate"))
+        latest_promotion = json_object(promotion_action.get("latest_promotion"))
+        latest_backup_gate_html = "Unavailable"
+        if latest_backup_gate is not None:
+            latest_backup_gate_html = f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
+        latest_promotion_html = "Unavailable"
+        if latest_promotion is not None:
+            latest_promotion_html = f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
+        recipe_html = "".join(recipe_cards) or (
+            '<p class="action-empty">Launchplane is not exposing a promotion recipe for the current tenant state yet.</p>'
+        )
+        return f"""
+        <section class=\"promotion-stage\">
+          <div class=\"promotion-stage-head\">
+            <div>
+              <div class=\"section-label\">Next promotion</div>
+              <h3>{escape(str(promotion_action.get("headline", "Launchplane cannot describe the next promotion yet.")))}</h3>
+              <p class=\"promotion-stage-copy\">{escape(str(promotion_action.get("summary", "No promotion summary recorded.")))}</p>
+            </div>
+            <span class=\"tone-pill tone-{escape(tone)}\">{escape(str(promotion_action.get("status", "unknown")).replace("_", " "))}</span>
+          </div>
+          <div class=\"promotion-stage-grid\">
+            <div class=\"promotion-primary\">
+              <dl class=\"promotion-meta\">
+                <div><dt>Candidate artifact</dt><dd><code>{escape(str(promotion_action.get("candidate_artifact_id", "")) or "Unavailable")}</code></dd></div>
+                <div><dt>Current prod</dt><dd><code>{escape(str(promotion_action.get("current_prod_artifact_id", "")) or "Unavailable")}</code></dd></div>
+                <div><dt>Testing source ref</dt><dd><code>{escape(str(promotion_action.get("source_git_ref", "")) or "Unavailable")}</code></dd></div>
+                <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
+                <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
+                <div><dt>Launchplane retains</dt><dd>{escape(str(promotion_action.get("retained_evidence", "Unavailable")))}</dd></div>
+              </dl>
+              <p class=\"promotion-next-action\">{escape(str(promotion_action.get("next_action", "No next action recorded.")))}</p>
+            </div>
+            <div class=\"promotion-evidence\">{evidence_html}</div>
+          </div>
+          <div class=\"promotion-recipes\">{recipe_html}</div>
+          {detail_link_html}
+        </section>
+        """
+
+    def render_environment_action_panel(
+        environment_actions: dict[str, object],
+        *,
+        context_name: str,
+    ) -> str:
+        action_cards: list[str] = []
+        for instance_name in ("testing", "prod"):
+            action_payload = environment_actions.get(instance_name)
+            if not isinstance(action_payload, dict):
+                continue
+            if str(action_payload.get("status", "")).strip() == "actionable":
+                recipe = str(action_payload.get("recipe", "")).strip()
+                if recipe:
+                    detail_href = ""
+                    if environment_detail_href_builder is not None:
+                        detail_href = environment_detail_href_builder(context_name, instance_name)
+                    footer_html = ""
+                    if detail_href:
+                        footer_html = (
+                            '<p class="action-footer">'
+                            f'<a class="lane-detail-link" href="{escape(detail_href)}">Open {escape(instance_name)} lane detail</a>'
+                            "</p>"
+                        )
+                    action_cards.append(
+                        render_launchplane_action_recipe(
+                            title=str(
+                                action_payload.get(
+                                    "headline", f"Re-ship current {instance_name} artifact"
+                                )
+                            ),
+                            summary=str(action_payload.get("summary", "")),
+                            tone=str(action_payload.get("tone", "neutral")),
+                            script=recipe,
+                            command_label="ship resolve -> ship execute",
+                            recipe_id=f"environment-{escape(context_name)}-{escape(instance_name)}-ship",
+                            footer_html=footer_html,
+                        )
+                    )
+                continue
+            detail_href = ""
+            if environment_detail_href_builder is not None:
+                detail_href = environment_detail_href_builder(context_name, instance_name)
+            detail_link_html = ""
+            if detail_href:
+                detail_link_html = (
+                    '<p class="lane-action-links">'
+                    f'<a class="lane-detail-link" href="{escape(detail_href)}">Open {escape(instance_name)} lane detail</a>'
+                    "</p>"
+                )
+            action_cards.append(
+                f"""
+                <article class=\"lane-action-note\">
+                  <div class=\"section-label\">{escape(instance_name)} lane</div>
+                  <h3>{escape(str(action_payload.get("headline", "No lane action available.")))}</h3>
+                  <p>{escape(str(action_payload.get("summary", "Launchplane does not have enough evidence for a typed lane action yet.")))}</p>
+                  {detail_link_html}
+                </article>
+                """
+            )
+        if not action_cards:
+            return ""
+        return f"""
+        <section class=\"lane-actions\">
+          <div class=\"lane-actions-head\">
+            <div>
+              <div class=\"section-label\">Lane actions</div>
+              <h3>Rebuild long-lived lanes</h3>
+            </div>
+            <p class=\"lane-actions-copy\">Use current environment evidence to re-ship the live artifact without reconstructing the request by hand.</p>
+          </div>
+          <div class=\"lane-actions-grid\">{"".join(action_cards)}</div>
+        </section>
+        """
+
+    tenant_stage_html = ""
+    roster_label = "Preview queue"
+    roster_title = "Launchplane-native review lanes"
+    roster_summary = "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and operator triage surface."
+    if isinstance(tenant_payload, dict):
+        tenant_label = escape(
+            str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant"
+        )
+        preview_counts = json_object(tenant_payload.get("preview_counts")) or {}
+        preview_candidates = json_object_items(tenant_payload.get("preview_candidates"))
+        preview_enablement_rows = json_object_items(tenant_payload.get("preview_enablement"))
+        preview_enablement_counts = (
+            json_object(tenant_payload.get("preview_enablement_counts")) or {}
+        )
+        environments = json_object(tenant_payload.get("environments")) or {}
+        promotion_summary = json_object(tenant_payload.get("promotion_summary")) or {}
+        promotion_action = json_object(tenant_payload.get("promotion_action")) or {}
+        environment_actions = json_object(tenant_payload.get("environment_actions")) or {}
+        preview_enablement_html = ""
+        if preview_enablement_rows:
+            visible_enablement_rows = preview_enablement_rows[:4]
+            remaining_enablement_count = len(preview_enablement_rows) - len(visible_enablement_rows)
+            overflow_note = (
+                f'<p class="enablement-overflow">{remaining_enablement_count} more PRs stay visible in the queue below.</p>'
+                if remaining_enablement_count > 0
+                else ""
+            )
+            preview_enablement_html = f"""
+            <section class=\"tenant-enablement\">
+              <div class=\"tenant-enablement-head\">
+                <div>
+                  <div class=\"section-label\">Preview enablement</div>
+                  <h3>Why each PR does or does not have a preview</h3>
+                </div>
+                <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Launchplane-driven requests, and retained history now stay visible before the deeper queue.</p>
+              </div>
+              <div class=\"enablement-list\">{"".join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
+              {overflow_note}
+            </section>
+            """
+        has_environment_evidence = any(
+            isinstance(environments.get(instance_name), dict)
+            for instance_name in ("testing", "prod")
+        )
+        promotion_status = (
+            str(promotion_action.get("status", "")).strip().lower() if promotion_action else ""
+        )
+        show_promotion_stage = bool(
+            has_environment_evidence or promotion_status not in {"", "unknown"}
+        )
+        lane_actions_html = render_environment_action_panel(
+            environment_actions, context_name=context_name
+        )
+        promotion_stage_html = render_promotion_action_panel(
+            promotion_action, context_name=context_name
+        )
+        sparse_preview_html = ""
+        if not has_environment_evidence:
+            sparse_preview_html = f"""
+            {preview_enablement_html}
+            <dl class=\"tenant-preview-strip\">
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
+            </dl>
+            """
+        dense_environment_html = ""
+        if has_environment_evidence:
+            dense_environment_html = f"""
+            <div class=\"environment-board\">
+              {render_environment_lane("testing", json_object(environments.get("testing")))}
+              {render_environment_lane("prod", json_object(environments.get("prod")))}
+            </div>
+            {lane_actions_html}
+            {promotion_stage_html if show_promotion_stage else ""}
+            <dl class=\"tenant-preview-strip\">
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
+            </dl>
+            {preview_enablement_html}
+            """
+        tenant_stage_copy = (
+            "Main feeds testing. Tested artifacts promote into prod. Pull requests become opt-in preview environments instead of shared dev branches."
+            if has_environment_evidence
+            else "Launchplane has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
+        )
+        tenant_brief_label = (
+            "Promotion path" if has_environment_evidence else "Current Launchplane focus"
+        )
+        tenant_brief_copy = (
+            escape(str(promotion_summary.get("summary", "No promotion evidence recorded yet.")))
+            if has_environment_evidence
+            else "Preview request state is available even before Launchplane has current long-lived lane evidence for this tenant."
+        )
+        tenant_stage_html = f"""
+        <section class=\"tenant-stage\">
+          <div class=\"tenant-stage-grid\">
+            <div>
+              <div class=\"section-label\">Tenant environment</div>
+              <h2>{tenant_label}</h2>
+              <p class=\"tenant-stage-copy\">{tenant_stage_copy}</p>
+            </div>
+            <aside class=\"tenant-brief\">
+              <div class=\"section-label\">{tenant_brief_label}</div>
+              <p class=\"tenant-brief-copy\">{tenant_brief_copy}</p>
+            </aside>
+          </div>
+          {dense_environment_html}
+          {sparse_preview_html}
+        </section>
+        """
+        roster_label = "Preview roster"
+        roster_title = "Pull request previews"
+        roster_summary = "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
+
+    body_html = f"""
+    <div data-launchplane-overview>
+      {tenant_stage_html}
+      <section class=\"index-mast\">
+        <div class=\"index-mast-grid\">
+          <div>
+            <div class=\"section-label\">{roster_label}</div>
+            <h2>{roster_title}</h2>
+            <p data-overview-summary>{roster_summary}</p>
+          </div>
+          <aside class=\"focus-panel\">
+            <div class=\"section-label\">Fleet focus</div>
+            <p class=\"focus-kicker\">Filter the queue before opening detail pages.</p>
+            <div class=\"focus-chip-row\" role=\"toolbar\" aria-label=\"Fleet focus filters\">{focus_controls_html}</div>
+            {scope_panel_html}
+            <p class=\"{focus_status_class}\" data-focus-status>{escape(filter_notes["all"])} Showing {len(preview_rows)} of {len(preview_rows)} previews.</p>
+          </aside>
+        </div>
+        {summary_strip_html}
+      </section>
+
+      <div class=\"lane-grid\">{lane_html}</div>
+
+      <section class=\"policy-strip\">
+        <div class=\"section-label\">Policy snapshot</div>
+        <h2>Preview control stance</h2>
+        <ul>
+          <li>Stable lanes such as local, testing, and prod stay separate from preview traffic.</li>
+          <li>One Launchplane preview identity maps to one anchor PR and rotates generations behind a stable route.</li>
+          <li>Cleanup, retention, and companion-policy evidence should be visible here before Launchplane grows write-side UI.</li>
+        </ul>
+      </section>
+    </div>
+    <script>
+    (() => {{
+      const root = document.querySelector('[data-launchplane-overview]');
+      if (!root) {{
+        return;
+      }}
+      const filterNotes = {json.dumps(filter_notes)};
+      const scopeNotes = {json.dumps(scope_notes)};
+      const controls = Array.from(root.querySelectorAll('[data-filter-control]'));
+      const scopeControls = Array.from(root.querySelectorAll('[data-scope-control]'));
+      const rows = Array.from(root.querySelectorAll('[data-preview-row]'));
+      const sections = Array.from(root.querySelectorAll('[data-lane-section]'));
+      const status = root.querySelector('[data-focus-status]');
+      const overviewSummary = root.querySelector('[data-overview-summary]');
+      const defaultOverviewSummary = overviewSummary ? overviewSummary.textContent || '' : '';
+      const validFocusKeys = new Set(controls.map((control) => control.dataset.filterControl || 'all'));
+      const validScopeKeys = new Set(scopeControls.map((control) => control.dataset.scopeControl || 'all'));
+      let activeFocus = 'all';
+      let activeScope = 'all';
+      const initialParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const initialFocus = initialParams.get('focus') || '';
+      const initialScope = initialParams.get('scope') || '';
+      if (validFocusKeys.has(initialFocus)) {{
+        activeFocus = initialFocus;
+      }}
+      if (validScopeKeys.has(initialScope)) {{
+        activeScope = initialScope;
+      }}
+
+      const matchesFilter = (row, filterKey) => {{
+        const filters = (row.dataset.filters || '').split(' ').filter(Boolean);
+        return filterKey === 'all' || filters.includes(filterKey);
+      }};
+
+      const matchesScope = (row, scopeKey) => {{
+        const scopes = (row.dataset.scopes || '').split(' ').filter(Boolean);
+        return scopeKey === 'all' || scopes.includes(scopeKey);
+      }};
+
+      const applyFilters = () => {{
+        let visibleRows = 0;
+        controls.forEach((control) => {{
+          const isActive = control.dataset.filterControl === activeFocus;
+          control.classList.toggle('is-active', isActive);
+          control.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        }});
+        scopeControls.forEach((control) => {{
+          const isActive = control.dataset.scopeControl === activeScope;
+          control.classList.toggle('is-active', isActive);
+          control.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        }});
+        rows.forEach((row) => {{
+          const visible = matchesFilter(row, activeFocus) && matchesScope(row, activeScope);
+          row.classList.toggle('is-hidden', !visible);
+          if (visible) {{
+            visibleRows += 1;
+          }}
+        }});
+        sections.forEach((section) => {{
+          const laneRows = Array.from(section.querySelectorAll('[data-preview-row]'));
+          const visibleLaneRows = laneRows.filter((row) => !row.classList.contains('is-hidden'));
+          section.classList.toggle('is-hidden', visibleLaneRows.length === 0);
+          const count = section.querySelector('[data-lane-count]');
+          if (count) {{
+            count.textContent = `${{visibleLaneRows.length}} visible`;
+          }}
+        }});
+        if (status) {{
+          const focusNote = filterNotes[activeFocus] || filterNotes.all || '';
+          const scopeNote = scopeNotes[activeScope] || scopeNotes.all || '';
+          status.textContent = `${{focusNote}} ${{scopeNote}} Showing ${{visibleRows}} of ${{rows.length}} previews.`.trim();
+        }}
+        if (overviewSummary) {{
+          if (activeFocus === 'all' && activeScope === 'all') {{
+            overviewSummary.textContent = defaultOverviewSummary;
+          }} else {{
+            const fragments = [];
+            if (activeScope !== 'all') {{
+              fragments.push(scopeNotes[activeScope] || '');
+            }}
+            if (activeFocus !== 'all') {{
+              fragments.push(filterNotes[activeFocus] || '');
+            }}
+            overviewSummary.textContent = `Showing ${{visibleRows}} of ${{rows.length}} previews. ${{fragments.filter(Boolean).join(' ')}}`.trim();
+          }}
+        }}
+        const nextParams = new URLSearchParams();
+        if (activeFocus !== 'all') {{
+          nextParams.set('focus', activeFocus);
+        }}
+        if (activeScope !== 'all') {{
+          nextParams.set('scope', activeScope);
+        }}
+        const nextHash = nextParams.toString();
+        const nextUrl = `${{window.location.pathname}}${{window.location.search}}${{nextHash ? `#${{nextHash}}` : ''}}`;
+        if (`${{window.location.pathname}}${{window.location.search}}${{window.location.hash}}` !== nextUrl) {{
+          window.history.replaceState(null, '', nextUrl);
+        }}
+      }};
+
+      controls.forEach((control) => {{
+        control.addEventListener('click', () => {{
+          activeFocus = control.dataset.filterControl || 'all';
+          applyFilters();
+        }});
+      }});
+      scopeControls.forEach((control) => {{
+        control.addEventListener('click', () => {{
+          activeScope = control.dataset.scopeControl || 'all';
+          applyFilters();
+        }});
+      }});
+      applyFilters();
+    }})();
+    </script>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .tenant-stage {
+      display: grid;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+      margin-bottom: 18px;
+    }
+    .tenant-stage-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .tenant-stage h2,
+    .environment-lane h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.02;
+    }
+    .tenant-stage h2 {
+      font-size: 42px;
+    }
+    .tenant-stage-copy,
+    .tenant-brief-copy,
+    .environment-summary,
+    .environment-note {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .tenant-brief {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .tenant-brief-copy {
+      color: var(--text);
+    }
+    .promotion-stage {
+      display: grid;
+      gap: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .lane-actions {
+      display: grid;
+      gap: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .lane-actions-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+    }
+    .lane-actions h3,
+    .lane-action-note h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .lane-actions h3 {
+      font-size: 28px;
+    }
+    .lane-actions-copy,
+    .lane-action-note p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .lane-actions-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .lane-action-note {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 8px;
+    }
+    .lane-action-note h3 {
+      font-size: 22px;
+    }
+    .promotion-stage-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+    }
+    .promotion-stage h3,
+    .promotion-check h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .promotion-stage h3 {
+      font-size: 30px;
+    }
+    .promotion-stage-copy,
+    .promotion-next-action,
+    .promotion-check p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .promotion-stage-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .promotion-primary {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+    }
+    .promotion-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .promotion-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .promotion-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .promotion-meta code {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .promotion-next-action {
+      color: var(--text);
+    }
+    .promotion-evidence {
+      display: grid;
+      gap: 12px;
+    }
+    .promotion-check {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: grid;
+      gap: 8px;
+    }
+    .promotion-check-good { border-left: 3px solid var(--good); }
+    .promotion-check-warn { border-left: 3px solid var(--warn); }
+    .promotion-check-bad { border-left: 3px solid var(--bad); }
+    .promotion-check-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .promotion-check h4 {
+      font-size: 22px;
+    }
+    .promotion-recipes {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .action-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 22px;
+      line-height: 1.08;
+    }
+    .action-card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .action-footer,
+    .lane-action-links,
+    .environment-links {
+      margin: 0;
+    }
+    .lane-detail-link {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .lane-detail-link:hover {
+      text-decoration: underline;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover {
+      background: #e7dfd0;
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .action-empty {
+      margin: 0;
+      color: var(--muted);
+    }
+    .tenant-preview-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0;
+    }
+    .tenant-preview-strip > div,
+    .environment-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .tenant-preview-strip dd,
+    .environment-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .tenant-preview-strip dd {
+      font-family: var(--serif);
+      font-size: 22px;
+    }
+    .tenant-enablement {
+      display: grid;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .tenant-enablement-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+    }
+    .tenant-enablement h3,
+    .enablement-row h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.02;
+    }
+    .tenant-enablement h3 {
+      font-size: 28px;
+    }
+    .tenant-enablement-copy,
+    .enablement-overflow,
+    .enablement-row p,
+    .enablement-meta {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .enablement-list {
+      display: grid;
+      gap: 12px;
+    }
+    .enablement-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px;
+      align-items: center;
+    }
+    .enablement-inline-action,
+    .enablement-inline-note {
+      grid-column: 1 / -1;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px 14px;
+      margin-top: 2px;
+    }
+    .enablement-inline-action {
+      display: grid;
+      gap: 10px;
+    }
+    .enablement-inline-action.tone-good,
+    .enablement-inline-action.tone-warn,
+    .enablement-inline-action.tone-bad,
+    .enablement-inline-action.tone-neutral,
+    .enablement-inline-note.tone-good,
+    .enablement-inline-note.tone-warn,
+    .enablement-inline-note.tone-bad,
+    .enablement-inline-note.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .enablement-inline-action.tone-good,
+    .enablement-inline-note.tone-good { border-left: 3px solid var(--good); }
+    .enablement-inline-action.tone-warn,
+    .enablement-inline-note.tone-warn { border-left: 3px solid var(--warn); }
+    .enablement-inline-action.tone-bad,
+    .enablement-inline-note.tone-bad { border-left: 3px solid var(--bad); }
+    .enablement-inline-action.tone-neutral,
+    .enablement-inline-note.tone-neutral { border-left: 3px solid var(--neutral); }
+    .enablement-inline-action-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .enablement-inline-action h4,
+    .enablement-inline-note h4 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 20px;
+      line-height: 1.08;
+    }
+    .enablement-inline-action p,
+    .enablement-inline-note p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .enablement-inline-note.tone-bad h4 {
+      color: var(--bad);
+    }
+    .enablement-row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .enablement-row-head h3 {
+      font-size: 24px;
+    }
+    .enablement-row-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: end;
+    }
+    .enablement-status {
+      margin-top: 6px;
+      color: var(--text);
+    }
+    .enablement-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: end;
+      gap: 12px;
+      align-items: center;
+    }
+    .enablement-row-actions a,
+    .enablement-meta {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .enablement-row-actions a:hover {
+      text-decoration: underline;
+    }
+    .environment-board {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .environment-lane {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .environment-lane-empty {
+      background: rgba(251, 250, 246, 0.7);
+    }
+    .environment-lane-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .environment-lane h3 {
+      font-size: 28px;
+      text-transform: capitalize;
+    }
+    .environment-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: end;
+    }
+    .environment-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .environment-meta code {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .index-mast {
+      display: grid;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+    }
+    .index-mast-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .index-mast h2,
+    .policy-strip h2,
+    .lane-section h2 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 34px;
+      line-height: 1.02;
+    }
+    .index-mast p,
+    .policy-strip p,
+    .lane-section p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+      max-width: 58ch;
+    }
+    .focus-panel {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 12px 14px 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .focus-panel p {
+      margin: 0;
+      max-width: none;
+    }
+    .focus-kicker {
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .focus-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .focus-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid var(--line);
+      background: transparent;
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+    }
+    .focus-chip strong {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+    .focus-chip.is-active {
+      background: var(--text);
+      border-color: var(--text);
+      color: #f8f4ed;
+    }
+    .focus-chip.is-active strong { color: inherit; }
+    .focus-status {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .focus-status-hidden {
+      display: none;
+    }
+    .scope-panel {
+      display: grid;
+      gap: 8px;
+    }
+    .scope-panel .section-label {
+      margin-bottom: 0;
+    }
+    .scope-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .scope-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: #f2ede3;
+      border-radius: 999px;
+      padding: 7px 10px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+    }
+    .scope-chip strong {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text);
+    }
+    .scope-chip.is-active {
+      border-color: var(--line-strong);
+      background: #e7dfd0;
+      color: var(--text);
+    }
+    .scope-chip.is-active strong { color: inherit; }
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin: 4px 0 0;
+    }
+    .summary-strip > div {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .summary-strip dt,
+    .preview-row-meta dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .summary-strip dd {
+      margin: 8px 0 0;
+      font-family: var(--serif);
+      font-size: 22px;
+    }
+    .policy-strip,
+    .lane-section {
+      border-top: 1px solid var(--line);
+      padding-top: 18px;
+      margin-top: 24px;
+    }
+    .policy-strip ul {
+      margin: 14px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 10px;
+      line-height: 1.6;
+    }
+    .lane-section-head {
+      display: flex;
+      gap: 14px;
+      justify-content: space-between;
+      align-items: end;
+    }
+    .lane-count {
+      flex: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .lane-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+      margin-top: 20px;
+    }
+    .lane-stack {
+      display: grid;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .preview-row {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 18px;
+      border-radius: 14px;
+    }
+    .preview-row.is-hidden,
+    .lane-section.is-hidden {
+      display: none;
+    }
+    .preview-row-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .preview-row-head h3 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 26px;
+      line-height: 1.04;
+    }
+    .preview-row-title { text-decoration: none; }
+    .preview-row-title:hover { text-decoration: underline; text-underline-offset: 0.18em; }
+    .preview-row-head p,
+    .preview-row-head a {
+      margin: 8px 0 0;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      text-underline-offset: 0.18em;
+    }
+    .preview-row-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tone-pill {
+      border-radius: 999px;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #f5f2ec;
+    }
+    .tone-good { background: var(--good); }
+    .tone-warn { background: var(--warn); }
+    .tone-bad { background: var(--bad); }
+    .tone-neutral { background: var(--neutral); }
+    .preview-row-signals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .signal-chip {
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      background: #f2ede3;
+      color: var(--muted);
+    }
+    .signal-good {
+      background: rgba(28, 93, 61, 0.1);
+      border-color: rgba(28, 93, 61, 0.22);
+      color: var(--good);
+    }
+    .signal-warn {
+      background: rgba(138, 98, 8, 0.1);
+      border-color: rgba(138, 98, 8, 0.22);
+      color: var(--warn);
+    }
+    .signal-bad {
+      background: rgba(138, 49, 44, 0.1);
+      border-color: rgba(138, 49, 44, 0.24);
+      color: var(--bad);
+    }
+    .preview-row-summary {
+      margin: 14px 0 0;
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .preview-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .preview-row-actions a {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .preview-row-actions a:hover { text-decoration: underline; }
+    .preview-row-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 0;
+    }
+    .preview-row-meta dd { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .preview-row-meta code { font-family: var(--mono); font-size: 12px; }
+    .lane-empty { margin: 16px 0 0; color: var(--muted); }
+    @media (max-width: 900px) {
+      .tenant-stage-grid,
+      .environment-board,
+      .lane-actions-grid,
+      .promotion-stage-grid,
+      .promotion-recipes,
+      .index-mast-grid,
+      .tenant-preview-strip,
+      .lane-grid,
+      .preview-row-meta,
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .tenant-stage-grid,
+      .index-mast-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 640px) {
+      .section-label {
+        margin-bottom: 6px;
+      }
+      .tenant-preview-strip,
+      .lane-actions-grid,
+      .promotion-stage-grid,
+      .promotion-recipes,
+      .enablement-row,
+      .environment-board,
+      .summary-strip,
+      .lane-grid,
+      .preview-row-meta,
+      .environment-meta,
+      .promotion-meta { grid-template-columns: 1fr; }
+      .shell-brand h1,
+      .tenant-stage h2,
+      .index-mast h2,
+      .policy-strip h2,
+      .lane-section h2 {
+        font-size: 24px;
+      }
+      .tenant-stage {
+        gap: 12px;
+        padding-bottom: 14px;
+        margin-bottom: 12px;
+      }
+      .shell-brand p,
+      .tenant-stage-copy,
+      .tenant-brief-copy,
+      .environment-summary,
+      .environment-note,
+      .index-mast p,
+      .policy-strip p,
+      .lane-section p,
+      .focus-kicker,
+      .focus-status {
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      .shell-nav {
+        gap: 8px;
+      }
+      .shell-nav-item {
+        padding: 7px 10px;
+        font-size: 11px;
+      }
+      .index-mast {
+        gap: 8px;
+        padding-bottom: 10px;
+      }
+      .focus-panel {
+        gap: 6px;
+        padding: 10px 12px 12px;
+      }
+      .tenant-brief,
+      .environment-lane,
+      .promotion-primary,
+      .promotion-check {
+        padding: 12px 14px 14px;
+      }
+      .tenant-enablement-head,
+      .lane-actions-head,
+      .promotion-stage-head,
+      .promotion-check-head,
+      .enablement-inline-action-head,
+      .enablement-row-head,
+      .enablement-row-actions {
+        display: grid;
+        gap: 10px;
+      }
+      .environment-lane h3 {
+        font-size: 22px;
+      }
+      .promotion-stage h3,
+      .lane-actions h3,
+      .promotion-check h4 {
+        font-size: 22px;
+      }
+      .focus-status,
+      .summary-strip {
+        display: none;
+      }
+      .focus-chip-row {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+        margin-right: -2px;
+      }
+      .focus-chip-row::-webkit-scrollbar {
+        display: none;
+      }
+      .scope-chip-row {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+      }
+      .scope-chip-row::-webkit-scrollbar {
+        display: none;
+      }
+      .focus-chip {
+        flex: 0 0 auto;
+        padding: 7px 10px;
+        gap: 8px;
+      }
+      .scope-chip {
+        flex: 0 0 auto;
+      }
+      .focus-chip strong,
+      .focus-chip span,
+      .scope-chip strong,
+      .scope-chip span {
+        white-space: nowrap;
+      }
+      .lane-section-head,
+      .preview-row-head {
+        align-items: start;
+      }
+      .lane-section-head p {
+        display: none;
+      }
+      .lane-count {
+        padding: 6px 8px;
+        font-size: 10px;
+      }
+      .policy-strip,
+      .lane-section {
+        padding-top: 12px;
+        margin-top: 14px;
+      }
+      .preview-row {
+        padding: 16px;
+      }
+    }
+    """
+
+    return render_launchplane_shell_document(
+        page_title=f"Launchplane preview index{' · ' + context_name if context_name else ''}",
+        context_name=context_name,
+        active_nav="overview",
         body_class="index-layout",
         body_html=body_html,
         extra_css=extra_css,
