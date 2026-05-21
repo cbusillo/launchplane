@@ -618,3 +618,437 @@ def render_launchplane_preview_policy_page_html(
         extra_css=extra_css,
         nav_links=nav_links,
     )
+
+
+def render_launchplane_promotion_status_page_html(
+    payload: dict[str, object],
+    *,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", "")).strip()
+    path_label = str(payload.get("path_label", "")).strip() or f"{context_name}/testing-to-prod"
+    tone = str(payload.get("tone", "neutral")).strip() or "neutral"
+    headline = escape(
+        str(payload.get("headline", "Launchplane cannot describe the promotion path yet."))
+    )
+    summary = escape(str(payload.get("summary", "No promotion summary recorded.")))
+    next_action = escape(str(payload.get("next_action", "No next action recorded.")))
+    retained_evidence = escape(
+        str(payload.get("retained_evidence", "No retained evidence summary recorded."))
+    )
+    candidate_artifact_id = escape(str(payload.get("candidate_artifact_id", "")) or "Unavailable")
+    current_prod_artifact_id = escape(
+        str(payload.get("current_prod_artifact_id", "")) or "Unavailable"
+    )
+    source_git_ref = escape(str(payload.get("source_git_ref", "")) or "Unavailable")
+    status_label_value = escape(str(payload.get("status", "unknown")).replace("_", " "))
+    evidence_checks = json_object_items(payload.get("evidence_checks"))
+    latest_backup_gate = json_object(payload.get("latest_backup_gate"))
+    latest_promotion = json_object(payload.get("latest_promotion"))
+    recent_backup_gates = json_object_items(payload.get("recent_backup_gates"))
+    recent_promotions = json_object_items(payload.get("recent_promotions"))
+    testing_live = json_object(payload.get("testing_live"))
+    prod_live = json_object(payload.get("prod_live"))
+
+    evidence_cards: list[str] = []
+    for check in evidence_checks:
+        check_status = str(check.get("status", "pending"))
+        check_tone = status_tone(check_status)
+        evidence_cards.append(
+            f"""
+        <article class=\"promotion-detail-check promotion-detail-check-{check_tone}\">
+          <div class=\"promotion-detail-check-head\">
+            <h4>{escape(str(check.get("label", "Evidence")))}</h4>
+            <span class=\"signal-chip signal-{check_tone}\">{escape(status_label(check_status))}</span>
+          </div>
+          <p>{escape(str(check.get("detail", "No evidence detail recorded.")))}</p>
+        </article>
+        """
+        )
+    evidence_html = (
+        "".join(evidence_cards)
+        or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
+    )
+
+    recipe_cards: list[str] = []
+    backup_gate_recipe = str(payload.get("backup_gate_recipe", "")).strip()
+    if backup_gate_recipe:
+        recipe_cards.append(
+            render_launchplane_action_recipe(
+                title="Record prod backup gate",
+                summary="Persist the exact backup authorization Launchplane expects before trying to promote into prod.",
+                tone="warn",
+                script=backup_gate_recipe,
+                command_label="backup-gates write",
+                recipe_id=f"promotion-detail-{escape(context_name)}-backup-gate",
+            )
+        )
+    resolve_recipe = str(payload.get("resolve_recipe", "")).strip()
+    if resolve_recipe:
+        recipe_cards.append(
+            render_launchplane_action_recipe(
+                title="Plan promotion request",
+                summary="Resolve Launchplane's typed promotion request from the current tenant evidence before execution.",
+                tone=tone,
+                script=resolve_recipe,
+                command_label="promote resolve",
+                recipe_id=f"promotion-detail-{escape(context_name)}-resolve",
+            )
+        )
+    execute_recipe = str(payload.get("execute_recipe", "")).strip()
+    if execute_recipe:
+        recipe_cards.append(
+            render_launchplane_action_recipe(
+                title="Execute promotion",
+                summary="Run the resolved promotion request once the typed payload looks correct.",
+                tone=tone,
+                script=execute_recipe,
+                command_label="promote execute",
+                recipe_id=f"promotion-detail-{escape(context_name)}-execute",
+            )
+        )
+    recipe_html = "".join(recipe_cards) or (
+        '<p class="table-empty">Launchplane is not exposing a promotion recipe for the current tenant state yet.</p>'
+    )
+
+    def render_live_lane_card(title: str, lane_payload: dict[str, object] | None) -> str:
+        if lane_payload is None:
+            return f"""
+            <article class=\"promotion-lane-card promotion-lane-card-empty\">
+              <div class=\"section-label\">{escape(title)}</div>
+              <h3>No lane evidence</h3>
+              <p>Launchplane has not recorded current live inventory for this lane yet.</p>
+            </article>
+            """
+        return f"""
+        <article class=\"promotion-lane-card\">
+          <div class=\"section-label\">{escape(title)}</div>
+          <h3><code>{escape(str(lane_payload.get("artifact_id", "")) or "Unavailable")}</code></h3>
+          <p>{escape(str(lane_payload.get("source_git_ref", "")) or "No source ref recorded.")}</p>
+          <dl class=\"promotion-lane-meta\">
+            <div><dt>Updated</dt><dd>{escape(str(lane_payload.get("updated_at", "")) or "Unavailable")}</dd></div>
+            <div><dt>Deploy</dt><dd>{escape(str(lane_payload.get("deploy_status", "")) or "Unavailable")}</dd></div>
+            <div><dt>Health</dt><dd>{escape(str(lane_payload.get("destination_health_status", "")) or "Unavailable")}</dd></div>
+            <div><dt>Record</dt><dd><code>{escape(str(lane_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
+          </dl>
+        </article>
+        """
+
+    recent_promotions_html = '<p class="table-empty">No promotion history recorded yet.</p>'
+    if recent_promotions:
+        recent_promotions_html = (
+            "<table><thead><tr><th>Promotion record</th><th>From lane</th><th>Artifact</th><th>Backup</th><th>Health</th><th>Finished</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('from_instance', '')) or 'Unavailable')}</td>"
+                f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('backup_status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('destination_health_status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in recent_promotions
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+        )
+
+    recent_backup_gates_html = (
+        '<p class="table-empty">No prod backup-gate history recorded yet.</p>'
+    )
+    if recent_backup_gates:
+        recent_backup_gates_html = (
+            "<table><thead><tr><th>Backup gate</th><th>Status</th><th>Source</th><th>Created</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('source', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('created_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in recent_backup_gates
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+        )
+
+    latest_backup_gate_html = (
+        f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
+        if latest_backup_gate is not None
+        else "Unavailable"
+    )
+    latest_promotion_html = (
+        f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
+        if latest_promotion is not None
+        else "Unavailable"
+    )
+
+    body_html = f"""
+    <section class=\"promotion-detail-mast\">
+      <div>
+        <div class=\"section-label\">Promotion detail</div>
+        <h2>{escape(path_label)}</h2>
+        <p>{summary}</p>
+      </div>
+      <aside class=\"promotion-detail-brief\">
+        <span class=\"tone-pill tone-{escape(tone)}\">{status_label_value}</span>
+        <p>{next_action}</p>
+      </aside>
+    </section>
+
+    <section class=\"promotion-detail-grid\">
+      <article class=\"promotion-summary-card\">
+        <div class=\"section-label\">Current path</div>
+        <h3>{headline}</h3>
+        <dl class=\"promotion-summary-meta\">
+          <div><dt>Candidate artifact</dt><dd><code>{candidate_artifact_id}</code></dd></div>
+          <div><dt>Current prod</dt><dd><code>{current_prod_artifact_id}</code></dd></div>
+          <div><dt>Testing source ref</dt><dd><code>{source_git_ref}</code></dd></div>
+          <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
+          <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
+          <div><dt>Launchplane retains</dt><dd>{retained_evidence}</dd></div>
+        </dl>
+      </article>
+      <div class=\"promotion-lane-grid\">
+        {render_live_lane_card("Testing lane", testing_live)}
+        {render_live_lane_card("Prod lane", prod_live)}
+      </div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Evidence checks</div>
+      <h3>What Launchplane is using to gate promotion</h3>
+      <div class=\"promotion-detail-check-grid\">{evidence_html}</div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Typed actions</div>
+      <h3>What Launchplane can do next</h3>
+      <div class=\"promotion-detail-recipes\">{recipe_html}</div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Promotion history</div>
+      <h3>Recent promotions into prod</h3>
+      {recent_promotions_html}
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Backup-gate history</div>
+      <h3>Recent prod backup authorization</h3>
+      {recent_backup_gates_html}
+    </section>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .promotion-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
+    .promotion-detail-mast h2,
+    .promotion-summary-card h3,
+    .promotion-lane-card h3,
+    .promotion-detail-section h3,
+    .promotion-detail-check h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .promotion-detail-mast h2 { font-size: 40px; }
+    .promotion-detail-mast p,
+    .promotion-detail-brief p,
+    .promotion-summary-card p,
+    .promotion-lane-card p,
+    .promotion-detail-check p,
+    .table-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .promotion-detail-brief,
+    .promotion-summary-card,
+    .promotion-lane-card,
+    .promotion-detail-check,
+    .promotion-detail-section {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+    }
+    .promotion-detail-brief {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .promotion-detail-grid,
+    .promotion-lane-grid,
+    .promotion-detail-check-grid,
+    .promotion-detail-recipes {
+      display: grid;
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .promotion-detail-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .promotion-lane-grid,
+    .promotion-detail-recipes {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .promotion-detail-check-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .promotion-summary-meta,
+    .promotion-lane-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 16px 0 0;
+    }
+    .promotion-summary-meta > div,
+    .promotion-lane-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .promotion-summary-meta dt,
+    .promotion-lane-meta dt,
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .promotion-summary-meta dd,
+    .promotion-lane-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .promotion-summary-meta code,
+    .promotion-lane-card code,
+    table code,
+    .action-pre {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .promotion-detail-check-good { border-left: 3px solid var(--good); }
+    .promotion-detail-check-warn { border-left: 3px solid var(--warn); }
+    .promotion-detail-check-bad { border-left: 3px solid var(--bad); }
+    .promotion-detail-check-head,
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-card {
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover { background: #e7dfd0; }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker { display: none; }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      line-height: 1.55;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .promotion-detail-section { margin-top: 18px; }
+    @media (max-width: 900px) {
+      .promotion-detail-mast,
+      .promotion-lane-grid,
+      .promotion-detail-check-grid,
+      .promotion-detail-recipes,
+      .promotion-summary-meta,
+      .promotion-lane-meta {
+        grid-template-columns: 1fr;
+      }
+      .promotion-detail-mast h2 { font-size: 32px; }
+      .promotion-detail-check-head,
+      .action-card-head { flex-direction: column; }
+    }
+    """
+
+    return render_launchplane_shell_document(
+        page_title=f"Launchplane promotion detail · {path_label}",
+        context_name=context_name,
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
