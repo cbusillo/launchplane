@@ -146,6 +146,41 @@ on unauthenticated runtime `gh` reads. A configured Project or signal source tha
 cannot be read fails the snapshot request instead of silently dropping Project
 fields.
 
+## GitHub Issue Inbox
+
+Launchplane can also expose a read-only grouped GitHub issue inbox for an
+explicit repository inventory:
+
+```sh
+GET /v1/work-graph/github/issues
+```
+
+The route uses the same `work_graph.rank` authorization as the snapshot route
+and never writes GitHub or Launchplane state. Enable it with
+`LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES`, a comma or newline separated
+list of `owner/repo` values. `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT` bounds
+the open issue reads per repository and defaults to `100`. The provider shells
+out to:
+
+```sh
+gh issue list --repo <owner>/<repo> --state open --limit <limit> \
+  --json number,title,url,state,labels,updatedAt,createdAt,author
+```
+
+The response groups results by configured `owner/repo`, includes empty groups so
+the configured inventory is visible, and gives every issue a stable key in the
+form `owner/repo#number` plus the source URL. If Code Plans Project env is also
+configured, the inbox reads Project item-list once to build membership and each
+issue is marked with `present_in_project: true` and
+`project_status: "present"` or `present_in_project: false` and
+`project_status: "missing"`. Without Project env, issues use
+`project_status: "unconfigured"` and `present_in_project: null`.
+
+Forks and private repositories are supported only through explicit inventory and
+the runtime `GH_TOKEN` permissions. Launchplane does not owner-wide search,
+fetch issue bodies, infer product ownership from inbox membership, or mutate
+Project membership from this read model.
+
 ## Boundary
 
 Do not store copied issue bodies as Launchplane authority. Project fields may be

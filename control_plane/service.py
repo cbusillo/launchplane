@@ -225,10 +225,16 @@ from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
 )
+from control_plane.work_graph_issue_inbox import (
+    build_github_issue_inbox_read_model,
+    load_github_issue_inbox_config_from_env,
+)
 from control_plane.work_graph_service import (
+    WorkGraphIssueInboxProvider,
     WorkGraphPlanningFactsProvider,
 )
 from control_plane.work_graph_http import (
+    handle_work_graph_issue_inbox_read,
     handle_repo_product_mapping_read,
     handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
@@ -713,6 +719,8 @@ _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT",
+        "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES",
+        "LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT",
         "LAUNCHPLANE_WORK_GRAPH_GH_BINARY",
         "GH_TOKEN",
     }
@@ -2569,6 +2577,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "merge_train.policy_targets", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
+    if len(segments) == 4 and segments == ["v1", "work-graph", "github", "issues"]:
+        return "work_graph.issue_inbox", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
         return "product_environment.read", {"repo_product_mapping": "true"}
     if len(segments) == 2 and segments == ["v1", "product-profiles"]:
@@ -7216,6 +7226,7 @@ def create_launchplane_service_app(
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
+    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -8138,6 +8149,15 @@ def create_launchplane_service_app(
                         work_request_store=_every_code_work_request_store(record_store),
                         planning_facts_provider=work_graph_planning_facts_provider,
                         utc_now=_utc_now_timestamp,
+                        json_response=_json_response,
+                        start_response=start_response,
+                    )
+                if action == "work_graph.issue_inbox":
+                    return handle_work_graph_issue_inbox_read(
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        trace_id=request_trace_id,
+                        issue_inbox_provider=work_graph_issue_inbox_provider,
                         json_response=_json_response,
                         start_response=start_response,
                     )
@@ -13383,12 +13403,27 @@ def serve_launchplane_service(
         if work_graph_project_config is not None
         else None
     )
+    work_graph_issue_inbox_config = load_github_issue_inbox_config_from_env(
+        dict(os.environ),
+        project_config=work_graph_project_config,
+    )
+    work_graph_issue_inbox_provider = (
+        (
+            lambda: build_github_issue_inbox_read_model(
+                generated_at=_utc_now_timestamp(),
+                config=work_graph_issue_inbox_config,
+            )
+        )
+        if work_graph_issue_inbox_config is not None
+        else None
+    )
     application = create_launchplane_service_app(
         state_dir=state_dir,
         verifier=verifier,
         authz_policy=authz_policy,
         database_url=database_url,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
+        work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
     )
     with make_server(
         host,
