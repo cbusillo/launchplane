@@ -96,6 +96,7 @@ from control_plane.contracts.merge_train_stack_collapse import (
     reconcile_merge_train_stack_children_after_root_landing,
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
+from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackEvent,
@@ -252,6 +253,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
+    MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.workflows.merge_train_worker import (
@@ -3413,6 +3415,74 @@ def _supersede_active_merge_train_batch_candidate_records(
         record_store.write_merge_train_batch_candidate_record(
             record.model_copy(update={"status": "superseded"})
         )
+
+
+def _try_reflow_failed_merge_train_candidate(
+    *,
+    candidate_store: _MergeTrainBatchCandidateRecordStore,
+    active_candidate_record: MergeTrainBatchCandidateRecord,
+    policy: MergeTrainPolicy,
+    policy_sha256: str,
+    transport: MergeTrainGitHubTransport,
+    repository: str,
+    base_branch: str,
+    recorded_at: str,
+    request_trace_id: str,
+    mutate: bool,
+) -> dict[str, object] | None:
+    try:
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository=repository,
+            base_branch=base_branch,
+        )
+    except Exception:
+        return None
+    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    if dry_run_result.intended_next_action != "merge":
+        return None
+    if _merge_train_candidate_matches_dry_run_queue(
+        candidate=active_candidate_record.candidate,
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+    ):
+        return None
+    candidate = build_merge_train_batch_candidate(
+        dry_run_result=dry_run_result,
+        base_sha=snapshot.base_sha,
+        policy_sha256=policy_sha256,
+        created_at=recorded_at,
+    )
+    result: dict[str, object] = {
+        "repository": candidate.repository,
+        "base_branch": candidate.base_branch,
+        "mode": "dry-run" if not mutate else "plan_candidate",
+        "controller_action": "plan_candidate",
+        "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+        "dry_run_result": dry_run_result.model_dump(mode="json"),
+        "candidate": candidate.model_dump(mode="json"),
+    }
+    if mutate:
+        candidate_record = build_merge_train_batch_candidate_record(
+            candidate=candidate,
+            source=f"service:controller:candidate-reflow:{request_trace_id}",
+            updated_at=recorded_at,
+        )
+        candidate_store.write_merge_train_batch_candidate_record(candidate_record)
+        try:
+            _supersede_active_merge_train_batch_candidate_records(
+                record_store=candidate_store,
+                repository=repository,
+                base_branch=base_branch,
+                batch_id=active_candidate_record.candidate.batch_id,
+                replacement_record_id=candidate_record.record_id,
+            )
+        except Exception:
+            candidate_store.write_merge_train_batch_candidate_record(
+                candidate_record.model_copy(update={"status": "superseded"})
+            )
+            raise
+        result["merge_train_batch_candidate_record_id"] = candidate_record.record_id
+    return result
 
 
 def _validate_merge_train_landing_record_for_controller(
@@ -9543,77 +9613,32 @@ def create_launchplane_service_app(
                         except ValueError as error:
                             raise MergeTrainControllerRequestError(str(error)) from error
                         if active_candidate_record.candidate.status == "failed":
-                            snapshot = GitHubMergeTrainSnapshotReader(
-                                transport=transport
-                            ).read_merge_train_snapshot(
+                            reflow_result = _try_reflow_failed_merge_train_candidate(
+                                candidate_store=candidate_store,
+                                active_candidate_record=active_candidate_record,
+                                policy=policy,
+                                policy_sha256=policy_record.policy_sha256,
+                                transport=transport,
                                 repository=controller_request.repository,
                                 base_branch=controller_request.base_branch,
+                                recorded_at=recorded_at,
+                                request_trace_id=request_trace_id,
+                                mutate=controller_request.mutate,
                             )
-                            dry_run_result = build_merge_train_dry_run_result(
-                                policy=policy, snapshot=snapshot
-                            )
-                            if (
-                                dry_run_result.intended_next_action == "merge"
-                                and not _merge_train_candidate_matches_dry_run_queue(
-                                    candidate=active_candidate_record.candidate,
-                                    dry_run_result=dry_run_result,
-                                    base_sha=snapshot.base_sha,
-                                )
-                            ):
-                                controller_action = "plan_candidate"
-                                candidate = build_merge_train_batch_candidate(
-                                    dry_run_result=dry_run_result,
-                                    base_sha=snapshot.base_sha,
-                                    policy_sha256=policy_record.policy_sha256,
-                                    created_at=recorded_at,
-                                )
-                                result = {
-                                    "repository": candidate.repository,
-                                    "base_branch": candidate.base_branch,
-                                    "mode": "dry-run"
-                                    if not controller_request.mutate
-                                    else controller_action,
-                                    "controller_action": controller_action,
-                                    "superseded_merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
-                                    "candidate": candidate.model_dump(mode="json"),
-                                }
-                                if controller_request.mutate:
-                                    candidate_record = build_merge_train_batch_candidate_record(
-                                        candidate=candidate,
-                                        source=(
-                                            "service:controller:candidate-reflow:"
-                                            f"{request_trace_id}"
-                                        ),
-                                        updated_at=recorded_at,
-                                    )
-                                    candidate_store.write_merge_train_batch_candidate_record(
-                                        candidate_record
-                                    )
-                                    result["merge_train_batch_candidate_record_id"] = (
-                                        candidate_record.record_id
-                                    )
-                                    _supersede_active_merge_train_batch_candidate_records(
-                                        record_store=candidate_store,
-                                        repository=controller_request.repository,
-                                        base_branch=controller_request.base_branch,
-                                        batch_id=active_candidate_record.candidate.batch_id,
-                                        replacement_record_id=candidate_record.record_id,
-                                    )
-                                driver_result = result
-                            else:
+                            if reflow_result is None:
                                 result = {
                                     "repository": controller_request.repository,
                                     "base_branch": controller_request.base_branch,
                                     "mode": "dry-run",
                                     "controller_action": "candidate_failed",
                                     "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                                    "dry_run_result": dry_run_result.model_dump(mode="json"),
                                     "candidate": active_candidate_record.candidate.model_dump(
                                         mode="json"
                                     ),
                                 }
-                                driver_result = result
+                            else:
+                                result = reflow_result
+                            driver_result = result
                         else:
                             if active_candidate_record.candidate.status in {
                                 "planned",

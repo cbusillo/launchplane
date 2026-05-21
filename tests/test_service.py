@@ -317,6 +317,17 @@ class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):
         return super().write_merge_train_batch_candidate_record(candidate_record)
 
 
+class _CandidateReflowSupersedeFailingFilesystemRecordStore(FilesystemRecordStore):
+    def write_merge_train_batch_candidate_record(self, record: object) -> Path:
+        candidate_record = cast(MergeTrainBatchCandidateRecord, record)
+        if (
+            candidate_record.status == "superseded"
+            and "candidate-reflow" not in candidate_record.source
+        ):
+            raise RuntimeError("candidate supersession persistence unavailable")
+        return super().write_merge_train_batch_candidate_record(candidate_record)
+
+
 class _SameBatchIdReflowFilesystemRecordStore(FilesystemRecordStore):
     def write_merge_train_batch_candidate_record(self, record: object) -> Path:
         candidate_record = cast(MergeTrainBatchCandidateRecord, record)
@@ -3270,6 +3281,198 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(len(failed_records), 1)
         self.assertEqual(failed_records[0].status, "active")
         self.assertFalse(any("candidate-reflow" in record.source for record in candidate_records))
+
+    def test_merge_train_controller_keeps_terminal_failed_candidate_when_reflow_snapshot_fails(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+
+            class _FailingSnapshotReader:
+                def __init__(self, *, transport: object) -> None:
+                    pass
+
+                def read_merge_train_snapshot(self, *, repository: str, base_branch: str) -> object:
+                    raise RuntimeError("snapshot unavailable")
+
+            with (
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+                patch("control_plane.service.GitHubMergeTrainSnapshotReader", _FailingSnapshotReader),
+            ):
+                status, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["result"]["controller_action"], "candidate_failed")
+        self.assertNotIn("dry_run_result", payload["result"])
+
+    def test_merge_train_controller_supersedes_reflow_candidate_when_old_retire_fails(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _FakeFailingMergeTrainGitHubClient,
+            ):
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            failing_store = _CandidateReflowSupersedeFailingFilesystemRecordStore(state_dir)
+            with (
+                patch("control_plane.service.build_record_store", return_value=failing_store),
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeExpandedMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                failing_app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_merge_train_service_identity()),
+                    authz_policy=_merge_train_service_policy(),
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+                status, payload = _invoke_app(
+                    failing_app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            candidate_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )
+
+        self.assertEqual(status, 500)
+        self.assertEqual(payload["error"]["code"], "internal_error")
+        reflow_records = tuple(
+            record for record in candidate_records if "candidate-reflow" in record.source
+        )
+        self.assertEqual(len(reflow_records), 1)
+        self.assertEqual(reflow_records[0].status, "superseded")
+        failed_records = tuple(
+            record for record in candidate_records if record.candidate.status == "failed"
+        )
+        self.assertEqual(len(failed_records), 1)
+        self.assertEqual(failed_records[0].status, "active")
 
     def test_merge_train_controller_returns_idle_without_eligible_pull_requests(
         self,
