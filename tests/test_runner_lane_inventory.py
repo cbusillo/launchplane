@@ -156,7 +156,10 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
                 ).read_runner_lane_inventory(repository=repository)
 
         with (
-            patch("control_plane.cli.UrllibMergeTrainGitHubTransport", return_value=object()),
+            patch(
+                "control_plane.cli_runner_lanes.UrllibMergeTrainGitHubTransport",
+                return_value=object(),
+            ),
             patch(
                 "control_plane.cli_runner_lanes.GitHubRunnerLaneInventoryReader",
                 _FakeInventoryReader,

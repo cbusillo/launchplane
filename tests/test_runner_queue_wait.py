@@ -193,7 +193,10 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
                 )
 
         with (
-            patch("control_plane.cli.UrllibMergeTrainGitHubTransport", return_value=object()),
+            patch(
+                "control_plane.cli_runner_lanes.UrllibMergeTrainGitHubTransport",
+                return_value=object(),
+            ),
             patch(
                 "control_plane.cli_runner_lanes.GitHubRunnerQueueWaitReader",
                 _FakeQueueWaitReader,
