@@ -66,6 +66,21 @@ class GitHubIssueInboxTests(unittest.TestCase):
                         ]
                     },
                     {"stdout": []},
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 7,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Inbox item",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/7",
+                                    }
+                                }
+                            ]
+                        }
+                    },
                 ],
             )
             previous_args = os.environ.get("FAKE_GH_ARGS")
@@ -135,6 +150,91 @@ class GitHubIssueInboxTests(unittest.TestCase):
         self.assertEqual(inbox.repositories[0].repository, "cbusillo/launchplane")
         self.assertEqual(inbox.repositories[0].issues, ())
 
+    def test_build_issue_inbox_surfaces_project_only_closed_and_stale_items(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            directory = Path(temporary_directory_name)
+            fake_gh = _write_fake_gh_sequence(
+                directory,
+                responses=[
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 7,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Closed plan",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/7",
+                                    },
+                                    "status": "Done",
+                                },
+                                {
+                                    "content": {
+                                        "number": 12,
+                                        "repository": "cbusillo/side-repo",
+                                        "title": "Untracked repository item",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/side-repo/issues/12",
+                                    },
+                                    "status": "In Progress",
+                                },
+                            ]
+                        }
+                    },
+                    {"stdout": []},
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 7,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Closed plan",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/7",
+                                    },
+                                    "status": "Done",
+                                },
+                                {
+                                    "content": {
+                                        "number": 12,
+                                        "repository": "cbusillo/side-repo",
+                                        "title": "Untracked repository item",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/side-repo/issues/12",
+                                    },
+                                    "status": "In Progress",
+                                },
+                            ]
+                        }
+                    },
+                ],
+            )
+            inbox = build_github_issue_inbox_read_model(
+                generated_at="2026-05-21T12:00:00Z",
+                config=GitHubIssueInboxConfig(
+                    repositories=("cbusillo/launchplane",),
+                    gh_binary=str(fake_gh),
+                    project_config=GitHubProjectPlanningFactsConfig(
+                        owner="cbusillo",
+                        project_number=4,
+                        gh_binary=str(fake_gh),
+                    ),
+                ),
+            )
+
+        self.assertEqual(inbox.repository_count, 2)
+        self.assertEqual(inbox.stale_project_item_count, 2)
+        issues = {
+            issue.key: issue
+            for repository_group in inbox.repositories
+            for issue in repository_group.issues
+        }
+        self.assertEqual(issues["cbusillo/launchplane#7"].project_status, "closed")
+        self.assertEqual(issues["cbusillo/side-repo#12"].project_status, "stale")
+        self.assertTrue(issues["cbusillo/side-repo#12"].present_in_project)
+
     def test_reconcile_issue_inbox_dry_run_lists_missing_open_issues(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             directory = Path(temporary_directory_name)
@@ -170,6 +270,20 @@ class GitHubIssueInboxTests(unittest.TestCase):
                         ]
                     },
                     {"stdout": []},
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 7,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Already planned",
+                                        "type": "Issue",
+                                    }
+                                }
+                            ]
+                        }
+                    },
                 ],
             )
             result = reconcile_github_issue_inbox(

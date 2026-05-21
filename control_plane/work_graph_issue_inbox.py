@@ -10,8 +10,10 @@ from typing import Any, Literal
 import click
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_github_projects import (
     GitHubProjectPlanningFactsConfig,
+    build_github_project_item_facts,
     build_github_project_issue_keys,
     github_as_object,
     github_labels,
@@ -20,7 +22,7 @@ from control_plane.work_graph_github_projects import (
 )
 
 
-IssueInboxProjectStatus = Literal["present", "missing", "unconfigured"]
+IssueInboxProjectStatus = Literal["present", "missing", "stale", "closed", "unconfigured"]
 _REPOSITORY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -59,6 +61,7 @@ class GitHubIssueInboxReadModel(BaseModel):
     project_configured: bool = False
     repository_count: int = Field(ge=0)
     issue_count: int = Field(ge=0)
+    stale_project_item_count: int = Field(default=0, ge=0)
     repositories: tuple[GitHubIssueInboxRepositoryGroup, ...] = ()
 
 
@@ -142,7 +145,9 @@ def build_github_issue_inbox_read_model(
     generated_at: str,
     config: GitHubIssueInboxConfig,
 ) -> GitHubIssueInboxReadModel:
-    project_issue_keys = _project_issue_keys(config.project_config)
+    project_facts = _project_facts(config.project_config)
+    project_issue_keys = _project_issue_keys_from_facts(project_facts)
+    open_issue_keys: set[str] = set()
     project_configured = config.project_config is not None
     groups = tuple(
         _repository_group(
@@ -150,14 +155,23 @@ def build_github_issue_inbox_read_model(
             repository=repository,
             project_configured=project_configured,
             project_issue_keys=project_issue_keys,
+            open_issue_keys=open_issue_keys,
         )
         for repository in config.repositories
+    )
+    groups = _append_stale_project_items(
+        groups=groups,
+        project_facts=project_facts,
+        open_issue_keys=frozenset(open_issue_keys),
     )
     return GitHubIssueInboxReadModel(
         generated_at=generated_at,
         project_configured=project_configured,
         repository_count=len(groups),
         issue_count=sum(group.issue_count for group in groups),
+        stale_project_item_count=sum(
+            1 for group in groups for issue in group.issues if issue.project_status in {"stale", "closed"}
+        ),
         repositories=groups,
     )
 
@@ -216,6 +230,7 @@ def _repository_group(
     repository: str,
     project_configured: bool,
     project_issue_keys: frozenset[str],
+    open_issue_keys: set[str],
 ) -> GitHubIssueInboxRepositoryGroup:
     issues = tuple(
         sorted(
@@ -231,8 +246,78 @@ def _repository_group(
             key=lambda issue: issue.number,
         )
     )
+    open_issue_keys.update(issue.key.lower() for issue in issues)
     return GitHubIssueInboxRepositoryGroup(
         repository=repository,
+        issue_count=len(issues),
+        present_in_project_count=sum(1 for issue in issues if issue.present_in_project is True),
+        missing_from_project_count=sum(1 for issue in issues if issue.present_in_project is False),
+        issues=issues,
+    )
+
+
+def _append_stale_project_items(
+    *,
+    groups: tuple[GitHubIssueInboxRepositoryGroup, ...],
+    project_facts: tuple[WorkGraphPlanningIssueFacts, ...],
+    open_issue_keys: frozenset[str],
+) -> tuple[GitHubIssueInboxRepositoryGroup, ...]:
+    if not project_facts:
+        return groups
+    stale_by_repository: dict[str, list[GitHubIssueInboxIssue]] = {}
+    for fact in project_facts:
+        key = f"{fact.repository}#{fact.number}"
+        if fact.is_pull_request or key.lower() in open_issue_keys:
+            continue
+        state = str(fact.state or "closed")
+        project_status: IssueInboxProjectStatus = "closed" if fact.state == "closed" else "stale"
+        stale_by_repository.setdefault(fact.repository, []).append(
+            GitHubIssueInboxIssue(
+                key=key,
+                repository=fact.repository,
+                number=fact.number,
+                title=fact.title,
+                url=fact.url,
+                state=state,
+                labels=fact.labels,
+                updated_at=fact.updated_at,
+                project_status=project_status,
+                present_in_project=True,
+            )
+        )
+    if not stale_by_repository:
+        return groups
+    configured_repositories = {group.repository.lower() for group in groups}
+    updated_groups = [
+        _group_with_stale_items(group, stale_by_repository.pop(group.repository, []))
+        for group in groups
+    ]
+    for repository in sorted(stale_by_repository):
+        if repository.lower() in configured_repositories:
+            continue
+        updated_groups.append(
+            _group_with_stale_items(
+                GitHubIssueInboxRepositoryGroup(
+                    repository=repository,
+                    issue_count=0,
+                    present_in_project_count=0,
+                    missing_from_project_count=0,
+                ),
+                stale_by_repository[repository],
+            )
+        )
+    return tuple(updated_groups)
+
+
+def _group_with_stale_items(
+    group: GitHubIssueInboxRepositoryGroup,
+    stale_items: list[GitHubIssueInboxIssue],
+) -> GitHubIssueInboxRepositoryGroup:
+    if not stale_items:
+        return group
+    issues = tuple(sorted((*group.issues, *stale_items), key=lambda issue: issue.number))
+    return GitHubIssueInboxRepositoryGroup(
+        repository=group.repository,
         issue_count=len(issues),
         present_in_project_count=sum(1 for issue in issues if issue.present_in_project is True),
         missing_from_project_count=sum(1 for issue in issues if issue.present_in_project is False),
@@ -302,6 +387,24 @@ def _project_issue_keys(
     if project_config is None:
         return frozenset()
     return frozenset(key.lower() for key in build_github_project_issue_keys(project_config))
+
+
+def _project_facts(
+    project_config: GitHubProjectPlanningFactsConfig | None,
+) -> tuple[WorkGraphPlanningIssueFacts, ...]:
+    if project_config is None:
+        return ()
+    return build_github_project_item_facts(project_config)
+
+
+def _project_issue_keys_from_facts(
+    project_facts: tuple[WorkGraphPlanningIssueFacts, ...],
+) -> frozenset[str]:
+    return frozenset(
+        f"{fact.repository}#{fact.number}".lower()
+        for fact in project_facts
+        if not fact.is_pull_request
+    )
 
 
 def _apply_issue_reconcile_item(

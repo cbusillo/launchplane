@@ -10,9 +10,12 @@
   --fg-strong: #ffffff;
   --fg-muted: #a3a8b0;
   --fg-faint: #747b85;
+  --panel: #15171a;
+  --accent: #6e9bd9;
   --lane-prod: #4fb286;
   --lane-testing: #d4a24a;
   --lane-preview: #6e9bd9;
+  --status-pass: #4fb286;
   --status-ok: #4fb286;
   --status-warn: #d4a24a;
   --status-fail: #d8736b;
@@ -291,9 +294,10 @@ p {
 
 .operator-cockpit {
   display: grid;
-  grid-template-columns:
-    minmax(220px, 0.64fr) minmax(280px, 1.08fr) minmax(280px, 1fr)
-    minmax(280px, 1fr) minmax(260px, 0.82fr);
+  grid-template-columns: minmax(220px, 0.65fr) minmax(280px, 1.05fr) repeat(
+      2,
+      minmax(300px, 1fr)
+    );
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--hair);
@@ -303,6 +307,7 @@ p {
 .cockpit-summary,
 .product-inventory-table,
 .work-graph-queue,
+.github-issue-inbox,
 .merge-train-panel,
 .every-code-queue {
   min-width: 0;
@@ -323,6 +328,7 @@ p {
 
 .product-inventory-table,
 .work-graph-queue,
+.github-issue-inbox,
 .merge-train-panel,
 .every-code-queue {
   display: grid;
@@ -549,6 +555,175 @@ p {
 
 .work-graph-hidden {
   color: var(--fg-faint);
+}
+
+.github-issue-inbox {
+  max-height: 620px;
+  overflow: auto;
+}
+
+.github-inbox-head {
+  grid-template-columns: auto 1fr auto;
+}
+
+.github-inbox-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.github-inbox-actions button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  font-size: 11px;
+}
+
+.github-inbox-actions button:disabled {
+  opacity: 0.52;
+}
+
+.github-inbox-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.github-inbox-summary span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg-faint);
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
+.github-inbox-summary strong {
+  color: var(--fg-strong);
+  font-family: var(--font-mono);
+}
+
+.github-inbox-sync {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg-faint);
+  padding: 7px 8px;
+  font-size: 11px;
+}
+
+.github-inbox-sync strong {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-inbox-summary-compact span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-inbox-reconcile-summary,
+.github-inbox-group {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  padding: 8px;
+}
+
+.github-inbox-reconcile-summary > div:first-child,
+.github-inbox-group-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.github-inbox-reconcile-summary strong,
+.github-inbox-group-head code {
+  overflow: hidden;
+  color: var(--fg-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-inbox-reconcile-summary span,
+.github-inbox-group-head span {
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.github-inbox-failure {
+  overflow: hidden;
+  color: var(--status-fail);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-inbox-row {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg);
+  padding: 8px;
+}
+
+.github-inbox-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.github-inbox-title strong,
+.github-inbox-title code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.github-inbox-title strong {
+  color: var(--fg-strong);
+}
+
+.github-inbox-title code {
+  color: var(--fg-muted);
+}
+
+.github-inbox-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
 }
 
 .merge-train-panel {
@@ -2373,7 +2548,9 @@ p {
   .cockpit-metrics,
   .product-inventory-row,
   .queue-row,
-  .work-graph-row {
+  .work-graph-row,
+  .github-inbox-actions,
+  .github-inbox-summary {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
   }

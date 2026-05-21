@@ -9,6 +9,9 @@ import type {
   GenericWebProdPromotionRequest,
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
+  GitHubIssueInboxPayload,
+  GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcilePayload,
   LogoutPayload,
   MergeTrainControllerStatusPayload,
   MergeTrainPolicyTargetsPayload,
@@ -160,6 +163,29 @@ export function rankWorkGraphSnapshot(
     snapshot,
     limit,
   });
+}
+
+export function readGitHubIssueInbox(
+  signal?: AbortSignal,
+): Promise<GitHubIssueInboxPayload> {
+  return requestJson<GitHubIssueInboxPayload>(
+    "/v1/work-graph/github/issues",
+    "GET",
+    undefined,
+    signal,
+  );
+}
+
+export function reconcileGitHubIssueInbox(
+  mode: GitHubIssueInboxReconcileMode,
+  signal?: AbortSignal,
+): Promise<GitHubIssueInboxReconcilePayload> {
+  return requestJson<GitHubIssueInboxReconcilePayload>(
+    "/v1/work-graph/github/issues/reconcile",
+    "POST",
+    { mode },
+    signal,
+  );
 }
 
 export function readMergeTrainControllerStatus(

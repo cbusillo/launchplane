@@ -15,7 +15,7 @@ import {
   Sun,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   LaunchplaneApiError,
   listEveryCodeWorkRequests,
@@ -23,9 +23,11 @@ import {
   listProducts,
   listProductProfiles,
   logout,
+  readGitHubIssueInbox,
   readAuthSession,
   readDriverView,
   readProductEnvironmentConfigStatus,
+  reconcileGitHubIssueInbox,
 } from "./api";
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { formatTime, labelForStatus } from "./format";
@@ -64,6 +66,10 @@ import type {
   DriverDescriptor,
   DriverView,
   EveryCodeWorkRequestRecord,
+  GitHubIssueInbox,
+  GitHubIssueInboxIssue,
+  GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcileSummary,
   GenericWebProdPromotionPayload,
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
@@ -218,6 +224,33 @@ export function App() {
   const [workGraphFilter, setWorkGraphFilter] =
     useState<WorkGraphFilter>("all");
   const [workGraphMode, setWorkGraphMode] = useState<WorkGraphMode>("all");
+  const [issueInbox, setIssueInbox] = useState<GitHubIssueInbox | null>(null);
+  const [issueInboxError, setIssueInboxError] = useState("");
+  const refreshIssueInbox = useCallback(async (signal?: AbortSignal) => {
+    setIssueInboxError("");
+    try {
+      const payload = await readGitHubIssueInbox(signal);
+      if (signal?.aborted) {
+        return;
+      }
+      setIssueInbox(payload.inbox);
+    } catch (apiError) {
+      if (signal?.aborted) {
+        return;
+      }
+      setIssueInbox(null);
+      if (
+        apiError instanceof LaunchplaneApiError &&
+        apiError.statusCode === 404
+      ) {
+        setIssueInboxError("");
+      } else if (apiError instanceof Error) {
+        setIssueInboxError(apiError.message);
+      } else {
+        setIssueInboxError("GitHub issue inbox request failed.");
+      }
+    }
+  }, []);
   const { choices, selected, setSelected } = useProductSelection({
     drivers,
     productProfiles,
@@ -292,6 +325,8 @@ export function App() {
       setConfigStatusError("");
       setWorkRequests([]);
       resetWorkGraph();
+      setIssueInbox(null);
+      setIssueInboxError("");
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -350,6 +385,7 @@ export function App() {
           setProductOverviews(productsPayload.products);
           setWorkRequests(workRequestsPayload.requests);
           await refreshWorkGraph(controller.signal);
+          await refreshIssueInbox(controller.signal);
         },
       )
       .catch((apiError: unknown) => {
@@ -372,7 +408,14 @@ export function App() {
       });
 
     return () => controller.abort();
-  }, [authStatus, selected, refreshKey, refreshWorkGraph, resetWorkGraph]);
+  }, [
+    authStatus,
+    selected,
+    refreshKey,
+    refreshWorkGraph,
+    refreshIssueInbox,
+    resetWorkGraph,
+  ]);
 
   useEffect(() => {
     if (authStatus !== "signed_in" || !selectedProductOverview) {
@@ -538,6 +581,8 @@ export function App() {
               workGraphItems={workGraphItems}
               workGraphHiddenCount={workGraphHiddenCount}
               workGraphError={workGraphError}
+              issueInbox={issueInbox}
+              issueInboxError={issueInboxError}
               workGraphFilter={workGraphFilter}
               workGraphMode={workGraphMode}
               loading={loading}
@@ -546,6 +591,10 @@ export function App() {
               }
               onWorkGraphFilterChange={setWorkGraphFilter}
               onWorkGraphModeChange={setWorkGraphMode}
+              onRefreshIssueInbox={() => void refreshIssueInbox()}
+              reconcileIssueInbox={async (mode, signal) =>
+                reconcileGitHubIssueInbox(mode, signal)
+              }
             />
             <ProductOverviewShell
               product={selectedProductOverview}
@@ -1348,6 +1397,69 @@ function StateFixtureGallery({
       ],
     },
   ];
+  const fixtureIssueInbox: GitHubIssueInbox = {
+    schema_version: 1,
+    generated_at: "2026-05-21T12:30:00Z",
+    project_configured: true,
+    repository_count: 3,
+    issue_count: 5,
+    stale_project_item_count: 2,
+    repositories: [
+      {
+        repository: "cbusillo/launchplane",
+        issue_count: 3,
+        present_in_project_count: 2,
+        missing_from_project_count: 1,
+        issues: [
+          fixtureInboxIssue({
+            number: 697,
+            title: "Add read-only grouped GitHub issue inbox",
+            projectStatus: "present",
+          }),
+          fixtureInboxIssue({
+            number: 698,
+            title: "Reconcile missing GitHub issues into Code Plans",
+            projectStatus: "missing",
+          }),
+          fixtureInboxIssue({
+            number: 601,
+            title: "Retired Code Plans follow-up",
+            projectStatus: "closed",
+            state: "closed",
+          }),
+        ],
+      },
+      {
+        repository: "cbusillo/codex-skills",
+        issue_count: 1,
+        present_in_project_count: 1,
+        missing_from_project_count: 0,
+        issues: [
+          fixtureInboxIssue({
+            repository: "cbusillo/codex-skills",
+            number: 127,
+            title: "Update Launchplane merge train guidance",
+            projectStatus: "present",
+          }),
+        ],
+      },
+      {
+        repository: "cbusillo/side-repo-with-a-long-name-for-mobile-layout",
+        issue_count: 1,
+        present_in_project_count: 1,
+        missing_from_project_count: 0,
+        issues: [
+          fixtureInboxIssue({
+            repository: "cbusillo/side-repo-with-a-long-name-for-mobile-layout",
+            number: 12,
+            title:
+              "Project item no longer appears in the configured open issue inventory",
+            projectStatus: "stale",
+          }),
+        ],
+      },
+    ],
+  };
 
   return (
     <section className="fixture-gallery">
@@ -1363,12 +1475,16 @@ function StateFixtureGallery({
           workGraphItems={fixtureWorkGraphItems}
           workGraphHiddenCount={2}
           workGraphError=""
+          issueInbox={fixtureIssueInbox}
+          issueInboxError=""
           workGraphFilter={fixtureWorkGraphFilter}
           workGraphMode={fixtureWorkGraphMode}
           loading={false}
           onSelectProduct={() => undefined}
           onWorkGraphFilterChange={setFixtureWorkGraphFilter}
           onWorkGraphModeChange={setFixtureWorkGraphMode}
+          onRefreshIssueInbox={() => undefined}
+          reconcileIssueInbox={fixtureReconcileIssueInbox}
           readMergeTrainStatus={fixtureMergeTrainControllerStatus}
           readMergeTrainPolicyTargets={fixtureMergeTrainPolicyTargets}
         />
@@ -1585,6 +1701,74 @@ function fixtureMergeTrainControllerStatus(
       ],
     },
   });
+}
+
+function fixtureInboxIssue({
+  repository = "cbusillo/launchplane",
+  number,
+  title,
+  projectStatus,
+  state = "open",
+}: {
+  repository?: string;
+  number: number;
+  title: string;
+  projectStatus: GitHubIssueInboxIssue["project_status"];
+  state?: string;
+}): GitHubIssueInboxIssue {
+  return {
+    key: `${repository}#${number}`,
+    repository,
+    number,
+    title,
+    url: `https://github.com/${repository}/issues/${number}`,
+    state,
+    labels: ["plan"],
+    author: projectStatus === "stale" ? "automation-gh" : "code",
+    created_at: "2026-05-20T12:00:00Z",
+    updated_at: "2026-05-21T12:00:00Z",
+    project_status: projectStatus,
+    present_in_project:
+      projectStatus !== "missing" && projectStatus !== "unconfigured",
+  };
+}
+
+function fixtureReconcileIssueInbox(
+  mode: GitHubIssueInboxReconcileMode,
+): Promise<{ result: { reconcile: GitHubIssueInboxReconcileSummary } }> {
+  const summary: GitHubIssueInboxReconcileSummary = {
+    schema_version: 1,
+    generated_at: "2026-05-21T12:32:00Z",
+    mode,
+    repository_count: 3,
+    issue_count: 5,
+    added_count: mode === "apply" ? 1 : 0,
+    already_present_count: mode === "apply" ? 2 : 0,
+    skipped_count: 0,
+    failed_count: mode === "apply" ? 1 : 0,
+    would_add_count: mode === "dry_run" ? 1 : 0,
+    items: [
+      {
+        key: "cbusillo/launchplane#698",
+        repository: "cbusillo/launchplane",
+        number: 698,
+        title: "Reconcile missing GitHub issues into Code Plans",
+        url: "https://github.com/cbusillo/launchplane/issues/698",
+        action: mode === "dry_run" ? "would_add" : "added",
+        detail: "",
+      },
+      {
+        key: "cbusillo/private-repo#44",
+        repository: "cbusillo/private-repo",
+        number: 44,
+        title: "Project write denied for fixture",
+        url: "https://github.com/cbusillo/private-repo/issues/44",
+        action: mode === "dry_run" ? "would_add" : "failed",
+        detail: mode === "apply" ? "GitHub CLI returned 403." : "",
+      },
+    ],
+  };
+  return Promise.resolve({ result: { reconcile: summary } });
 }
 
 function fixtureMergeTrainPolicyTargets() {

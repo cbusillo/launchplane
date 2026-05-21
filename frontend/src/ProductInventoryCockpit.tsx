@@ -1,6 +1,7 @@
 import { PanelsTopLeft } from "lucide-react";
 
 import { EveryCodeQueue } from "./EveryCodeQueue";
+import { GitHubIssueInboxPanel } from "./GitHubIssueInboxPanel";
 import { MergeTrainControllerPanel } from "./MergeTrainControllerPanel";
 import { MetricTile, PanelHead } from "./panel-ui";
 import { StateBlock, SkeletonRows, StatusPill } from "./status-ui";
@@ -8,6 +9,9 @@ import { TrustBadge } from "./TrustBadge";
 
 import type {
   EveryCodeWorkRequestRecord,
+  GitHubIssueInbox,
+  GitHubIssueInboxReconcileMode,
+  GitHubIssueInboxReconcileSummary,
   ProductSiteOverview,
   MergeTrainControllerStatus,
   MergeTrainPolicyTarget,
@@ -26,12 +30,16 @@ export function ProductInventoryCockpit({
   workGraphItems,
   workGraphHiddenCount,
   workGraphError,
+  issueInbox,
+  issueInboxError,
   workGraphFilter,
   workGraphMode,
   loading,
   onSelectProduct,
   onWorkGraphFilterChange,
   onWorkGraphModeChange,
+  onRefreshIssueInbox,
+  reconcileIssueInbox,
   readMergeTrainStatus,
   readMergeTrainPolicyTargets,
 }: {
@@ -41,12 +49,19 @@ export function ProductInventoryCockpit({
   workGraphItems: WorkGraphQueueItem[];
   workGraphHiddenCount: number;
   workGraphError: string;
+  issueInbox: GitHubIssueInbox | null;
+  issueInboxError: string;
   workGraphFilter: WorkGraphFilter;
   workGraphMode: WorkGraphMode;
   loading: boolean;
   onSelectProduct: (product: ProductSiteOverview) => void;
   onWorkGraphFilterChange: (filter: WorkGraphFilter) => void;
   onWorkGraphModeChange: (mode: WorkGraphMode) => void;
+  onRefreshIssueInbox: () => void;
+  reconcileIssueInbox?: (
+    mode: GitHubIssueInboxReconcileMode,
+    signal?: AbortSignal,
+  ) => Promise<{ result: { reconcile: GitHubIssueInboxReconcileSummary } }>;
   readMergeTrainStatus?: (
     repository: string,
     baseBranch: string,
@@ -157,6 +172,13 @@ export function ProductInventoryCockpit({
         loading={loading}
         onFilterChange={onWorkGraphFilterChange}
         onModeChange={onWorkGraphModeChange}
+      />
+      <GitHubIssueInboxPanel
+        inbox={issueInbox}
+        loading={loading}
+        error={issueInboxError}
+        onRefresh={onRefreshIssueInbox}
+        reconcile={reconcileIssueInbox}
       />
       <MergeTrainControllerPanel
         products={products}
