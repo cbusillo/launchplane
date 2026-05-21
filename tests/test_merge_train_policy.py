@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from control_plane import cli as control_plane_cli
 from control_plane.cli import main
+from control_plane.cli_policy_profiles import summarize_merge_train_policy_record
 from control_plane.cli_service import _first_driver_payload
 from control_plane.cli_storage_secrets import normalize_secret_scope
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
@@ -81,7 +82,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
             policy=policy,
         )
 
-        summary = control_plane_cli._summarize_merge_train_policy_record(record)
+        summary = summarize_merge_train_policy_record(record)
 
         self.assertEqual(summary["record_id"], record.record_id)
         self.assertEqual(summary["status"], "active")
