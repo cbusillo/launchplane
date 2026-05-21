@@ -1,0 +1,544 @@
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+import click
+
+from control_plane import dokploy as control_plane_dokploy
+from control_plane.contracts.driver_descriptor import DriverContextView
+from control_plane.drivers.registry import build_driver_context_view
+from control_plane.service import serve_launchplane_service
+
+
+_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
+_SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
+
+
+@dataclass(frozen=True)
+class ServiceCliCallbacks:
+    store_factory: Callable[..., object]
+    control_plane_root: Callable[[], Path]
+    build_bootstrap_policy_payload: Callable[..., dict[str, object]]
+    sync_launchplane_bootstrap_policy: Callable[..., dict[str, object]]
+    inspect_launchplane_service_dokploy_target: Callable[
+        ..., tuple[control_plane_dokploy.JsonObject, dict[str, object]]
+    ]
+    launchplane_service_target_preflight_error_message: Callable[..., str]
+    apply_dokploy_image_reference: Callable[..., dict[str, object]]
+    restore_dokploy_image_reference: Callable[..., dict[str, object]]
+    trigger_and_wait_for_dokploy_target_deploy: Callable[..., dict[str, str]]
+    verify_healthcheck_urls: Callable[..., None]
+    inspect_local_launchplane_config_boundary: Callable[..., dict[str, object]]
+
+
+_callbacks: ServiceCliCallbacks | None = None
+
+
+def register_service_commands(main: click.Group, *, callbacks: ServiceCliCallbacks) -> None:
+    global _callbacks
+    _callbacks = callbacks
+    main.add_command(service)
+
+
+def _service_callbacks() -> ServiceCliCallbacks:
+    if _callbacks is None:
+        raise click.ClickException("Launchplane service CLI callbacks are not configured.")
+    return _callbacks
+
+
+def _store(*, state_dir: Path, database_url: str | None = None) -> object:
+    return _service_callbacks().store_factory(state_dir=state_dir, database_url=database_url)
+
+
+def _control_plane_root() -> Path:
+    return _service_callbacks().control_plane_root()
+
+
+def _first_driver_payload(
+    view_payload: DriverContextView, *, driver_id: str
+) -> dict[str, object] | None:
+    for driver_view in view_payload.drivers:
+        if getattr(driver_view, "driver_id", "") == driver_id:
+            return dict(driver_view.model_dump(mode="json"))
+    return None
+
+
+def _provenance_payload(raw_value: object) -> dict[str, object] | None:
+    if not isinstance(raw_value, dict):
+        return None
+    provenance = raw_value.get("provenance")
+    return provenance if isinstance(provenance, dict) else None
+
+
+def _freshness_surface(
+    *, name: str, driver_id: str, raw_value: object, unsupported: bool = False
+) -> dict[str, object]:
+    if unsupported:
+        return {
+            "name": name,
+            "driver_id": driver_id,
+            "freshness_status": "unsupported",
+            "source_kind": "unsupported",
+            "source_record_id": "",
+            "recorded_at": "",
+            "stale_after": "",
+            "has_provenance": True,
+        }
+    provenance = _provenance_payload(raw_value)
+    if provenance is None:
+        return {
+            "name": name,
+            "driver_id": driver_id,
+            "freshness_status": "missing",
+            "source_kind": "record",
+            "source_record_id": "",
+            "recorded_at": "",
+            "stale_after": "",
+            "has_provenance": False,
+        }
+    freshness_status = str(provenance.get("freshness_status") or "missing")
+    source_kind = str(provenance.get("source_kind") or "record")
+    source_record_id = str(provenance.get("source_record_id") or "")
+    has_provenance = freshness_status != "missing" and (
+        source_kind != "record" or bool(source_record_id)
+    )
+    return {
+        "name": name,
+        "driver_id": driver_id,
+        "freshness_status": freshness_status,
+        "source_kind": source_kind,
+        "source_record_id": source_record_id,
+        "recorded_at": str(provenance.get("recorded_at") or ""),
+        "stale_after": str(provenance.get("stale_after") or ""),
+        "has_provenance": has_provenance,
+    }
+
+
+def _build_data_freshness_report(
+    *, record_store: object, context_name: str, preview_context_name: str
+) -> dict[str, object]:
+    surfaces: list[dict[str, object]] = []
+    for instance_name in ("prod", "testing"):
+        view = build_driver_context_view(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        driver = _first_driver_payload(view, driver_id="verireel")
+        lane_summary = driver.get("lane_summary") if isinstance(driver, dict) else None
+        surfaces.append(
+            _freshness_surface(
+                name=f"{context_name}/{instance_name}/lane",
+                driver_id="verireel",
+                raw_value=lane_summary,
+            )
+        )
+
+    preview_view = build_driver_context_view(
+        record_store=record_store,
+        context_name=preview_context_name,
+    )
+    preview_driver = _first_driver_payload(preview_view, driver_id="verireel")
+    inventory_provenance = (
+        preview_driver.get("preview_inventory_provenance")
+        if isinstance(preview_driver, dict)
+        else None
+    )
+    preview_summaries = (
+        preview_driver.get("preview_summaries") if isinstance(preview_driver, dict) else None
+    )
+    if isinstance(preview_summaries, list) and preview_summaries:
+        for summary in preview_summaries:
+            preview = summary.get("preview") if isinstance(summary, dict) else None
+            preview_id = "unknown-preview"
+            if isinstance(preview, dict):
+                preview_id = str(preview.get("preview_id") or preview_id)
+            surfaces.append(
+                _freshness_surface(
+                    name=f"{preview_context_name}/{preview_id}",
+                    driver_id="verireel",
+                    raw_value=summary,
+                )
+            )
+    else:
+        surfaces.append(
+            _freshness_surface(
+                name=f"{preview_context_name}/preview-inventory",
+                driver_id="verireel",
+                raw_value={"provenance": inventory_provenance}
+                if isinstance(inventory_provenance, dict)
+                else None,
+            )
+        )
+
+    missing_provenance = [surface for surface in surfaces if not surface["has_provenance"]]
+    return {
+        "status": "ok" if not missing_provenance else "rejected",
+        "context": context_name,
+        "preview_context": preview_context_name,
+        "surface_count": len(surfaces),
+        "missing_provenance_count": len(missing_provenance),
+        "surfaces": surfaces,
+    }
+
+
+@click.group()
+def service() -> None:
+    """Launchplane service commands."""
+
+
+@service.command("serve")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--policy-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=8080, show_default=True)
+@click.option(
+    "--audience",
+    default="launchplane.shinycomputers.com",
+    show_default=True,
+    help="Expected GitHub OIDC audience for Launchplane service tokens.",
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default=None,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+def service_serve(
+    state_dir: Path,
+    policy_file: Path,
+    host: str,
+    port: int,
+    audience: str,
+    database_url: str | None,
+) -> None:
+    serve_launchplane_service(
+        state_dir=state_dir,
+        policy_file=policy_file,
+        host=host,
+        port=port,
+        audience=audience,
+        database_url=database_url,
+    )
+
+
+@service.command("render-authz-policy")
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Explicit bootstrap authz policy source. Live policy should be DB-backed.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "b64"]),
+    default="json",
+    show_default=True,
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve a relative policy file.",
+)
+def service_render_authz_policy(
+    policy_file: Path | None,
+    output_format: str,
+    control_plane_root: Path | None,
+) -> None:
+    callbacks = _service_callbacks()
+    payload = callbacks.build_bootstrap_policy_payload(
+        control_plane_root=control_plane_root or _control_plane_root(),
+        policy_file=policy_file,
+    )
+    if output_format == "b64":
+        click.echo(str(payload["policy_b64"]))
+        return
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service.command("sync-bootstrap-policy")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
+    required=True,
+    help="Dokploy target type for the live Launchplane service.",
+)
+@click.option(
+    "--target-id",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
+    required=True,
+    help="Dokploy target id for the live Launchplane service.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Explicit bootstrap authz policy source. Live policy should be DB-backed.",
+)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials and a relative policy file.",
+)
+def service_sync_bootstrap_policy(
+    target_type: str,
+    target_id: str,
+    policy_file: Path | None,
+    apply_changes: bool,
+    control_plane_root: Path | None,
+) -> None:
+    callbacks = _service_callbacks()
+    payload = callbacks.sync_launchplane_bootstrap_policy(
+        target_type=target_type,
+        target_id=target_id,
+        control_plane_root=control_plane_root or _control_plane_root(),
+        policy_file=policy_file,
+        apply_changes=apply_changes,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service.command("deploy-dokploy-image")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
+    required=True,
+    help="Dokploy target type for the live Launchplane service.",
+)
+@click.option(
+    "--target-id",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
+    required=True,
+    help="Dokploy target id for the live Launchplane service.",
+)
+@click.option(
+    "--image-reference",
+    required=True,
+    help="Immutable image reference to deploy, usually repo@sha256:...",
+)
+@click.option(
+    "--health-url",
+    "health_urls",
+    multiple=True,
+    required=True,
+    help="Public Launchplane health URL to verify after Dokploy rollout. Repeat for alternate URLs.",
+)
+@click.option("--deploy-timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--health-timeout-seconds", type=int, default=180, show_default=True)
+@click.option("--rollback-on-failure/--no-rollback-on-failure", default=True, show_default=True)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Request Dokploy no-cache redeploy semantics when supported.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def service_deploy_dokploy_image(
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+    health_urls: tuple[str, ...],
+    deploy_timeout_seconds: int,
+    health_timeout_seconds: int,
+    rollback_on_failure: bool,
+    no_cache: bool,
+    control_plane_root: Path | None,
+) -> None:
+    callbacks = _service_callbacks()
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    target_payload, preflight_payload = callbacks.inspect_launchplane_service_dokploy_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    if preflight_payload["blockers"]:
+        raise click.ClickException(
+            callbacks.launchplane_service_target_preflight_error_message(
+                preflight_payload=preflight_payload
+            )
+        )
+    normalized_health_urls = tuple(url.strip() for url in health_urls if url.strip())
+    apply_result = callbacks.apply_dokploy_image_reference(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        image_reference=image_reference,
+        target_payload=target_payload,
+    )
+    payload: dict[str, object] = {
+        "status": "pending",
+        "target_type": target_type,
+        "target_id": target_id,
+        "image_reference": image_reference,
+        "preflight": preflight_payload,
+        "health_urls": list(normalized_health_urls),
+        "deploy_timeout_seconds": deploy_timeout_seconds,
+        "health_timeout_seconds": health_timeout_seconds,
+        "rollback_on_failure": rollback_on_failure,
+        **apply_result,
+    }
+    previous_image_reference = str(apply_result["previous_image_reference"])
+    previous_value_present = bool(apply_result["previous_image_reference_present"])
+    rollback_payload: dict[str, object] | None = None
+    try:
+        payload.update(
+            callbacks.trigger_and_wait_for_dokploy_target_deploy(
+                host=host,
+                token=token,
+                target_type=target_type,
+                target_id=target_id,
+                deploy_timeout_seconds=deploy_timeout_seconds,
+                no_cache=no_cache,
+            )
+        )
+        callbacks.verify_healthcheck_urls(
+            health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds
+        )
+        payload["status"] = "ok"
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    except click.ClickException as error:
+        payload["status"] = "failed"
+        payload["error"] = str(error)
+        if rollback_on_failure:
+            rollback_payload = {
+                "requested_image_reference": previous_image_reference,
+                "requested_image_reference_present": previous_value_present,
+                "status": "pending",
+            }
+            try:
+                rollback_payload.update(
+                    callbacks.restore_dokploy_image_reference(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        image_reference=previous_image_reference,
+                        value_present=previous_value_present,
+                    )
+                )
+                rollback_payload.update(
+                    callbacks.trigger_and_wait_for_dokploy_target_deploy(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        deploy_timeout_seconds=deploy_timeout_seconds,
+                        no_cache=no_cache,
+                    )
+                )
+                callbacks.verify_healthcheck_urls(
+                    health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds
+                )
+                rollback_payload["status"] = "ok"
+            except click.ClickException as rollback_error:
+                rollback_payload["status"] = "failed"
+                rollback_payload["error"] = str(rollback_error)
+        payload["rollback"] = rollback_payload
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        raise click.ClickException(str(error)) from error
+
+
+@service.command("inspect-dokploy-target")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
+    required=True,
+    help="Dokploy target type for the live Launchplane service.",
+)
+@click.option(
+    "--target-id",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
+    required=True,
+    help="Dokploy target id for the live Launchplane service.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def service_inspect_dokploy_target(
+    target_type: str,
+    target_id: str,
+    control_plane_root: Path | None,
+) -> None:
+    callbacks = _service_callbacks()
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    _, preflight_payload = callbacks.inspect_launchplane_service_dokploy_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    click.echo(json.dumps(preflight_payload, indent=2, sort_keys=True))
+    if preflight_payload["blockers"]:
+        raise click.ClickException(
+            callbacks.launchplane_service_target_preflight_error_message(
+                preflight_payload=preflight_payload
+            )
+        )
+
+
+@service.command("inspect-config-boundary")
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to inspect local config authority.",
+)
+def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
+    callbacks = _service_callbacks()
+    launchplane_root = control_plane_root or _control_plane_root()
+    payload = callbacks.inspect_local_launchplane_config_boundary(
+        control_plane_root=launchplane_root
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service.command("inspect-data-freshness")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--database-url", envvar=_DATABASE_URL_ENV_KEYS, default="", show_default=False)
+@click.option("--context", "context_name", default="verireel", show_default=True)
+@click.option(
+    "--preview-context", "preview_context_name", default="verireel-testing", show_default=True
+)
+def service_inspect_data_freshness(
+    state_dir: Path, database_url: str, context_name: str, preview_context_name: str
+) -> None:
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    try:
+        payload = _build_data_freshness_report(
+            record_store=record_store,
+            context_name=context_name,
+            preview_context_name=preview_context_name,
+        )
+    finally:
+        close = getattr(record_store, "close", None)
+        if callable(close):
+            close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    if payload["status"] != "ok":
+        raise click.ClickException("Launchplane data freshness report is missing provenance.")

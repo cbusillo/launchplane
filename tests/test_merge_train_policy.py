@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from control_plane import cli as control_plane_cli
 from control_plane.cli import main
+from control_plane.cli_service import _first_driver_payload
 from control_plane.cli_storage_secrets import normalize_secret_scope
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.driver_descriptor import DriverView
@@ -161,7 +162,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
             ),
         )
 
-        payload = control_plane_cli._first_driver_payload(view, driver_id="verireel")
+        payload = _first_driver_payload(view, driver_id="verireel")
 
         self.assertIsNotNone(payload)
         assert payload is not None
@@ -177,7 +178,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
     def test_cli_first_driver_payload_returns_none_for_missing_driver(self) -> None:
         view = DriverContextView(context="demo")
 
-        payload = control_plane_cli._first_driver_payload(view, driver_id="verireel")
+        payload = _first_driver_payload(view, driver_id="verireel")
 
         self.assertIsNone(payload)
 
