@@ -15,12 +15,136 @@ from control_plane.contracts.runner_lane_control import RunnerLaneControlPolicy
 from control_plane.contracts.runner_lane_control import RunnerLaneControlRequest
 from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
+from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
+from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.ship import utc_now_timestamp
 
 
 def register_runner_lane_commands(work_graph: click.Group) -> None:
+    work_graph.add_command(runner_inventory, name="runner-inventory")
+    work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
+
+
+@click.command("runner-inventory")
+@click.option(
+    "--repository",
+    required=True,
+    help="owner/name repository whose self-hosted runner lanes should be listed.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token used for read-only runner inventory.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+def runner_inventory(repository: str, github_token_env: str, github_api_base_url: str) -> None:
+    try:
+        token_env = github_token_env.strip()
+        if not token_env:
+            raise click.ClickException("runner inventory requires --github-token-env.")
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+        transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
+        inventory = GitHubRunnerLaneInventoryReader(
+            transport=transport
+        ).read_runner_lane_inventory(repository=repository)
+    except MergeTrainGitHubError as error:
+        detail = str(error)
+        if error.status_code is not None:
+            detail = f"{detail} (HTTP {error.status_code})"
+        raise click.ClickException(f"GitHub runner inventory request failed: {detail}") from error
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(inventory.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@click.command("runner-queue-wait")
+@click.option(
+    "--repository",
+    required=True,
+    help="owner/name repository whose recent GitHub Actions jobs should be inspected.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token used for read-only Actions metadata.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+@click.option(
+    "--workflow-run-limit",
+    default=20,
+    show_default=True,
+    type=click.IntRange(min=1, max=100),
+    help="Recent workflow runs to inspect for job timing evidence.",
+)
+@click.option(
+    "--constrained-threshold-seconds",
+    default=300,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Queue-wait threshold that marks the sample as capacity constrained.",
+)
+@click.option(
+    "--include-runner-inventory/--skip-runner-inventory",
+    default=True,
+    show_default=True,
+    help="Also read current runner inventory so queue wait can be correlated with lane capacity.",
+)
+def runner_queue_wait(
+    repository: str,
+    github_token_env: str,
+    github_api_base_url: str,
+    workflow_run_limit: int,
+    constrained_threshold_seconds: int,
+    include_runner_inventory: bool,
+) -> None:
+    try:
+        token_env = github_token_env.strip()
+        if not token_env:
+            raise click.ClickException("runner queue wait requires --github-token-env.")
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+        transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
+        inventory: RunnerLaneInventory | None = None
+        if include_runner_inventory:
+            inventory = GitHubRunnerLaneInventoryReader(
+                transport=transport
+            ).read_runner_lane_inventory(repository=repository)
+        queue_wait = GitHubRunnerQueueWaitReader(transport=transport).read_runner_queue_wait(
+            repository=repository,
+            workflow_run_limit=workflow_run_limit,
+            constrained_threshold_seconds=constrained_threshold_seconds,
+            inventory_capacity_constrained=(
+                inventory.capacity_constrained if inventory is not None else None
+            ),
+            inventory_capacity_reason=(inventory.capacity_reason if inventory is not None else ""),
+        )
+    except MergeTrainGitHubError as error:
+        detail = str(error)
+        if error.status_code is not None:
+            detail = f"{detail} (HTTP {error.status_code})"
+        raise click.ClickException(f"GitHub runner queue wait request failed: {detail}") from error
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(queue_wait.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @click.command("runner-baseline-observe")

@@ -157,7 +157,10 @@ class RunnerLaneInventoryCliTests(unittest.TestCase):
 
         with (
             patch("control_plane.cli.UrllibMergeTrainGitHubTransport", return_value=object()),
-            patch("control_plane.cli.GitHubRunnerLaneInventoryReader", _FakeInventoryReader),
+            patch(
+                "control_plane.cli_runner_lanes.GitHubRunnerLaneInventoryReader",
+                _FakeInventoryReader,
+            ),
             patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
