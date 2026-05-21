@@ -3,7 +3,6 @@ from collections.abc import Mapping
 import hashlib
 import json
 import os
-import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
@@ -37,7 +36,6 @@ from control_plane.contracts.preview_request_metadata import (
 )
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
-    PostDeployUpdateEvidence,
     PromotionRecord,
     PromotionRequest,
 )
@@ -127,15 +125,12 @@ from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
 )
+from control_plane.workflows import promotion_ship_execution
 from control_plane.workflows import promotion_ship_resolution
 from control_plane.workflows.runtime_identity_health import (
     wait_for_healthcheck_with_retry,
 )
-from control_plane.workflows.ship import (
-    build_deployment_record,
-    generate_deployment_record_id,
-    utc_now_timestamp,
-)
+from control_plane.workflows.ship import utc_now_timestamp
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
@@ -2835,165 +2830,25 @@ def _execute_ship(
     mint_release_tuple: bool = True,
 ) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
     record_store = _store(state_dir, database_url=database_url)
-    resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
-    artifact_manifest = _read_artifact_manifest(
+    return promotion_ship_execution.execute_ship(
         record_store=record_store,
-        artifact_id=resolved_artifact_id,
-    )
-    resolved_request = _resolve_artifact_native_execution_request(
+        env_file=env_file,
         request=request,
-        artifact_id=resolved_artifact_id,
-        artifact_manifest=artifact_manifest,
+        mint_release_tuple=mint_release_tuple,
+        callbacks=promotion_ship_execution.ShipExecutionCallbacks(
+            require_artifact_id=_require_artifact_id,
+            read_artifact_manifest=_read_artifact_manifest,
+            resolve_artifact_native_execution_request=_resolve_artifact_native_execution_request,
+            resolve_dokploy_target=_resolve_dokploy_target,
+            sync_artifact_image_reference_for_target=_sync_artifact_image_reference_for_target,
+            execute_dokploy_deploy=_execute_dokploy_deploy,
+            run_compose_post_deploy_update=_run_compose_post_deploy_update,
+            skipped_destination_health=_skipped_destination_health,
+            verify_ship_healthchecks=_verify_ship_healthchecks,
+            write_environment_inventory=_write_environment_inventory,
+            write_release_tuple_from_deployment=_write_release_tuple_from_deployment,
+        ),
     )
-    if mint_release_tuple and control_plane_release_tuples.should_mint_release_tuple_for_channel(
-        resolved_request.instance
-    ):
-        control_plane_release_tuples.repo_shas_from_artifact_manifest(
-            context_name=resolved_request.context,
-            artifact_manifest=artifact_manifest,
-        )
-
-    if resolved_request.dry_run:
-        click.echo(json.dumps(resolved_request.model_dump(mode="json"), indent=2, sort_keys=True))
-        return None, resolved_request
-
-    record_id = generate_deployment_record_id(
-        context_name=resolved_request.context,
-        instance_name=resolved_request.instance,
-    )
-    started_at = utc_now_timestamp()
-    pending_record = build_deployment_record(
-        request=resolved_request,
-        record_id=record_id,
-        deployment_id="control-plane-dokploy",
-        deployment_status="pending",
-        started_at=started_at,
-        finished_at="",
-    )
-    record_path = record_store.write_deployment_record(pending_record)
-
-    try:
-        resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
-            request=resolved_request,
-        )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    runtime_source_evidence: dict[str, str] = {}
-    try:
-        runtime_source_evidence = _sync_artifact_image_reference_for_target(
-            context_name=resolved_request.context,
-            instance_name=resolved_request.instance,
-            artifact_manifest=artifact_manifest,
-            resolved_target=resolved_target,
-        )
-        _execute_dokploy_deploy(
-            request=resolved_request,
-            resolved_target=resolved_target,
-            deploy_timeout_seconds=deploy_timeout_seconds,
-        )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            runtime_source=runtime_source_evidence,
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    try:
-        if resolved_request.wait and resolved_target.target_type == "compose":
-            _run_compose_post_deploy_update(
-                env_file=env_file,
-                request=resolved_request,
-            )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            runtime_source=runtime_source_evidence,
-            post_deploy_update=PostDeployUpdateEvidence(
-                attempted=True,
-                status="fail",
-                detail=(
-                    "Odoo-specific post-deploy update failed through the native "
-                    "control-plane Dokploy schedule workflow."
-                ),
-            ),
-            destination_health=_skipped_destination_health(resolved_request),
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    post_deploy_update_evidence = PostDeployUpdateEvidence()
-    if resolved_request.wait and resolved_target.target_type == "compose":
-        post_deploy_update_evidence = PostDeployUpdateEvidence(
-            attempted=True,
-            status="pass",
-            detail=(
-                "Odoo-specific post-deploy update completed through the native "
-                "control-plane Dokploy schedule workflow."
-            ),
-        )
-
-    try:
-        _verify_ship_healthchecks(request=resolved_request)
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            runtime_source=runtime_source_evidence,
-            post_deploy_update=post_deploy_update_evidence,
-        )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            runtime_source=runtime_source_evidence,
-            post_deploy_update=post_deploy_update_evidence,
-            destination_health=_skipped_destination_health(resolved_request, detail_status="fail"),
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    record_store.write_deployment_record(final_record)
-    if final_record.wait_for_completion and final_record.deploy.status == "pass":
-        _write_environment_inventory(record_store=record_store, deployment_record=final_record)
-        if mint_release_tuple:
-            _write_release_tuple_from_deployment(
-                record_store=record_store,
-                deployment_record=final_record,
-                artifact_manifest=artifact_manifest,
-            )
-    return record_path, final_record
 
 
 def _require_artifact_id(*, requested_artifact_id: str) -> str:
