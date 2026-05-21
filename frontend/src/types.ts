@@ -814,6 +814,93 @@ export interface WorkGraphRankPayload {
   };
 }
 
+export type GitHubIssueInboxProjectStatus =
+  | "present"
+  | "missing"
+  | "stale"
+  | "closed"
+  | "unconfigured";
+
+export interface GitHubIssueInboxIssue {
+  key: string;
+  repository: string;
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  labels: string[];
+  author: string;
+  created_at: string;
+  updated_at: string;
+  project_status: GitHubIssueInboxProjectStatus;
+  present_in_project: boolean | null;
+}
+
+export interface GitHubIssueInboxRepositoryGroup {
+  repository: string;
+  issue_count: number;
+  present_in_project_count: number;
+  missing_from_project_count: number;
+  issues: GitHubIssueInboxIssue[];
+}
+
+export interface GitHubIssueInbox {
+  schema_version: number;
+  generated_at: string;
+  project_configured: boolean;
+  repository_count: number;
+  issue_count: number;
+  stale_project_item_count: number;
+  repositories: GitHubIssueInboxRepositoryGroup[];
+}
+
+export interface GitHubIssueInboxPayload {
+  status: "ok";
+  trace_id: string;
+  configured: boolean;
+  inbox: GitHubIssueInbox | null;
+}
+
+export type GitHubIssueInboxReconcileMode = "dry_run" | "apply";
+export type GitHubIssueInboxReconcileAction =
+  | "would_add"
+  | "added"
+  | "already_present"
+  | "failed"
+  | "skipped";
+
+export interface GitHubIssueInboxReconcileItem {
+  key: string;
+  repository: string;
+  number: number;
+  title: string;
+  url: string;
+  action: GitHubIssueInboxReconcileAction;
+  detail: string;
+}
+
+export interface GitHubIssueInboxReconcileSummary {
+  schema_version: number;
+  generated_at: string;
+  mode: GitHubIssueInboxReconcileMode;
+  repository_count: number;
+  issue_count: number;
+  added_count: number;
+  already_present_count: number;
+  skipped_count: number;
+  failed_count: number;
+  would_add_count: number;
+  items: GitHubIssueInboxReconcileItem[];
+}
+
+export interface GitHubIssueInboxReconcilePayload {
+  status: "accepted";
+  trace_id: string;
+  result: {
+    reconcile: GitHubIssueInboxReconcileSummary;
+  };
+}
+
 export interface MergeTrainAdmissionDecision {
   schema_version: number;
   repository: string;

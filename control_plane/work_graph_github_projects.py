@@ -51,8 +51,14 @@ class GitHubProjectPlanningFactsConfig:
 def build_github_project_planning_facts(
     config: GitHubProjectPlanningFactsConfig,
 ) -> tuple[WorkGraphPlanningIssueFacts, ...]:
-    facts = _load_github_project_planning_facts(config)
+    facts = build_github_project_item_facts(config)
     return _enrich_planning_facts_with_github_signals(config=config, facts=facts)
+
+
+def build_github_project_item_facts(
+    config: GitHubProjectPlanningFactsConfig,
+) -> tuple[WorkGraphPlanningIssueFacts, ...]:
+    return _load_github_project_planning_facts(config)
 
 
 def build_github_project_issue_keys(
@@ -60,7 +66,7 @@ def build_github_project_issue_keys(
 ) -> tuple[str, ...]:
     return tuple(
         f"{fact.repository}#{fact.number}"
-        for fact in _load_github_project_planning_facts(config)
+        for fact in build_github_project_item_facts(config)
         if not fact.is_pull_request
     )
 

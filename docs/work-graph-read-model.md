@@ -176,6 +176,12 @@ issue is marked with `present_in_project: true` and
 `project_status: "missing"`. Without Project env, issues use
 `project_status: "unconfigured"` and `present_in_project: null`.
 
+Project-only issue items that are no longer visible in the configured open issue
+inventory remain in the response for operator review. Closed items use
+`project_status: "closed"`; other Project-only items use
+`project_status: "stale"`. The route reports `stale_project_item_count` but does
+not remove or mutate Project items.
+
 Forks and private repositories are supported only through explicit inventory and
 the runtime `GH_TOKEN` permissions. Launchplane does not owner-wide search,
 fetch issue bodies, or infer product ownership from inbox membership.
@@ -190,7 +196,7 @@ POST /v1/work-graph/github/issues/reconcile
 The request is a small mode selector:
 
 ```json
-{"mode": "dry_run"}
+{ "mode": "dry_run" }
 ```
 
 `dry_run` uses `work_graph.rank` authorization and returns the missing open

@@ -9204,12 +9204,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "generated_at": "2026-05-21T12:00:00Z",
                         "project_configured": True,
                         "repository_count": 1,
-                        "issue_count": 1,
+                        "issue_count": 2,
+                        "stale_project_item_count": 1,
                         "repositories": [
                             {
                                 "repository": "cbusillo/launchplane",
-                                "issue_count": 1,
-                                "present_in_project_count": 0,
+                                "issue_count": 2,
+                                "present_in_project_count": 1,
                                 "missing_from_project_count": 1,
                                 "issues": [
                                     {
@@ -9221,6 +9222,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                         "state": "OPEN",
                                         "project_status": "missing",
                                         "present_in_project": False,
+                                    },
+                                    {
+                                        "key": "cbusillo/launchplane#601",
+                                        "repository": "cbusillo/launchplane",
+                                        "number": 601,
+                                        "title": "Closed Project item",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/601",
+                                        "state": "closed",
+                                        "project_status": "closed",
+                                        "present_in_project": True,
                                     }
                                 ],
                             }
@@ -9238,8 +9249,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(payload["configured"])
         inbox = payload["inbox"]
         self.assertEqual(inbox["repository_count"], 1)
+        self.assertEqual(inbox["stale_project_item_count"], 1)
         self.assertEqual(inbox["repositories"][0]["issues"][0]["key"], "cbusillo/launchplane#697")
         self.assertIs(inbox["repositories"][0]["issues"][0]["present_in_project"], False)
+        self.assertEqual(inbox["repositories"][0]["issues"][1]["project_status"], "closed")
 
     def test_work_graph_issue_inbox_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
