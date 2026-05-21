@@ -263,11 +263,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ) as transport_class,
             patch(
-                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ) as reader_class,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -338,14 +338,14 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
-            patch("control_plane.cli.GitHubMergeTrainClient", _FakeGitHubClient),
+            patch("control_plane.cli_work_graph.GitHubMergeTrainClient", _FakeGitHubClient),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             policy_file = _write_policy_file(Path(temp_dir))
@@ -403,11 +403,11 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with (
             TemporaryDirectory() as temp_dir,
             patch(
-                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                "control_plane.cli_work_graph.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
             ),
             patch(
-                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                "control_plane.cli_work_graph.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
