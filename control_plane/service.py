@@ -3377,6 +3377,29 @@ def _merge_train_candidate_matches_dry_run_queue(
     return candidate_entries == tuple(current_entries)
 
 
+def _supersede_active_merge_train_batch_candidate_records(
+    *,
+    record_store: _MergeTrainBatchCandidateRecordStore,
+    repository: str,
+    base_branch: str,
+    batch_id: str,
+    replacement_record_id: str,
+) -> None:
+    records = record_store.list_merge_train_batch_candidate_records(
+        repository=repository,
+        base_branch=base_branch,
+        status="active",
+    )
+    for record in records:
+        if record.record_id == replacement_record_id:
+            continue
+        if record.candidate.batch_id != batch_id:
+            continue
+        record_store.write_merge_train_batch_candidate_record(
+            record.model_copy(update={"status": "superseded"})
+        )
+
+
 def _validate_merge_train_landing_record_for_controller(
     *,
     landing_record: MergeTrainBatchLandingPlanRecord,
@@ -9544,24 +9567,13 @@ def create_launchplane_service_app(
                                     result["merge_train_batch_candidate_record_id"] = (
                                         candidate_record.record_id
                                     )
-                                    batch_records = (
-                                        candidate_store.list_merge_train_batch_candidate_records(
-                                            repository=controller_request.repository,
-                                            base_branch=controller_request.base_branch,
-                                            status="active",
-                                            limit=25,
-                                        )
+                                    _supersede_active_merge_train_batch_candidate_records(
+                                        record_store=candidate_store,
+                                        repository=controller_request.repository,
+                                        base_branch=controller_request.base_branch,
+                                        batch_id=active_candidate_record.candidate.batch_id,
+                                        replacement_record_id=candidate_record.record_id,
                                     )
-                                    for batch_record in batch_records:
-                                        if (
-                                            batch_record.candidate.batch_id
-                                            == active_candidate_record.candidate.batch_id
-                                        ):
-                                            candidate_store.write_merge_train_batch_candidate_record(
-                                                batch_record.model_copy(
-                                                    update={"status": "superseded"}
-                                                )
-                                            )
                                 driver_result = result
                             else:
                                 result = {
