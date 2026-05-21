@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from control_plane import cli as control_plane_cli
 from control_plane.cli import main
+from control_plane.cli_odoo import normalize_odoo_apply_status
 from control_plane.cli_policy_profiles import summarize_merge_train_policy_record
 from control_plane.cli_service import _first_driver_payload
 from control_plane.cli_storage_secrets import normalize_secret_scope
@@ -97,7 +98,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
 
     def test_cli_choice_normalizers_share_trimmed_case_insensitive_choices(self) -> None:
         self.assertEqual(normalize_secret_scope(" Context "), "context")
-        self.assertEqual(control_plane_cli._normalize_odoo_apply_status(" PASS "), "pass")
+        self.assertEqual(normalize_odoo_apply_status(" PASS "), "pass")
         self.assertEqual(
             control_plane_cli._normalize_odoo_prod_rollback_source_channel(" testing "),
             "testing",
@@ -115,7 +116,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
                 "Secret scope must be one of global, context, or context_instance.",
             ),
             (
-                control_plane_cli._normalize_odoo_apply_status,
+                normalize_odoo_apply_status,
                 "success",
                 "Odoo override apply status must be skipped, pending, pass, or fail.",
             ),
