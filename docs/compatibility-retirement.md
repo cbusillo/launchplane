@@ -68,8 +68,10 @@ records.
   validate record contract parity and service behavior without requiring a live
   Postgres database.
 - `launchplane service serve --state-dir ...` may stay as a local-only fallback
-  for development when `--database-url` is omitted. Hosted/shared service runs
-  should use `LAUNCHPLANE_DATABASE_URL`.
+  for development when `--database-url` is omitted and the service binds only to
+  `127.0.0.1`, `localhost`, or `::1`. Hosted/shared service runs must provide
+  `--database-url` or `LAUNCHPLANE_DATABASE_URL`; startup fails closed instead
+  of treating local JSON files as shared authority.
 - Every Code local worker commands may keep `--state-dir` for daemon pid/log
   files and local worktree/session state. Work-request authority should use
   `--service-url` mode for the deployed Launchplane service.

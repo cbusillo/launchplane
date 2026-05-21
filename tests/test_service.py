@@ -3351,7 +3351,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
-                patch("control_plane.service.GitHubMergeTrainSnapshotReader", _FailingSnapshotReader),
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader", _FailingSnapshotReader
+                ),
             ):
                 status, payload = _invoke_app(
                     app,
@@ -9435,7 +9437,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                         "state": "closed",
                                         "project_status": "closed",
                                         "present_in_project": True,
-                                    }
+                                    },
                                 ],
                             }
                         ],
@@ -9954,6 +9956,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 200)
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["storage_backend"], "filesystem")
+
+    def test_service_serve_rejects_hosted_filesystem_startup(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "policy.toml"
+            policy_file.write_text("schema_version = 1\n", encoding="utf-8")
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "serve",
+                    "--host",
+                    "0.0.0.0",
+                    "--state-dir",
+                    str(Path(temporary_directory_name) / "state"),
+                    "--policy-file",
+                    str(policy_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("refuses hosted startup without --database-url", result.output)
 
     def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
