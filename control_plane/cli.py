@@ -127,9 +127,6 @@ from control_plane.workflows.odoo_prod_rollback import (
 )
 from control_plane.workflows import promotion_ship_execution
 from control_plane.workflows import promotion_ship_resolution
-from control_plane.workflows.runtime_identity_health import (
-    wait_for_healthcheck_with_retry,
-)
 from control_plane.workflows.ship import utc_now_timestamp
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
@@ -1850,7 +1847,7 @@ def _load_github_webhook_json_bytes(
 
 
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
-    wait_for_healthcheck_with_retry(
+    promotion_ship_execution.wait_for_ship_healthcheck(
         url=url,
         timeout_seconds=timeout_seconds,
         sleep=time.sleep,
@@ -1859,29 +1856,10 @@ def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
 
 
 def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
-    if not request.wait or not request.verify_health:
-        return
-    if not request.destination_health.urls:
-        raise click.ClickException(
-            "Healthcheck verification requested but no target domain/URL was resolved. "
-            "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
-        )
-    if request.destination_health.timeout_seconds is None:
-        raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
-    healthcheck_errors: list[str] = []
-    for healthcheck_url in request.destination_health.urls:
-        try:
-            _wait_for_ship_healthcheck(
-                url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds
-            )
-            return
-        except click.ClickException as error:
-            healthcheck_errors.append(str(error))
-    if healthcheck_errors:
-        raise click.ClickException(
-            "Healthcheck verification failed for all resolved URLs:\n"
-            + "\n".join(healthcheck_errors)
-        )
+    promotion_ship_execution.verify_ship_healthchecks(
+        request=request,
+        wait_for_healthcheck=_wait_for_ship_healthcheck,
+    )
 
 
 def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: int) -> None:
@@ -2653,30 +2631,12 @@ def _execute_dokploy_deploy(
 ) -> None:
     control_plane_root = _control_plane_root()
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    latest_before = None
-    if request.wait:
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
-            host=host,
-            token=token,
-            target_type=resolved_target.target_type,
-            target_id=resolved_target.target_id,
-        )
-    control_plane_dokploy.trigger_deployment(
+    promotion_ship_execution.execute_dokploy_deploy(
         host=host,
         token=token,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
-        no_cache=request.no_cache,
-    )
-    if not request.wait:
-        return
-    control_plane_dokploy.wait_for_target_deployment(
-        host=host,
-        token=token,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
-        timeout_seconds=deploy_timeout_seconds,
+        request=request,
+        resolved_target=resolved_target,
+        deploy_timeout_seconds=deploy_timeout_seconds,
     )
 
 
