@@ -136,6 +136,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import (
     PreviewInventoryScanRecord,
@@ -183,6 +184,7 @@ from control_plane.drivers.registry import (
     read_driver_descriptor,
 )
 from control_plane.launchplane_mutations import (
+    LaunchplaneMutationStore,
     apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence,
     control_plane_root,
@@ -212,7 +214,6 @@ from control_plane.service_human_auth import (
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.factory import build_record_store, storage_backend_name
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.ui_static_http import serve_ui_route
@@ -317,6 +318,7 @@ from control_plane.workflows.preview_pr_feedback import (
     handle_every_code_preview_validation_comment,
 )
 from control_plane.workflows.launchplane import (
+    ProductProfileListStore,
     create_github_issue_comment,
     find_github_issue_comment_by_marker,
     find_preview_record,
@@ -327,6 +329,7 @@ from control_plane.workflows.launchplane import (
     verify_github_webhook_signature,
 )
 from control_plane.workflows.odoo_artifact_publish import (
+    OdooArtifactPublishEvidenceStore,
     OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishInputsRequest,
     build_odoo_artifact_publish_inputs,
@@ -350,6 +353,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 )
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionRequest,
+    OdooProdPromotionStore,
     execute_odoo_prod_promotion,
 )
 from control_plane.workflows.odoo_prod_rollback import (
@@ -363,6 +367,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
+    VeriReelStableDeployStore,
     execute_verireel_stable_deploy,
 )
 from control_plane.workflows.verireel_environment import (
@@ -379,14 +384,17 @@ from control_plane.workflows.verireel_app_maintenance import (
 )
 from control_plane.workflows.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
+    VeriReelProdBackupGateStore,
     execute_verireel_prod_backup_gate,
 )
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
+    VeriReelProdPromotionStore,
     execute_verireel_prod_promotion,
 )
 from control_plane.workflows.verireel_prod_rollback import (
     VeriReelProdRollbackRequest,
+    VeriReelProdRollbackStore,
     execute_verireel_prod_rollback,
 )
 from control_plane.workflows.verireel_preview_driver import (
@@ -2854,6 +2862,10 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
+class _PreviewGenerationMutationStore(LaunchplaneMutationStore, Protocol):
+    def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
+
+
 class _AgentWriteIntentRecordStore(Protocol):
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
 
@@ -2885,6 +2897,19 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
+
+
+def _preview_generation_mutation_store(record_store: object) -> _PreviewGenerationMutationStore:
+    required_methods = (
+        "list_preview_records",
+        "list_preview_generation_records",
+        "read_preview_generation_record",
+        "write_preview_record",
+        "write_preview_generation_record",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_PreviewGenerationMutationStore, record_store)
+    raise TypeError("record store does not support Launchplane preview generation mutations")
 
 
 def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentRecordStore:
@@ -4114,8 +4139,7 @@ def _handle_every_code_preview_validation_webhook(
         )
     every_code_store = _every_code_work_request_store(record_store)
     context_name = launchplane_anchor_repo_context(
-        record_store=cast(FilesystemRecordStore, record_store),
-        repo=repo,
+        record_store=cast(ProductProfileListStore, record_store), repo=repo
     )
     if not context_name:
         context_name = f"{repo}-preview"
@@ -6837,10 +6861,9 @@ def _apply_generic_web_preview_refresh_records(
         driver_result=driver_result,
         profile=profile,
     )
-    typed_record_store = cast(FilesystemRecordStore, record_store)
     return apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
-        record_store=typed_record_store,
+        record_store=cast(LaunchplaneMutationStore, record_store),
         preview_request=preview_request,
         generation_request=generation_request,
     )
@@ -6891,10 +6914,9 @@ def _apply_verireel_preview_refresh_records(
         failure_stage="" if refresh_passed else "provision",
         failure_summary="" if refresh_passed else failure_summary,
     )
-    typed_record_store = cast(FilesystemRecordStore, record_store)
     return apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
-        record_store=typed_record_store,
+        record_store=cast(LaunchplaneMutationStore, record_store),
         preview_request=preview_request,
         generation_request=generation_request,
     )
@@ -6908,10 +6930,9 @@ def _apply_verireel_preview_destroy_records(
 ) -> dict[str, object]:
     if driver_result.destroy_status != "pass":
         return {"transition": "destroy_failed"}
-    typed_record_store = cast(FilesystemRecordStore, record_store)
     try:
         return apply_launchplane_destroy_preview(
-            record_store=typed_record_store,
+            record_store=cast(LaunchplaneMutationStore, record_store),
             request=PreviewDestroyMutationRequest(
                 context=request.context,
                 anchor_repo=request.anchor_repo,
@@ -6936,7 +6957,7 @@ def _apply_verireel_preview_verification_records(
     record_store: object,
     request: VeriReelPreviewVerificationRequest,
 ) -> dict[str, object]:
-    typed_record_store = cast(FilesystemRecordStore, record_store)
+    typed_record_store = _preview_generation_mutation_store(record_store)
     preview = find_preview_record(
         record_store=typed_record_store,
         context_name=request.context,
@@ -7006,7 +7027,7 @@ def _apply_odoo_preview_verification_records(
     record_store: object,
     request: OdooPreviewVerificationRequest,
 ) -> dict[str, object]:
-    typed_record_store = cast(FilesystemRecordStore, record_store)
+    typed_record_store = _preview_generation_mutation_store(record_store)
     preview = find_preview_record(
         record_store=typed_record_store,
         context_name=request.context,
@@ -7104,10 +7125,9 @@ def _apply_odoo_stable_verification_records(
     record_store: object,
     request: OdooStableVerificationRequest,
 ) -> dict[str, object]:
-    typed_record_store = cast(FilesystemRecordStore, record_store)
-    evidence_store = cast(EvidenceIngestionStore, typed_record_store)
+    evidence_store = cast(EvidenceIngestionStore, record_store)
     try:
-        deployment_record = typed_record_store.read_deployment_record(request.deployment_record_id)
+        deployment_record = evidence_store.read_deployment_record(request.deployment_record_id)
     except FileNotFoundError as exc:
         raise click.ClickException(
             f"No Launchplane deployment record found for {request.deployment_record_id}."
@@ -7136,7 +7156,7 @@ def _apply_odoo_stable_verification_records(
     promotion_record_id = request.promotion_record_id.strip()
     if promotion_record_id:
         try:
-            promotion_record = typed_record_store.read_promotion_record(promotion_record_id)
+            promotion_record = evidence_store.read_promotion_record(promotion_record_id)
         except FileNotFoundError as exc:
             raise click.ClickException(
                 f"No Launchplane promotion record found for {promotion_record_id}."
@@ -7212,10 +7232,9 @@ def _apply_verireel_testing_verification_records(
     record_store: object,
     request: VeriReelTestingVerificationRequest,
 ) -> dict[str, str]:
-    typed_record_store = cast(FilesystemRecordStore, record_store)
-    evidence_store = cast(EvidenceIngestionStore, typed_record_store)
+    evidence_store = cast(EvidenceIngestionStore, record_store)
     try:
-        deployment_record = typed_record_store.read_deployment_record(request.deployment_record_id)
+        deployment_record = evidence_store.read_deployment_record(request.deployment_record_id)
     except FileNotFoundError as exc:
         raise click.ClickException(
             f"No Launchplane deployment record found for {request.deployment_record_id}."
@@ -10284,7 +10303,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 result = dict[str, object](
                     apply_deployment_evidence(
-                        record_store=record_store,
+                        record_store=cast(EvidenceIngestionStore, record_store),
                         deployment_record=deployment_request.deployment,
                     )
                 )
@@ -11619,7 +11638,7 @@ def create_launchplane_service_app(
                 if idempotent_response is not None:
                     return idempotent_response
                 driver_result = ingest_odoo_artifact_publish_evidence(
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(OdooArtifactPublishEvidenceStore, record_store),
                     request=odoo_publish_request.publish,
                 )
                 result = {
@@ -11732,7 +11751,7 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     state_dir=state_dir,
                     database_url=database_url,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(OdooProdPromotionStore, record_store),
                     request=odoo_promotion_request.promotion,
                 )
                 result = {
@@ -11975,7 +11994,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(VeriReelStableDeployStore, record_store),
                     request=verireel_testing_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
@@ -12148,7 +12167,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(VeriReelStableDeployStore, record_store),
                     request=verireel_prod_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
@@ -12188,7 +12207,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_backup_gate(
                     control_plane_root=resolved_root,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(VeriReelProdBackupGateStore, record_store),
                     request=verireel_prod_backup_gate_request.backup_gate,
                     run_async=True,
                 )
@@ -12236,7 +12255,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_promotion(
                     control_plane_root=resolved_root,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(VeriReelProdPromotionStore, record_store),
                     request=verireel_prod_promotion_request.promotion,
                 )
                 result = {
@@ -12279,7 +12298,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_rollback(
                     control_plane_root=resolved_root,
-                    record_store=cast(FilesystemRecordStore, record_store),
+                    record_store=cast(VeriReelProdRollbackStore, record_store),
                     request=verireel_prod_rollback_request.rollback,
                 )
                 result = {
@@ -12816,7 +12835,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 result = dict[str, object](
                     apply_promotion_evidence(
-                        record_store=record_store,
+                        record_store=cast(EvidenceIngestionStore, record_store),
                         promotion_record=promotion_request.promotion,
                     )
                 )

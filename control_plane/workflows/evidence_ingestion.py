@@ -16,6 +16,8 @@ class EvidenceIngestionStore(Protocol):
 
     def read_deployment_record(self, deployment_record_id: str) -> DeploymentRecord: ...
 
+    def read_promotion_record(self, promotion_record_id: str) -> PromotionRecord: ...
+
     def write_promotion_record(self, record: PromotionRecord) -> object: ...
 
     def write_environment_inventory(self, inventory: EnvironmentInventory) -> object: ...
@@ -56,12 +58,13 @@ def apply_deployment_evidence(
     deployment_record: DeploymentRecord,
 ) -> dict[str, str]:
     record_store.write_deployment_record(deployment_record)
-    result = {"deployment_record_id": deployment_record.record_id}
-    result["inventory_record_id"] = _write_environment_inventory(
-        record_store=record_store,
-        deployment_record=deployment_record,
-    )
-    return result
+    return {
+        "deployment_record_id": deployment_record.record_id,
+        "inventory_record_id": _write_environment_inventory(
+            record_store=record_store,
+            deployment_record=deployment_record,
+        ),
+    }
 
 
 def apply_promotion_evidence(
