@@ -44,7 +44,6 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
@@ -78,12 +77,19 @@ class PreviewMutationRecordStore(Protocol):
         self, *, preview_id: str = "", limit: int | None = None
     ) -> tuple[PreviewGenerationRecord, ...]: ...
 
+
 class ProductProfileListStore(Protocol):
     def list_product_profile_records(
         self,
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+class PullRequestPreviewWorkflowStore(
+    PreviewMutationRecordStore, ProductProfileListStore, Protocol
+):
+    pass
 
 
 class GitHubPullRequestReference(TypedDict):
@@ -130,16 +136,12 @@ def launchplane_anchor_repo_profile(
     return None
 
 
-def launchplane_anchor_repo_context(
-    *, record_store: ProductProfileListStore, repo: str
-) -> str:
+def launchplane_anchor_repo_context(*, record_store: ProductProfileListStore, repo: str) -> str:
     profile = launchplane_anchor_repo_profile(record_store=record_store, repo=repo)
     return profile.preview.context if profile is not None else ""
 
 
-def launchplane_anchor_repo_eligible(
-    *, record_store: ProductProfileListStore, repo: str
-) -> bool:
+def launchplane_anchor_repo_eligible(*, record_store: ProductProfileListStore, repo: str) -> bool:
     return bool(launchplane_anchor_repo_context(record_store=record_store, repo=repo))
 
 
@@ -185,7 +187,7 @@ def classify_pull_request_event_for_launchplane(
 def build_pull_request_event_action_payload(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: PullRequestPreviewWorkflowStore,
     event: GitHubPullRequestEvent,
 ) -> dict[str, object]:
     request_metadata = parse_preview_request_metadata(pr_body=event.pr_body)
@@ -342,7 +344,7 @@ def verify_github_webhook_signature(
 
 def build_pull_request_feedback_payload(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     event: GitHubPullRequestEvent,
     action: LaunchplanePullRequestAction,
     preview: PreviewRecord | None,
@@ -476,7 +478,7 @@ def build_pull_request_feedback_payload(
 def deliver_pull_request_feedback(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     event: GitHubPullRequestEvent,
     resolved_context: str,
     feedback_payload: dict[str, object],
@@ -1009,7 +1011,7 @@ def _github_comment_url(comment_payload: dict[str, object]) -> str:
 
 def resolve_pull_request_event_decision(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PullRequestPreviewWorkflowStore,
     event: GitHubPullRequestEvent,
 ) -> tuple[LaunchplanePullRequestAction, str, PreviewRecord | None]:
     resolved_context = launchplane_anchor_repo_context(record_store=record_store, repo=event.repo)
