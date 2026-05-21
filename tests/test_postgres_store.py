@@ -1039,7 +1039,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         with TemporaryDirectory() as temporary_directory_name:
             with patch(
-                "control_plane.cli.PostgresRecordStore", return_value=postgres_store
+                "control_plane.cli_storage_secrets.PostgresRecordStore",
+                return_value=postgres_store,
             ) as store_class:
                 result = runner.invoke(
                     main,
