@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from control_plane import cli as control_plane_cli
 from control_plane.cli import main
+from control_plane.cli_storage_secrets import normalize_secret_scope
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.driver_descriptor import DriverView
 from control_plane.contracts.merge_train_policy import (
@@ -93,7 +94,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
 
     def test_cli_choice_normalizers_share_trimmed_case_insensitive_choices(self) -> None:
-        self.assertEqual(control_plane_cli._normalize_secret_scope(" Context "), "context")
+        self.assertEqual(normalize_secret_scope(" Context "), "context")
         self.assertEqual(control_plane_cli._normalize_odoo_apply_status(" PASS "), "pass")
         self.assertEqual(
             control_plane_cli._normalize_odoo_prod_rollback_source_channel(" testing "),
@@ -107,7 +108,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
     def test_cli_choice_normalizer_preserves_domain_error_messages(self) -> None:
         invalid_cases = [
             (
-                control_plane_cli._normalize_secret_scope,
+                normalize_secret_scope,
                 "environment",
                 "Secret scope must be one of global, context, or context_instance.",
             ),

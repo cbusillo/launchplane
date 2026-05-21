@@ -101,7 +101,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
 )
-from control_plane.contracts.secret_record import SecretBinding, SecretScope
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.every_code_worker import (
@@ -121,6 +121,7 @@ from control_plane.every_code_worker import (
 )
 from control_plane.cli_runner_lanes import register_runner_lane_commands
 from control_plane.cli_preview_workflow import register_preview_workflow_commands
+from control_plane.cli_storage_secrets import register_storage_secret_commands
 from control_plane.cli_work_graph import register_work_graph_core_commands
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
@@ -325,21 +326,6 @@ def _normalize_cli_choice(
         return choices[normalized_value]
     except KeyError as exc:
         raise click.ClickException(error_message) from exc
-
-
-def _normalize_secret_scope(scope: str) -> SecretScope:
-    return cast(
-        SecretScope,
-        _normalize_cli_choice(
-            scope,
-            choices={
-                "global": "global",
-                "context": "context",
-                "context_instance": "context_instance",
-            },
-            error_message="Secret scope must be one of global, context, or context_instance.",
-        ),
-    )
 
 
 def _normalize_odoo_apply_status(
@@ -9665,6 +9651,7 @@ def work_graph() -> None:
 register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
+register_storage_secret_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 
 
 @every_code.command("run-once")
@@ -10384,16 +10371,6 @@ def _gh_current_user_login() -> str:
     return login
 
 
-@main.group()
-def storage() -> None:
-    """Launchplane storage commands."""
-
-
-@main.group()
-def secrets() -> None:
-    """Launchplane managed secret commands."""
-
-
 @main.group("product-config")
 def product_config() -> None:
     """Trusted product runtime config apply commands."""
@@ -10444,122 +10421,6 @@ def product_config_apply(
         )
     except control_plane_product_config.ProductConfigError as error:
         raise click.ClickException(str(error)) from error
-    finally:
-        postgres_store.close()
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@storage.command("import-core-records")
-@click.option(
-    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
-)
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane shared-service core records.",
-)
-def storage_import_core_records(state_dir: Path, database_url: str) -> None:
-    filesystem_store = FilesystemRecordStore(state_dir=state_dir)
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
-    counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
-    click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
-
-
-@secrets.command("put")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane managed secrets.",
-)
-@click.option(
-    "--scope", type=click.Choice(["global", "context", "context_instance"]), required=True
-)
-@click.option("--integration", required=True)
-@click.option("--name", required=True)
-@click.option("--binding-key", required=True)
-@click.option("--value", required=True)
-@click.option("--context", "context_name", default="")
-@click.option("--instance", "instance_name", default="")
-@click.option("--description", default="")
-@click.option("--actor", default="cli", show_default=True)
-def secrets_put(
-    database_url: str,
-    scope: str,
-    integration: str,
-    name: str,
-    binding_key: str,
-    value: str,
-    context_name: str,
-    instance_name: str,
-    description: str,
-    actor: str,
-) -> None:
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    postgres_store.ensure_schema()
-    try:
-        result = control_plane_secrets.write_secret_value(
-            record_store=postgres_store,
-            scope=_normalize_secret_scope(scope),
-            integration=integration,
-            name=name,
-            plaintext_value=value,
-            binding_key=binding_key,
-            context_name=context_name,
-            instance_name=instance_name,
-            description=description,
-            actor=actor,
-        )
-        payload = control_plane_secrets.build_secret_status(
-            postgres_store, secret_id=result["secret_id"]
-        )
-    finally:
-        postgres_store.close()
-    click.echo(
-        json.dumps({"status": "ok", "result": result, "secret": payload}, indent=2, sort_keys=True)
-    )
-
-
-@secrets.command("list")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane managed secrets.",
-)
-@click.option("--integration", default="")
-@click.option("--context", "context_name", default="")
-@click.option("--instance", "instance_name", default="")
-def secrets_list(
-    database_url: str, integration: str, context_name: str, instance_name: str
-) -> None:
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    try:
-        payload = control_plane_secrets.list_secret_statuses(
-            postgres_store,
-            integration=integration,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
-    finally:
-        postgres_store.close()
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
-@secrets.command("show")
-@click.option(
-    "--database-url",
-    envvar=_DATABASE_URL_ENV_KEYS,
-    required=True,
-    help="Postgres connection string for Launchplane managed secrets.",
-)
-@click.option("--secret-id", required=True)
-def secrets_show(database_url: str, secret_id: str) -> None:
-    postgres_store = PostgresRecordStore(database_url=database_url)
-    try:
-        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=secret_id)
     finally:
         postgres_store.close()
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
