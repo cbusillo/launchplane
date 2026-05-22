@@ -2618,6 +2618,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
         return "product_environment.read", {"product": segments[2]}
+    if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
+        return "product_environment.read", {"product": segments[2], "environments": "true"}
     if len(segments) == 5 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
         return "product_environment.read", {"product": segments[2], "environment": segments[4]}
     if (

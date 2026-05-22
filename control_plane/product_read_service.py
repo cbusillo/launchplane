@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductReadModelStore,
+    ProductSiteOverview,
     build_product_activity_read_model,
     build_product_environment_config_status,
     build_product_environment_detail,
@@ -23,7 +24,10 @@ class ProductEnvironmentReadServiceResult:
 
 
 def is_product_environment_detail_request(params: Mapping[str, str]) -> bool:
-    return any(key in params for key in ("activity", "config_status", "environment", "product"))
+    return any(
+        key in params
+        for key in ("activity", "config_status", "environment", "environments", "product")
+    )
 
 
 def build_product_profile_list_service_payload(
@@ -81,6 +85,19 @@ def build_product_environment_read_service_result(
             denial_message="Workflow cannot read the requested product environment.",
         )
 
+    if params.get("environments") == "true":
+        overview = build_product_site_overview(
+            record_store=record_store,
+            product=params["product"],
+            action_allowed=action_allowed,
+        )
+        return ProductEnvironmentReadServiceResult(
+            payload=_product_environments_payload(overview),
+            authorization_product=overview.product,
+            authorization_context="launchplane",
+            denial_message="Workflow cannot list the requested product environments.",
+        )
+
     if "product" in params:
         overview = build_product_site_overview(
             record_store=record_store,
@@ -109,4 +126,19 @@ def build_product_environment_list_service_payload(
     )
     return {
         "products": [overview.model_dump(mode="json") for overview in overviews],
+    }
+
+
+def _product_environments_payload(overview: ProductSiteOverview) -> dict[str, object]:
+    return {
+        "product": overview.product,
+        "display_name": overview.display_name,
+        "repository": overview.repository,
+        "driver_id": overview.driver_id,
+        "base_driver_id": overview.base_driver_id,
+        "environments": [
+            environment.model_dump(mode="json") for environment in overview.environments
+        ],
+        "trust_state": overview.trust_state,
+        "provenance": overview.provenance.model_dump(mode="json"),
     }

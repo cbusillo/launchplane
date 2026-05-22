@@ -10728,6 +10728,81 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["activity"]["events"][0]["event_type"], "authz_policy")
         self.assertEqual(payload["activity"]["events"][0]["action_id"], "authz_policy.update")
 
+    def test_product_environments_endpoint_lists_db_backed_environment_summaries(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="example-site",
+                    instance="prod",
+                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site",
+                    instance="prod",
+                    target_type="application",
+                    target_name="example-site-prod",
+                    updated_at="2026-05-02T22:33:00Z",
+                    source_label="test",
+                )
+            )
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["example-site"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/example-site/environments",
+            )
+
+        response_text = json.dumps(payload)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["product"], "example-site")
+        self.assertEqual(
+            [environment["environment"] for environment in payload["environments"]],
+            ["testing", "prod"],
+        )
+        prod_environment = payload["environments"][1]
+        self.assertEqual(prod_environment["context"], "example-site")
+        self.assertEqual(prod_environment["trust_state"], "missing")
+        self.assertEqual(payload["trust_state"], "missing")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+
     def test_product_environment_detail_redacts_runtime_and_secret_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
