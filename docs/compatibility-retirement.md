@@ -78,6 +78,9 @@ fallback.
   `--service-url` mode for the deployed Launchplane service.
 - `storage import-core-records --state-dir ... --database-url ...` stays as the
   explicit backfill bridge from local JSON records into Postgres-backed records.
+- `promote execute` and `ship execute` require `--database-url` or
+  `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem execution must opt in
+  with `--local-rehearsal`.
 
 ### Migrate Or Demote
 
