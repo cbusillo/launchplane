@@ -10,6 +10,9 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.github_payload import json_object
+from control_plane.github_payload import required_positive_int
+from control_plane.github_payload import required_string_text
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
@@ -547,9 +550,7 @@ def _reference_path(reference: str) -> str:
 
 
 def _json_object(value: object, label: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise MergeTrainGitHubError(f"{label} must be a JSON object.")
-    return value
+    return json_object(value, label, error_type=MergeTrainGitHubError)
 
 
 def _repository_full_name(value: object, label: str) -> str:
@@ -609,18 +610,11 @@ def _base_rooted_pull_requests(
 
 
 def _required_int(value: object, message: str) -> int:
-    if not isinstance(value, int) or value <= 0:
-        raise MergeTrainGitHubError(message)
-    return value
+    return required_positive_int(value, message, error_type=MergeTrainGitHubError)
 
 
 def _required_text(value: object, message: str) -> str:
-    if not isinstance(value, str):
-        raise MergeTrainGitHubError(message)
-    normalized = value.strip()
-    if not normalized:
-        raise MergeTrainGitHubError(message)
-    return normalized
+    return required_string_text(value, message, error_type=MergeTrainGitHubError)
 
 
 def _pull_request_state(value: str) -> MergeTrainPullRequestState:
