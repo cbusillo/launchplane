@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
+from sqlalchemy import inspect
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
@@ -127,6 +128,7 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import Base, PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -789,6 +791,37 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
         self.assertEqual(loaded.image.digest, "sha256:image123")
+
+    def test_verify_schema_rejects_empty_database_without_creating_tables(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+
+            with self.assertRaisesRegex(RuntimeError, "missing required table"):
+                store.verify_schema()
+
+            self.assertEqual(inspect(store._engine).get_table_names(), [])
+            store.close()
+
+    def test_shared_record_store_verifies_existing_schema_without_creating_it(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "Run Alembic migrations"):
+                build_shared_record_store(database_url=database_url)
+
+            alembic_command.upgrade(_alembic_config(database_url), "head")
+            store = build_shared_record_store(database_url=database_url)
+            manifest = _artifact_manifest()
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+            store.close()
+
+        self.assertEqual(loaded.artifact_id, manifest.artifact_id)
 
     def test_alembic_baseline_downgrades_to_empty_schema(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

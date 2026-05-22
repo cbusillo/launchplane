@@ -24,7 +24,7 @@ def build_shared_record_store(*, database_url: str | None = None) -> PostgresRec
             "LAUNCHPLANE_DATABASE_URL. Filesystem state is local-only."
         )
     store = PostgresRecordStore(database_url=resolved_database_url)
-    store.ensure_schema()
+    store.verify_schema()
     return store
 
 
