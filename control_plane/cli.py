@@ -3271,22 +3271,6 @@ def _sync_artifact_image_reference_for_target(
             instance_name=instance_name,
         )
     )
-    database_url = resolve_database_url(None)
-    runtime_key_safety = control_plane_live_target_runtime.skipped_runtime_key_safety_summary()
-    if database_url is not None:
-        postgres_store = PostgresRecordStore(database_url=database_url)
-        postgres_store.ensure_schema()
-        try:
-            try:
-                runtime_key_safety = control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
-                    record_store=postgres_store,
-                    context_name=context_name,
-                    instance_name=instance_name,
-                )
-            except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-                raise click.ClickException(str(error)) from error
-        finally:
-            postgres_store.close()
     desired_env_map = dict(env_map)
     desired_env_map.update(runtime_environment_values)
 
@@ -3304,6 +3288,28 @@ def _sync_artifact_image_reference_for_target(
         target_payload=target_payload,
         env_map=desired_env_map,
     )
+
+    database_url = resolve_database_url(None)
+    if database_url is None:
+        raise click.ClickException(
+            "Odoo target runtime sync requires LAUNCHPLANE_DATABASE_URL for DB-backed "
+            "runtime key-safety evaluation."
+        )
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        try:
+            runtime_key_safety = (
+                control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
+                    record_store=postgres_store,
+                    context_name=context_name,
+                    instance_name=instance_name,
+                )
+            )
+        except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
+            raise click.ClickException(str(error)) from error
+    finally:
+        postgres_store.close()
 
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
