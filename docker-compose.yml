@@ -12,9 +12,9 @@ services:
       LAUNCHPLANE_SERVICE_AUDIENCE: ${LAUNCHPLANE_SERVICE_AUDIENCE:-localhost}
       LAUNCHPLANE_SERVICE_HOST: 0.0.0.0
       LAUNCHPLANE_SERVICE_PORT: 8080
-      LAUNCHPLANE_STATE_DIR: /app/state
+      LAUNCHPLANE_STATE_DIR: /app/runtime
     volumes:
-      - launchplane-state:/app/state
+      - launchplane-runtime:/app/runtime
 
 volumes:
-  launchplane-state: {}
+  launchplane-runtime: {}

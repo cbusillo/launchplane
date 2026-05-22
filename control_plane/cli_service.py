@@ -216,10 +216,9 @@ def service_serve(
     audience: str,
     database_url: str | None,
 ) -> None:
-    normalized_host = host.strip().lower()
-    if database_url is None and normalized_host not in {"127.0.0.1", "localhost", "::1"}:
+    if database_url is None or not database_url.strip():
         raise click.ClickException(
-            "Launchplane service refuses hosted startup without --database-url or "
+            "Launchplane service refuses startup without --database-url or "
             "LAUNCHPLANE_DATABASE_URL. Filesystem state is local-only."
         )
     serve_launchplane_service(

@@ -57,7 +57,9 @@ Keep a compatibility surface only when it is one of these:
 remain compatibility surfaces. They are allowed only for local development,
 tests, import/backfill, and emergency inspection. Shared and production live
 mutations must use the deployed Launchplane service API or DB-backed operator
-records.
+records. Service startup requires `--database-url` or
+`LAUNCHPLANE_DATABASE_URL`; filesystem state is never a service persistence
+fallback.
 
 ### Keep
 
@@ -67,11 +69,10 @@ records.
 - Unit and integration tests may keep temporary `state_dir` fixtures. These
   validate record contract parity and service behavior without requiring a live
   Postgres database.
-- `launchplane service serve --state-dir ...` may stay as a local-only fallback
-  for development when `--database-url` is omitted and the service binds only to
-  `127.0.0.1`, `localhost`, or `::1`. Hosted/shared service runs must provide
-  `--database-url` or `LAUNCHPLANE_DATABASE_URL`; startup fails closed instead
-  of treating local JSON files as shared authority.
+- `launchplane service serve --state-dir ...` may pass an operator-local runtime
+  directory for non-authoritative process artifacts, but service persistence is
+  always DB-backed. Omitting `--database-url` or `LAUNCHPLANE_DATABASE_URL`
+  fails closed, including loopback local development.
 - Every Code local worker commands may keep `--state-dir` for daemon pid/log
   files and local worktree/session state. Work-request authority should use
   `--service-url` mode for the deployed Launchplane service.
