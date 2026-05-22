@@ -82,6 +82,7 @@ jobs:
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
+      LAUNCHPLANE_DATABASE_URL: ${{ secrets.LAUNCHPLANE_DATABASE_URL }}
       ODOO_CM_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_TESTING_DOKPLOY_TARGET_ID }}
       ODOO_CM_PROD_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_PROD_DOKPLOY_TARGET_ID }}
       ODOO_OPW_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_OPW_TESTING_DOKPLOY_TARGET_ID }}
@@ -214,6 +215,14 @@ jobs:
             image_reference="${{ steps.prep.outputs.image_repository }}@${{ steps.build.outputs.digest }}"
           fi
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
+
+      - name: Apply Launchplane database migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_DATABASE_URL:?Missing LAUNCHPLANE_DATABASE_URL secret}"
+
+          uv run alembic upgrade head
 
       - name: Request Launchplane self deploy
         id: self_deploy

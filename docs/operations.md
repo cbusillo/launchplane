@@ -320,6 +320,12 @@ than Launchplane CLI validations:
 - The Postgres service referenced by `LAUNCHPLANE_DATABASE_URL` must already be
   deployed and reachable on the Dokploy network before Launchplane is redeployed.
 
+The Launchplane self-deploy workflow applies `uv run alembic upgrade head` to
+the workflow-provided `LAUNCHPLANE_DATABASE_URL` before requesting a Dokploy
+image swap. This keeps hosted service startup fail-closed on schema drift while
+ensuring new images that require new columns are deployed only after the shared
+database has been migrated.
+
 Current derived-state behavior:
 
 - accepted deployment evidence also refreshes current environment inventory for
@@ -415,9 +421,8 @@ Current derived-state behavior:
   preview generations instead of adding another long-lived route.
 - Operator read models compose inventory, deployment, promotion, and
   backup-gate records instead of requiring operators to inspect raw JSON first.
-- Until Launchplane has a formal schema migration system, DB-backed schema changes
-  must stay additive and backward-compatible so image rollback remains a valid
-  recovery path.
+- DB-backed schema changes must land as Alembic revisions. Keep revisions
+  additive and rollback-aware so image rollback remains a valid recovery path.
 - Local CLI/file-backed compatibility paths must pass the review checkpoints in
   [compatibility-retirement.md](compatibility-retirement.md). Product workflows
   should use service routes once matching OIDC-authenticated routes exist.
