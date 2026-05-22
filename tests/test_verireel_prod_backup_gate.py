@@ -199,6 +199,25 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
 
         run.assert_not_called()
 
+    def test_run_delegated_worker_requires_database_for_runtime_key_safety(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("control_plane.workflows.verireel_prod_backup_gate.subprocess.run") as run,
+            ):
+                with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdBackupGateWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        ),
+                    )
+
+        run.assert_not_called()
+
     def test_prod_backup_gate_default_timeout_allows_longer_vzdump_backup(self) -> None:
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 1800)
 
