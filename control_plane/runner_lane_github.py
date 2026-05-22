@@ -7,6 +7,9 @@ from urllib.parse import urlencode
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.github_payload import json_object
+from control_plane.github_payload import required_int
+from control_plane.github_payload import required_stripped_text
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubTransport
 
@@ -117,22 +120,15 @@ def _repository_path(repository: str) -> str:
 
 
 def _json_object(value: object, label: str) -> dict[str, object]:
-    if not isinstance(value, dict):
-        raise MergeTrainGitHubError(f"{label} must be a JSON object.")
-    return value
+    return json_object(value, label, error_type=MergeTrainGitHubError)
 
 
 def _required_text(value: object, message: str) -> str:
-    normalized_value = str(value or "").strip()
-    if not normalized_value:
-        raise MergeTrainGitHubError(message)
-    return normalized_value
+    return required_stripped_text(value, message, error_type=MergeTrainGitHubError)
 
 
 def _required_int(value: object, message: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise MergeTrainGitHubError(message)
-    return value
+    return required_int(value, message, error_type=MergeTrainGitHubError)
 
 
 def _required_bool(value: object, message: str) -> bool:
