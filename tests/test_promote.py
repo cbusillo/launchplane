@@ -1846,6 +1846,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -1860,6 +1861,43 @@ DOKPLOY_SHIP_MODE = "auto"
                 ),
                 record,
             )
+
+    def test_deployments_write_requires_database_url_without_local_rehearsal(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            input_file = repo_root / "deployment-record.json"
+            record = DeploymentRecord(
+                record_id="deployment-20260411T182231Z-opw-prod",
+                artifact_identity=_artifact_identity_reference("artifact-2"),
+                context="opw",
+                instance="prod",
+                source_git_ref="def456",
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-11T18:22:31Z",
+                    finished_at="2026-04-11T18:22:31Z",
+                ),
+            )
+            input_file.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+
+            result = runner.invoke(
+                main,
+                [
+                    "deployments",
+                    "write",
+                    "--input-file",
+                    str(input_file),
+                ],
+                env={"LAUNCHPLANE_DATABASE_URL": ""},
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("deployments write requires --database-url", result.output)
 
     def test_promotions_write_persists_record(self) -> None:
         runner = CliRunner()
@@ -1888,6 +1926,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -1945,6 +1984,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write-from-deployment",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--record-id",
                     record.record_id,
                 ],
@@ -2018,6 +2058,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write-from-promotion",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--record-id",
                     promotion_record.record_id,
                 ],
@@ -2061,6 +2102,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write-from-promotion",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--record-id",
                     promotion_record.record_id,
                 ],
@@ -2127,6 +2169,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write-from-promotion",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--record-id",
                     promotion_record.record_id,
                 ],
@@ -2173,6 +2216,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "write-from-promotion",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--record-id",
                     promotion_record.record_id,
                 ],

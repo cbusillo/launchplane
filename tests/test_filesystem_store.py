@@ -303,7 +303,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [record.feedback_id for record in listed_records],
             [newer_record.feedback_id, older_record.feedback_id],
         )
-        self.assertEqual([record.feedback_id for record in limited_records], [other_record.feedback_id])
+        self.assertEqual(
+            [record.feedback_id for record in limited_records], [other_record.feedback_id]
+        )
 
     def test_write_and_list_every_code_preview_gate_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1057,6 +1059,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     "ingest",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -1095,6 +1098,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     "write",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],

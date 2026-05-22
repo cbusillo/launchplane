@@ -81,13 +81,19 @@ fallback.
 - `promote execute` and `ship execute` require `--database-url` or
   `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem execution must opt in
   with `--local-rehearsal`.
+- Generic record mutation commands such as `artifacts write`,
+  `backup-gates write`, `promotions write`, `deployments write`,
+  `inventory write-from-*`, and `release-tuples write-from-promotion` require
+  `--database-url` or `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem
+  writes must opt in with `--local-rehearsal`.
 
 ### Migrate Or Demote
 
-- Generic record CLI groups such as `artifacts`, `backup-gates`, `deployments`,
-  `promotions`, `inventory`, `release-tuples`, and `launchplane-previews`
-  should be treated as local inspection/backfill tools unless they are run with
-  `--database-url`. Do not document them as live shared-service mutation paths.
+- Generic record CLI read/export groups such as `artifacts`, `backup-gates`,
+  `deployments`, `promotions`, `inventory`, and `release-tuples` may read local
+  `--state-dir` data for inspection. Mutation commands require DB authority or
+  an explicit `--local-rehearsal` flag. Do not document local record writes as
+  live shared-service mutation paths.
 - Service routes and product driver workflows should accept generic record-store
   protocols instead of concrete file-backed stores. The first compatibility
   retirement pass migrated Launchplane preview, Odoo promotion, VeriReel deploy,
