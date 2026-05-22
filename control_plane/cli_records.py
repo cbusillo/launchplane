@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,9 @@ from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+
+
+_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,26 @@ def _store(
     return _records_callbacks().store_factory(state_dir, database_url=database_url)
 
 
+def _resolve_record_mutation_database_url(
+    *, database_url: str, local_rehearsal: bool, command_label: str
+) -> str | None:
+    if local_rehearsal:
+        return None
+    normalized_database_url = database_url.strip()
+    if not normalized_database_url:
+        for environment_key in _DATABASE_URL_ENV_KEYS:
+            environment_value = os.environ.get(environment_key, "").strip()
+            if environment_value:
+                normalized_database_url = environment_value
+                break
+    if not normalized_database_url:
+        raise click.ClickException(
+            f"{command_label} requires --database-url or LAUNCHPLANE_DATABASE_URL. "
+            "Use --local-rehearsal for explicit local filesystem rehearsal."
+        )
+    return normalized_database_url
+
+
 def _load_json_file(input_file: Path) -> dict[str, object]:
     return _records_callbacks().load_json_file(input_file)
 
@@ -72,10 +96,20 @@ def artifacts() -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_write(state_dir: Path, database_url: str, input_file: Path) -> None:
+def artifacts_write(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="artifacts write",
+    )
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
+    record_path = _store(state_dir, database_url=execution_database_url).write_artifact_manifest(
+        manifest
+    )
     click.echo(record_path)
 
 
@@ -95,10 +129,20 @@ def artifacts_show(state_dir: Path, database_url: str, artifact_id: str) -> None
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_ingest(state_dir: Path, database_url: str, input_file: Path) -> None:
+def artifacts_ingest(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="artifacts ingest",
+    )
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
+    record_path = _store(state_dir, database_url=execution_database_url).write_artifact_manifest(
+        manifest
+    )
     click.echo(record_path)
 
 
@@ -162,9 +206,17 @@ def release_tuples_export_catalog(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--record-id", required=True)
-def release_tuples_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
+def release_tuples_write_from_promotion(
+    state_dir: Path, database_url: str, local_rehearsal: bool, record_id: str
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="release-tuples write-from-promotion",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     promotion_record = record_store.read_promotion_record(record_id)
     if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
         promotion_record.from_instance
@@ -209,10 +261,20 @@ def backup_gates() -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def backup_gates_write(state_dir: Path, database_url: str, input_file: Path) -> None:
+def backup_gates_write(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="backup-gates write",
+    )
     record = BackupGateRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_backup_gate_record(record)
+    record_path = _store(state_dir, database_url=execution_database_url).write_backup_gate_record(
+        record
+    )
     click.echo(record_path)
 
 
@@ -262,10 +324,20 @@ def promotions() -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def promotions_write(state_dir: Path, database_url: str, input_file: Path) -> None:
+def promotions_write(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="promotions write",
+    )
     record = PromotionRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_promotion_record(record)
+    record_path = _store(state_dir, database_url=execution_database_url).write_promotion_record(
+        record
+    )
     click.echo(record_path)
 
 
@@ -322,10 +394,20 @@ def deployments() -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def deployments_write(state_dir: Path, database_url: str, input_file: Path) -> None:
+def deployments_write(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="deployments write",
+    )
     record = DeploymentRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=database_url).write_deployment_record(record)
+    record_path = _store(state_dir, database_url=execution_database_url).write_deployment_record(
+        record
+    )
     click.echo(record_path)
 
 
@@ -375,9 +457,17 @@ def inventory() -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--record-id", required=True)
-def inventory_write_from_deployment(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
+def inventory_write_from_deployment(
+    state_dir: Path, database_url: str, local_rehearsal: bool, record_id: str
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="inventory write-from-deployment",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     deployment_record = record_store.read_deployment_record(record_id)
     inventory_path = _records_callbacks().write_environment_inventory(
         record_store=record_store,
@@ -391,9 +481,17 @@ def inventory_write_from_deployment(state_dir: Path, database_url: str, record_i
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--record-id", required=True)
-def inventory_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
-    record_store = _store(state_dir, database_url=database_url)
+def inventory_write_from_promotion(
+    state_dir: Path, database_url: str, local_rehearsal: bool, record_id: str
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="inventory write-from-promotion",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     promotion_record = record_store.read_promotion_record(record_id)
     inventory_path = _records_callbacks().write_environment_inventory_from_promotion(
         record_store=record_store,
