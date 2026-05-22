@@ -11005,6 +11005,100 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("https://internal.example-site.invalid", response_text)
         self.assertNotIn("super-secret-password", response_text)
 
+    def test_product_environment_detail_returns_not_found_for_unknown_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["missing-site"],
+                            "contexts": ["missing-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/missing-site/environments/prod",
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "Product 'missing-site' was not found.")
+
+    def test_product_environment_detail_returns_not_found_for_unknown_environment(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["example-site"],
+                            "contexts": ["example-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/example-site/environments/staging",
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Product 'example-site' has no environment 'staging'.",
+        )
+
     def test_product_environment_config_status_endpoint_redacts_expected_config_status(
         self,
     ) -> None:

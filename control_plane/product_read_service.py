@@ -85,10 +85,18 @@ def build_product_environment_read_service_result(
     params: Mapping[str, str],
     action_allowed: ActionAllowed,
 ) -> ProductEnvironmentReadServiceResult:
+    product = params.get("product", "").strip()
+    if not product:
+        raise ValueError("Product environment read result requires product parameters.")
+    try:
+        record_store.read_product_profile_record(product)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"Product '{product}' was not found.") from error
+
     if params.get("activity") == "true":
         activity = build_product_activity_read_model(
             record_store=record_store,
-            product=params["product"],
+            product=product,
         )
         return ProductEnvironmentReadServiceResult(
             payload={"activity": activity.model_dump(mode="json")},
@@ -98,11 +106,17 @@ def build_product_environment_read_service_result(
         )
 
     if params.get("config_status") == "true":
-        config_status = build_product_environment_config_status(
-            record_store=record_store,
-            product=params["product"],
-            environment=params["environment"],
-        )
+        environment = params["environment"]
+        try:
+            config_status = build_product_environment_config_status(
+                record_store=record_store,
+                product=product,
+                environment=environment,
+            )
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                f"Product '{product}' has no environment '{environment}'."
+            ) from error
         return ProductEnvironmentReadServiceResult(
             payload={"config_status": config_status.model_dump(mode="json")},
             authorization_product=config_status.product,
@@ -111,12 +125,18 @@ def build_product_environment_read_service_result(
         )
 
     if "environment" in params:
-        detail = build_product_environment_detail(
-            record_store=record_store,
-            product=params["product"],
-            environment=params["environment"],
-            action_allowed=action_allowed,
-        )
+        environment = params["environment"]
+        try:
+            detail = build_product_environment_detail(
+                record_store=record_store,
+                product=product,
+                environment=environment,
+                action_allowed=action_allowed,
+            )
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                f"Product '{product}' has no environment '{environment}'."
+            ) from error
         return ProductEnvironmentReadServiceResult(
             payload={"environment": detail.model_dump(mode="json")},
             authorization_product=detail.product,
@@ -127,7 +147,7 @@ def build_product_environment_read_service_result(
     if params.get("environments") == "true":
         overview = build_product_site_overview(
             record_store=record_store,
-            product=params["product"],
+            product=product,
             action_allowed=action_allowed,
         )
         return ProductEnvironmentReadServiceResult(
@@ -140,7 +160,7 @@ def build_product_environment_read_service_result(
     if "product" in params:
         overview = build_product_site_overview(
             record_store=record_store,
-            product=params["product"],
+            product=product,
             action_allowed=action_allowed,
         )
         return ProductEnvironmentReadServiceResult(

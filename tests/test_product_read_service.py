@@ -219,6 +219,14 @@ class ProductReadServiceTests(unittest.TestCase):
         )
         self.assertIn("environment", result.payload)
 
+    def test_product_environment_result_requires_product_params(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires product parameters"):
+            build_product_environment_read_service_result(
+                record_store=self.store,
+                params={},
+                action_allowed=lambda _action, _product, _context: True,
+            )
+
     def test_product_environment_results_identify_branch_authorization_targets(
         self,
     ) -> None:
