@@ -156,6 +156,64 @@ class ProductReadServiceTests(unittest.TestCase):
         )
         self.assertIn("environment", result.payload)
 
+    def test_product_environment_results_identify_branch_authorization_targets(
+        self,
+    ) -> None:
+        cases = (
+            (
+                {"product": "example-site"},
+                "product",
+                "example-site",
+                "launchplane",
+                "Workflow cannot read the requested product overview.",
+            ),
+            (
+                {"product": "example-site", "activity": "true"},
+                "activity",
+                "example-site",
+                "launchplane",
+                "Workflow cannot read the requested product activity.",
+            ),
+            (
+                {"product": "example-site", "environments": "true"},
+                "environments",
+                "example-site",
+                "launchplane",
+                "Workflow cannot list the requested product environments.",
+            ),
+            (
+                {"product": "example-site", "environment": "prod"},
+                "environment",
+                "example-site",
+                "example-site-prod",
+                "Workflow cannot read the requested product environment.",
+            ),
+            (
+                {
+                    "product": "example-site",
+                    "environment": "prod",
+                    "config_status": "true",
+                },
+                "config_status",
+                "example-site",
+                "example-site-prod",
+                "Workflow cannot read the requested product environment config status.",
+            ),
+        )
+
+        for params, payload_key, product, context, denial_message in cases:
+            with self.subTest(payload_key=payload_key):
+                result = build_product_environment_read_service_result(
+                    record_store=self.store,
+                    params=params,
+                    action_allowed=lambda _action, _product, _context: True,
+                )
+
+                self.assertEqual(result.authorization_product, product)
+                self.assertEqual(result.authorization_context, context)
+                self.assertEqual(result.denial_message, denial_message)
+                self.assertIn(payload_key, result.payload)
+
     def test_product_environment_list_payload_serializes_overviews(self) -> None:
         payload = build_product_environment_list_service_payload(
             record_store=self.store,
