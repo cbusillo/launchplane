@@ -82,7 +82,6 @@ jobs:
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
-      LAUNCHPLANE_DATABASE_URL: ${{ secrets.LAUNCHPLANE_DATABASE_URL }}
       ODOO_CM_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_TESTING_DOKPLOY_TARGET_ID }}
       ODOO_CM_PROD_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_PROD_DOKPLOY_TARGET_ID }}
       ODOO_OPW_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_OPW_TESTING_DOKPLOY_TARGET_ID }}
@@ -215,56 +214,6 @@ jobs:
             image_reference="${{ steps.prep.outputs.image_repository }}@${{ steps.build.outputs.digest }}"
           fi
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve Launchplane database URL
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${LAUNCHPLANE_DATABASE_URL:-}" ]; then
-            echo "::add-mask::${LAUNCHPLANE_DATABASE_URL}"
-            exit 0
-          fi
-          if [ -z "${LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST:-}" ] || [ -z "${LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN:-}" ]; then
-            echo "Launchplane deploy migrations require LAUNCHPLANE_DATABASE_URL or emergency Dokploy read credentials." >&2
-            exit 1
-          fi
-
-          uv run python - <<'PY'
-          import os
-
-          from control_plane import dokploy as control_plane_dokploy
-
-          host = os.environ["LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST"].strip()
-          token = os.environ["LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN"].strip()
-          target_type = os.environ["LAUNCHPLANE_DOKPLOY_TARGET_TYPE"].strip()
-          target_id = os.environ["LAUNCHPLANE_DOKPLOY_TARGET_ID"].strip()
-
-          target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-              host=host,
-              token=token,
-              target_type=target_type,
-              target_id=target_id,
-          )
-          env_map = control_plane_dokploy.parse_dokploy_env_text(
-              str(target_payload.get("env") or "")
-          )
-          database_url = env_map.get("LAUNCHPLANE_DATABASE_URL", "").strip()
-          if not database_url:
-              raise SystemExit(
-                  "Launchplane target env is missing LAUNCHPLANE_DATABASE_URL."
-              )
-          print(f"::add-mask::{database_url}")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
-              handle.write(f"LAUNCHPLANE_DATABASE_URL={database_url}\n")
-          PY
-
-      - name: Apply Launchplane database migrations
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_DATABASE_URL:?Missing LAUNCHPLANE_DATABASE_URL secret}"
-
-          uv run alembic upgrade head
 
       - name: Request Launchplane self deploy
         id: self_deploy

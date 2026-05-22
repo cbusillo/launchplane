@@ -74,6 +74,9 @@ if [ -z "$launchplane_database_url" ]; then
 	exit 1
 fi
 
+echo "Applying Launchplane database migrations before service startup."
+LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic upgrade head
+
 exec uv run launchplane service serve \
 	--host "$launchplane_service_host" \
 	--port "$launchplane_service_port" \
