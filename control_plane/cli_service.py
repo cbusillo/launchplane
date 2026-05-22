@@ -526,14 +526,29 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", envvar=_DATABASE_URL_ENV_KEYS, default="", show_default=False)
+@click.option("--local-inspection", is_flag=True, default=False)
 @click.option("--context", "context_name", default="verireel", show_default=True)
 @click.option(
     "--preview-context", "preview_context_name", default="verireel-testing", show_default=True
 )
 def service_inspect_data_freshness(
-    state_dir: Path, database_url: str, context_name: str, preview_context_name: str
+    state_dir: Path,
+    database_url: str,
+    local_inspection: bool,
+    context_name: str,
+    preview_context_name: str,
 ) -> None:
-    record_store = _store(state_dir=state_dir, database_url=database_url)
+    resolved_database_url = database_url.strip()
+    if not resolved_database_url and not local_inspection:
+        raise click.ClickException(
+            "service inspect-data-freshness requires --database-url or "
+            "LAUNCHPLANE_DATABASE_URL. Use --local-inspection for explicit local "
+            "filesystem inspection."
+        )
+    record_store = _store(
+        state_dir=state_dir,
+        database_url=resolved_database_url if resolved_database_url else None,
+    )
     try:
         payload = _build_data_freshness_report(
             record_store=record_store,
