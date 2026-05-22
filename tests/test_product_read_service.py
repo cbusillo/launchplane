@@ -3,11 +3,15 @@ from __future__ import annotations
 import unittest
 from typing import cast
 
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.product_read_service import (
+    ProductReadModelStoreCapabilityError,
     build_product_environment_list_service_payload,
     build_product_environment_read_service_result,
     build_product_profile_list_service_payload,
+    require_product_environment_read_model_store,
 )
 
 
@@ -64,6 +68,31 @@ class _ProductReadStore:
         if product != self.profile.product:
             raise FileNotFoundError(product)
         return self.profile
+
+    def read_lane_summary(
+        self, *, context_name: str, instance_name: str
+    ) -> LaunchplaneLaneSummary:
+        _ = self
+        return LaunchplaneLaneSummary(context=context_name, instance=instance_name)
+
+    def list_preview_summaries(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        preview_limit: int | None = None,
+        generation_limit: int | None = 1,
+    ) -> tuple[LaunchplanePreviewSummary, ...]:
+        _ = (
+            self,
+            context_name,
+            anchor_repo,
+            anchor_pr_number,
+            preview_limit,
+            generation_limit,
+        )
+        return ()
 
     def list_preview_records(
         self,
@@ -140,6 +169,24 @@ class ProductReadServiceTests(unittest.TestCase):
         self.assertEqual(payload["driver_id"], "generic-web")
         profiles = cast(list[dict[str, object]], payload["profiles"])
         self.assertEqual(len(profiles), 1)
+
+    def test_product_read_model_store_requires_db_summary_capabilities(self) -> None:
+        class PartialStore:
+            def list_product_profile_records(
+                self, *, driver_id: str = ""
+            ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+                return ()
+
+            def read_product_profile_record(
+                self, product: str
+            ) -> LaunchplaneProductProfileRecord:
+                raise FileNotFoundError(product)
+
+        with self.assertRaisesRegex(
+            ProductReadModelStoreCapabilityError,
+            "read_lane_summary, list_preview_summaries",
+        ):
+            require_product_environment_read_model_store(PartialStore())
 
     def test_product_environment_result_identifies_authorization_target(self) -> None:
         result = build_product_environment_read_service_result(
