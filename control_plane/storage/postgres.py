@@ -7,7 +7,6 @@ from typing import Any, Literal, Protocol, TypeVar, cast
 from pydantic import BaseModel
 from sqlalchemy import (
     JSON,
-    ColumnExpressionArgument,
     Index,
     Integer,
     String,
@@ -59,6 +58,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -90,8 +90,6 @@ PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
-_SqlFilter = ColumnExpressionArgument[bool]
-_SqlOrderBy = ColumnExpressionArgument[Any]
 
 
 class _PayloadRow(Protocol):
@@ -252,6 +250,31 @@ class LaunchplanePreviewGenerationRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     finished_at: Mapped[str] = mapped_column(String, nullable=False)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewEnablementRow(Base):
+    __tablename__ = "launchplane_preview_enablement"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_enablement_context_idx",
+            "context",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_preview_enablement_anchor_idx",
+            "anchor_repo",
+            "anchor_pr_number",
+            desc("updated_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    anchor_repo: Mapped[str] = mapped_column(String, nullable=False)
+    anchor_pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    pr_state: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1057,7 +1080,7 @@ class PostgresRecordStore(HumanSessionStore):
         orm_model: type[Base],
         filters: Sequence[object],
     ) -> RecordModel:
-        statement = select(orm_model).where(*cast(Sequence[_SqlFilter], filters)).limit(1)
+        statement = select(orm_model).where(*cast(Any, filters)).limit(1)
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
@@ -1094,8 +1117,8 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[RecordModel, ...]:
         statement = select(orm_model)
         if filters:
-            statement = statement.where(*cast(Sequence[_SqlFilter], filters))
-        statement = statement.order_by(*cast(Sequence[_SqlOrderBy], order_by))
+            statement = statement.where(*cast(Any, filters))
+        statement = statement.order_by(*cast(Any, order_by))
         if offset > 0:
             statement = statement.offset(offset)
         if limit is not None:
@@ -1683,6 +1706,52 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> None:
+        self._write_row(
+            LaunchplanePreviewEnablementRow(
+                record_id=record.record_id,
+                context=record.context,
+                anchor_repo=record.anchor_repo,
+                anchor_pr_number=record.anchor_pr_number,
+                pr_state=record.pr_state,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
+        return self._read_model(
+            model_type=PreviewEnablementRecord,
+            orm_model=LaunchplanePreviewEnablementRow,
+            filters=(LaunchplanePreviewEnablementRow.record_id == record_id,),
+        )
+
+    def list_preview_enablement_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        pr_state: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewEnablementRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewEnablementRow.context == context_name)
+        if anchor_repo:
+            filters.append(LaunchplanePreviewEnablementRow.anchor_repo == anchor_repo)
+        if pr_state:
+            filters.append(LaunchplanePreviewEnablementRow.pr_state == pr_state)
+        return self._list_models(
+            model_type=PreviewEnablementRecord,
+            orm_model=LaunchplanePreviewEnablementRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewEnablementRow.updated_at.desc(),
+                LaunchplanePreviewEnablementRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def write_preview_inventory_scan_record(self, record: PreviewInventoryScanRecord) -> None:
         self._write_row(
             LaunchplanePreviewInventoryScanRow(
@@ -1805,7 +1874,7 @@ class PostgresRecordStore(HumanSessionStore):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]:
-        filters: list[_SqlFilter] = []
+        filters: list[Any] = []
         if state:
             filters.append(LaunchplaneEveryCodeWorkRequestRow.state == state)
         if repository:
@@ -1952,9 +2021,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
-    def write_merge_train_pr_feedback_record(
-        self, record: MergeTrainPrFeedbackRecord
-    ) -> None:
+    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> None:
         self._write_row(
             LaunchplaneMergeTrainPrFeedbackRow(
                 feedback_id=record.feedback_id,
@@ -3105,6 +3172,7 @@ class PostgresRecordStore(HumanSessionStore):
             "odoo_instance_overrides": 0,
             "product_profiles": 0,
             "preview_records": 0,
+            "preview_enablement": 0,
             "preview_generations": 0,
             "preview_desired_states": 0,
             "preview_inventory_scans": 0,
@@ -3154,6 +3222,10 @@ class PostgresRecordStore(HumanSessionStore):
         for preview_record in filesystem_store.list_preview_records():
             self.write_preview_record(preview_record)
             counts["preview_records"] += 1
+        if hasattr(filesystem_store, "list_preview_enablement_records"):
+            for enablement_record in filesystem_store.list_preview_enablement_records():
+                self.write_preview_enablement_record(enablement_record)
+                counts["preview_enablement"] += 1
         for generation_record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1

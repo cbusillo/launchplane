@@ -22,6 +22,13 @@ from control_plane.workflows.launchplane import (
 )
 
 
+def _record_locator(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    normalized_value = str(value).strip()
+    return normalized_value or fallback
+
+
 class LaunchplaneMutationStore(PreviewMutationRecordStore, Protocol):
     def write_preview_record(self, record: PreviewRecord) -> object: ...
 
@@ -108,9 +115,9 @@ def apply_launchplane_generation_evidence(
     preview_path = record_store.write_preview_record(transitioned_preview)
     return {
         "generation_id": generation_record.generation_id,
-        "generation_path": str(generation_path),
+        "generation_path": _record_locator(generation_path, generation_record.generation_id),
         "preview_id": transitioned_preview.preview_id,
-        "preview_path": str(preview_path),
+        "preview_path": _record_locator(preview_path, transitioned_preview.preview_id),
         "transition": generation_record.state,
     }
 
@@ -138,6 +145,6 @@ def apply_launchplane_destroy_preview(
     preview_path = record_store.write_preview_record(transitioned_preview)
     return {
         "preview_id": transitioned_preview.preview_id,
-        "preview_path": str(preview_path),
+        "preview_path": _record_locator(preview_path, transitioned_preview.preview_id),
         "transition": "destroyed",
     }

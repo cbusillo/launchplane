@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -26,6 +27,8 @@ from control_plane.launchplane_mutations import (
     upsert_launchplane_preview_from_request as shared_upsert_launchplane_preview_from_request,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.launchplane import ProductProfileListStore
 from control_plane.workflows.launchplane import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
@@ -45,9 +48,13 @@ from control_plane.workflows.launchplane import (
 )
 
 
+_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+LaunchplanePreviewRecordStore = FilesystemRecordStore | PostgresRecordStore
+
+
 @dataclass(frozen=True)
 class LaunchplanePreviewCliCallbacks:
-    store_factory: Callable[..., FilesystemRecordStore]
+    store_factory: Callable[..., LaunchplanePreviewRecordStore]
     control_plane_root: Callable[[], Path]
     load_json_file: Callable[[Path], dict[str, object]]
     require_preview_status_payload: Callable[..., dict[str, object]]
@@ -56,7 +63,7 @@ class LaunchplanePreviewCliCallbacks:
     render_policy_page_html: Callable[..., str]
     write_site_bundle: Callable[..., None]
     render_status_page_html: Callable[[dict[str, object]], str]
-    preview_profile_rows: Callable[[FilesystemRecordStore], tuple[tuple[str, str], ...]]
+    preview_profile_rows: Callable[[ProductProfileListStore], tuple[tuple[str, str], ...]]
     build_preview_enablement_record: Callable[..., PreviewEnablementRecord | None]
     load_github_webhook_json_bytes: Callable[..., dict[str, object]]
     json_object: Callable[[object], dict[str, object] | None]
@@ -79,8 +86,28 @@ def _preview_callbacks() -> LaunchplanePreviewCliCallbacks:
     return _callbacks
 
 
-def _store(state_dir: Path) -> FilesystemRecordStore:
-    return _preview_callbacks().store_factory(state_dir)
+def _store(state_dir: Path, *, database_url: str | None = None) -> LaunchplanePreviewRecordStore:
+    return _preview_callbacks().store_factory(state_dir, database_url=database_url)
+
+
+def _resolve_preview_mutation_database_url(
+    *, database_url: str, local_rehearsal: bool, command_label: str
+) -> str | None:
+    if local_rehearsal:
+        return None
+    normalized_database_url = database_url.strip()
+    if not normalized_database_url:
+        for environment_key in _DATABASE_URL_ENV_KEYS:
+            environment_value = os.environ.get(environment_key, "").strip()
+            if environment_value:
+                normalized_database_url = environment_value
+                break
+    if not normalized_database_url:
+        raise click.ClickException(
+            f"{command_label} requires --database-url or LAUNCHPLANE_DATABASE_URL. "
+            "Use --local-rehearsal for explicit local filesystem rehearsal."
+        )
+    return normalized_database_url
 
 
 def _control_plane_root() -> Path:
@@ -105,7 +132,7 @@ def _require_launchplane_preview_status_payload(
 def _build_launchplane_tenant_payload(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     context_name: str,
     anchor_repo: str = "",
 ) -> dict[str, object] | None:
@@ -142,7 +169,7 @@ def _render_launchplane_preview_status_page_html(payload: dict[str, object]) -> 
 
 
 def _launchplane_preview_profile_rows(
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
 ) -> tuple[tuple[str, str], ...]:
     return _preview_callbacks().preview_profile_rows(record_store)
 
@@ -174,6 +201,28 @@ def _json_object(value: object) -> dict[str, object] | None:
     return _preview_callbacks().json_object(value)
 
 
+def _record_locator(value: object, fallback: str) -> str:
+    if value is None:
+        return fallback
+    normalized_value = str(value).strip()
+    return normalized_value or fallback
+
+
+def _generation_transition_payload(
+    *,
+    generation: PreviewGenerationRecord,
+    preview: PreviewRecord,
+    generation_locator: object,
+    preview_locator: object,
+) -> dict[str, str]:
+    return {
+        "generation_id": generation.generation_id,
+        "generation_path": _record_locator(generation_locator, generation.generation_id),
+        "preview_id": preview.preview_id,
+        "preview_path": _record_locator(preview_locator, preview.preview_id),
+    }
+
+
 @click.group("launchplane-previews")
 def launchplane_previews() -> None:
     """Launchplane preview record and read-model commands."""
@@ -183,42 +232,72 @@ def launchplane_previews() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_write_preview(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_preview(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews write-preview",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewMutationRequest.model_validate(_load_json_file(input_file))
     record = build_preview_record_from_request(
         control_plane_root=_control_plane_root(),
-        record_store=_store(state_dir),
+        record_store=record_store,
         request=request,
     )
-    record_path = _store(state_dir).write_preview_record(record)
-    click.echo(record_path)
+    record_path = record_store.write_preview_record(record)
+    click.echo(_record_locator(record_path, record.preview_id))
 
 
 @launchplane_previews.command("write-generation")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_write_generation(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_generation(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews write-generation",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     record = build_preview_generation_record_from_request(
-        record_store=_store(state_dir),
+        record_store=record_store,
         request=request,
     )
-    record_path = _store(state_dir).write_preview_generation_record(record)
-    click.echo(record_path)
+    record_path = record_store.write_preview_generation_record(record)
+    click.echo(_record_locator(record_path, record.generation_id))
 
 
 @launchplane_previews.command("write-enablement")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_write_enablement(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_enablement(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews write-enablement",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     record = PreviewEnablementRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_preview_enablement_record(record)
-    click.echo(record_path)
+    record_path = record_store.write_preview_enablement_record(record)
+    click.echo(_record_locator(record_path, record.record_id))
 
 
 @launchplane_previews.command("request-generation")
@@ -229,12 +308,21 @@ def launchplane_previews_write_enablement(state_dir: Path, input_file: Path) -> 
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 def launchplane_previews_request_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
+    database_url: str,
+    local_rehearsal: bool,
 ) -> None:
-    record_store = _store(state_dir)
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews request-generation",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     preview_request = PreviewMutationRequest.model_validate(_load_json_file(preview_input_file))
     generation_request = PreviewGenerationMutationRequest.model_validate(
         _load_json_file(generation_input_file)
@@ -256,12 +344,21 @@ def launchplane_previews_request_generation(
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 def launchplane_previews_write_from_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
+    database_url: str,
+    local_rehearsal: bool,
 ) -> None:
-    record_store = _store(state_dir)
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews write-from-generation",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     preview_request = PreviewMutationRequest.model_validate(_load_json_file(preview_input_file))
     generation_request = PreviewGenerationMutationRequest.model_validate(
         _load_json_file(generation_input_file)
@@ -279,9 +376,18 @@ def launchplane_previews_write_from_generation(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_write_destroyed(state_dir: Path, input_file: Path) -> None:
-    record_store = _store(state_dir)
+def launchplane_previews_write_destroyed(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews write-destroyed",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
     result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
@@ -294,9 +400,18 @@ def launchplane_previews_write_destroyed(state_dir: Path, input_file: Path) -> N
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_mark_generation_ready(state_dir: Path, input_file: Path) -> None:
-    record_store = _store(state_dir)
+def launchplane_previews_mark_generation_ready(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews mark-generation-ready",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     if not request.generation_id.strip():
         raise click.ClickException("Ready-generation transition requires generation_id.")
@@ -323,12 +438,12 @@ def launchplane_previews_mark_generation_ready(state_dir: Path, input_file: Path
     preview_path = record_store.write_preview_record(transitioned_preview)
     click.echo(
         json.dumps(
-            {
-                "generation_id": generation_record.generation_id,
-                "generation_path": str(generation_path),
-                "preview_id": transitioned_preview.preview_id,
-                "preview_path": str(preview_path),
-            },
+            _generation_transition_payload(
+                generation=generation_record,
+                preview=transitioned_preview,
+                generation_locator=generation_path,
+                preview_locator=preview_path,
+            ),
             indent=2,
             sort_keys=True,
         )
@@ -339,9 +454,18 @@ def launchplane_previews_mark_generation_ready(state_dir: Path, input_file: Path
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_mark_generation_failed(state_dir: Path, input_file: Path) -> None:
-    record_store = _store(state_dir)
+def launchplane_previews_mark_generation_failed(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews mark-generation-failed",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     if not request.generation_id.strip():
         raise click.ClickException("Failed-generation transition requires generation_id.")
@@ -368,12 +492,12 @@ def launchplane_previews_mark_generation_failed(state_dir: Path, input_file: Pat
     preview_path = record_store.write_preview_record(transitioned_preview)
     click.echo(
         json.dumps(
-            {
-                "generation_id": generation_record.generation_id,
-                "generation_path": str(generation_path),
-                "preview_id": transitioned_preview.preview_id,
-                "preview_path": str(preview_path),
-            },
+            _generation_transition_payload(
+                generation=generation_record,
+                preview=transitioned_preview,
+                generation_locator=generation_path,
+                preview_locator=preview_path,
+            ),
             indent=2,
             sort_keys=True,
         )
@@ -384,9 +508,18 @@ def launchplane_previews_mark_generation_failed(state_dir: Path, input_file: Pat
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def launchplane_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
-    record_store = _store(state_dir)
+def launchplane_previews_destroy_preview(
+    state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
+) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews destroy-preview",
+    )
+    record_store = _store(state_dir, database_url=execution_database_url)
     request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
     result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
@@ -399,15 +532,28 @@ def launchplane_previews_destroy_preview(state_dir: Path, input_file: Path) -> N
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
 def launchplane_previews_ingest_pr_event(
-    state_dir: Path, input_file: Path, apply_intent: bool, deliver_feedback: bool
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    input_file: Path,
+    apply_intent: bool,
+    deliver_feedback: bool,
 ) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews ingest-pr-event",
+    )
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
     payload = _ingest_launchplane_pr_event_payload(
         state_dir=state_dir,
+        database_url=execution_database_url,
         event=event,
         apply_intent=apply_intent,
         deliver_feedback=deliver_feedback,
@@ -419,6 +565,8 @@ def launchplane_previews_ingest_pr_event(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--event-name", default="pull_request", show_default=True)
 @click.option("--delivery-id", default="", help="Optional GitHub delivery id for traceability.")
@@ -432,6 +580,8 @@ def launchplane_previews_ingest_pr_event(
 @click.option("--deliver-feedback", is_flag=True)
 def launchplane_previews_ingest_github_webhook(
     state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
     input_file: Path,
     event_name: str,
     delivery_id: str,
@@ -440,9 +590,15 @@ def launchplane_previews_ingest_github_webhook(
     apply_intent: bool,
     deliver_feedback: bool,
 ) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews ingest-github-webhook",
+    )
     raw_payload_bytes, webhook_payload = _load_github_webhook_json_file(input_file)
     payload = _ingest_launchplane_github_webhook_payload(
         state_dir=state_dir,
+        database_url=execution_database_url,
         event_name=event_name,
         raw_payload_bytes=raw_payload_bytes,
         webhook_payload=webhook_payload,
@@ -795,15 +951,24 @@ def launchplane_previews_build_github_webhook_replay_envelope(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
 def launchplane_previews_replay_github_webhook(
     state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
     input_file: Path,
     apply_intent: bool,
     deliver_feedback: bool,
 ) -> None:
+    execution_database_url = _resolve_preview_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="launchplane-previews replay-github-webhook",
+    )
     try:
         envelope = GitHubWebhookReplayEnvelope.model_validate(_load_json_file(input_file))
     except ValidationError as exc:
@@ -814,6 +979,7 @@ def launchplane_previews_replay_github_webhook(
     raw_payload_bytes, webhook_payload = _load_github_webhook_replay_envelope(envelope)
     payload = _ingest_launchplane_github_webhook_payload(
         state_dir=state_dir,
+        database_url=execution_database_url,
         event_name=resolved_event_name,
         raw_payload_bytes=raw_payload_bytes,
         webhook_payload=webhook_payload,
@@ -840,12 +1006,13 @@ def launchplane_previews_replay_github_webhook(
 def _ingest_launchplane_pr_event_payload(
     *,
     state_dir: Path,
+    database_url: str | None,
     event: GitHubPullRequestEvent,
     apply_intent: bool,
     deliver_feedback: bool,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
-    record_store = _store(state_dir)
+    record_store = _store(state_dir, database_url=database_url)
     payload = build_pull_request_event_action_payload(
         control_plane_root=control_plane_root,
         record_store=record_store,
@@ -929,6 +1096,7 @@ def _ingest_launchplane_pr_event_payload(
 def _ingest_launchplane_github_webhook_payload(
     *,
     state_dir: Path,
+    database_url: str | None,
     event_name: str,
     raw_payload_bytes: bytes,
     webhook_payload: dict[str, object],
@@ -956,6 +1124,7 @@ def _ingest_launchplane_github_webhook_payload(
     )
     payload = _ingest_launchplane_pr_event_payload(
         state_dir=state_dir,
+        database_url=database_url,
         event=event,
         apply_intent=apply_intent,
         deliver_feedback=deliver_feedback,
@@ -1004,7 +1173,7 @@ def _load_github_webhook_replay_envelope(
 
 def _verify_launchplane_github_webhook_signature(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     control_plane_root: Path,
     event_name: str,
     webhook_payload: dict[str, object],
@@ -1049,7 +1218,10 @@ def _verify_launchplane_github_webhook_signature(
 
 
 def _resolve_launchplane_github_webhook_context(
-    *, record_store: FilesystemRecordStore, event_name: str, webhook_payload: dict[str, object]
+    *,
+    record_store: LaunchplanePreviewRecordStore,
+    event_name: str,
+    webhook_payload: dict[str, object],
 ) -> str:
     if event_name.strip() != "pull_request":
         return ""
@@ -1251,7 +1423,7 @@ def launchplane_previews_history(
 
 def _read_launchplane_preview_or_fail(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
@@ -1271,7 +1443,7 @@ def _read_launchplane_preview_or_fail(
 
 def _read_launchplane_generation_or_fail(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     preview_id: str,
     generation_id: str,
 ) -> PreviewGenerationRecord:
@@ -1287,7 +1459,7 @@ def _read_launchplane_generation_or_fail(
 def _apply_launchplane_request_generation(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
@@ -1308,16 +1480,16 @@ def _apply_launchplane_request_generation(
     preview_path = record_store.write_preview_record(transitioned_preview)
     return {
         "generation_id": generation_record.generation_id,
-        "generation_path": str(generation_path),
+        "generation_path": _record_locator(generation_path, generation_record.generation_id),
         "preview_id": transitioned_preview.preview_id,
-        "preview_path": str(preview_path),
+        "preview_path": _record_locator(preview_path, transitioned_preview.preview_id),
     }
 
 
 def _upsert_launchplane_preview_from_request(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     request: PreviewMutationRequest,
 ) -> PreviewRecord:
     return shared_upsert_launchplane_preview_from_request(
@@ -1330,7 +1502,7 @@ def _upsert_launchplane_preview_from_request(
 def _apply_launchplane_generation_evidence(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
@@ -1344,7 +1516,7 @@ def _apply_launchplane_generation_evidence(
 
 def _apply_launchplane_destroy_preview(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
     return shared_apply_launchplane_destroy_preview(
@@ -1356,7 +1528,7 @@ def _apply_launchplane_destroy_preview(
 def _apply_launchplane_pr_event_intent(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplanePreviewRecordStore,
     payload: dict[str, object],
 ) -> dict[str, object]:
     mutation_payload = payload.get("mutation")

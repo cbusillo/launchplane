@@ -122,6 +122,7 @@ def build_launchplane_action_script(
         "launchplane",
         "launchplane-previews",
         command_name,
+        "--local-rehearsal",
         "--state-dir",
         '"$STATE_DIR"',
     ]
@@ -344,7 +345,7 @@ def build_launchplane_backup_gate_write_recipe_script(
         "cat >\"$BACKUP_GATE_FILE\" <<'JSON'",
         json.dumps(payload, indent=2, sort_keys=True),
         "JSON",
-        'uv run launchplane backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
+        'uv run launchplane backup-gates write --local-rehearsal --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
     ]
     return "\n".join(lines)
 

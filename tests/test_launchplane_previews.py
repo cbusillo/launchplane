@@ -1262,6 +1262,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Write-side Launchplane recipes", rendered_html)
             self.assertIn("request-generation", rendered_html)
             self.assertIn("destroy-preview", rendered_html)
+            self.assertIn("--local-rehearsal", rendered_html)
             self.assertIn('id="operator-actions"', rendered_html)
             self.assertIn(
                 "This preview is live at the stable Launchplane route and serving the latest requested generation.",
@@ -1478,6 +1479,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 [
                     "launchplane-previews",
                     "ingest-pr-event",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -1523,6 +1525,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 [
                     "launchplane-previews",
                     "write-enablement",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -1578,6 +1581,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 [
                     "launchplane-previews",
                     "ingest-pr-event",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -1855,6 +1859,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 rendered_html,
             )
             self.assertIn("backup-gates write", rendered_html)
+            self.assertIn("--local-rehearsal", rendered_html)
             self.assertNotIn("promote resolve", rendered_html)
 
     def test_launchplane_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(
@@ -3000,6 +3005,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("latest / active", rendered_html)
             self.assertIn("mark-generation-ready", rendered_html)
             self.assertIn("mark-generation-failed", rendered_html)
+            self.assertIn("--local-rehearsal", rendered_html)
             self.assertNotIn(
                 "Latest replacement failed. Launchplane is still serving the older preview.",
                 rendered_html,
@@ -3261,6 +3267,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "write-preview",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -3327,6 +3334,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "write-preview",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -3377,6 +3385,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "write-preview",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -3417,6 +3426,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "write-preview",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -3471,6 +3481,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "write-generation",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3512,6 +3523,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "write-generation",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3598,6 +3610,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "request-generation",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--preview-input-file",
@@ -3668,6 +3681,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "write-from-generation",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--preview-input-file",
@@ -3758,6 +3772,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "mark-generation-ready",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3837,6 +3852,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "mark-generation-failed",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3884,6 +3900,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "destroy-preview",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3937,6 +3954,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "write-destroyed",
+                    "--local-rehearsal",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -3997,6 +4015,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4086,6 +4105,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4162,6 +4182,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4233,6 +4254,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4418,6 +4440,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4504,6 +4527,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4559,6 +4583,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4609,6 +4634,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4674,6 +4700,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4744,6 +4771,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4793,6 +4821,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4825,6 +4854,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4875,6 +4905,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4913,6 +4944,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "ingest-github-webhook",
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                     "--event-name",
@@ -4939,6 +4971,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "ingest-github-webhook",
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                     "--allow-unsigned",
@@ -4965,6 +4998,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -4997,6 +5031,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -5038,6 +5073,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -5162,6 +5198,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -5379,6 +5416,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -5614,6 +5652,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -6515,6 +6554,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "replay-github-webhook",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -6572,6 +6612,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "replay-github-webhook",
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -6601,6 +6642,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 [
                     "launchplane-previews",
                     "replay-github-webhook",
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -6648,6 +6690,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-pr-event",
+                        "--local-rehearsal",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
