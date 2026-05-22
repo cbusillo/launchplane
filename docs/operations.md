@@ -320,13 +320,13 @@ than Launchplane CLI validations:
 - The Postgres service referenced by `LAUNCHPLANE_DATABASE_URL` must already be
   deployed and reachable on the Dokploy network before Launchplane is redeployed.
 
-The Launchplane self-deploy workflow applies `uv run alembic upgrade head` to
-the workflow-provided `LAUNCHPLANE_DATABASE_URL` before requesting a Dokploy
-image swap. This keeps hosted service startup fail-closed on schema drift while
-ensuring new images that require new columns are deployed only after the shared
-database has been migrated. If the GitHub secret is not configured, the workflow
-can read the current Launchplane target env through the emergency Dokploy read
-credentials and masks the resolved database URL before running migrations.
+The Launchplane service entrypoint applies `uv run alembic upgrade head` with
+the container's `LAUNCHPLANE_DATABASE_URL` before starting HTTP service. This
+keeps hosted service startup fail-closed on schema drift while running
+migrations from inside the Dokploy network that can resolve the shared Postgres
+service hostname. The self-deploy workflow should not run shared database
+migrations from the GitHub runner; keep Launchplane migrations additive and
+rollback-aware so a failed health check can still return to the previous image.
 
 Current derived-state behavior:
 
