@@ -60,3 +60,13 @@ def required_positive_int(
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise error_type(message)
     return value
+
+
+def repository_full_name(repository: str) -> str:
+    normalized_repository = "/".join(part.strip() for part in repository.strip().split("/"))
+    if normalized_repository.count("/") != 1:
+        raise ValueError("GitHub repository must be formatted as owner/name.")
+    owner, repo = normalized_repository.split("/", 1)
+    if not owner or not repo:
+        raise ValueError("GitHub repository must be formatted as owner/name.")
+    return normalized_repository
