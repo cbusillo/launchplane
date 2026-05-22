@@ -15,9 +15,10 @@ It exists to keep new cross-product work aligned with Launchplane's target form:
 - Launchplane-owned drivers
 - thin repo extensions
 
-The current repo-local CLI and file-backed state directory are implementation
-scaffolding. This document defines the boundary those adapters should converge
-on.
+The repo-local CLI is an operator/client surface around this boundary. Local
+file-backed state is allowed only for development, tests, import/backfill,
+explicit local rehearsal, and emergency inspection; it is not a production
+persistence fallback.
 
 Agent-facing context and scoped write-intent rules are summarized in
 [agent-context-boundary.md](agent-context-boundary.md). Keep that page aligned

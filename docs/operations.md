@@ -7,14 +7,13 @@ title: Operations
 Use `uv run launchplane --help` for the complete CLI surface. The current
 top-level groups are:
 
-Today this CLI is the local Launchplane operator surface around the service API.
-It owns stable-lane deploy and promotion records for `testing` and `prod`, plus
-Launchplane preview records and read models for PR review flows. It should not
-be treated as the final cross-product ingress boundary for Launchplane. Shared
-or production mutations must prefer the deployed service API with GitHub OIDC or
-the operator UI that calls it. If a live mutation still exists only as a local
-CLI command, stop and add or use a service API path instead of running the local
-command from an arbitrary checkout.
+Today this CLI is the local Launchplane operator/client surface around the
+service API. DB-backed commands may create stable-lane deploy and promotion
+records for `testing` and `prod`, plus Launchplane preview records and read
+models for PR review flows. Shared or production mutations must prefer the
+deployed service API with GitHub OIDC or the operator UI that calls it. If a live
+mutation still exists only as a local CLI command, stop and add or use a service
+API path instead of running the local command from an arbitrary checkout.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
@@ -39,10 +38,10 @@ are the current small evidence-ingest surfaces that let Launchplane accept
 externally-produced deployment and promotion facts without claiming it
 executed that product's runtime action itself.
 
-Those commands are current implementation scaffolding. The target Launchplane
-boundary is a long-running service with authenticated HTTP ingress, where the
-CLI becomes a client of Launchplane's stable API contract instead of defining that
-contract itself.
+Those commands are current implementation scaffolding. The Launchplane boundary
+is a long-running service with authenticated HTTP ingress. The CLI should remain
+a client of Launchplane's stable API contract or an explicit DB-backed operator
+tool, not a separate live-state authority.
 
 ## Target Launchplane Ingress
 
@@ -54,8 +53,9 @@ The target communication model is:
 - GitHub Actions OIDC is the default machine-to-machine trust boundary.
 - Launchplane authorizes requests from GitHub-issued identity claims such as repo,
   workflow, ref, environment, and event context.
-- Typed evidence payloads are the stable contract; CLI commands are temporary
-  adapters while the service boundary is being built.
+- Typed evidence payloads are the stable contract; CLI commands are service
+  clients, DB-backed operator tools, or explicit local-only rehearsal and
+  inspection helpers.
 
 Launchplane should eventually expose API ingress for at least:
 

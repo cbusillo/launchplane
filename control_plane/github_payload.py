@@ -46,7 +46,7 @@ def required_int(
     *,
     error_type: Callable[[str], Exception],
 ) -> int:
-    if not isinstance(value, int) or isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise error_type(message)
     return value
 
@@ -57,6 +57,6 @@ def required_positive_int(
     *,
     error_type: Callable[[str], Exception],
 ) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise error_type(message)
     return value
