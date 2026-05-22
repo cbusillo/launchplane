@@ -444,6 +444,29 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertNotIn("testing_verification", actions)
         self.assertNotIn("preview_verification", actions)
 
+    def test_product_site_overview_raises_for_unknown_product(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        store = _PreviewRecordStore(profile, ())
+
+        with self.assertRaisesRegex(FileNotFoundError, "unknown-site"):
+            build_product_site_overview(
+                record_store=store,
+                product="unknown-site",
+                action_allowed=lambda _action, _product, _context: True,
+            )
+
+    def test_product_environment_detail_raises_for_unknown_environment(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        store = _PreviewRecordStore(profile, ())
+
+        with self.assertRaisesRegex(FileNotFoundError, "staging"):
+            build_product_environment_detail(
+                record_store=store,
+                product="example-site",
+                environment="staging",
+                action_allowed=lambda _action, _product, _context: True,
+            )
+
     def test_product_site_overview_filters_preview_summaries_by_repository_and_state(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
         store = _PreviewRecordStore(

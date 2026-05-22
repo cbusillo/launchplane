@@ -8633,11 +8633,38 @@ def create_launchplane_service_app(
                                     },
                                 },
                             )
-                        product_read_result = control_plane_product_read_service.build_product_environment_read_service_result(
-                            record_store=product_read_store,
-                            params=params,
-                            action_allowed=product_action_allowed,
-                        )
+                        try:
+                            product_read_result = control_plane_product_read_service.build_product_environment_read_service_result(
+                                record_store=product_read_store,
+                                params=params,
+                                action_allowed=product_action_allowed,
+                            )
+                        except FileNotFoundError as error:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=404,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "not_found",
+                                        "message": str(error),
+                                    },
+                                },
+                            )
+                        except ValueError as error:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=400,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "invalid_request",
+                                        "message": str(error),
+                                    },
+                                },
+                            )
                         if not product_action_allowed(
                             "product_environment.read",
                             product_read_result.authorization_product,
