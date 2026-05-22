@@ -85,15 +85,13 @@ fallback.
   `promotions`, `inventory`, `release-tuples`, and `launchplane-previews`
   should be treated as local inspection/backfill tools unless they are run with
   `--database-url`. Do not document them as live shared-service mutation paths.
-- Legacy workflow helpers that still type their store as `FilesystemRecordStore`
-  should be migrated to store protocols or DB-backed/service-backed entrypoints
-  before they are used for shared environments. Current examples include
-  `control_plane.workflows.launchplane`, `odoo_prod_promotion`,
-  `verireel_stable_deploy`, `verireel_prod_backup_gate`,
-  `verireel_prod_promotion`, and `verireel_prod_rollback`.
-- Service routes and product driver workflows should keep accepting a generic
-  record-store protocol where possible. New product workflow docs should point
-  to the service route, not to a local checkout plus `--state-dir` command.
+- Service routes and product driver workflows should accept generic record-store
+  protocols instead of concrete file-backed stores. The first compatibility
+  retirement pass migrated Launchplane preview, Odoo promotion, VeriReel deploy,
+  VeriReel backup-gate, VeriReel promotion, VeriReel rollback, and service route
+  store boundaries to protocol-shaped interfaces.
+- New product workflow docs should point to the service route, not to a local
+  checkout plus `--state-dir` command.
 - Any public doc that shows a product/tenant operator mutating live state through
   local JSON files should be rewritten to use service ingress, DB-backed
   operator commands, or a clearly labeled local-only rehearsal.
