@@ -237,6 +237,27 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
 
         run.assert_not_called()
 
+    def test_run_delegated_worker_requires_database_for_runtime_key_safety(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            with (
+                patch.dict("os.environ", {}, clear=True),
+                patch("control_plane.workflows.verireel_prod_rollback.subprocess.run") as run,
+            ):
+                with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdRollbackWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                            snapshot_name="ver-predeploy-20260421-180000",
+                        ),
+                    )
+
+        run.assert_not_called()
+
     def test_rollout_base_url_resolution_accepts_rollback_request_shape(self) -> None:
         request = VeriReelProdRollbackRequest(
             promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
@@ -391,9 +412,7 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                 clear=True,
             ),
         ):
-            with self.assertRaisesRegex(
-                Exception, "Missing LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
-            ):
+            with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
                 _run_delegated_worker(
                     control_plane_root=Path(temporary_directory_name),
                     request=VeriReelProdRollbackWorkerRequest(

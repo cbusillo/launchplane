@@ -22,7 +22,9 @@ def enforce_worker_runtime_key_safety(
 ) -> None:
     database_url = resolve_database_url(None)
     if database_url is None:
-        return
+        raise click.ClickException(
+            f"Runtime key-safety gate requires LAUNCHPLANE_DATABASE_URL for {operation_name}."
+        )
 
     record_store = PostgresRecordStore(database_url=database_url)
     record_store.ensure_schema()
