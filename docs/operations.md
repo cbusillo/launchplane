@@ -324,7 +324,9 @@ The Launchplane self-deploy workflow applies `uv run alembic upgrade head` to
 the workflow-provided `LAUNCHPLANE_DATABASE_URL` before requesting a Dokploy
 image swap. This keeps hosted service startup fail-closed on schema drift while
 ensuring new images that require new columns are deployed only after the shared
-database has been migrated.
+database has been migrated. If the GitHub secret is not configured, the workflow
+can read the current Launchplane target env through the emergency Dokploy read
+credentials and masks the resolved database URL before running migrations.
 
 Current derived-state behavior:
 
