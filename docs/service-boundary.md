@@ -877,6 +877,7 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/products`
 - `GET /v1/products/{product}`
 - `GET /v1/products/{product}/activity`
+- `GET /v1/products/{product}/environments`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/previews/{preview_id}`
 - `GET /v1/previews/{preview_id}/history`
@@ -903,6 +904,14 @@ metadata, action availability, and trust state. Raw context names and provider
 target identifiers remain evidence metadata; runtime values, secret plaintext,
 secret ciphertext, and product-specific driver payloads are not exposed as
 shared top-level fields.
+
+`GET /v1/products/{product}/environments` returns the product's stable
+environment summaries from DB-backed Launchplane records. It is the collection
+form of the per-product read model and is intended for operator and UI
+navigation before loading a single environment detail page. It uses the same
+redaction rules as the product overview: environment summaries include context,
+URLs, action availability, trust state, and provenance, but not runtime values or
+secret material.
 
 `GET /v1/products/{product}/environments/{environment}/config-status` is a
 redacted product/site read under the same action. It compares product-profile

@@ -63,6 +63,7 @@ The first product/site read endpoints are:
 - `GET /v1/products`
 - `GET /v1/products/{product}`
 - `GET /v1/products/{product}/activity`
+- `GET /v1/products/{product}/environments`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/products/{product}/environments/{environment}/config-status`
 
