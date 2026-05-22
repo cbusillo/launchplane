@@ -4879,6 +4879,53 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "gh-delivery-123")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "github-webhook")
 
+    def test_launchplane_previews_ingest_github_webhook_uses_database_for_signature_context(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            database_url = _runtime_environments_database_url(control_plane_root)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    _preview_product_profile(
+                        product="tenant-opw",
+                        repository="every/tenant-opw",
+                        preview_context="opw",
+                    )
+                )
+            finally:
+                store.close()
+            input_file = control_plane_root / "github-webhook.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    CLI_MAIN,
+                    [
+                        "launchplane-previews",
+                        "ingest-github-webhook",
+                        "--database-url",
+                        database_url,
+                        "--state-dir",
+                        str(control_plane_root / "empty-state"),
+                        "--input-file",
+                        str(input_file),
+                        "--signature-256",
+                        _github_webhook_signature(webhook_payload),
+                    ],
+                    env={"LAUNCHPLANE_DATABASE_URL": database_url},
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["webhook"]["signature_verification"]["context"], "opw")
+            self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
+
     def test_launchplane_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(
         self,
     ) -> None:

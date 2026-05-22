@@ -1108,7 +1108,7 @@ def _ingest_launchplane_github_webhook_payload(
     deliver_feedback: bool,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
-    record_store = _store(state_dir)
+    record_store = _store(state_dir, database_url=database_url)
     signature_verification = _verify_launchplane_github_webhook_signature(
         record_store=record_store,
         control_plane_root=control_plane_root,
