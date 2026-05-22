@@ -6,9 +6,15 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import (
@@ -17,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 from control_plane.contracts.secret_record import SecretBinding
@@ -54,6 +61,32 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         self, *, context_name: str, instance_name: str
     ) -> LaunchplaneLaneSummary: ...
 
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]: ...
+
+    def list_backup_gate_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[BackupGateRecord, ...]: ...
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
     def list_preview_summaries(
         self,
         *,
@@ -63,6 +96,22 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         preview_limit: int | None = None,
         generation_limit: int | None = 1,
     ) -> tuple[LaunchplanePreviewSummary, ...]: ...
+
+    def list_preview_desired_state_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewDesiredStateRecord, ...]: ...
+
+    def list_preview_lifecycle_cleanup_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewLifecycleCleanupRecord, ...]: ...
+
+    def list_preview_pr_feedback_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewPrFeedbackRecord, ...]: ...
+
+    def list_authz_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]: ...
 
 
 def _build_action_authz_by_route() -> dict[str, str]:

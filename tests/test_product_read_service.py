@@ -3,9 +3,17 @@ from __future__ import annotations
 import unittest
 from typing import cast
 
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
+from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.product_read_service import (
     ProductReadModelStoreCapabilityError,
     build_product_environment_list_service_payload,
@@ -101,12 +109,14 @@ class _ProductReadStore:
         anchor_repo: str = "",
         anchor_pr_number: int | None = None,
         limit: int | None = None,
-    ) -> tuple[object, ...]:
+    ) -> tuple[PreviewRecord, ...]:
+        _ = (self, context_name, anchor_repo, anchor_pr_number, limit)
         return ()
 
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[DeploymentRecord, ...]:
+        _ = (self, context_name, instance_name, limit)
         return ()
 
     def list_promotion_records(
@@ -116,32 +126,38 @@ class _ProductReadStore:
         from_instance_name: str = "",
         to_instance_name: str = "",
         limit: int | None = None,
-    ) -> tuple[object, ...]:
+    ) -> tuple[PromotionRecord, ...]:
+        _ = (self, context_name, from_instance_name, to_instance_name, limit)
         return ()
 
     def list_backup_gate_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[BackupGateRecord, ...]:
+        _ = (self, context_name, instance_name, limit)
         return ()
 
     def list_preview_desired_state_records(
         self, *, context_name: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[PreviewDesiredStateRecord, ...]:
+        _ = (self, context_name, limit)
         return ()
 
     def list_preview_lifecycle_cleanup_records(
         self, *, context_name: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[PreviewLifecycleCleanupRecord, ...]:
+        _ = (self, context_name, limit)
         return ()
 
     def list_preview_pr_feedback_records(
         self, *, context_name: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[PreviewPrFeedbackRecord, ...]:
+        _ = (self, context_name, limit)
         return ()
 
     def list_authz_policy_records(
         self, *, status: str = "", limit: int | None = None
-    ) -> tuple[object, ...]:
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        _ = (self, status, limit)
         return ()
 
     def list_runtime_environment_records(
@@ -184,7 +200,7 @@ class ProductReadServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProductReadModelStoreCapabilityError,
-            "read_lane_summary, list_preview_summaries",
+            "read_lane_summary, list_deployment_records, list_promotion_records",
         ):
             require_product_environment_read_model_store(PartialStore())
 

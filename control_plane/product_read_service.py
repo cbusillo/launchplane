@@ -33,7 +33,15 @@ _PRODUCT_ENVIRONMENT_READ_MODEL_STORE_METHODS = (
     "list_product_profile_records",
     "read_product_profile_record",
     "read_lane_summary",
+    "list_deployment_records",
+    "list_promotion_records",
+    "list_backup_gate_records",
+    "list_preview_records",
     "list_preview_summaries",
+    "list_preview_desired_state_records",
+    "list_preview_lifecycle_cleanup_records",
+    "list_preview_pr_feedback_records",
+    "list_authz_policy_records",
 )
 
 
