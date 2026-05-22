@@ -9,6 +9,7 @@ from control_plane.contracts.runner_queue_wait import RunnerQueueWaitSummary
 from control_plane.contracts.runner_queue_wait import build_runner_queue_wait_job
 from control_plane.contracts.runner_queue_wait import build_runner_queue_wait_summary
 from control_plane.github_payload import json_object
+from control_plane.github_payload import repository_full_name
 from control_plane.github_payload import required_int
 from control_plane.github_payload import required_stripped_text
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -150,13 +151,7 @@ def _job_labels(value: object) -> tuple[str, ...]:
 
 
 def _repository_path(repository: str) -> str:
-    normalized_repository = "/".join(part.strip() for part in repository.strip().split("/"))
-    if normalized_repository.count("/") != 1:
-        raise ValueError("GitHub repository must be formatted as owner/name.")
-    owner, repo = normalized_repository.split("/", 1)
-    if not owner or not repo:
-        raise ValueError("GitHub repository must be formatted as owner/name.")
-    return normalized_repository
+    return repository_full_name(repository)
 
 
 def _json_object(value: object, label: str) -> dict[str, object]:
