@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import click
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from click.testing import CliRunner
 from pydantic import ValidationError
@@ -680,6 +681,37 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             ["ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"],
         )
         self.assertEqual(stored_record.last_apply.status, "pass")
+
+    def test_post_deploy_update_requires_database_for_override_authority(self) -> None:
+        source_of_truth = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="opw",
+                    instance="prod",
+                    target_type="compose",
+                    target_name="opw-prod",
+                    target_id="compose-123",
+                ),
+            ),
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source_of_truth,
+            ),
+            patch("control_plane.dokploy.run_compose_post_deploy_update") as runner,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "LAUNCHPLANE_DATABASE_URL"):
+                _run_compose_post_deploy_update(env_file=None, request=_ship_request())
+
+        runner.assert_not_called()
 
     def test_cli_migrate_secret_transport_relabels_secret_bindings_without_plaintext(
         self,

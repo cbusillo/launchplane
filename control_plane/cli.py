@@ -2687,6 +2687,12 @@ def _run_compose_post_deploy_update(
     request: ShipRequest,
 ) -> None:
     control_plane_root = _control_plane_root()
+    database_url = resolve_database_url(None)
+    if database_url is None:
+        raise click.ClickException(
+            "Compose post-deploy update requires LAUNCHPLANE_DATABASE_URL for "
+            "DB-backed Odoo override authority."
+        )
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -2706,6 +2712,7 @@ def _run_compose_post_deploy_update(
             f"Configured={target_definition.target_type}."
         )
     odoo_override_record = _read_odoo_instance_override_record_for_post_deploy(
+        database_url=database_url,
         context_name=request.context,
         instance_name=request.instance,
     )
@@ -2728,6 +2735,7 @@ def _run_compose_post_deploy_update(
             )
         except click.ClickException as error:
             _write_odoo_instance_override_apply_result(
+                database_url=database_url,
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
@@ -2746,6 +2754,7 @@ def _run_compose_post_deploy_update(
     except click.ClickException as error:
         if odoo_override_record is not None:
             _write_odoo_instance_override_apply_result(
+                database_url=database_url,
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
@@ -2753,6 +2762,7 @@ def _run_compose_post_deploy_update(
         raise
     if odoo_override_record is not None:
         _write_odoo_instance_override_apply_result(
+            database_url=database_url,
             record=odoo_override_record,
             status="pass"
             if workflow_environment_overrides or required_workflow_environment_keys
@@ -2767,12 +2777,10 @@ def _run_compose_post_deploy_update(
 
 def _read_odoo_instance_override_record_for_post_deploy(
     *,
+    database_url: str,
     context_name: str,
     instance_name: str,
 ) -> OdooInstanceOverrideRecord | None:
-    database_url = resolve_database_url(None)
-    if database_url is None:
-        return None
     postgres_store = PostgresRecordStore(database_url=database_url)
     try:
         return postgres_store.read_odoo_instance_override_record(
@@ -2787,13 +2795,11 @@ def _read_odoo_instance_override_record_for_post_deploy(
 
 def _write_odoo_instance_override_apply_result(
     *,
+    database_url: str,
     record: OdooInstanceOverrideRecord,
     status: Literal["skipped", "pending", "pass", "fail"],
     detail: str,
 ) -> None:
-    database_url = resolve_database_url(None)
-    if database_url is None:
-        return
     postgres_store = PostgresRecordStore(database_url=database_url)
     postgres_store.ensure_schema()
     try:
