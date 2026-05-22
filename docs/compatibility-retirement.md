@@ -4,9 +4,11 @@ title: Compatibility Retirement
 
 ## Purpose
 
-Launchplane keeps local CLI helpers and file-backed stores for development,
-tests, and emergency operator inspection. They are not production authority once
-the matching service route, DB-backed records, and product workflow calls exist.
+Launchplane keeps local CLI helpers and file-backed stores only for local
+development, tests, explicit import/backfill, local rehearsal, and emergency
+operator inspection. They are not production authority, and production-capable
+service or CLI mutation paths must fail closed unless they have DB-backed
+authority.
 
 Use this page as the review checklist before keeping or deleting compatibility
 surfaces.
@@ -54,10 +56,10 @@ Keep a compatibility surface only when it is one of these:
 ## File-Backed State Inventory
 
 `state/`, `FilesystemRecordStore`, `--state-dir`, and `LAUNCHPLANE_STATE_DIR`
-remain compatibility surfaces. They are allowed only for local development,
-tests, import/backfill, and emergency inspection. Shared and production live
-mutations must use the deployed Launchplane service API or DB-backed operator
-records. Service startup requires `--database-url` or
+remain local-only surfaces. They are allowed only for local development, tests,
+import/backfill, explicitly flagged local rehearsal, and emergency inspection.
+Shared and production live mutations must use the deployed Launchplane service
+API or DB-backed operator records. Service startup requires `--database-url` or
 `LAUNCHPLANE_DATABASE_URL`; filesystem state is never a service persistence
 fallback.
 
