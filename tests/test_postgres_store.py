@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
@@ -803,6 +803,33 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 store.verify_schema()
 
             self.assertEqual(inspect(store._engine).get_table_names(), [])
+            store.close()
+
+    def test_verify_schema_rejects_missing_columns_without_creating_them(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            alembic_command.upgrade(_alembic_config(database_url), "head")
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE launchplane_artifact_manifests DROP COLUMN payload"))
+            engine.dispose()
+            store = PostgresRecordStore(database_url=database_url)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "missing required column.*launchplane_artifact_manifests.payload",
+            ):
+                store.verify_schema()
+
+            artifact_columns = {
+                column["name"]
+                for column in inspect(store._engine).get_columns(
+                    "launchplane_artifact_manifests"
+                )
+            }
+            self.assertNotIn("payload", artifact_columns)
             store.close()
 
     def test_shared_record_store_verifies_existing_schema_without_creating_it(self) -> None:

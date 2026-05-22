@@ -1070,6 +1070,18 @@ class PostgresRecordStore(HumanSessionStore):
                 "Launchplane shared storage schema is missing required table(s): "
                 f"{missing}. Run Alembic migrations before starting the hosted service."
             )
+        missing_columns: list[str] = []
+        for table_name, table in sorted(Base.metadata.tables.items()):
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name in sorted(table.columns.keys()):
+                if column_name not in existing_columns:
+                    missing_columns.append(f"{table_name}.{column_name}")
+        if missing_columns:
+            missing = ", ".join(missing_columns)
+            raise RuntimeError(
+                "Launchplane shared storage schema is missing required column(s): "
+                f"{missing}. Run Alembic migrations before starting the hosted service."
+            )
 
     def close(self) -> None:
         self._engine.dispose()
