@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
-
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
 DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -19,12 +16,13 @@ def resolve_database_url(database_url: str | None = None) -> str | None:
     return None
 
 
-def build_record_store(
-    *, state_dir: Path, database_url: str | None = None
-) -> FilesystemRecordStore | PostgresRecordStore:
+def build_shared_record_store(*, database_url: str | None = None) -> PostgresRecordStore:
     resolved_database_url = resolve_database_url(database_url)
     if resolved_database_url is None:
-        return FilesystemRecordStore(state_dir=state_dir)
+        raise ValueError(
+            "Launchplane shared storage requires --database-url or "
+            "LAUNCHPLANE_DATABASE_URL. Filesystem state is local-only."
+        )
     store = PostgresRecordStore(database_url=resolved_database_url)
     store.ensure_schema()
     return store

@@ -66,6 +66,30 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, msg=result.stderr)
         self.assertIn("Refusing to start Launchplane with example policy file", result.stderr)
 
+    def test_requires_database_url_for_loopback_startup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            app_root.mkdir()
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_POLICY_TOML": "schema_version = 1\n",
+                    "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
+                    "LAUNCHPLANE_DATABASE_URL": "",
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+
     def test_accepts_explicit_base64_policy_input(self) -> None:
         policy_path = Path("/tmp/launchplane-authz.toml")
         policy_path.unlink(missing_ok=True)
@@ -89,8 +113,9 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
                         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                         "UV_CAPTURE_FILE": str(capture_file),
                         "LAUNCHPLANE_APP_ROOT": str(app_root),
-                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
                         "LAUNCHPLANE_SERVICE_HOST": "127.0.0.1",
+                        "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
                         "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode(
                             "ascii"
                         ),
@@ -103,6 +128,7 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stderr)
             self.assertIn("--policy-file", captured_args)
             self.assertIn(str(policy_path), captured_args)
+            self.assertIn("--database-url", captured_args)
             self.assertEqual(policy_path.read_text(encoding="utf-8"), "schema_version = 1\n")
         finally:
             policy_path.unlink(missing_ok=True)
@@ -129,7 +155,7 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 1, msg=result.stderr)
-        self.assertIn("refuses hosted startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+        self.assertIn("refuses startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
 
     def test_forwards_database_url_for_hosted_startup(self) -> None:
         policy_path = Path("/tmp/launchplane-authz.toml")

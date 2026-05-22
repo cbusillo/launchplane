@@ -90,7 +90,10 @@ from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRe
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train import discover_merge_train_stack
-from control_plane.service import OdooPreviewVerificationRequest, create_launchplane_service_app
+from control_plane.service import (
+    OdooPreviewVerificationRequest,
+    create_launchplane_service_app as _create_launchplane_service_app,
+)
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -116,6 +119,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewInventoryResult,
     VeriReelPreviewRefreshResult,
 )
+
 from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceResult
 from control_plane.workflows.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
@@ -925,6 +929,21 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
+def create_launchplane_service_app(
+    **kwargs: object,
+) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
+    if "database_url" not in kwargs and "local_record_store_for_tests" not in kwargs:
+        state_dir = kwargs.get("state_dir")
+        if not isinstance(state_dir, Path):
+            raise AssertionError("service tests must pass a pathlib state_dir")
+        kwargs["local_record_store_for_tests"] = FilesystemRecordStore(state_dir=state_dir)
+    factory = cast(Any, _create_launchplane_service_app)
+    return cast(
+        Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],
+        factory(**kwargs),
+    )
+
+
 def _write_runtime_key_safety_policy(
     *,
     database_url: str,
@@ -1417,7 +1436,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             status_code, headers, _ = _invoke_raw_app(
                 app,
@@ -1452,7 +1471,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = _signed_in_cookie(app)
             status_code, payload = _invoke_app(
@@ -1480,7 +1499,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 authz_policy=policy,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = _signed_in_cookie(app)
 
@@ -1562,7 +1581,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = _signed_in_cookie(app)
 
@@ -1644,7 +1663,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 authz_policy=policy,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = _signed_in_cookie(app)
             recreated_app = create_launchplane_service_app(
@@ -1653,7 +1672,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 authz_policy=policy,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
 
             status_code, payload = _invoke_app(
@@ -1688,7 +1707,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = self._signed_in_cookie(app)
             status_code, payload = _invoke_app(
@@ -1724,7 +1743,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = self._signed_in_cookie(app)
             status_code, payload = _invoke_app(
@@ -1749,7 +1768,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
             )
             cookie = self._signed_in_cookie(app)
             status_code, payload = _invoke_app(
@@ -3057,7 +3076,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             same_batch_store = _SameBatchIdReflowFilesystemRecordStore(state_dir)
             with (
-                patch("control_plane.service.build_record_store", return_value=same_batch_store),
                 patch(
                     "control_plane.service.GitHubMergeTrainSnapshotReader",
                     _FakeExpandedMergeTrainSnapshotReader,
@@ -3069,6 +3087,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     verifier=_StubVerifier(_merge_train_service_identity()),
                     authz_policy=_merge_train_service_policy(),
                     control_plane_root_path=Path(temporary_directory_name),
+                    local_record_store_for_tests=same_batch_store,
                 )
                 reflow_status, reflow_payload = _invoke_app(
                     reflow_app,
@@ -3241,7 +3260,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             failing_store = _CandidateReflowWriteFailingFilesystemRecordStore(state_dir)
             with (
-                patch("control_plane.service.build_record_store", return_value=failing_store),
                 patch(
                     "control_plane.service.GitHubMergeTrainSnapshotReader",
                     _FakeExpandedMergeTrainSnapshotReader,
@@ -3253,6 +3271,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     verifier=_StubVerifier(_merge_train_service_identity()),
                     authz_policy=_merge_train_service_policy(),
                     control_plane_root_path=Path(temporary_directory_name),
+                    local_record_store_for_tests=failing_store,
                 )
                 reflow_status, reflow_payload = _invoke_app(
                     failing_app,
@@ -3432,7 +3451,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             failing_store = _CandidateReflowSupersedeFailingFilesystemRecordStore(state_dir)
             with (
-                patch("control_plane.service.build_record_store", return_value=failing_store),
                 patch(
                     "control_plane.service.GitHubMergeTrainSnapshotReader",
                     _FakeExpandedMergeTrainSnapshotReader,
@@ -3444,6 +3462,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     verifier=_StubVerifier(_merge_train_service_identity()),
                     authz_policy=_merge_train_service_policy(),
                     control_plane_root_path=Path(temporary_directory_name),
+                    local_record_store_for_tests=failing_store,
                 )
                 status, payload = _invoke_app(
                     failing_app,
@@ -4763,15 +4782,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 )
             failing_store = _StackCollapseWriteFailingFilesystemRecordStore(state_dir)
-            with (
-                patch("control_plane.service.build_record_store", return_value=failing_store),
-                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
-            ):
+            with patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient):
                 failing_app = create_launchplane_service_app(
                     state_dir=state_dir,
                     verifier=_StubVerifier(_merge_train_service_identity()),
                     authz_policy=_merge_train_service_policy(),
                     control_plane_root_path=Path(temporary_directory_name),
+                    local_record_store_for_tests=failing_store,
                 )
                 status_code, payload = _invoke_app(
                     failing_app,
@@ -9196,7 +9213,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
                 authz_policy=policy,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                github_oauth_client=oauth_client,
                 control_plane_root_path=Path(temporary_directory_name),
             )
             cookie = _signed_in_cookie(app)
@@ -9940,13 +9957,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable")
         self.assertEqual(sections["every_code_summary"]["status"], "available")
 
-    def test_health_endpoint_reports_storage_backend(self) -> None:
+    def test_create_service_app_requires_database_url_without_explicit_local_test_store(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
+            with self.assertRaisesRegex(ValueError, "shared storage requires"):
+                _create_launchplane_service_app(
+                    state_dir=Path(temporary_directory_name) / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+
+    def test_health_endpoint_reports_explicit_local_test_storage_backend(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
             )
 
             status_code, payload = _invoke_app(
@@ -9957,7 +9988,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["storage_backend"], "filesystem")
 
-    def test_service_serve_rejects_hosted_filesystem_startup(self) -> None:
+    def test_service_serve_rejects_missing_database_url(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             policy_file = Path(temporary_directory_name) / "policy.toml"
@@ -9968,8 +9999,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 [
                     "service",
                     "serve",
-                    "--host",
-                    "0.0.0.0",
                     "--state-dir",
                     str(Path(temporary_directory_name) / "state"),
                     "--policy-file",
@@ -9978,7 +10007,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("refuses hosted startup without --database-url", result.output)
+        self.assertIn("refuses startup without --database-url", result.output)
 
     def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -12326,7 +12355,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             _write_runtime_key_safety_policy(
                 database_url=database_url,
@@ -12408,7 +12437,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             _write_runtime_key_safety_policy(
                 database_url=database_url,
@@ -12487,7 +12516,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="read_only")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="read_only")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -13780,7 +13809,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -13856,7 +13885,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -13909,7 +13938,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -13990,7 +14019,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -14047,7 +14076,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_humans": []}),
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -14166,7 +14195,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -17639,7 +17668,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -17712,7 +17741,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -17823,7 +17852,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
@@ -17926,7 +17955,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             cookie = _signed_in_cookie(app)
 
@@ -18033,7 +18062,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
             )
             store = PostgresRecordStore(database_url=database_url)
             try:

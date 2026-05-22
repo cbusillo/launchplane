@@ -213,7 +213,7 @@ from control_plane.service_human_auth import (
     build_pkce_verifier,
     load_github_oauth_config_from_env,
 )
-from control_plane.storage.factory import build_record_store, storage_backend_name
+from control_plane.storage.factory import build_shared_record_store, storage_backend_name
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.ui_static_http import serve_ui_route
@@ -645,6 +645,13 @@ class _IdempotencyCapableStore(Protocol):
     ) -> LaunchplaneIdempotencyRecord: ...
 
     def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
+
+
+class _TestLaunchplaneServiceRecordStore(Protocol):
+    @property
+    def backend_name(self) -> str: ...
+
+    def close(self) -> None: ...
 
 
 class _OdooStableBootstrapOperationStore(Protocol):
@@ -7316,6 +7323,7 @@ def create_launchplane_service_app(
     authz_policy: LaunchplaneAuthzPolicy,
     control_plane_root_path: Path | None = None,
     database_url: str | None = None,
+    local_record_store_for_tests: _TestLaunchplaneServiceRecordStore | None = None,
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
@@ -7325,7 +7333,10 @@ def create_launchplane_service_app(
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
-    record_store = build_record_store(state_dir=state_dir, database_url=database_url)
+    record_store = cast(
+        PostgresRecordStore,
+        local_record_store_for_tests or build_shared_record_store(database_url=database_url),
+    )
     storage_backend = storage_backend_name(record_store)
     authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source = (
         _resolve_authz_policy(record_store=record_store, bootstrap_policy=authz_policy)

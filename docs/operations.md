@@ -82,9 +82,9 @@ uv run launchplane service serve \
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
 longer tracks the live policy. Product and workflow grants should be represented
-as DB-backed authz policy records. Omitting `--database-url` is supported only
-for loopback local development; hosted/shared service startup fails closed rather
-than using file-backed JSON state as authority.
+as DB-backed authz policy records. Omitting `--database-url` always fails closed,
+including loopback local development, rather than using file-backed JSON state
+as authority.
 
 Current implementation scope:
 

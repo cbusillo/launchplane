@@ -103,7 +103,9 @@ from control_plane.launchplane_mutations import (
     control_plane_root as shared_control_plane_root,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.factory import build_record_store, resolve_database_url
+from control_plane.storage.factory import (
+    resolve_database_url,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import load_authz_policy
 from control_plane.workflows.launchplane import (
@@ -195,7 +197,13 @@ def _store(
     state_dir: Path, *, database_url: str | None = None
 ) -> FilesystemRecordStore | PostgresRecordStore:
     if database_url is not None and database_url.strip():
-        return build_record_store(state_dir=state_dir, database_url=database_url)
+        postgres_store = PostgresRecordStore(database_url=database_url)
+        postgres_store.ensure_schema()
+        return postgres_store
+    return _local_filesystem_store(state_dir)
+
+
+def _local_filesystem_store(state_dir: Path) -> FilesystemRecordStore:
     return FilesystemRecordStore(state_dir=state_dir)
 
 
