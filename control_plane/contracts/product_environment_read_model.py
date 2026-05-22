@@ -49,6 +49,22 @@ class ProductReadModelStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
+class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
+    def read_lane_summary(
+        self, *, context_name: str, instance_name: str
+    ) -> LaunchplaneLaneSummary: ...
+
+    def list_preview_summaries(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        preview_limit: int | None = None,
+        generation_limit: int | None = 1,
+    ) -> tuple[LaunchplanePreviewSummary, ...]: ...
+
+
 def _build_action_authz_by_route() -> dict[str, str]:
     return {
         action.route_path: action.authz_action

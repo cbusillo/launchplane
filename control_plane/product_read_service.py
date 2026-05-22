@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
+    ProductEnvironmentReadModelStore,
     ProductReadModelStore,
     ProductSiteOverview,
     build_product_activity_read_model,
@@ -21,6 +23,35 @@ class ProductEnvironmentReadServiceResult:
     authorization_product: str
     authorization_context: str
     denial_message: str
+
+
+class ProductReadModelStoreCapabilityError(RuntimeError):
+    pass
+
+
+_PRODUCT_ENVIRONMENT_READ_MODEL_STORE_METHODS = (
+    "list_product_profile_records",
+    "read_product_profile_record",
+    "read_lane_summary",
+    "list_preview_summaries",
+)
+
+
+def require_product_environment_read_model_store(
+    record_store: object,
+) -> ProductEnvironmentReadModelStore:
+    missing_methods = tuple(
+        method_name
+        for method_name in _PRODUCT_ENVIRONMENT_READ_MODEL_STORE_METHODS
+        if not callable(getattr(record_store, method_name, None))
+    )
+    if missing_methods:
+        missing = ", ".join(missing_methods)
+        raise ProductReadModelStoreCapabilityError(
+            "Product environment reads require DB-backed Launchplane storage; "
+            f"missing store method(s): {missing}."
+        )
+    return cast(ProductEnvironmentReadModelStore, record_store)
 
 
 def is_product_environment_detail_request(params: Mapping[str, str]) -> bool:
@@ -42,7 +73,7 @@ def build_product_profile_list_service_payload(
 
 def build_product_environment_read_service_result(
     *,
-    record_store: ProductReadModelStore,
+    record_store: ProductEnvironmentReadModelStore,
     params: Mapping[str, str],
     action_allowed: ActionAllowed,
 ) -> ProductEnvironmentReadServiceResult:
@@ -116,7 +147,7 @@ def build_product_environment_read_service_result(
 
 def build_product_environment_list_service_payload(
     *,
-    record_store: ProductReadModelStore,
+    record_store: ProductEnvironmentReadModelStore,
     action_allowed: ActionAllowed,
 ) -> dict[str, object]:
 

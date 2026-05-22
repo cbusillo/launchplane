@@ -8615,11 +8615,26 @@ def create_launchplane_service_app(
                             start_response=start_response,
                         )
 
-                    if control_plane_product_read_service.is_product_environment_detail_request(
-                        params
-                    ):
+                    if control_plane_product_read_service.is_product_environment_detail_request(params):
+                        try:
+                            product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
+                                record_store
+                            )
+                        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=503,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "database_storage_required",
+                                        "message": str(error),
+                                    },
+                                },
+                            )
                         product_read_result = control_plane_product_read_service.build_product_environment_read_service_result(
-                            record_store=record_store,
+                            record_store=product_read_store,
                             params=params,
                             action_allowed=product_action_allowed,
                         )
@@ -8666,8 +8681,25 @@ def create_launchplane_service_app(
                                 },
                             },
                         )
+                    try:
+                        product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
+                            record_store
+                        )
+                    except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=503,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "database_storage_required",
+                                    "message": str(error),
+                                },
+                            },
+                        )
                     product_list_payload = control_plane_product_read_service.build_product_environment_list_service_payload(
-                        record_store=record_store,
+                        record_store=product_read_store,
                         action_allowed=product_action_allowed,
                     )
                     return _json_response(

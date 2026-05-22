@@ -10743,6 +10743,48 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["testing", "prod"],
         )
 
+    def test_products_endpoint_requires_database_backed_read_model_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane", "example-site"],
+                            "contexts": ["launchplane", "example-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products",
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("DB-backed Launchplane storage", payload["error"]["message"])
+
     def test_product_activity_endpoint_returns_product_timeline(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -11051,11 +11093,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
             )
+            store.close()
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -11073,10 +11117,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_service_app(
-                state_dir=state_dir,
+                state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                database_url=database_url,
             )
 
             status_code, payload = _invoke_app(
