@@ -688,6 +688,11 @@ baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
 local renders should run with `LAUNCHPLANE_DATABASE_URL` pointed at the same
 shared store that owns the current stable-lane tuple state.
 
+Preview mutation, ingest, replay, and lifecycle transition commands require
+`--database-url` or `LAUNCHPLANE_DATABASE_URL`. Offline JSON writes are local
+rehearsals only and must opt in with `--local-rehearsal`; read and render
+commands may still inspect a local `--state-dir`.
+
 Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
@@ -867,8 +872,8 @@ to pin the payload shape while the Launchplane service ingress continues to
 absorb the reusable lifecycle behavior.
 
 For a successful or failed preview refresh, emit two JSON payloads and hand
-them to Launchplane's preview-generation evidence ingress. The current local adapter
-is `launchplane-previews write-from-generation`:
+them to Launchplane's preview-generation evidence ingress. The current local
+rehearsal adapter is `launchplane-previews write-from-generation`:
 
 ```json
 {
@@ -914,7 +919,7 @@ That evidence maps directly from the VeriReel workflow outputs:
 
 For cleanup, emit the destroy payload and hand it to
 Launchplane's preview-destroyed evidence ingress once the preview teardown has
-actually completed. The current local adapter is
+actually completed. The current local rehearsal adapter is
 `launchplane-previews write-destroyed`:
 
 ```json

@@ -114,6 +114,7 @@ from control_plane.workflows.launchplane import (
     launchplane_anchor_repo_context,
     launchplane_preview_label_enabled,
     LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+    ProductProfileListStore,
     resolve_pull_request_event_manifest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -411,7 +412,7 @@ def _require_launchplane_preview_status_payload(
 
 
 def _launchplane_preview_profile_rows(
-    record_store: FilesystemRecordStore,
+    record_store: ProductProfileListStore,
 ) -> tuple[tuple[str, str], ...]:
     rows: list[tuple[str, str]] = []
     for profile in record_store.list_product_profile_records():

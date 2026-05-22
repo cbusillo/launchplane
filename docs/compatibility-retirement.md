@@ -86,6 +86,10 @@ fallback.
   `inventory write-from-*`, and `release-tuples write-from-promotion` require
   `--database-url` or `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem
   writes must opt in with `--local-rehearsal`.
+- `launchplane-previews` mutation, ingest, replay, and lifecycle transition
+  commands require `--database-url` or `LAUNCHPLANE_DATABASE_URL`; explicit
+  offline filesystem writes must opt in with `--local-rehearsal`. Read and
+  render commands may keep `--state-dir` as local inspection surfaces.
 
 ### Migrate Or Demote
 
