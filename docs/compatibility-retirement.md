@@ -90,6 +90,9 @@ fallback.
   commands require `--database-url` or `LAUNCHPLANE_DATABASE_URL`; explicit
   offline filesystem writes must opt in with `--local-rehearsal`. Read and
   render commands may keep `--state-dir` as local inspection surfaces.
+- `service inspect-data-freshness` requires `--database-url` or
+  `LAUNCHPLANE_DATABASE_URL`; explicit local JSON inspection must opt in with
+  `--local-inspection`.
 
 ### Migrate Or Demote
 

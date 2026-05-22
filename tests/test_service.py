@@ -17135,6 +17135,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 [
                     "service",
                     "inspect-data-freshness",
+                    "--local-inspection",
                     "--state-dir",
                     str(state_dir),
                 ],
@@ -17153,6 +17154,24 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "verireel-testing/preview-verireel-testing-verireel-pr-123",
             },
         )
+
+    def test_data_freshness_report_requires_database_or_local_inspection(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "inspect-data-freshness",
+                    "--state-dir",
+                    str(state_dir),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("requires --database-url or LAUNCHPLANE_DATABASE_URL", result.output)
+        self.assertIn("--local-inspection", result.output)
 
     def test_data_freshness_report_uses_empty_preview_inventory_scan(self) -> None:
         runner = CliRunner()
@@ -17176,6 +17195,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 [
                     "service",
                     "inspect-data-freshness",
+                    "--local-inspection",
                     "--state-dir",
                     str(state_dir),
                 ],
