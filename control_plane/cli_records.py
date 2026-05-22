@@ -101,16 +101,13 @@ def artifacts() -> None:
 def artifacts_write(
     state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
 ) -> None:
-    execution_database_url = _resolve_record_mutation_database_url(
+    _write_artifact_manifest_command(
+        state_dir=state_dir,
         database_url=database_url,
         local_rehearsal=local_rehearsal,
+        input_file=input_file,
         command_label="artifacts write",
     )
-    manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir, database_url=execution_database_url).write_artifact_manifest(
-        manifest
-    )
-    click.echo(record_path)
 
 
 @artifacts.command("show")
@@ -134,10 +131,27 @@ def artifacts_show(state_dir: Path, database_url: str, artifact_id: str) -> None
 def artifacts_ingest(
     state_dir: Path, database_url: str, local_rehearsal: bool, input_file: Path
 ) -> None:
+    _write_artifact_manifest_command(
+        state_dir=state_dir,
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        input_file=input_file,
+        command_label="artifacts ingest",
+    )
+
+
+def _write_artifact_manifest_command(
+    *,
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    input_file: Path,
+    command_label: str,
+) -> None:
     execution_database_url = _resolve_record_mutation_database_url(
         database_url=database_url,
         local_rehearsal=local_rehearsal,
-        command_label="artifacts ingest",
+        command_label=command_label,
     )
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
     record_path = _store(state_dir, database_url=execution_database_url).write_artifact_manifest(
