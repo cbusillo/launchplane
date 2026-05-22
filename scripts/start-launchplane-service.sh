@@ -26,6 +26,35 @@ with open(path, "wb") as handle:
 PY
 }
 
+schema_has_alembic_version() {
+	database_url="$1"
+	LAUNCHPLANE_DATABASE_URL="$database_url" uv run python - <<'PY'
+from control_plane.storage.postgres import _build_engine
+from control_plane.storage.postgres import Base
+from sqlalchemy import inspect
+import os
+import sys
+
+database_url = os.environ["LAUNCHPLANE_DATABASE_URL"]
+engine = _build_engine(database_url)
+try:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    if "alembic_version" in existing_tables:
+        raise SystemExit(0)
+    if not existing_tables.intersection(Base.metadata.tables):
+        raise SystemExit(0)
+    raise SystemExit(1)
+except SystemExit:
+    raise
+except Exception as error:
+    print(f"Could not inspect Launchplane database schema version: {error}", file=sys.stderr)
+    raise SystemExit(2)
+finally:
+    engine.dispose()
+PY
+}
+
 launchplane_app_root="${LAUNCHPLANE_APP_ROOT:-/app}"
 state_dir="${LAUNCHPLANE_STATE_DIR:-$launchplane_app_root/runtime}"
 launchplane_policy_toml="${LAUNCHPLANE_POLICY_TOML:-}"
@@ -75,6 +104,19 @@ if [ -z "$launchplane_database_url" ]; then
 fi
 
 echo "Applying Launchplane database migrations before service startup."
+schema_version_status=0
+schema_has_alembic_version "$launchplane_database_url" || schema_version_status="$?"
+case "$schema_version_status" in
+0) ;;
+1)
+	echo "Existing Launchplane schema is unversioned; stamping Alembic baseline before upgrade."
+	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp fe94a0486977
+	;;
+*)
+	echo "Launchplane database schema verification failed before migrations." >&2
+	exit 1
+	;;
+esac
 LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic upgrade head
 
 exec uv run launchplane service serve \
