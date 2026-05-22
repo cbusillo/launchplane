@@ -13,6 +13,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    inspect,
     text,
     select,
 )
@@ -1052,6 +1053,23 @@ class PostgresRecordStore(HumanSessionStore):
 
     def ensure_schema(self) -> None:
         Base.metadata.create_all(self._engine)
+
+    def verify_schema(self) -> None:
+        inspector = inspect(self._engine)
+        existing_tables = set(inspector.get_table_names())
+        missing_tables = tuple(
+            sorted(
+                table_name
+                for table_name in Base.metadata.tables
+                if table_name not in existing_tables
+            )
+        )
+        if missing_tables:
+            missing = ", ".join(missing_tables)
+            raise RuntimeError(
+                "Launchplane shared storage schema is missing required table(s): "
+                f"{missing}. Run Alembic migrations before starting the hosted service."
+            )
 
     def close(self) -> None:
         self._engine.dispose()

@@ -939,6 +939,11 @@ def create_launchplane_service_app(
         if not isinstance(state_dir, Path):
             raise AssertionError("service tests must pass a pathlib state_dir")
         kwargs["local_record_store_for_tests"] = FilesystemRecordStore(state_dir=state_dir)
+    database_url = kwargs.get("database_url")
+    if isinstance(database_url, str) and database_url.startswith("sqlite"):
+        store = PostgresRecordStore(database_url=database_url)
+        store.ensure_schema()
+        store.close()
     factory = cast(Any, _create_launchplane_service_app)
     return cast(
         Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],

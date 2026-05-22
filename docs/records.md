@@ -21,8 +21,10 @@ title: Records
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
-the versioned migration mechanism for shared-service Postgres databases. Runtime
-code can still call `ensure_schema()` for compatibility and ephemeral test/local
+the versioned migration mechanism for shared-service Postgres databases. Hosted
+service startup verifies that the shared database schema is already present; it
+does not create or migrate tables as a startup side effect. Runtime code can
+still call `ensure_schema()` for compatibility and ephemeral test/local
 databases, but new production schema changes should land as Alembic revisions.
 
 For a fresh database, apply the current schema with:
