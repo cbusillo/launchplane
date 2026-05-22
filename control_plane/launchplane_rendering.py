@@ -352,11 +352,11 @@ def build_launchplane_backup_gate_write_recipe_script(
 def build_launchplane_promotion_execute_recipe_script(*, state_dir: str) -> str:
     return "\n".join(
         (
-            "# Local rehearsal only. Shared/live mutations must use the deployed "
-            "Launchplane service API or DB-backed operator flows.",
-            f'STATE_DIR="{state_dir or "/path/to/local-state"}"',
+            "# DB-backed execution authority. For offline rehearsal only, replace --database-url with --local-rehearsal.",
+            'LAUNCHPLANE_DATABASE_URL="postgresql+psycopg://..."',
+            f'STATE_DIR="{state_dir or "/path/to/runtime"}"',
             'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
-            'uv run launchplane promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
+            'uv run launchplane promote execute --database-url "$LAUNCHPLANE_DATABASE_URL" --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
         )
     )
 
@@ -371,13 +371,13 @@ def build_launchplane_environment_ship_recipe_script(
     request_file = f"/tmp/launchplane-{context_name}-{instance_name}-ship-request.json"
     return "\n".join(
         (
-            "# Local rehearsal only. Shared/live mutations must use the deployed "
-            "Launchplane service API or DB-backed operator flows.",
-            'STATE_DIR="/path/to/local-state"',
+            "# DB-backed execution authority. For offline rehearsal only, replace --database-url with --local-rehearsal.",
+            'LAUNCHPLANE_DATABASE_URL="postgresql+psycopg://..."',
+            'STATE_DIR="/path/to/runtime"',
             f'SHIP_REQUEST_FILE="{request_file}"',
             f'uv run launchplane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
             'cat "$SHIP_REQUEST_FILE"',
-            'uv run launchplane ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
+            'uv run launchplane ship execute --database-url "$LAUNCHPLANE_DATABASE_URL" --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
         )
     )
 

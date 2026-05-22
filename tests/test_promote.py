@@ -876,6 +876,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -891,6 +892,72 @@ target_id = "compose-123"
 
 
 class PromoteCliTests(unittest.TestCase):
+    def test_promote_execute_requires_database_url(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            input_file = repo_root / "promotion-request.json"
+            input_file.write_text(
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
+                    backup_record_id="backup-opw-prod-20260410T182231Z",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "promote",
+                    "execute",
+                    "--input-file",
+                    str(input_file),
+                ],
+                env={"LAUNCHPLANE_DATABASE_URL": ""},
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("require --database-url", result.output)
+
+    def test_ship_execute_requires_database_url(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "ship",
+                    "execute",
+                    "--input-file",
+                    str(input_file),
+                ],
+                env={"LAUNCHPLANE_DATABASE_URL": ""},
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("require --database-url", result.output)
+
     def test_promote_execute_persists_record_and_executes_control_plane_ship(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -962,6 +1029,7 @@ class PromoteCliTests(unittest.TestCase):
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -1517,6 +1585,7 @@ DOKPLOY_SHIP_MODE = "auto"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2142,6 +2211,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -2182,6 +2252,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -2221,6 +2292,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -2260,6 +2332,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -2323,6 +2396,7 @@ DOKPLOY_SHIP_MODE = "auto"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2415,6 +2489,7 @@ DOKPLOY_SHIP_MODE = "auto"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2510,6 +2585,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -2581,6 +2657,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2678,6 +2755,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2764,6 +2842,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2828,6 +2907,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2913,6 +2993,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -2991,6 +3072,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3057,6 +3139,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3121,6 +3204,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3158,6 +3242,7 @@ target_id = "compose-123"
                     "execute",
                     "--state-dir",
                     str(state_dir),
+                    "--local-rehearsal",
                     "--input-file",
                     str(input_file),
                 ],
@@ -3221,6 +3306,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3287,6 +3373,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3354,6 +3441,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3398,6 +3486,7 @@ target_id = "compose-123"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3769,6 +3858,7 @@ DOKPLOY_SHIP_MODE = "auto"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],
@@ -3842,6 +3932,7 @@ DOKPLOY_SHIP_MODE = "auto"
                         "execute",
                         "--state-dir",
                         str(state_dir),
+                        "--local-rehearsal",
                         "--input-file",
                         str(input_file),
                     ],

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ from control_plane.workflows.promote import (
     build_promotion_record,
     generate_promotion_record_id,
 )
+
+
+_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,25 @@ def _store(
     state_dir: Path, *, database_url: str | None = None
 ) -> FilesystemRecordStore | PostgresRecordStore:
     return _promotion_ship_callbacks().store_factory(state_dir, database_url=database_url)
+
+
+def _resolve_execution_database_url(*, database_url: str, local_rehearsal: bool) -> str | None:
+    if local_rehearsal:
+        return None
+    normalized_database_url = database_url.strip()
+    if not normalized_database_url:
+        for environment_key in _DATABASE_URL_ENV_KEYS:
+            environment_value = os.environ.get(environment_key, "").strip()
+            if environment_value:
+                normalized_database_url = environment_value
+                break
+    if not normalized_database_url:
+        raise click.ClickException(
+            "Promotion and ship execution require --database-url or "
+            "LAUNCHPLANE_DATABASE_URL. Use --local-rehearsal for explicit "
+            "local filesystem rehearsal."
+        )
+    return normalized_database_url
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
@@ -210,16 +233,22 @@ def promote_resolve(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def promote_execute(
     state_dir: Path,
     database_url: str,
+    local_rehearsal: bool,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
+    execution_database_url = _resolve_execution_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+    )
     request = PromotionRequest.model_validate(_load_json_file(input_file))
-    record_store = _store(state_dir, database_url=database_url)
+    record_store = _store(state_dir, database_url=execution_database_url)
     resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
     _read_artifact_manifest(
         record_store=record_store,
@@ -267,7 +296,7 @@ def promote_execute(
         ship_request = _resolve_ship_request_for_promotion(request=resolved_request)
         _record_path, deployment_record = _execute_ship(
             state_dir=state_dir,
-            database_url=database_url,
+            database_url=execution_database_url,
             env_file=env_file,
             request=ship_request,
             mint_release_tuple=False,
@@ -368,18 +397,24 @@ def ship_resolve(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def ship_execute(
     state_dir: Path,
     database_url: str,
+    local_rehearsal: bool,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
+    execution_database_url = _resolve_execution_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+    )
     request = ShipRequest.model_validate(_load_json_file(input_file))
     record_path, _record = _execute_ship(
         state_dir=state_dir,
-        database_url=database_url,
+        database_url=execution_database_url,
         env_file=env_file,
         request=request,
     )

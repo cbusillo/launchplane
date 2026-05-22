@@ -400,6 +400,9 @@ Current derived-state behavior:
 - `promote execute` requires the source lane's current release tuple to match
   the requested artifact, then promotes that exact tuple to the destination
   lane after the deploy passes.
+- `promote execute` and `ship execute` require `--database-url` or
+  `LAUNCHPLANE_DATABASE_URL`; explicit offline filesystem execution must opt in
+  with `--local-rehearsal`.
 - Current environment inventory is refreshed from successful waited `ship` and
   `promote` executions.
 - Externally produced promotion evidence can also refresh current inventory
