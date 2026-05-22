@@ -224,20 +224,25 @@ def apply_live_target_runtime_environment(
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
 
-    if not apply_changes or changed_key_count or deploy:
-        database_url = resolve_database_url(None)
-        if database_url is not None:
-            postgres_store = PostgresRecordStore(database_url=database_url)
-            postgres_store.ensure_schema()
-            try:
-                runtime_key_safety = evaluate_runtime_key_safety_for_live_target_sync(
-                    record_store=postgres_store,
-                    context_name=context_name,
-                    instance_name=instance_name,
-                    require_policy=apply_changes,
-                )
-            finally:
-                postgres_store.close()
+    database_url = resolve_database_url(None)
+    if apply_changes and database_url is None:
+        raise LiveTargetRuntimeError(
+            "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed "
+            "runtime key-safety evaluation.",
+            code="runtime_key_safety_unavailable",
+        )
+    if database_url is not None and (not apply_changes or changed_key_count or deploy):
+        postgres_store = PostgresRecordStore(database_url=database_url)
+        postgres_store.ensure_schema()
+        try:
+            runtime_key_safety = evaluate_runtime_key_safety_for_live_target_sync(
+                record_store=postgres_store,
+                context_name=context_name,
+                instance_name=instance_name,
+                require_policy=apply_changes,
+            )
+        finally:
+            postgres_store.close()
 
     if apply_changes and changed_key_count:
         try:
