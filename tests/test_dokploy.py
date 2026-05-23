@@ -170,7 +170,10 @@ class DokployConfigTests(unittest.TestCase):
             {
                 "logs": [
                     "started",
-                    "RESEND_API_KEY=re_123 Bearer abc.def SMTP_PASSWORD=smtp-secret",
+                    (
+                        "RESEND_API_KEY=re_123 Bearer abc.def "
+                        "SMTP_PASSWORD=smtp-secret LAUNCHPLANE_DATABASE_URL=postgresql://secret"
+                    ),
                 ]
             }
         )
@@ -179,8 +182,10 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIn("RESEND_API_KEY=[redacted]", lines[1])
         self.assertIn("Bearer [redacted]", lines[1])
         self.assertIn("SMTP_PASSWORD=[redacted]", lines[1])
+        self.assertIn("LAUNCHPLANE_DATABASE_URL=[redacted]", lines[1])
         self.assertNotIn("re_123", lines[1])
         self.assertNotIn("smtp-secret", lines[1])
+        self.assertNotIn("postgresql://secret", lines[1])
 
     def test_redact_dokploy_log_line_redacts_quoted_secret_fields(self) -> None:
         redacted_line = control_plane_dokploy.redact_dokploy_log_line(
