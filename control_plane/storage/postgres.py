@@ -75,6 +75,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -386,6 +387,29 @@ class LaunchplanePreviewPrFeedbackRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRunnerHostHygieneAuditRow(Base):
+    __tablename__ = "launchplane_runner_host_hygiene_audits"
+    __table_args__ = (
+        Index(
+            "launchplane_runner_host_hygiene_audits_host_idx",
+            "host_name",
+            desc("audit_record_key"),
+        ),
+        Index(
+            "launchplane_runner_host_hygiene_audits_status_idx",
+            "status",
+            desc("audit_record_key"),
+        ),
+    )
+
+    audit_record_key: Mapped[str] = mapped_column(String, primary_key=True)
+    host_name: Mapped[str] = mapped_column(String, nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    mutate: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2469,6 +2493,41 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_runner_host_hygiene_audit_record(
+        self, record: RunnerHostHygieneApplyAuditRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneRunnerHostHygieneAuditRow(
+                audit_record_key=record.audit_record_key,
+                host_name=record.request.host_name,
+                action=record.request.action,
+                status=record.status,
+                mutate=int(record.request.mutate),
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_runner_host_hygiene_audit_records(
+        self,
+        *,
+        host_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RunnerHostHygieneApplyAuditRecord, ...]:
+        filters: list[object] = []
+        normalized_host_name = host_name.strip().lower()
+        if normalized_host_name:
+            filters.append(LaunchplaneRunnerHostHygieneAuditRow.host_name == normalized_host_name)
+        if status:
+            filters.append(LaunchplaneRunnerHostHygieneAuditRow.status == status)
+        return self._list_models(
+            model_type=RunnerHostHygieneApplyAuditRecord,
+            orm_model=LaunchplaneRunnerHostHygieneAuditRow,
+            filters=filters,
+            order_by=(LaunchplaneRunnerHostHygieneAuditRow.audit_record_key.desc(),),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -3209,6 +3268,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_lifecycle_cleanups": 0,
             "preview_lifecycle_plans": 0,
             "preview_pr_feedback": 0,
+            "runner_host_hygiene_audits": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
             "merge_train_pr_feedback": 0,
@@ -3279,6 +3339,10 @@ class PostgresRecordStore(HumanSessionStore):
             for pr_feedback_record in filesystem_store.list_preview_pr_feedback_records():
                 self.write_preview_pr_feedback_record(pr_feedback_record)
                 counts["preview_pr_feedback"] += 1
+        if hasattr(filesystem_store, "list_runner_host_hygiene_audit_records"):
+            for audit_record in filesystem_store.list_runner_host_hygiene_audit_records():
+                self.write_runner_host_hygiene_audit_record(audit_record)
+                counts["runner_host_hygiene_audits"] += 1
         if hasattr(filesystem_store, "list_every_code_preview_gate_records"):
             for gate_record in filesystem_store.list_every_code_preview_gate_records():
                 self.write_every_code_preview_gate_record(gate_record)

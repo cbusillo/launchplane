@@ -67,6 +67,14 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
+from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
+from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
@@ -158,6 +166,48 @@ def _merge_train_batch_candidate_record(
     )
 
 
+def _runner_host_hygiene_audit_record(
+    *,
+    audit_record_key: str,
+    status: RunnerHostHygieneApplyAuditStatus = "planned",
+    message: str = "planned runner host hygiene apply; no host mutation was executed",
+) -> RunnerHostHygieneApplyAuditRecord:
+    report = evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(required_warm_builders=("odoo-docker-chris-testing",)),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-05-23T13:00:00Z",
+            free_disk_bytes=500,
+            warm_builders=("odoo-docker-chris-testing",),
+        ),
+    )
+    request = RunnerHostHygieneApplyRequest(
+        action="prune_docker_cache",
+        host_name="chris-testing",
+        mutate=True,
+        retained_warm_builders=("odoo-docker-chris-testing",),
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_host_hygiene_apply(
+        policy=RunnerHostHygieneApplyPolicy(
+            approved_hosts=("chris-testing",),
+            required_retained_warm_builders=("odoo-docker-chris-testing",),
+            allow_docker_cache_prune=True,
+        ),
+        request=request,
+        report=report,
+    )
+    return RunnerHostHygieneApplyAuditRecord(
+        audit_record_key=audit_record_key,
+        status=status,
+        request=request,
+        plan=plan,
+        pre_apply_report=report,
+        post_apply_report=report if status != "planned" else None,
+        message=message,
+    )
+
+
 def _merge_train_batch_landing_plan_record(
     *,
     record_id: str = "merge-train-batch-landing-plan-20260514T010500Z-active",
@@ -241,6 +291,45 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_and_list_runner_host_hygiene_audit_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing"
+            )
+            newer_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing"
+            )
+            failed_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-25/chris-testing",
+                status="failed",
+                message="post-apply evidence reported low disk",
+            )
+
+            written_path = store.write_runner_host_hygiene_audit_record(older_record)
+            store.write_runner_host_hygiene_audit_record(newer_record)
+            store.write_runner_host_hygiene_audit_record(failed_record)
+            planned_records = store.list_runner_host_hygiene_audit_records(
+                host_name="Chris-Testing",
+                status="planned",
+            )
+            limited_records = store.list_runner_host_hygiene_audit_records(limit=1)
+
+        self.assertEqual(
+            written_path.parent.relative_to(state_dir).as_posix(),
+            "launchplane_runner_host_hygiene_audits",
+        )
+        self.assertTrue(written_path.name.startswith("runner-host-hygiene-2026-05-23-"))
+        self.assertEqual(
+            [record.audit_record_key for record in planned_records],
+            [newer_record.audit_record_key, older_record.audit_record_key],
+        )
+        self.assertEqual(
+            [record.audit_record_key for record in limited_records],
+            [failed_record.audit_record_key],
+        )
+
     def test_write_and_list_merge_train_pr_feedback_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)
