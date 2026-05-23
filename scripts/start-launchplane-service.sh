@@ -26,12 +26,13 @@ with open(path, "wb") as handle:
 PY
 }
 
-schema_has_alembic_version() {
+schema_stamp_revision() {
 	database_url="$1"
 	LAUNCHPLANE_DATABASE_URL="$database_url" uv run python - <<'PY'
 from control_plane.storage.postgres import _build_engine
 from control_plane.storage.postgres import Base
 from sqlalchemy import inspect
+from sqlalchemy import text
 import os
 import sys
 
@@ -40,34 +41,16 @@ engine = _build_engine(database_url)
 try:
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())
+    has_latest_table = "launchplane_preview_enablement" in existing_tables
     if "alembic_version" in existing_tables:
+        with engine.connect() as connection:
+            version_rows = connection.execute(text("select version_num from alembic_version")).fetchall()
+        version_numbers = {str(row[0]).strip() for row in version_rows if str(row[0]).strip()}
+        if version_numbers == {"fe94a0486977"} and has_latest_table:
+            print("b1c3d5e7f9a1")
         raise SystemExit(0)
     if not existing_tables.intersection(Base.metadata.tables):
         raise SystemExit(0)
-    raise SystemExit(1)
-except SystemExit:
-    raise
-except Exception as error:
-    print(f"Could not inspect Launchplane database schema version: {error}", file=sys.stderr)
-    raise SystemExit(2)
-finally:
-    engine.dispose()
-PY
-}
-
-legacy_schema_revision() {
-	database_url="$1"
-	LAUNCHPLANE_DATABASE_URL="$database_url" uv run python - <<'PY'
-from control_plane.storage.postgres import _build_engine
-from sqlalchemy import inspect
-import os
-import sys
-
-database_url = os.environ["LAUNCHPLANE_DATABASE_URL"]
-engine = _build_engine(database_url)
-try:
-    inspector = inspect(engine)
-    existing_tables = set(inspector.get_table_names())
     if "launchplane_preview_enablement" in existing_tables:
         print("b1c3d5e7f9a1")
         raise SystemExit(0)
@@ -129,20 +112,14 @@ if [ -z "$launchplane_database_url" ]; then
 fi
 
 echo "Applying Launchplane database migrations before service startup."
-schema_version_status=0
-schema_has_alembic_version "$launchplane_database_url" || schema_version_status="$?"
-case "$schema_version_status" in
-0) ;;
-1)
-	legacy_revision="$(legacy_schema_revision "$launchplane_database_url")"
-	echo "Existing Launchplane schema is unversioned; stamping Alembic revision ${legacy_revision} before upgrade."
-	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp "$legacy_revision"
-	;;
-*)
+stamp_revision="$(schema_stamp_revision "$launchplane_database_url")" || {
 	echo "Launchplane database schema verification failed before migrations." >&2
 	exit 1
-	;;
-esac
+}
+if [ -n "$stamp_revision" ]; then
+	echo "Stamping Launchplane database at Alembic revision ${stamp_revision} before upgrade."
+	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp "$stamp_revision"
+fi
 LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic upgrade head
 
 exec uv run launchplane service serve \
