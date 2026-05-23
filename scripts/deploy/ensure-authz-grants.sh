@@ -962,6 +962,14 @@ post_launchplane_grant \
   product-legacy-context-cleanup
 post_grant \
   "$GITHUB_REPOSITORY" \
+  runner-host-hygiene.yml \
+  launchplane \
+  launchplane \
+  runner_host_hygiene_audit.write \
+  deploy:runner-host-hygiene-audit-grant \
+  runner-host-hygiene-audit
+post_grant \
+  "$GITHUB_REPOSITORY" \
   work-graph-snapshot-validate.yml \
   launchplane \
   launchplane \

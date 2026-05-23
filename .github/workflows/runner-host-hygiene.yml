@@ -1,0 +1,137 @@
+---
+name: Runner Host Hygiene
+
+"on":
+  workflow_dispatch:
+    inputs:
+      audit_record_key:
+        description: Launchplane audit record key
+        required: true
+        type: string
+      mutate:
+        description: Execute the approved Docker cache prune
+        required: true
+        default: false
+        type: boolean
+      minimum_free_disk_bytes:
+        description: Minimum free disk bytes required in pre/post evidence
+        required: false
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: runner-host-hygiene-${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
+  cancel-in-progress: false
+
+jobs:
+  docker-cache-prune:
+    runs-on: ubuntu-latest
+    env:
+      LAUNCHPLANE_SERVICE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      RUNNER_HOST_NAME: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
+      RUNNER_EXECUTION_LANE: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
+      RUNNER_SERVICE_USER: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER }}
+      RUNNER_REPOSITORY_SCOPE: ${{ github.repository }}
+      RUNNER_RETAINED_WARM_BUILDERS: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY: >-
+        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS: >-
+        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run approved runner host hygiene executor
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          require_env() {
+            local name="$1"
+            if [ -z "${!name:-}" ]; then
+              echo "Missing ${name}." >&2
+              exit 1
+            fi
+          }
+          require_env RUNNER_HOST_NAME
+          require_env RUNNER_EXECUTION_LANE
+          require_env RUNNER_SERVICE_USER
+          require_env RUNNER_RETAINED_WARM_BUILDERS
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS
+
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("service URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+          })"
+          token_json="$(curl -fsSL \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
+          oidc_token="$(jq -r '.value' <<<"$token_json")"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token." >&2
+            exit 1
+          fi
+          export LAUNCHPLANE_SERVICE_TOKEN="$oidc_token"
+
+          builder_args=()
+          IFS=',' read -r -a builders <<< "$RUNNER_RETAINED_WARM_BUILDERS"
+          for builder in "${builders[@]}"; do
+            trimmed="$(xargs <<< "$builder")"
+            if [ -n "$trimmed" ]; then
+              builder_args+=(--retained-warm-builder "$trimmed")
+            fi
+          done
+          if [ "${#builder_args[@]}" -eq 0 ]; then
+            echo "At least one retained warm builder is required." >&2
+            exit 1
+          fi
+
+          mutate_flag="--dry-run"
+          if [ "${{ inputs.mutate }}" = "true" ]; then
+            mutate_flag="--mutate"
+          fi
+
+          uv run launchplane work-graph runner-host-hygiene-ssh-executor \
+            --host-name "$RUNNER_HOST_NAME" \
+            --execution-lane "$RUNNER_EXECUTION_LANE" \
+            --service-user "$RUNNER_SERVICE_USER" \
+            --repository-scope "$RUNNER_REPOSITORY_SCOPE" \
+            --audit-record-key "${{ inputs.audit_record_key }}" \
+            "${builder_args[@]}" \
+            "$mutate_flag" \
+            --minimum-free-disk-bytes "${{ inputs.minimum_free_disk_bytes }}" \
+            --service-url "$LAUNCHPLANE_SERVICE_URL" \
+            | tee runner-host-hygiene-result.json
+
+      - name: Upload executor result
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-host-hygiene-result
+          path: runner-host-hygiene-result.json
+          if-no-files-found: error
