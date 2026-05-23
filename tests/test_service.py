@@ -84,6 +84,15 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneApplyAuditRecord,
+    RunnerHostHygieneApplyPolicy,
+    RunnerHostHygieneApplyRequest,
+    RunnerHostHygieneObservation,
+    RunnerHostHygienePolicy,
+    evaluate_runner_host_hygiene,
+    plan_runner_host_hygiene_apply,
+)
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
@@ -980,6 +989,47 @@ def _write_runtime_key_safety_policy(
         )
     finally:
         store.close()
+
+
+def _runner_host_hygiene_audit_payload(
+    *,
+    audit_record_key: str = "runner-host-hygiene/2026-05-23/chris-testing",
+    product: str = "launchplane",
+) -> dict[str, object]:
+    report = evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(required_warm_builders=("odoo-docker-chris-testing",)),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-05-23T13:00:00Z",
+            free_disk_bytes=500,
+            warm_builders=("odoo-docker-chris-testing",),
+        ),
+    )
+    request = RunnerHostHygieneApplyRequest(
+        action="prune_docker_cache",
+        host_name="chris-testing",
+        mutate=False,
+        retained_warm_builders=("odoo-docker-chris-testing",),
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_host_hygiene_apply(
+        policy=RunnerHostHygieneApplyPolicy(
+            approved_hosts=("chris-testing",),
+            required_retained_warm_builders=("odoo-docker-chris-testing",),
+            allow_docker_cache_prune=True,
+        ),
+        request=request,
+        report=report,
+    )
+    audit_record = RunnerHostHygieneApplyAuditRecord(
+        audit_record_key=audit_record_key,
+        status="planned",
+        request=request,
+        plan=plan,
+        pre_apply_report=report,
+        message="planned runner host hygiene apply; no host mutation was executed",
+    )
+    return {"schema_version": 1, "product": product, "audit": audit_record.model_dump(mode="json")}
 
 
 def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
@@ -10741,10 +10791,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["products"][0]["driver_id"], "generic-web")
         self.assertEqual(
-            [
-                environment["environment"]
-                for environment in payload["products"][0]["environments"]
-            ],
+            [environment["environment"] for environment in payload["products"][0]["environments"]],
             ["testing", "prod"],
         )
 
@@ -19972,6 +20019,189 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 ),
             )
+
+    def test_runner_host_hygiene_audit_endpoint_writes_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_host_hygiene_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-host-hygiene/audits",
+                payload=_runner_host_hygiene_audit_payload(),
+            )
+
+            self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "runner_host_hygiene_audit_record_key": (
+                        "runner-host-hygiene/2026-05-23/chris-testing"
+                    ),
+                },
+            )
+            self.assertEqual(payload["result"]["audit"]["status"], "planned")
+            store = FilesystemRecordStore(state_dir=state_dir)
+            records = store.list_runner_host_hygiene_audit_records(
+                host_name="chris-testing", status="planned"
+            )
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].audit_record_key,
+                "runner-host-hygiene/2026-05-23/chris-testing",
+            )
+            self.assertFalse(records[0].request.mutate)
+
+    def test_runner_host_hygiene_audit_endpoint_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_host_hygiene_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_host_hygiene_audit_payload()
+
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-host-hygiene/audits",
+                payload=request_payload,
+                headers={"Idempotency-Key": "runner-host-hygiene:chris-testing:planned"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-host-hygiene/audits",
+                payload=request_payload,
+                headers={"Idempotency-Key": "runner-host-hygiene:chris-testing:planned"},
+            )
+
+            self.assertEqual(first_status_code, 202, msg=json.dumps(first_payload, indent=2))
+            self.assertEqual(second_status_code, 202, msg=json.dumps(second_payload, indent=2))
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertTrue(second_payload["replayed"])
+            self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    def test_runner_host_hygiene_audit_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-host-hygiene/audits",
+                payload=_runner_host_hygiene_audit_payload(),
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_runner_host_hygiene_audit_endpoint_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": ["*"],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_host_hygiene_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-host-hygiene/audits",
+                payload=_runner_host_hygiene_audit_payload(product="odoo"),
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

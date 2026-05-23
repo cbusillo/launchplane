@@ -167,6 +167,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
@@ -796,6 +797,21 @@ class DeploymentEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("deployment evidence requires product")
+        return self
+
+
+class RunnerHostHygieneAuditEvidenceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    audit: RunnerHostHygieneApplyAuditRecord
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "RunnerHostHygieneAuditEvidenceEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("runner host hygiene audit evidence requires product 'launchplane'")
+        self.product = "launchplane"
         return self
 
 
@@ -2695,6 +2711,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/work-graph/rank",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
+        "/v1/evidence/runner-host-hygiene/audits",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
@@ -4692,6 +4709,7 @@ def _accepted_payload(
         "merge_train_run_id",
         "odoo_stable_bootstrap_operation_id",
         "odoo_stable_target_replacement_operation_id",
+        "runner_host_hygiene_audit_record_key",
     }
     records: dict[str, object] = {}
     for key, value in result.items():
@@ -8615,12 +8633,16 @@ def create_launchplane_service_app(
                             start_response=start_response,
                         )
 
-                    if control_plane_product_read_service.is_product_environment_detail_request(params):
+                    if control_plane_product_read_service.is_product_environment_detail_request(
+                        params
+                    ):
                         try:
                             product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
                                 record_store
                             )
-                        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+                        except (
+                            control_plane_product_read_service.ProductReadModelStoreCapabilityError
+                        ) as error:
                             return _json_response(
                                 start_response=start_response,
                                 status_code=503,
@@ -8712,7 +8734,9 @@ def create_launchplane_service_app(
                         product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
                             record_store
                         )
-                    except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+                    except (
+                        control_plane_product_read_service.ProductReadModelStoreCapabilityError
+                    ) as error:
                         return _json_response(
                             start_response=start_response,
                             status_code=503,
@@ -10415,6 +10439,51 @@ def create_launchplane_service_app(
                     return idempotent_response
                 record_store.write_backup_gate_record(backup_gate_request.backup_gate)
                 result = {"backup_gate_record_id": backup_gate_request.backup_gate.record_id}
+            elif path == "/v1/evidence/runner-host-hygiene/audits":
+                runner_host_hygiene_request = RunnerHostHygieneAuditEvidenceEnvelope.model_validate(
+                    payload
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="runner_host_hygiene_audit.write",
+                    product=runner_host_hygiene_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write runner host hygiene audit evidence."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                record_store.write_runner_host_hygiene_audit_record(
+                    runner_host_hygiene_request.audit
+                )
+                result = {
+                    "runner_host_hygiene_audit_record_key": runner_host_hygiene_request.audit.audit_record_key,
+                    "host_name": runner_host_hygiene_request.audit.request.host_name,
+                    "audit_status": runner_host_hygiene_request.audit.status,
+                    "mutate": str(runner_host_hygiene_request.audit.request.mutate).lower(),
+                }
+                driver_result = {"audit": runner_host_hygiene_request.audit.model_dump(mode="json")}
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(
