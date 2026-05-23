@@ -17,7 +17,8 @@ Runner host hygiene has two separate phases:
   through an approved Launchplane-owned host adapter. This phase is not active
   until a disposable host or explicit operator target exists.
 
-The current Launchplane surface implements only the report-only phase.
+The current Launchplane surface implements report-only evidence and local
+apply-boundary planning. It still does not execute host mutations.
 
 ## Report Contract
 
@@ -63,9 +64,38 @@ uv run launchplane work-graph runner-host-hygiene-report \
   --policy-file runner-host-policy.json
 ```
 
+## Apply Planning
+
+Apply planning records the safety boundary a future host adapter must satisfy,
+but it still does not execute cleanup:
+
+```bash
+uv run launchplane work-graph runner-host-hygiene-apply-plan \
+  --action prune_docker_cache \
+  --host-name chris-testing \
+  --mutate \
+  --audit-record-key runner-host-hygiene/2026-05-23/chris-testing \
+  --approved-host chris-testing \
+  --allow-docker-cache-prune \
+  --required-retained-warm-builder odoo-docker-chris-testing \
+  --retained-warm-builder odoo-docker-chris-testing \
+  --report-file runner-host-report.json
+```
+
+The planner fails closed unless the host is approved, the action is enabled, the
+request carries explicit mutate intent, the pre-apply report is healthy, required
+warm builders are retained, and an audit record key is present. Passing
+`--mutate` records operator intent in the request so the boundary can be tested;
+this CLI still prints a dry-run JSON plan and does not invoke Docker, systemd,
+SSH, GitHub, or a host adapter.
+
+When an audit key is provided, the CLI also emits a planned audit-record payload.
+That record is a contract for a future Launchplane-owned storage write, not a
+write performed by this local command.
+
 ## Future Apply Requirements
 
-Before Launchplane grows a host mutation path, the apply design must name:
+Before Launchplane grows a host mutation adapter, the apply design must name:
 
 - the disposable or explicitly approved host target
 - the runner lane and repository scope the host adapter is allowed to affect
@@ -74,4 +104,5 @@ Before Launchplane grows a host mutation path, the apply design must name:
 - the rollback or stop condition when cleanup cannot be completed safely
 - the audit record written back to Launchplane-owned storage
 
-Until those are present, host hygiene work remains report-only.
+Until those are present, host hygiene work remains report-only or dry-run
+planning only.

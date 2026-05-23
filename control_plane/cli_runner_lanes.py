@@ -16,8 +16,14 @@ from control_plane.contracts.runner_lane_control import RunnerLaneControlRequest
 from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAction
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
+from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
@@ -31,6 +37,7 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
+    work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
 
 
 @click.command("runner-inventory")
@@ -450,6 +457,144 @@ def runner_host_hygiene_report(
     )
 
 
+@click.command("runner-host-hygiene-apply-plan")
+@click.option(
+    "--action",
+    "apply_action",
+    required=True,
+    type=click.Choice(("prune_docker_cache", "prune_runner_workdir", "restart_runner_service")),
+    help="Runner host hygiene apply action to plan. The command never mutates hosts.",
+)
+@click.option("--host-name", required=True, help="Runner host name to plan against.")
+@click.option(
+    "--mutate/--dry-run",
+    default=False,
+    show_default=True,
+    help="Record explicit mutate intent. This command still emits only a dry-run plan.",
+)
+@click.option(
+    "--audit-record-key",
+    default="",
+    help="Launchplane-owned audit record key the future apply adapter must write.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for this apply boundary. Repeat for each approved host.",
+)
+@click.option(
+    "--retained-warm-builder",
+    "retained_warm_builders",
+    multiple=True,
+    help="Warm builder the request promises to retain. Repeat for each retained builder.",
+)
+@click.option(
+    "--required-retained-warm-builder",
+    "required_retained_warm_builders",
+    multiple=True,
+    help="Warm builder policy requires the apply request to retain. Repeat for each builder.",
+)
+@click.option(
+    "--allow-docker-cache-prune/--disallow-docker-cache-prune",
+    default=False,
+    show_default=True,
+    help="Enable Docker cache prune planning in the local policy.",
+)
+@click.option(
+    "--allow-runner-workdir-prune/--disallow-runner-workdir-prune",
+    default=False,
+    show_default=True,
+    help="Enable runner work-directory prune planning in the local policy.",
+)
+@click.option(
+    "--allow-runner-service-restart/--disallow-runner-service-restart",
+    default=False,
+    show_default=True,
+    help="Enable runner service restart planning in the local policy.",
+)
+@click.option(
+    "--require-healthy-report/--allow-attention-report",
+    default=True,
+    show_default=True,
+    help="Require a healthy pre-apply hygiene report before planning can become ready.",
+)
+@click.option(
+    "--require-audit-record/--allow-missing-audit-record",
+    default=True,
+    show_default=True,
+    help="Require an audit record key before planning can become ready.",
+)
+@click.option(
+    "--report-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="RunnerHostHygieneReport JSON or runner-host-hygiene-report output.",
+)
+def runner_host_hygiene_apply_plan(
+    apply_action: RunnerHostHygieneApplyAction,
+    host_name: str,
+    mutate: bool,
+    audit_record_key: str,
+    approved_hosts: tuple[str, ...],
+    retained_warm_builders: tuple[str, ...],
+    required_retained_warm_builders: tuple[str, ...],
+    allow_docker_cache_prune: bool,
+    allow_runner_workdir_prune: bool,
+    allow_runner_service_restart: bool,
+    require_healthy_report: bool,
+    require_audit_record: bool,
+    report_file: Path,
+) -> None:
+    try:
+        report = _load_runner_host_hygiene_report(report_file)
+        policy = RunnerHostHygieneApplyPolicy(
+            approved_hosts=approved_hosts,
+            required_retained_warm_builders=required_retained_warm_builders,
+            require_healthy_report=require_healthy_report,
+            require_audit_record=require_audit_record,
+            allow_docker_cache_prune=allow_docker_cache_prune,
+            allow_runner_workdir_prune=allow_runner_workdir_prune,
+            allow_runner_service_restart=allow_runner_service_restart,
+        )
+        request = RunnerHostHygieneApplyRequest(
+            action=apply_action,
+            host_name=host_name,
+            mutate=mutate,
+            retained_warm_builders=retained_warm_builders,
+            audit_record_key=audit_record_key,
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=policy,
+            request=request,
+            report=report,
+        )
+        audit_record = (
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan,
+                pre_apply_report=report,
+                message="planned runner host hygiene apply; no host mutation was executed",
+            )
+            if request.audit_record_key
+            else None
+        )
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    payload: dict[str, object] = {
+        "mode": "dry-run",
+        "policy": policy.model_dump(mode="json"),
+        "request": request.model_dump(mode="json"),
+        "report": report.model_dump(mode="json"),
+        "plan": plan.model_dump(mode="json"),
+    }
+    if audit_record is not None:
+        payload["audit_record"] = audit_record.model_dump(mode="json")
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:
     return RunnerLaneInventory.model_validate(
         json.loads(inventory_file.read_text(encoding="utf-8"))
@@ -477,6 +622,13 @@ def _load_runner_host_hygiene_policy(policy_file: Path) -> RunnerHostHygienePoli
     return RunnerHostHygienePolicy.model_validate(
         json.loads(policy_file.read_text(encoding="utf-8"))
     )
+
+
+def _load_runner_host_hygiene_report(report_file: Path) -> RunnerHostHygieneReport:
+    payload = json.loads(report_file.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("report"), dict):
+        payload = payload["report"]
+    return RunnerHostHygieneReport.model_validate(payload)
 
 
 def _runner_baseline_runner_name(value: str) -> str:
