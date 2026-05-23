@@ -328,9 +328,10 @@ service hostname. The self-deploy workflow should not run shared database
 migrations from the GitHub runner; keep Launchplane migrations additive and
 rollback-aware so a failed health check can still return to the previous image.
 If a shared database already has Launchplane tables but no `alembic_version`
-table from the pre-migration `create_all` era, the entrypoint stamps the
-baseline revision before applying later migrations. Empty databases still run
-the full migration chain from the first revision.
+table from the pre-migration `create_all` era, the entrypoint stamps the newest
+revision that matches the detected legacy table set before applying later
+migrations. Empty databases still run the full migration chain from the first
+revision.
 
 Current derived-state behavior:
 
