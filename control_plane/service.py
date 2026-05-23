@@ -10479,11 +10479,14 @@ def create_launchplane_service_app(
                 )
                 result = {
                     "runner_host_hygiene_audit_record_key": runner_host_hygiene_request.audit.audit_record_key,
+                }
+                driver_result = {
+                    "runner_host_hygiene_audit_record_key": runner_host_hygiene_request.audit.audit_record_key,
                     "host_name": runner_host_hygiene_request.audit.request.host_name,
                     "audit_status": runner_host_hygiene_request.audit.status,
-                    "mutate": str(runner_host_hygiene_request.audit.request.mutate).lower(),
+                    "mutate": runner_host_hygiene_request.audit.request.mutate,
+                    "audit": runner_host_hygiene_request.audit.model_dump(mode="json"),
                 }
-                driver_result = {"audit": runner_host_hygiene_request.audit.model_dump(mode="json")}
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(
