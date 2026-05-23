@@ -6,6 +6,9 @@ Launchplane owns the safety contract for self-hosted GitHub Actions runner lanes
 used by product publish, preview, and promotion workflows. Product repositories
 may request work, but runner host readiness and Docker credential hygiene belong
 to Launchplane rather than repo-by-repo workflow workarounds.
+Shared host hygiene reporting lives in
+[runner-host-hygiene.md](runner-host-hygiene.md); lane readiness and lane control
+planning stay here.
 
 ## Baseline Policy
 
