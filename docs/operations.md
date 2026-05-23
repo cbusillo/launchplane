@@ -270,6 +270,9 @@ break-glass `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST` and
 `LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN` repository secrets for rollback fallback:
 they are used only when a failed rollout makes the Launchplane service route
 unable to accept its own rollback request.
+Before rollback, the workflow uses those same break-glass credentials to capture
+redacted Dokploy target, container, and recent log diagnostics for the failed
+rollout. Diagnostics failures are non-blocking so rollback remains the priority.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that

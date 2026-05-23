@@ -415,6 +415,189 @@ jobs:
           echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
           exit 1
 
+      - name: Capture failed Launchplane deploy diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST:-}" ] || [ -z "${LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN:-}" ]; then
+            echo "Skipping Dokploy diagnostics because emergency Dokploy credentials are unavailable."
+            exit 0
+          fi
+
+          uv run python - <<'PY' || true
+          import json
+          import os
+          import re
+          from typing import Any
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+
+          SECRET_VALUE_PATTERN = re.compile(
+              r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
+          )
+          BEARER_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+
+
+          def required_env(key: str) -> str:
+              value = os.environ.get(key, "").strip()
+              if not value:
+                  raise RuntimeError(f"Missing required environment variable: {key}")
+              return value
+
+
+          def redact(value: str) -> str:
+              value = SECRET_VALUE_PATTERN.sub(r"\1[redacted]", value)
+              return BEARER_PATTERN.sub(r"\1[redacted]", value)
+
+
+          def request_json(
+              *,
+              host: str,
+              token: str,
+              path: str,
+              query: dict[str, str | int] | None = None,
+          ) -> Any:
+              url = f"{host.rstrip('/')}{path}"
+              if query:
+                  url = f"{url}?{urlencode(query)}"
+              request = Request(url, headers={"x-api-key": token})
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      raw = response.read()
+              except HTTPError as error:
+                  body = error.read().decode(errors="replace")
+                  return {"error": f"HTTP {error.code}", "body": redact(body)[:2000]}
+              except URLError as error:
+                  return {"error": str(error.reason)}
+              if not raw:
+                  return {}
+              try:
+                  return json.loads(raw)
+              except json.JSONDecodeError:
+                  return {"raw": redact(raw.decode(errors="replace"))[:4000]}
+
+
+          host = required_env("LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST")
+          token = required_env("LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN")
+          target_type = required_env("LAUNCHPLANE_DOKPLOY_TARGET_TYPE")
+          target_id = required_env("LAUNCHPLANE_DOKPLOY_TARGET_ID")
+          expected_image = required_env("LAUNCHPLANE_EXPECTED_IMAGE_REFERENCE")
+
+          if target_type != "compose":
+              print(f"Dokploy diagnostics currently support compose targets only; target_type={target_type}.")
+              raise SystemExit(0)
+
+          target_payload = request_json(
+              host=host,
+              token=token,
+              path="/api/compose.one",
+              query={"composeId": target_id},
+          )
+          if not isinstance(target_payload, dict):
+              print("Dokploy compose.one returned a non-object payload.")
+              raise SystemExit(0)
+
+          raw_env = str(target_payload.get("env") or "")
+          env_keys: list[str] = []
+          docker_image_reference = ""
+          for line in raw_env.splitlines():
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#") or "=" not in stripped:
+                  continue
+              key, value = stripped.split("=", 1)
+              env_key = key.strip()
+              env_keys.append(env_key)
+              if env_key == "DOCKER_IMAGE_REFERENCE":
+                  docker_image_reference = value.strip()
+
+          domains = [
+              {
+                  "host": domain.get("host"),
+                  "port": domain.get("port"),
+                  "path": domain.get("path"),
+                  "serviceName": domain.get("serviceName"),
+              }
+              for domain in target_payload.get("domains") or []
+              if isinstance(domain, dict)
+          ]
+          deployments = [
+              {
+                  "deploymentId": deployment.get("deploymentId"),
+                  "status": deployment.get("status"),
+                  "title": deployment.get("title"),
+                  "createdAt": deployment.get("createdAt"),
+              }
+              for deployment in target_payload.get("deployments") or []
+              if isinstance(deployment, dict)
+          ][-8:]
+          print(
+              json.dumps(
+                  {
+                      "diagnostic": "dokploy-target",
+                      "target_type": target_type,
+                      "target_id": target_id,
+                      "appName": target_payload.get("appName"),
+                      "composeStatus": target_payload.get("composeStatus"),
+                      "domains": domains,
+                      "env_keys": sorted(env_keys),
+                      "docker_image_matches_expected": docker_image_reference == expected_image,
+                      "deployments": deployments,
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+
+          containers_payload = request_json(host=host, token=token, path="/api/docker.getContainers")
+          containers = containers_payload if isinstance(containers_payload, list) else []
+          app_name = str(target_payload.get("appName") or "")
+          target_containers: list[dict[str, Any]] = []
+          for container in containers:
+              if not isinstance(container, dict):
+                  continue
+              container_name = str(container.get("name") or "")
+              if app_name and app_name not in container_name:
+                  continue
+              target_containers.append(
+                  {
+                      "containerId": container.get("containerId") or container.get("id") or container.get("Id"),
+                      "name": container_name,
+                      "image": container.get("image") or container.get("Image"),
+                      "state": container.get("state") or container.get("State"),
+                      "status": container.get("status") or container.get("Status"),
+                      "ports": container.get("ports") or container.get("Ports"),
+                  }
+              )
+          print(
+              json.dumps(
+                  {"diagnostic": "dokploy-containers", "containers": target_containers},
+                  indent=2,
+                  sort_keys=True,
+              )
+          )
+
+          for container in target_containers:
+              container_id = str(container.get("containerId") or "").strip()
+              if not container_id:
+                  continue
+              log_payload = request_json(
+                  host=host,
+                  token=token,
+                  path="/api/compose.readLogs",
+                  query={"composeId": target_id, "containerId": container_id, "tail": 300, "since": "1h"},
+              )
+              log_text = log_payload if isinstance(log_payload, str) else json.dumps(log_payload)
+              print(f"--- Dokploy logs for {container.get('name')} ({container_id}) ---")
+              for line in log_text.splitlines()[-120:]:
+                  print(redact(line)[:1200])
+          PY
+        env:
+          LAUNCHPLANE_EXPECTED_IMAGE_REFERENCE: ${{ steps.image.outputs.image_reference }}
+
       - name: Roll back failed Launchplane deploy
         if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
         shell: bash
