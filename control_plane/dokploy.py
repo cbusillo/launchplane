@@ -56,13 +56,13 @@ DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
+    r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
 )
 _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r'(?i)("?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*"?\s*[=:]\s*)"[^"\r\n]*"'
+    r'(?i)("?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*"?\s*[=:]\s*)"[^"\r\n]*"'
 )
 _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
-    r"(?i)('?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*'?\s*[=:]\s*)'[^'\r\n]*'"
+    r"(?i)('?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
