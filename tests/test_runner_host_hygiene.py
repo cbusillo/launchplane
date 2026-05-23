@@ -203,7 +203,6 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 "audit_record_required",
                 "host_needs_attention",
                 "mutate_not_requested",
-                "retained_warm_builder_missing_from_report",
                 "warm_builder_not_retained",
             ],
         )
@@ -288,6 +287,34 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 host_name="chris-testing",
                 summary="runner host hygiene satisfies report-only policy",
             ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertIn(
+            "retained_warm_builder_missing_from_report",
+            [blocker.code for blocker in plan.blockers],
+        )
+
+    def test_apply_plan_requires_report_to_observe_each_request_retained_builder(
+        self,
+    ) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                required_retained_warm_builders=("odoo-docker-chris-testing",),
+                allow_docker_cache_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                retained_warm_builders=(
+                    "odoo-docker-chris-testing",
+                    "odoo-enterprise-chris-testing",
+                ),
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+            ),
+            report=_healthy_report(),
         )
 
         self.assertEqual(plan.status, "blocked")

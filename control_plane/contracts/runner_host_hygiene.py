@@ -406,16 +406,14 @@ def plan_runner_host_hygiene_apply(
             )
         )
     missing_observed_retained_builders = tuple(
-        builder
-        for builder in policy.required_retained_warm_builders
-        if builder not in report.warm_builders
+        builder for builder in request.retained_warm_builders if builder not in report.warm_builders
     )
     if missing_observed_retained_builders:
         blockers.append(
             _apply_blocker(
                 "retained_warm_builder_missing_from_report",
                 (
-                    "runner host hygiene report did not observe required retained warm builders: "
+                    "runner host hygiene report did not observe requested retained warm builders: "
                     + ", ".join(missing_observed_retained_builders)
                 ),
             )
