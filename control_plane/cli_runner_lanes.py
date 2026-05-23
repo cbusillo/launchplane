@@ -15,6 +15,9 @@ from control_plane.contracts.runner_lane_control import RunnerLaneControlPolicy
 from control_plane.contracts.runner_lane_control import RunnerLaneControlRequest
 from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
+from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
@@ -27,6 +30,7 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
+    work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
 
 
 @click.command("runner-inventory")
@@ -56,9 +60,9 @@ def runner_inventory(repository: str, github_token_env: str, github_api_base_url
         if not token:
             raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
         transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
-        inventory = GitHubRunnerLaneInventoryReader(
-            transport=transport
-        ).read_runner_lane_inventory(repository=repository)
+        inventory = GitHubRunnerLaneInventoryReader(transport=transport).read_runner_lane_inventory(
+            repository=repository
+        )
     except MergeTrainGitHubError as error:
         detail = str(error)
         if error.status_code is not None:
@@ -366,6 +370,86 @@ def runner_control_plan(
     )
 
 
+@click.command("runner-host-hygiene-report")
+@click.option(
+    "--observation-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="RunnerHostHygieneObservation JSON collected by an approved read-only probe.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    help="Optional RunnerHostHygienePolicy JSON. CLI policy flags are ignored when set.",
+)
+@click.option(
+    "--minimum-free-disk-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Minimum acceptable free disk bytes for report-only evaluation.",
+)
+@click.option(
+    "--maximum-docker-reclaimable-bytes",
+    type=click.IntRange(min=0),
+    help="Maximum acceptable Docker reclaimable bytes before the host needs attention.",
+)
+@click.option(
+    "--maximum-runner-workdir-bytes",
+    type=click.IntRange(min=0),
+    help="Maximum acceptable runner work-directory bytes before the host needs attention.",
+)
+@click.option(
+    "--required-warm-builder",
+    "required_warm_builders",
+    multiple=True,
+    help="Builder name that must remain warm. Repeat for each required builder.",
+)
+@click.option(
+    "--allow-orphan-buildkit/--forbid-orphan-buildkit",
+    default=False,
+    show_default=True,
+    help="Whether orphan BuildKit containers or volumes are acceptable in the report.",
+)
+def runner_host_hygiene_report(
+    observation_file: Path,
+    policy_file: Path | None,
+    minimum_free_disk_bytes: int,
+    maximum_docker_reclaimable_bytes: int | None,
+    maximum_runner_workdir_bytes: int | None,
+    required_warm_builders: tuple[str, ...],
+    allow_orphan_buildkit: bool,
+) -> None:
+    try:
+        observation = _load_runner_host_hygiene_observation(observation_file)
+        policy = (
+            _load_runner_host_hygiene_policy(policy_file)
+            if policy_file is not None
+            else RunnerHostHygienePolicy(
+                minimum_free_disk_bytes=minimum_free_disk_bytes,
+                maximum_docker_reclaimable_bytes=maximum_docker_reclaimable_bytes,
+                maximum_runner_workdir_bytes=maximum_runner_workdir_bytes,
+                required_warm_builders=required_warm_builders,
+                allow_orphan_buildkit=allow_orphan_buildkit,
+            )
+        )
+        report = evaluate_runner_host_hygiene(policy=policy, observation=observation)
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        json.dumps(
+            {
+                "mode": "report-only",
+                "observation": observation.model_dump(mode="json"),
+                "policy": policy.model_dump(mode="json"),
+                "report": report.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:
     return RunnerLaneInventory.model_validate(
         json.loads(inventory_file.read_text(encoding="utf-8"))
@@ -379,6 +463,20 @@ def _load_runner_lane_baseline_readiness(
     if isinstance(payload, dict) and isinstance(payload.get("readiness"), dict):
         payload = payload["readiness"]
     return RunnerLaneBaselineReadiness.model_validate(payload)
+
+
+def _load_runner_host_hygiene_observation(
+    observation_file: Path,
+) -> RunnerHostHygieneObservation:
+    return RunnerHostHygieneObservation.model_validate(
+        json.loads(observation_file.read_text(encoding="utf-8"))
+    )
+
+
+def _load_runner_host_hygiene_policy(policy_file: Path) -> RunnerHostHygienePolicy:
+    return RunnerHostHygienePolicy.model_validate(
+        json.loads(policy_file.read_text(encoding="utf-8"))
+    )
 
 
 def _runner_baseline_runner_name(value: str) -> str:
