@@ -14,11 +14,13 @@ Runner host hygiene has two separate phases:
   policy. This phase is safe for normal development because it does not mutate
   Docker, runner services, GitHub runner registrations, or product state.
 - Apply workflow: clean Docker state, restart services, or change runner lanes
-  through an approved Launchplane-owned host adapter. This phase is not active
-  until a disposable host or explicit operator target exists.
+  through an approved Launchplane-owned host adapter. The first approved lane is
+  limited to remote Docker cache pruning and keeps runner work-directory pruning
+  and runner service restarts disabled.
 
-The current Launchplane surface implements report-only evidence and local
-apply-boundary planning. It still does not execute host mutations.
+The current Launchplane surface implements report-only evidence, local
+apply-boundary planning, durable audit evidence, and a constrained SSH executor
+for the approved first lane.
 
 ## Report Contract
 
@@ -99,9 +101,42 @@ status, and mutate intent into columns, while the full typed request, plan,
 pre/post reports, retained warm-builder evidence, and operator message remain in
 the JSON payload. `POST /v1/evidence/runner-host-hygiene/audits` accepts planned,
 completed, and failed audit records for product/context `launchplane/launchplane`
-under `runner_host_hygiene_audit.write`. The current CLI still only prints the
-planned record; a future approved executor must call the service route after it
-captures the required pre/post host evidence.
+under `runner_host_hygiene_audit.write`. The local planner only prints the
+planned record; the approved executor calls the service route after it captures
+the required pre/post host evidence.
+
+## Approved SSH Executor
+
+The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
+on GitHub-hosted infrastructure, authenticates back to Launchplane with GitHub
+Actions OIDC, and reaches the approved runner host over SSH as a constrained
+service user. It supports only `prune_docker_cache`, implemented as:
+
+```bash
+docker builder prune --all --force
+```
+
+The workflow requires these repository variables:
+
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER`
+
+It requires these repository secrets:
+
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS`
+
+The executor fails closed unless the configured SSH user matches the requested
+service user, retained warm builders are present in pre-apply evidence, the
+apply plan is ready, and `mutate=true` is explicitly supplied to the workflow.
+It writes a `planned` audit before mutation, then writes `completed` only when
+the prune command succeeds and post-apply evidence is healthy. If the prune
+command fails or post evidence reports a missing warm builder, it writes
+`failed`. It does not attempt runner service restart or automatic rollback.
 
 ## Adapter Boundary Planning
 
@@ -110,10 +145,10 @@ privileged execution boundary against a ready apply plan:
 
 ```bash
 uv run launchplane work-graph runner-host-hygiene-adapter-boundary-plan \
-  --adapter-type github_actions_runner \
+  --adapter-type remote_host_executor \
   --host-name chris-testing \
   --execution-lane chris-testing-ops-gate \
-  --service-user gha \
+  --service-user launchplane-runner-hygiene \
   --repository-scope cbusillo/launchplane \
   --privileged-scope docker_cache \
   --audit-record-key runner-host-hygiene/2026-05-23/chris-testing \
@@ -125,9 +160,9 @@ uv run launchplane work-graph runner-host-hygiene-adapter-boundary-plan \
   --post-apply-evidence docker_summary \
   --post-apply-evidence warm_builders \
   --approved-host chris-testing \
-  --allowed-adapter-type github_actions_runner \
+  --allowed-adapter-type remote_host_executor \
   --allowed-execution-lane chris-testing-ops-gate \
-  --allowed-service-user gha \
+  --allowed-service-user launchplane-runner-hygiene \
   --allowed-repository-scope cbusillo/launchplane \
   --allowed-privileged-scope docker_cache \
   --required-pre-apply-evidence df \
@@ -144,7 +179,7 @@ is ready, the host is approved, the proposal names an allowed adapter type,
 execution lane, service user, repository scope, narrow privileged scope, audit
 record key prefix, pre/post evidence set, and rollback or stop condition. It
 does not call Docker, systemd, SSH, GitHub runner registration APIs, or a host
-executor.
+executor; the dedicated SSH executor is the separate apply surface.
 
 The privileged scope must match the planned action exactly:
 
@@ -157,7 +192,8 @@ quietly grow service-restart or work-directory powers.
 
 ## Future Apply Requirements
 
-Before Launchplane grows a host mutation adapter, the apply design must name:
+Before Launchplane grows additional host mutation powers, each apply design must
+name:
 
 - the disposable or explicitly approved host target
 - the runner lane and repository scope the host adapter is allowed to affect
@@ -166,5 +202,5 @@ Before Launchplane grows a host mutation adapter, the apply design must name:
 - the rollback or stop condition when cleanup cannot be completed safely
 - the audit record written back to Launchplane-owned storage
 
-Until those are present, host hygiene work remains report-only or dry-run
-planning only.
+Until those are present for another action, that action remains report-only or
+dry-run planning only.

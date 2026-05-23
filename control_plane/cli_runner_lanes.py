@@ -34,6 +34,15 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
+from control_plane.workflows.runner_host_hygiene_executor import (
+    RunnerHostHygieneSshExecutorRequest,
+)
+from control_plane.workflows.runner_host_hygiene_executor import build_service_audit_poster
+from control_plane.workflows.runner_host_hygiene_executor import build_ssh_remote_runner
+from control_plane.workflows.runner_host_hygiene_executor import (
+    execute_runner_host_hygiene_ssh_executor,
+)
+from control_plane.workflows.runner_host_hygiene_executor import validate_ssh_executor_environment
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -47,6 +56,10 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(
         runner_host_hygiene_adapter_boundary_plan,
         name="runner-host-hygiene-adapter-boundary-plan",
+    )
+    work_graph.add_command(
+        runner_host_hygiene_ssh_executor,
+        name="runner-host-hygiene-ssh-executor",
     )
 
 
@@ -791,6 +804,116 @@ def runner_host_hygiene_adapter_boundary_plan(
             sort_keys=True,
         )
     )
+
+
+@click.command("runner-host-hygiene-ssh-executor")
+@click.option(
+    "--host-name",
+    required=True,
+    help="Approved runner host name. Must match the configured SSH target boundary.",
+)
+@click.option(
+    "--execution-lane",
+    required=True,
+    help="Approved execution lane label for this privileged host action.",
+)
+@click.option(
+    "--service-user",
+    required=True,
+    help="Constrained SSH service user expected on the remote host.",
+)
+@click.option(
+    "--repository-scope",
+    required=True,
+    help="owner/name repository scope approved for this executor run.",
+)
+@click.option(
+    "--audit-record-key",
+    required=True,
+    help="Launchplane-owned audit record key to write through the service route.",
+)
+@click.option(
+    "--retained-warm-builder",
+    "retained_warm_builders",
+    multiple=True,
+    required=True,
+    help="Warm builder image/tag that must remain after cleanup. Repeat as needed.",
+)
+@click.option(
+    "--mutate/--dry-run",
+    default=False,
+    show_default=True,
+    help="Require explicit mutate=true before the executor runs Docker cache prune.",
+)
+@click.option(
+    "--minimum-free-disk-bytes",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Minimum post/pre free disk policy in bytes.",
+)
+@click.option(
+    "--timeout-seconds",
+    default=120,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Timeout for each remote evidence or prune command.",
+)
+@click.option(
+    "--service-url",
+    required=True,
+    help="Launchplane service origin, for example https://launchplane.example.com.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a GitHub OIDC bearer token.",
+)
+def runner_host_hygiene_ssh_executor(
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    repository_scope: str,
+    audit_record_key: str,
+    retained_warm_builders: tuple[str, ...],
+    mutate: bool,
+    minimum_free_disk_bytes: int,
+    timeout_seconds: int,
+    service_url: str,
+    bearer_token_env: str,
+) -> None:
+    try:
+        token_env = bearer_token_env.strip()
+        if not token_env:
+            raise click.ClickException("runner host hygiene executor requires --bearer-token-env.")
+        bearer_token = os.environ.get(token_env, "").strip()
+        if not bearer_token:
+            raise click.ClickException(f"Missing Launchplane bearer token in {token_env}.")
+        request = RunnerHostHygieneSshExecutorRequest(
+            action="prune_docker_cache",
+            host_name=host_name,
+            execution_lane=execution_lane,
+            service_user=service_user,
+            repository_scope=repository_scope,
+            audit_record_key=audit_record_key,
+            retained_warm_builders=retained_warm_builders,
+            mutate=mutate,
+            minimum_free_disk_bytes=minimum_free_disk_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+        validate_ssh_executor_environment(request=request)
+        result = execute_runner_host_hygiene_ssh_executor(
+            request=request,
+            remote_runner=build_ssh_remote_runner(),
+            audit_poster=build_service_audit_poster(
+                service_url=service_url,
+                bearer_token=bearer_token,
+            ),
+        )
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:
