@@ -813,7 +813,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
             alembic_command.upgrade(_alembic_config(database_url), "head")
             engine = create_engine(database_url)
             with engine.begin() as connection:
-                connection.execute(text("ALTER TABLE launchplane_artifact_manifests DROP COLUMN payload"))
+                connection.execute(
+                    text("ALTER TABLE launchplane_artifact_manifests DROP COLUMN payload")
+                )
             engine.dispose()
             store = PostgresRecordStore(database_url=database_url)
 
@@ -825,9 +827,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
             artifact_columns = {
                 column["name"]
-                for column in inspect(store._engine).get_columns(
-                    "launchplane_artifact_manifests"
-                )
+                for column in inspect(store._engine).get_columns("launchplane_artifact_manifests")
             }
             self.assertNotIn("payload", artifact_columns)
             store.close()
@@ -849,6 +849,48 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
+
+    def test_alembic_head_repairs_stamped_schema_missing_odoo_replacement_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "head")
+            engine = create_engine(database_url)
+            with engine.begin() as connection:
+                connection.execute(
+                    text("DROP INDEX launchplane_odoo_replacement_operation_idempotency_idx")
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE "
+                        "launchplane_odoo_stable_target_replacement_operations "
+                        "DROP COLUMN idempotency_scope"
+                    )
+                )
+                connection.execute(text("DELETE FROM alembic_version"))
+                connection.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:version_num)"),
+                    {"version_num": "b1c3d5e7f9a1"},
+                )
+            engine.dispose()
+
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            store.verify_schema()
+
+            repaired_columns = {
+                column["name"]
+                for column in inspect(store._engine).get_columns(
+                    "launchplane_odoo_stable_target_replacement_operations"
+                )
+            }
+            store.close()
+
+        self.assertIn("idempotency_scope", repaired_columns)
 
     def test_alembic_baseline_downgrades_to_empty_schema(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
