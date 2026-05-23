@@ -245,6 +245,28 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         self.assertEqual(plan.blockers, ())
         self.assertIn("pre-apply", plan.next_steps[0])
 
+    def test_apply_plan_rejects_report_for_different_host(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                allow_docker_cache_prune=True,
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+            ),
+            report=RunnerHostHygieneReport(
+                status="healthy",
+                host_name="other-host",
+                summary="runner host hygiene satisfies report-only policy",
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertIn("report_host_mismatch", [blocker.code for blocker in plan.blockers])
+
     def test_apply_audit_record_requires_matching_key(self) -> None:
         request = RunnerHostHygieneApplyRequest(
             action="prune_docker_cache",
@@ -267,6 +289,166 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
                 request=request,
                 plan=plan,
                 pre_apply_report=_healthy_report(),
+            )
+
+    def test_apply_audit_record_requires_matching_plan_audit_key(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/other",
+            ),
+            report=_healthy_report(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "plan key must match request"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan,
+                pre_apply_report=_healthy_report(),
+            )
+
+    def test_apply_audit_record_requires_plan_action_and_mutate_to_match_request(
+        self,
+    ) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        healthy_report = _healthy_report()
+
+        with self.assertRaisesRegex(ValueError, "plan must match request action"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan_runner_host_hygiene_apply(
+                    policy=RunnerHostHygieneApplyPolicy(
+                        approved_hosts=("chris-testing",), allow_runner_service_restart=True
+                    ),
+                    request=RunnerHostHygieneApplyRequest(
+                        action="restart_runner_service",
+                        host_name="chris-testing",
+                        mutate=True,
+                        audit_record_key=request.audit_record_key,
+                    ),
+                    report=healthy_report,
+                ),
+                pre_apply_report=healthy_report,
+            )
+
+        with self.assertRaisesRegex(ValueError, "plan must match request mutate intent"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan_runner_host_hygiene_apply(
+                    policy=RunnerHostHygieneApplyPolicy(
+                        approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+                    ),
+                    request=RunnerHostHygieneApplyRequest(
+                        action="prune_docker_cache",
+                        host_name="chris-testing",
+                        mutate=False,
+                        audit_record_key=request.audit_record_key,
+                    ),
+                    report=healthy_report,
+                ),
+                pre_apply_report=healthy_report,
+            )
+
+    def test_apply_audit_record_requires_matching_host_for_reports(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+            ),
+            request=request,
+            report=_healthy_report(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "pre-apply report must match request host"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="planned",
+                request=request,
+                plan=plan,
+                pre_apply_report=RunnerHostHygieneReport(
+                    status="healthy",
+                    host_name="other-host",
+                    summary="runner host hygiene satisfies report-only policy",
+                ),
+            )
+
+    def test_apply_audit_record_requires_terminal_post_apply_report(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",), allow_docker_cache_prune=True
+            ),
+            request=request,
+            report=_healthy_report(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires post-apply report"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="completed",
+                request=request,
+                plan=plan,
+                pre_apply_report=_healthy_report(),
+            )
+
+    def test_apply_audit_record_requires_terminal_ready_plan(self) -> None:
+        request = RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        healthy_report = _healthy_report()
+
+        with self.assertRaisesRegex(ValueError, "requires a ready plan"):
+            RunnerHostHygieneApplyAuditRecord(
+                audit_record_key=request.audit_record_key,
+                status="completed",
+                request=request,
+                plan=plan_runner_host_hygiene_apply(
+                    policy=RunnerHostHygieneApplyPolicy(approved_hosts=("chris-testing",)),
+                    request=RunnerHostHygieneApplyRequest(
+                        action="prune_docker_cache",
+                        host_name="chris-testing",
+                        mutate=True,
+                        audit_record_key=request.audit_record_key,
+                    ),
+                    report=_attention_report(),
+                ),
+                pre_apply_report=healthy_report,
+                post_apply_report=healthy_report,
             )
 
 
