@@ -55,6 +55,31 @@ finally:
 PY
 }
 
+legacy_schema_revision() {
+	database_url="$1"
+	LAUNCHPLANE_DATABASE_URL="$database_url" uv run python - <<'PY'
+from control_plane.storage.postgres import _build_engine
+from sqlalchemy import inspect
+import os
+import sys
+
+database_url = os.environ["LAUNCHPLANE_DATABASE_URL"]
+engine = _build_engine(database_url)
+try:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    if "launchplane_preview_enablement" in existing_tables:
+        print("b1c3d5e7f9a1")
+        raise SystemExit(0)
+    print("fe94a0486977")
+except Exception as error:
+    print(f"Could not classify legacy Launchplane database schema: {error}", file=sys.stderr)
+    raise SystemExit(1)
+finally:
+    engine.dispose()
+PY
+}
+
 launchplane_app_root="${LAUNCHPLANE_APP_ROOT:-/app}"
 state_dir="${LAUNCHPLANE_STATE_DIR:-$launchplane_app_root/runtime}"
 launchplane_policy_toml="${LAUNCHPLANE_POLICY_TOML:-}"
@@ -109,8 +134,9 @@ schema_has_alembic_version "$launchplane_database_url" || schema_version_status=
 case "$schema_version_status" in
 0) ;;
 1)
-	echo "Existing Launchplane schema is unversioned; stamping Alembic baseline before upgrade."
-	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp fe94a0486977
+	legacy_revision="$(legacy_schema_revision "$launchplane_database_url")"
+	echo "Existing Launchplane schema is unversioned; stamping Alembic revision ${legacy_revision} before upgrade."
+	LAUNCHPLANE_DATABASE_URL="$launchplane_database_url" uv run alembic stamp "$legacy_revision"
 	;;
 *)
 	echo "Launchplane database schema verification failed before migrations." >&2
