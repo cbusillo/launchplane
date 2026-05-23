@@ -114,6 +114,14 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
+from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
+from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -223,6 +231,48 @@ def _generic_web_rollback_plan_record(
         target_health=HealthcheckEvidence(status="pass"),
         created_at=created_at,
         summary="generic web rollback plan is ready",
+    )
+
+
+def _runner_host_hygiene_audit_record(
+    *,
+    audit_record_key: str,
+    status: RunnerHostHygieneApplyAuditStatus = "planned",
+    message: str = "planned runner host hygiene apply; no host mutation was executed",
+) -> RunnerHostHygieneApplyAuditRecord:
+    report = evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(required_warm_builders=("odoo-docker-chris-testing",)),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-05-23T13:00:00Z",
+            free_disk_bytes=500,
+            warm_builders=("odoo-docker-chris-testing",),
+        ),
+    )
+    request = RunnerHostHygieneApplyRequest(
+        action="prune_docker_cache",
+        host_name="chris-testing",
+        mutate=True,
+        retained_warm_builders=("odoo-docker-chris-testing",),
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_host_hygiene_apply(
+        policy=RunnerHostHygieneApplyPolicy(
+            approved_hosts=("chris-testing",),
+            required_retained_warm_builders=("odoo-docker-chris-testing",),
+            allow_docker_cache_prune=True,
+        ),
+        request=request,
+        report=report,
+    )
+    return RunnerHostHygieneApplyAuditRecord(
+        audit_record_key=audit_record_key,
+        status=status,
+        request=request,
+        plan=plan,
+        pre_apply_report=report,
+        post_apply_report=report if status != "planned" else None,
+        message=message,
     )
 
 
@@ -1889,6 +1939,46 @@ env_var = "GH_TOKEN"
         self.assertEqual(listed_records[0].destroyed_slugs, ("pr-122",))
         self.assertEqual(listed_records[0].results[0].application_id, "app-122")
 
+    def test_runner_host_hygiene_audit_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            older_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing"
+            )
+            newer_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing"
+            )
+            failed_record = _runner_host_hygiene_audit_record(
+                audit_record_key="runner-host-hygiene/2026-05-25/chris-testing",
+                status="failed",
+                message="post-apply evidence reported low disk",
+            )
+
+            store.write_runner_host_hygiene_audit_record(older_record)
+            store.write_runner_host_hygiene_audit_record(newer_record)
+            store.write_runner_host_hygiene_audit_record(failed_record)
+            planned_records = store.list_runner_host_hygiene_audit_records(
+                host_name="Chris-Testing",
+                status="planned",
+            )
+            limited_records = store.list_runner_host_hygiene_audit_records(limit=1)
+            store.close()
+
+        self.assertEqual(
+            [record.audit_record_key for record in planned_records],
+            [newer_record.audit_record_key, older_record.audit_record_key],
+        )
+        self.assertEqual(
+            [record.audit_record_key for record in limited_records],
+            [failed_record.audit_record_key],
+        )
+        self.assertEqual(limited_records[0].message, "post-apply evidence reported low disk")
+
     def test_preview_pr_feedback_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -2535,6 +2625,11 @@ env_var = "GH_TOKEN"
                     error_message="Launchplane runtime records do not expose GITHUB_TOKEN for this context",
                 )
             )
+            filesystem_store.write_runner_host_hygiene_audit_record(
+                _runner_host_hygiene_audit_record(
+                    audit_record_key="runner-host-hygiene/2026-05-23/chris-testing"
+                )
+            )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
             filesystem_store.write_product_profile_record(_product_profile_record())
             filesystem_store.write_runtime_key_safety_policy_record(
@@ -2636,6 +2731,7 @@ env_var = "GH_TOKEN"
                     "preview_lifecycle_cleanups": 1,
                     "preview_lifecycle_plans": 1,
                     "preview_pr_feedback": 1,
+                    "runner_host_hygiene_audits": 1,
                     "every_code_preview_gates": 0,
                     "agent_write_intents": 0,
                     "merge_train_pr_feedback": 0,
@@ -2720,6 +2816,13 @@ env_var = "GH_TOKEN"
                     limit=1,
                 )[0].feedback_id,
                 "preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
+            )
+            self.assertEqual(
+                store.list_runner_host_hygiene_audit_records(
+                    host_name="chris-testing",
+                    limit=1,
+                )[0].audit_record_key,
+                "runner-host-hygiene/2026-05-23/chris-testing",
             )
             self.assertEqual(
                 store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]

@@ -93,6 +93,14 @@ When an audit key is provided, the CLI also emits a planned audit-record payload
 That record is a contract for a future Launchplane-owned storage write, not a
 write performed by this local command.
 
+Launchplane storage supports durable runner-host hygiene audit records keyed by
+`audit_record_key`. Shared-service storage promotes the key, host, action,
+status, and mutate intent into columns, while the full typed request, plan,
+pre/post reports, retained warm-builder evidence, and operator message remain in
+the JSON payload. The current CLI still only prints the planned record; a future
+approved executor or service route must write planned, completed, or failed
+records through Launchplane-owned storage.
+
 ## Adapter Boundary Planning
 
 Before a real host mutation adapter is implemented, operators can review the

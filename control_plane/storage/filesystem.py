@@ -51,6 +51,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -143,6 +144,15 @@ class FilesystemRecordStore:
             "launchplane_runtime_key_safety_policies", record.record_id, record
         )
 
+    def write_runner_host_hygiene_audit_record(
+        self, record: RunnerHostHygieneApplyAuditRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_runner_host_hygiene_audits",
+            _runner_host_hygiene_audit_record_id(record.audit_record_key),
+            record,
+        )
+
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
         return self._write_model("launchplane_agent_write_intents", record.record_id, record)
 
@@ -187,12 +197,8 @@ class FilesystemRecordStore:
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
         return self._write_model("launchplane_merge_train_policies", record.record_id, record)
 
-    def write_merge_train_pr_feedback_record(
-        self, record: MergeTrainPrFeedbackRecord
-    ) -> Path:
-        return self._write_model(
-            "launchplane_merge_train_pr_feedback", record.feedback_id, record
-        )
+    def write_merge_train_pr_feedback_record(self, record: MergeTrainPrFeedbackRecord) -> Path:
+        return self._write_model("launchplane_merge_train_pr_feedback", record.feedback_id, record)
 
     def list_merge_train_pr_feedback_records(
         self,
@@ -388,6 +394,28 @@ class FilesystemRecordStore:
             if not status or record.status == status
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_runner_host_hygiene_audit_records(
+        self,
+        *,
+        host_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RunnerHostHygieneApplyAuditRecord, ...]:
+        normalized_host_name = host_name.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                RunnerHostHygieneApplyAuditRecord,
+                "launchplane_runner_host_hygiene_audits",
+            )
+            if (not normalized_host_name or record.request.host_name == normalized_host_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: record.audit_record_key, reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
@@ -1112,3 +1140,8 @@ def _odoo_target_replacement_lane_reservation_id(
     lane_key = "|".join((record.product, record.context, record.instance))
     digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
     return f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
+
+
+def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
+    digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
+    return audit_record_key.strip().replace("/", "-") + f"-{digest}"

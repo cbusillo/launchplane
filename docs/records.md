@@ -138,6 +138,11 @@ an ORM column/table or remains only in the evidence payload.
 - Secret audit event: modeled fields are `event_id`, `secret_id`, `event_type`,
   and `recorded_at`. Actor, detail, and metadata stay payload-only until audit
   filtering needs more columns.
+- Runner host hygiene audit: modeled fields are `audit_record_key`,
+  `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
+  request, plan, pre/post hygiene reports, retained warm-builder evidence, and
+  operator message. Host-command output, Docker summaries, and rollout notes stay
+  payload-only until they need queryable operational views.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
