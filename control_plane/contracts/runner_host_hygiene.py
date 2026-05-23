@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,6 +21,7 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "host_needs_attention",
     "mutate_not_requested",
     "report_host_mismatch",
+    "retained_warm_builder_missing_from_report",
     "warm_builder_not_retained",
 ]
 RunnerHostHygieneFindingCode = Literal[
@@ -91,6 +93,7 @@ class RunnerHostHygieneReport(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: RunnerHostHygieneStatus
     host_name: str
+    warm_builders: tuple[str, ...] = ()
     findings: tuple[RunnerHostHygieneFinding, ...] = ()
     summary: str
     next_steps: tuple[str, ...] = ()
@@ -100,6 +103,7 @@ class RunnerHostHygieneReport(BaseModel):
         self.host_name = _required_text(
             self.host_name, "runner host hygiene report requires host_name"
         )
+        self.warm_builders = _normalized_tokens(self.warm_builders)
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
         self.summary = _required_text(self.summary, "runner host hygiene report requires summary")
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
@@ -323,6 +327,7 @@ def evaluate_runner_host_hygiene(
     return RunnerHostHygieneReport(
         status=status,
         host_name=observation.host_name,
+        warm_builders=observation.warm_builders,
         findings=tuple(findings),
         summary=(
             "runner host hygiene satisfies report-only policy"
@@ -400,6 +405,21 @@ def plan_runner_host_hygiene_apply(
                 ),
             )
         )
+    missing_observed_retained_builders = tuple(
+        builder
+        for builder in policy.required_retained_warm_builders
+        if builder not in report.warm_builders
+    )
+    if missing_observed_retained_builders:
+        blockers.append(
+            _apply_blocker(
+                "retained_warm_builder_missing_from_report",
+                (
+                    "runner host hygiene report did not observe required retained warm builders: "
+                    + ", ".join(missing_observed_retained_builders)
+                ),
+            )
+        )
 
     status: RunnerHostHygieneApplyPlanStatus = "blocked" if blockers else "ready"
     return RunnerHostHygieneApplyPlan(
@@ -472,9 +492,7 @@ def _apply_blocker(
 
 
 def _normalized_host_names(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        sorted({normalized for value in values if (normalized := _normalized_host_name(value))})
-    )
+    return _normalized_values(values, _normalized_host_name)
 
 
 def _normalized_host_name(value: str) -> str:
@@ -482,9 +500,11 @@ def _normalized_host_name(value: str) -> str:
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        sorted({normalized for value in values if (normalized := _normalized_token(value))})
-    )
+    return _normalized_values(values, _normalized_token)
+
+
+def _normalized_values(values: tuple[str, ...], normalize: Callable[[str], str]) -> tuple[str, ...]:
+    return tuple(sorted({normalized for value in values if (normalized := normalize(value))}))
 
 
 def _normalized_token(value: str) -> str:
