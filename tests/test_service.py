@@ -20074,6 +20074,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ),
                 },
             )
+            self.assertEqual(
+                payload["result"]["runner_host_hygiene_audit_record_key"],
+                "runner-host-hygiene/2026-05-23/chris-testing",
+            )
+            self.assertEqual(payload["result"]["host_name"], "chris-testing")
+            self.assertEqual(payload["result"]["audit_status"], "planned")
+            self.assertFalse(payload["result"]["mutate"])
             self.assertEqual(payload["result"]["audit"]["status"], "planned")
             store = FilesystemRecordStore(state_dir=state_dir)
             records = store.list_runner_host_hygiene_audit_records(
