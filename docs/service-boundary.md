@@ -43,6 +43,7 @@ VeriReel product paths:
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
+  - `POST /v1/evidence/runner-host-hygiene/audits`
 - product profile routes:
   - `GET /v1/product-profiles`
   - `GET /v1/product-profiles/{product}`
@@ -1292,6 +1293,35 @@ evidence ingestion only; it does not mutate provider state.
 
 The deployment and promotion endpoints should follow the same pattern: stable
 typed record payloads inside a Launchplane-owned API envelope.
+
+### Runner host hygiene audit evidence
+
+`POST /v1/evidence/runner-host-hygiene/audits`
+
+Request payload:
+
+```json
+{
+  "schema_version": 1,
+  "product": "launchplane",
+  "audit": {
+    "schema_version": 1,
+    "audit_record_key": "runner-host-hygiene/2026-05-23/chris-testing",
+    "status": "planned",
+    "request": "RunnerHostHygieneApplyRequest",
+    "plan": "RunnerHostHygieneApplyPlan",
+    "pre_apply_report": "RunnerHostHygieneReport",
+    "post_apply_report": null,
+    "message": "planned runner host hygiene apply; no host mutation was executed"
+  }
+}
+```
+
+The route requires `runner_host_hygiene_audit.write` for product/context
+`launchplane/launchplane`, writes the typed audit record to Launchplane-owned
+storage, and returns the `runner_host_hygiene_audit_record_key`. It is evidence
+ingress only: it records planned, completed, or failed audit facts supplied by a
+future approved executor, but it does not mutate runner hosts itself.
 
 For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate
