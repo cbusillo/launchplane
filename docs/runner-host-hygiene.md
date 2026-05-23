@@ -93,6 +93,58 @@ When an audit key is provided, the CLI also emits a planned audit-record payload
 That record is a contract for a future Launchplane-owned storage write, not a
 write performed by this local command.
 
+## Adapter Boundary Planning
+
+Before a real host mutation adapter is implemented, operators can review the
+privileged execution boundary against a ready apply plan:
+
+```bash
+uv run launchplane work-graph runner-host-hygiene-adapter-boundary-plan \
+  --adapter-type github_actions_runner \
+  --host-name chris-testing \
+  --execution-lane chris-testing-ops-gate \
+  --service-user gha \
+  --repository-scope cbusillo/launchplane \
+  --privileged-scope docker_cache \
+  --audit-record-key runner-host-hygiene/2026-05-23/chris-testing \
+  --rollback-plan "Stop before mutation if retained builders are absent." \
+  --pre-apply-evidence df \
+  --pre-apply-evidence docker_summary \
+  --pre-apply-evidence warm_builders \
+  --post-apply-evidence df \
+  --post-apply-evidence docker_summary \
+  --post-apply-evidence warm_builders \
+  --approved-host chris-testing \
+  --allowed-adapter-type github_actions_runner \
+  --allowed-execution-lane chris-testing-ops-gate \
+  --allowed-service-user gha \
+  --allowed-repository-scope cbusillo/launchplane \
+  --allowed-privileged-scope docker_cache \
+  --required-pre-apply-evidence df \
+  --required-pre-apply-evidence docker_summary \
+  --required-pre-apply-evidence warm_builders \
+  --required-post-apply-evidence df \
+  --required-post-apply-evidence docker_summary \
+  --required-post-apply-evidence warm_builders \
+  --apply-plan-file runner-host-apply-plan.json
+```
+
+This command is still a planning surface. It fails closed unless the apply plan
+is ready, the host is approved, the proposal names an allowed adapter type,
+execution lane, service user, repository scope, narrow privileged scope, audit
+record key prefix, pre/post evidence set, and rollback or stop condition. It
+does not call Docker, systemd, SSH, GitHub runner registration APIs, or a host
+executor.
+
+The privileged scope must match the planned action exactly:
+
+- `prune_docker_cache` requires `docker_cache`.
+- `prune_runner_workdir` requires `runner_workdir`.
+- `restart_runner_service` requires `runner_service`.
+
+Extra privileged scopes block the boundary plan so a Docker-cache prune cannot
+quietly grow service-restart or work-directory powers.
+
 ## Future Apply Requirements
 
 Before Launchplane grows a host mutation adapter, the apply design must name:

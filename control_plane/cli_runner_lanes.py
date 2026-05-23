@@ -19,11 +19,17 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObserva
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAction
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterType
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePrivilegedScope
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
+from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
@@ -38,6 +44,10 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
     work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
+    work_graph.add_command(
+        runner_host_hygiene_adapter_boundary_plan,
+        name="runner-host-hygiene-adapter-boundary-plan",
+    )
 
 
 @click.command("runner-inventory")
@@ -595,6 +605,194 @@ def runner_host_hygiene_apply_plan(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+@click.command("runner-host-hygiene-adapter-boundary-plan")
+@click.option(
+    "--adapter-type",
+    required=True,
+    type=click.Choice(("github_actions_runner", "launchplane_worker", "remote_host_executor")),
+    help="Proposed host adapter type. The command never mutates hosts.",
+)
+@click.option("--host-name", required=True, help="Runner host name to plan against.")
+@click.option(
+    "--execution-lane",
+    required=True,
+    help="Dedicated execution lane proposed for privileged host work.",
+)
+@click.option("--service-user", required=True, help="Host service user for the proposed adapter.")
+@click.option(
+    "--repository-scope",
+    "repository_scopes",
+    multiple=True,
+    help="Repository scope the adapter is allowed to affect. Repeat for each repository.",
+)
+@click.option(
+    "--privileged-scope",
+    "privileged_scopes",
+    multiple=True,
+    type=click.Choice(("docker_cache", "runner_service", "runner_workdir")),
+    help="Privileged host capability requested by the adapter. Repeat for each scope.",
+)
+@click.option(
+    "--audit-record-key",
+    required=True,
+    help="Launchplane-owned audit record key the future adapter must write.",
+)
+@click.option(
+    "--rollback-plan",
+    default="",
+    help="Rollback or stop condition required before implementing host mutation.",
+)
+@click.option(
+    "--pre-apply-evidence",
+    "pre_apply_evidence",
+    multiple=True,
+    help="Pre-apply evidence the adapter proposal will capture. Repeat for each item.",
+)
+@click.option(
+    "--post-apply-evidence",
+    "post_apply_evidence",
+    multiple=True,
+    help="Post-apply evidence the adapter proposal will capture. Repeat for each item.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for adapter execution. Repeat for each approved host.",
+)
+@click.option(
+    "--allowed-adapter-type",
+    "allowed_adapter_types",
+    multiple=True,
+    type=click.Choice(("github_actions_runner", "launchplane_worker", "remote_host_executor")),
+    help="Adapter type allowed by local policy. Repeat for each type.",
+)
+@click.option(
+    "--allowed-execution-lane",
+    "allowed_execution_lanes",
+    multiple=True,
+    help="Execution lane allowed by local policy. Repeat for each lane.",
+)
+@click.option(
+    "--allowed-service-user",
+    "allowed_service_users",
+    multiple=True,
+    help="Service user allowed by local policy. Repeat for each user.",
+)
+@click.option(
+    "--allowed-repository-scope",
+    "allowed_repository_scopes",
+    multiple=True,
+    help="Repository scope allowed by local policy. Repeat for each repository.",
+)
+@click.option(
+    "--allowed-privileged-scope",
+    "allowed_privileged_scopes",
+    multiple=True,
+    type=click.Choice(("docker_cache", "runner_service", "runner_workdir")),
+    help="Privileged host scope allowed by local policy. Repeat for each scope.",
+)
+@click.option(
+    "--required-pre-apply-evidence",
+    "required_pre_apply_evidence",
+    multiple=True,
+    help="Pre-apply evidence required by local policy. Repeat for each item.",
+)
+@click.option(
+    "--required-post-apply-evidence",
+    "required_post_apply_evidence",
+    multiple=True,
+    help="Post-apply evidence required by local policy. Repeat for each item.",
+)
+@click.option(
+    "--audit-record-key-prefix",
+    default="runner-host-hygiene/",
+    show_default=True,
+    help="Required audit record key prefix.",
+)
+@click.option(
+    "--require-rollback-plan/--allow-missing-rollback-plan",
+    default=True,
+    show_default=True,
+    help="Require a rollback or stop condition before the adapter boundary can be ready.",
+)
+@click.option(
+    "--apply-plan-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="RunnerHostHygieneApplyPlan JSON or runner-host-hygiene-apply-plan output.",
+)
+def runner_host_hygiene_adapter_boundary_plan(
+    adapter_type: RunnerHostHygieneAdapterType,
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    repository_scopes: tuple[str, ...],
+    privileged_scopes: tuple[RunnerHostHygienePrivilegedScope, ...],
+    audit_record_key: str,
+    rollback_plan: str,
+    pre_apply_evidence: tuple[str, ...],
+    post_apply_evidence: tuple[str, ...],
+    approved_hosts: tuple[str, ...],
+    allowed_adapter_types: tuple[RunnerHostHygieneAdapterType, ...],
+    allowed_execution_lanes: tuple[str, ...],
+    allowed_service_users: tuple[str, ...],
+    allowed_repository_scopes: tuple[str, ...],
+    allowed_privileged_scopes: tuple[RunnerHostHygienePrivilegedScope, ...],
+    required_pre_apply_evidence: tuple[str, ...],
+    required_post_apply_evidence: tuple[str, ...],
+    audit_record_key_prefix: str,
+    require_rollback_plan: bool,
+    apply_plan_file: Path,
+) -> None:
+    try:
+        apply_plan = _load_runner_host_hygiene_apply_plan(apply_plan_file)
+        policy = RunnerHostHygieneAdapterPolicy(
+            approved_hosts=approved_hosts,
+            allowed_adapter_types=allowed_adapter_types,
+            allowed_execution_lanes=allowed_execution_lanes,
+            allowed_service_users=allowed_service_users,
+            allowed_repository_scopes=allowed_repository_scopes,
+            allowed_privileged_scopes=allowed_privileged_scopes,
+            required_pre_apply_evidence=required_pre_apply_evidence,
+            required_post_apply_evidence=required_post_apply_evidence,
+            audit_record_key_prefix=audit_record_key_prefix,
+            require_rollback_plan=require_rollback_plan,
+        )
+        proposal = RunnerHostHygieneAdapterProposal(
+            adapter_type=adapter_type,
+            host_name=host_name,
+            execution_lane=execution_lane,
+            service_user=service_user,
+            repository_scopes=repository_scopes,
+            privileged_scopes=privileged_scopes,
+            audit_record_key=audit_record_key,
+            rollback_plan=rollback_plan,
+            pre_apply_evidence=pre_apply_evidence,
+            post_apply_evidence=post_apply_evidence,
+        )
+        boundary = plan_runner_host_hygiene_adapter_boundary(
+            policy=policy,
+            proposal=proposal,
+            apply_plan=apply_plan,
+        )
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        json.dumps(
+            {
+                "mode": "adapter-boundary-plan",
+                "policy": policy.model_dump(mode="json"),
+                "proposal": proposal.model_dump(mode="json"),
+                "apply_plan": apply_plan.model_dump(mode="json"),
+                "boundary": boundary.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def _load_runner_lane_inventory(inventory_file: Path) -> RunnerLaneInventory:
     return RunnerLaneInventory.model_validate(
         json.loads(inventory_file.read_text(encoding="utf-8"))
@@ -629,6 +827,13 @@ def _load_runner_host_hygiene_report(report_file: Path) -> RunnerHostHygieneRepo
     if isinstance(payload, dict) and isinstance(payload.get("report"), dict):
         payload = payload["report"]
     return RunnerHostHygieneReport.model_validate(payload)
+
+
+def _load_runner_host_hygiene_apply_plan(apply_plan_file: Path) -> RunnerHostHygieneApplyPlan:
+    payload = json.loads(apply_plan_file.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("plan"), dict):
+        payload = payload["plan"]
+    return RunnerHostHygieneApplyPlan.model_validate(payload)
 
 
 def _runner_baseline_runner_name(value: str) -> str:

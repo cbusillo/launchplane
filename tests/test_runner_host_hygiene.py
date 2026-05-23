@@ -11,11 +11,15 @@ from control_plane.cli import main
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
+from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
 
 
 CLI_MAIN = cast(Command, main)
@@ -507,6 +511,106 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
             )
 
 
+class RunnerHostHygieneAdapterBoundaryTests(unittest.TestCase):
+    def test_adapter_boundary_can_be_ready_for_narrow_docker_prune(self) -> None:
+        apply_plan = _ready_apply_plan()
+
+        boundary = plan_runner_host_hygiene_adapter_boundary(
+            policy=_adapter_policy(),
+            proposal=RunnerHostHygieneAdapterProposal(
+                adapter_type="github_actions_runner",
+                host_name="Chris-Testing",
+                execution_lane="chris-testing-ops-gate",
+                service_user="gha",
+                repository_scopes=("Cbusillo/Launchplane",),
+                privileged_scopes=("docker_cache",),
+                audit_record_key=apply_plan.audit_record_key,
+                rollback_plan="Stop if retained builders are missing after pre-apply evidence.",
+                pre_apply_evidence=("df", "docker_summary", "warm_builders"),
+                post_apply_evidence=("df", "docker_summary", "warm_builders"),
+            ),
+            apply_plan=apply_plan,
+        )
+
+        self.assertEqual(boundary.status, "ready")
+        self.assertEqual(boundary.blockers, ())
+        self.assertEqual(boundary.execution_lane, "chris-testing-ops-gate")
+        self.assertIn("approved execution lane", boundary.next_steps[1])
+
+    def test_adapter_boundary_blocks_until_apply_plan_is_ready(self) -> None:
+        blocked_apply_plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(approved_hosts=("chris-testing",)),
+            request=RunnerHostHygieneApplyRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                mutate=True,
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+            ),
+            report=_healthy_report(),
+        )
+
+        boundary = plan_runner_host_hygiene_adapter_boundary(
+            policy=_adapter_policy(),
+            proposal=_adapter_proposal(blocked_apply_plan),
+            apply_plan=blocked_apply_plan,
+        )
+
+        self.assertEqual(boundary.status, "blocked")
+        self.assertIn("apply_plan_not_ready", [blocker.code for blocker in boundary.blockers])
+
+    def test_adapter_boundary_rejects_overbroad_privileged_scope(self) -> None:
+        apply_plan = _ready_apply_plan()
+
+        boundary = plan_runner_host_hygiene_adapter_boundary(
+            policy=_adapter_policy(),
+            proposal=RunnerHostHygieneAdapterProposal(
+                adapter_type="github_actions_runner",
+                host_name="chris-testing",
+                execution_lane="chris-testing-ops-gate",
+                service_user="gha",
+                repository_scopes=("cbusillo/launchplane",),
+                privileged_scopes=("docker_cache", "runner_service"),
+                audit_record_key=apply_plan.audit_record_key,
+                rollback_plan="Stop if post-apply evidence cannot be collected.",
+                pre_apply_evidence=("df", "docker_summary", "warm_builders"),
+                post_apply_evidence=("df", "docker_summary", "warm_builders"),
+            ),
+            apply_plan=apply_plan,
+        )
+
+        self.assertEqual(boundary.status, "blocked")
+        self.assertIn("privileged_scope_overbroad", [blocker.code for blocker in boundary.blockers])
+
+    def test_adapter_boundary_requires_repository_scope_evidence_and_rollback(self) -> None:
+        apply_plan = _ready_apply_plan()
+
+        boundary = plan_runner_host_hygiene_adapter_boundary(
+            policy=_adapter_policy(),
+            proposal=RunnerHostHygieneAdapterProposal(
+                adapter_type="github_actions_runner",
+                host_name="chris-testing",
+                execution_lane="chris-testing-ops-gate",
+                service_user="gha",
+                privileged_scopes=("docker_cache",),
+                audit_record_key=apply_plan.audit_record_key,
+                pre_apply_evidence=("df",),
+                post_apply_evidence=("df",),
+            ),
+            apply_plan=apply_plan,
+        )
+
+        self.assertEqual(boundary.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in boundary.blockers],
+            [
+                "post_apply_evidence_missing",
+                "pre_apply_evidence_missing",
+                "repository_scope_required",
+                "rollback_plan_required",
+            ],
+        )
+
+
 class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
     def test_cli_builds_apply_plan_from_report_file(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -550,6 +654,83 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
             "planned runner host hygiene apply; no host mutation was executed",
         )
 
+    def test_cli_builds_adapter_boundary_from_apply_plan_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            apply_plan = _ready_apply_plan()
+            apply_plan_file = Path(temp_dir) / "apply-plan.json"
+            apply_plan_file.write_text(
+                json.dumps({"plan": apply_plan.model_dump(mode="json")}),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-host-hygiene-adapter-boundary-plan",
+                    "--adapter-type",
+                    "github_actions_runner",
+                    "--host-name",
+                    "chris-testing",
+                    "--execution-lane",
+                    "chris-testing-ops-gate",
+                    "--service-user",
+                    "gha",
+                    "--repository-scope",
+                    "cbusillo/launchplane",
+                    "--privileged-scope",
+                    "docker_cache",
+                    "--audit-record-key",
+                    apply_plan.audit_record_key,
+                    "--rollback-plan",
+                    "Stop before mutation if retained builders are absent.",
+                    "--pre-apply-evidence",
+                    "df",
+                    "--pre-apply-evidence",
+                    "docker_summary",
+                    "--pre-apply-evidence",
+                    "warm_builders",
+                    "--post-apply-evidence",
+                    "df",
+                    "--post-apply-evidence",
+                    "docker_summary",
+                    "--post-apply-evidence",
+                    "warm_builders",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allowed-adapter-type",
+                    "github_actions_runner",
+                    "--allowed-execution-lane",
+                    "chris-testing-ops-gate",
+                    "--allowed-service-user",
+                    "gha",
+                    "--allowed-repository-scope",
+                    "cbusillo/launchplane",
+                    "--allowed-privileged-scope",
+                    "docker_cache",
+                    "--required-pre-apply-evidence",
+                    "df",
+                    "--required-pre-apply-evidence",
+                    "docker_summary",
+                    "--required-pre-apply-evidence",
+                    "warm_builders",
+                    "--required-post-apply-evidence",
+                    "df",
+                    "--required-post-apply-evidence",
+                    "docker_summary",
+                    "--required-post-apply-evidence",
+                    "warm_builders",
+                    "--apply-plan-file",
+                    apply_plan_file.as_posix(),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "adapter-boundary-plan")
+        self.assertEqual(payload["boundary"]["status"], "ready")
+        self.assertEqual(payload["proposal"]["privileged_scopes"], ["docker_cache"])
+
 
 def _healthy_report() -> RunnerHostHygieneReport:
     return evaluate_runner_host_hygiene(
@@ -571,6 +752,52 @@ def _attention_report() -> RunnerHostHygieneReport:
             observed_at="2026-05-23T13:00:00Z",
             free_disk_bytes=100,
         ),
+    )
+
+
+def _ready_apply_plan() -> RunnerHostHygieneApplyPlan:
+    return plan_runner_host_hygiene_apply(
+        policy=RunnerHostHygieneApplyPolicy(
+            approved_hosts=("chris-testing",),
+            required_retained_warm_builders=("odoo-docker-chris-testing",),
+            allow_docker_cache_prune=True,
+        ),
+        request=RunnerHostHygieneApplyRequest(
+            action="prune_docker_cache",
+            host_name="chris-testing",
+            mutate=True,
+            retained_warm_builders=("odoo-docker-chris-testing",),
+            audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
+        ),
+        report=_healthy_report(),
+    )
+
+
+def _adapter_policy() -> RunnerHostHygieneAdapterPolicy:
+    return RunnerHostHygieneAdapterPolicy(
+        approved_hosts=("chris-testing",),
+        allowed_adapter_types=("github_actions_runner",),
+        allowed_execution_lanes=("chris-testing-ops-gate",),
+        allowed_service_users=("gha",),
+        allowed_repository_scopes=("cbusillo/launchplane",),
+        allowed_privileged_scopes=("docker_cache",),
+        required_pre_apply_evidence=("df", "docker_summary", "warm_builders"),
+        required_post_apply_evidence=("df", "docker_summary", "warm_builders"),
+    )
+
+
+def _adapter_proposal(apply_plan: RunnerHostHygieneApplyPlan) -> RunnerHostHygieneAdapterProposal:
+    return RunnerHostHygieneAdapterProposal(
+        adapter_type="github_actions_runner",
+        host_name="chris-testing",
+        execution_lane="chris-testing-ops-gate",
+        service_user="gha",
+        repository_scopes=("cbusillo/launchplane",),
+        privileged_scopes=("docker_cache",),
+        audit_record_key=apply_plan.audit_record_key,
+        rollback_plan="Stop if retained builders are missing after pre-apply evidence.",
+        pre_apply_evidence=("df", "docker_summary", "warm_builders"),
+        post_apply_evidence=("df", "docker_summary", "warm_builders"),
     )
 
 
