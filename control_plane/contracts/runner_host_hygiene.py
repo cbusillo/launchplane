@@ -19,6 +19,7 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "audit_record_required",
     "host_needs_attention",
     "mutate_not_requested",
+    "report_host_mismatch",
     "warm_builder_not_retained",
 ]
 RunnerHostHygieneFindingCode = Literal[
@@ -215,8 +216,36 @@ class RunnerHostHygieneApplyAuditRecord(BaseModel):
         self.message = self.message.strip()
         if self.audit_record_key != self.request.audit_record_key:
             raise ValueError("runner host hygiene audit record key must match request")
+        if self.plan.audit_record_key != self.request.audit_record_key:
+            raise ValueError("runner host hygiene audit record plan key must match request")
+        if _normalized_host_name(self.request.host_name) != _normalized_host_name(
+            self.plan.host_name
+        ):
+            raise ValueError("runner host hygiene audit record plan must match request host")
+        if self.plan.action != self.request.action:
+            raise ValueError("runner host hygiene audit record plan must match request action")
+        if self.plan.mutate != self.request.mutate:
+            raise ValueError(
+                "runner host hygiene audit record plan must match request mutate intent"
+            )
+        if _normalized_host_name(self.request.host_name) != _normalized_host_name(
+            self.pre_apply_report.host_name
+        ):
+            raise ValueError(
+                "runner host hygiene audit record pre-apply report must match request host"
+            )
+        if self.post_apply_report is not None and _normalized_host_name(
+            self.request.host_name
+        ) != _normalized_host_name(self.post_apply_report.host_name):
+            raise ValueError(
+                "runner host hygiene audit record post-apply report must match request host"
+            )
         if self.status == "planned" and self.post_apply_report is not None:
             raise ValueError("planned runner host hygiene audit record cannot include post report")
+        if self.status in {"completed", "failed"} and self.post_apply_report is None:
+            raise ValueError("terminal runner host hygiene audit record requires post-apply report")
+        if self.status in {"completed", "failed"} and self.plan.status != "ready":
+            raise ValueError("terminal runner host hygiene audit record requires a ready plan")
         return self
 
 
@@ -344,6 +373,16 @@ def plan_runner_host_hygiene_apply(
             _apply_blocker(
                 "host_needs_attention",
                 f"runner host hygiene report is not healthy: {report.summary}",
+            )
+        )
+    if _normalized_host_name(report.host_name) != request.host_name:
+        blockers.append(
+            _apply_blocker(
+                "report_host_mismatch",
+                (
+                    "runner host hygiene report host does not match requested host: "
+                    f"{report.host_name} != {request.host_name}"
+                ),
             )
         )
     missing_retained_builders = tuple(
