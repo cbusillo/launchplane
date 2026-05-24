@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from decimal import InvalidOperation
 import json
 import os
 import pwd
@@ -29,6 +31,18 @@ from control_plane.workflows.ship import utc_now_timestamp
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
+_DOCKER_SYSTEM_DF_TYPES = ("Local Volumes", "Build Cache", "Containers", "Images")
+_DOCKER_SIZE_UNITS = {
+    "b": Decimal(1),
+    "kb": Decimal(1000),
+    "mb": Decimal(1000**2),
+    "gb": Decimal(1000**3),
+    "tb": Decimal(1000**4),
+    "kib": Decimal(1024),
+    "mib": Decimal(1024**2),
+    "gib": Decimal(1024**3),
+    "tib": Decimal(1024**4),
+}
 
 
 @dataclass(frozen=True)
@@ -259,6 +273,7 @@ def collect_runner_host_hygiene_report(
         host_name=request.host_name,
         observed_at=utc_now_timestamp(),
         free_disk_bytes=_parse_df_available_bytes(df_result.stdout),
+        docker_reclaimable_bytes=_parse_docker_system_df_reclaimable_bytes(docker_summary.stdout),
         warm_builders=warm_builders,
         notes=(
             f"execution_lane={request.execution_lane}",
@@ -382,6 +397,53 @@ def _parse_df_available_bytes(output: str) -> int:
     if not available.isdigit():
         raise click.ClickException("runner host hygiene df available bytes was not numeric")
     return int(available)
+
+
+def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
+    total = 0
+    parsed_rows = 0
+    for line in output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        for row_type in _DOCKER_SYSTEM_DF_TYPES:
+            prefix = f"{row_type} "
+            if stripped_line.startswith(prefix):
+                columns = stripped_line.removeprefix(prefix).split()
+                if len(columns) < 3:
+                    raise click.ClickException(
+                        "runner host hygiene docker summary evidence was incomplete"
+                    )
+                total += _parse_docker_size_bytes(columns[2])
+                parsed_rows += 1
+                break
+    if parsed_rows == 0:
+        raise click.ClickException(
+            "runner host hygiene docker summary evidence did not include reclaimable bytes"
+        )
+    return total
+
+
+def _parse_docker_size_bytes(value: str) -> int:
+    size = value.split("(", 1)[0].strip()
+    if not size:
+        raise click.ClickException("runner host hygiene Docker size was empty")
+    numeric_text = "".join(
+        character for character in size if character.isdigit() or character == "."
+    )
+    unit_text = size[len(numeric_text) :].strip().lower()
+    if not numeric_text:
+        raise click.ClickException("runner host hygiene Docker size was not numeric")
+    try:
+        numeric_value = Decimal(numeric_text)
+    except InvalidOperation as error:
+        raise click.ClickException("runner host hygiene Docker size was invalid") from error
+    multiplier = _DOCKER_SIZE_UNITS.get(unit_text or "b")
+    if multiplier is None:
+        raise click.ClickException(
+            f"runner host hygiene Docker size used unsupported unit: {unit_text}"
+        )
+    return int(numeric_value * multiplier)
 
 
 def _compact_evidence(output: str) -> str:
