@@ -32,7 +32,8 @@ policy from observation:
   whether orphan BuildKit artifacts are tolerated.
 - `RunnerHostHygieneObservation` records facts collected by an approved
   read-only probe, including host name, free disk, Docker reclaimable bytes,
-  runner work-directory bytes, warm builders, and orphan BuildKit counts.
+  runner work-directory bytes, warm builders, read-only image and volume
+  inventory, and orphan BuildKit counts.
 - `evaluate_runner_host_hygiene(...)` returns a structured report with
   `healthy` or `attention` status, findings, and non-mutating next steps.
 
@@ -43,7 +44,14 @@ explicitly permits that condition.
 Reports also carry the typed observation counters used for evaluation, so audit
 records preserve free disk, Docker reclaimable bytes, runner work-directory
 bytes, warm builders, and orphan BuildKit counts instead of relying only on raw
-operator notes.
+operator notes. Executor-written reports also include read-only resource
+inventory for Docker images and volumes. Image rows preserve repository, tag,
+image ID, size, creation timestamp, dangling status, in-use hints, and whether
+the image is one of the retained warm builders. Volume rows preserve name,
+driver, mountpoint, labels, size when Docker exposes it, reference count when
+Docker exposes it, and dangling status. These inventory fields are evidence for
+operator review only; aggregate reclaimable totals are not enough to approve
+destructive volume or image pruning.
 
 ## CLI
 
@@ -140,7 +148,10 @@ active Docker build client process is observed, and
 audit before mutation, then writes `completed` only when the bounded prune
 command succeeds and post-apply evidence is healthy. If the idle preflight,
 prune command, or post evidence fails, it writes `failed`. It does not attempt
-runner service restart or automatic rollback.
+runner service restart or automatic rollback. Operators should use the captured
+image and volume inventory to decide any later phase-two cleanup lane; the
+current executor still only prunes old BuildKit cache through the bounded
+`docker builder prune` command above.
 
 ## Adapter Boundary Planning
 

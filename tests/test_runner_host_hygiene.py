@@ -15,8 +15,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPl
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneAdapterProposal
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
@@ -49,6 +51,42 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self.assertEqual(report.warm_builders, ("odoo-docker-chris-testing",))
         self.assertEqual(report.findings, ())
         self.assertIn("report-only", report.summary)
+
+    def test_report_preserves_sorted_resource_inventory(self) -> None:
+        report = evaluate_runner_host_hygiene(
+            policy=RunnerHostHygienePolicy(),
+            observation=RunnerHostHygieneObservation(
+                host_name="chris-testing",
+                observed_at="2026-05-23T13:00:00Z",
+                free_disk_bytes=200,
+                image_inventory=(
+                    RunnerHostHygieneImageInventoryItem(
+                        image_id="image-b",
+                        repository="z-image",
+                        tag="latest",
+                    ),
+                    RunnerHostHygieneImageInventoryItem(
+                        image_id="image-a",
+                        repository="a-image",
+                        tag="latest",
+                        in_use=True,
+                    ),
+                ),
+                volume_inventory=(
+                    RunnerHostHygieneVolumeInventoryItem(name="z-volume", driver="local"),
+                    RunnerHostHygieneVolumeInventoryItem(
+                        name="a-volume",
+                        driver="local",
+                        labels=(" role=cache ", ""),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual([item.image_id for item in report.image_inventory], ["image-a", "image-b"])
+        self.assertTrue(report.image_inventory[0].in_use)
+        self.assertEqual([item.name for item in report.volume_inventory], ["a-volume", "z-volume"])
+        self.assertEqual(report.volume_inventory[0].labels, ("role=cache",))
 
     def test_report_finds_missing_builder_and_low_free_disk(self) -> None:
         report = evaluate_runner_host_hygiene(
