@@ -34,6 +34,10 @@ AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
 DEFAULT_PRUNE_UNTIL = "168h"
 HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 _DOCKER_SYSTEM_DF_TYPES = ("Local Volumes", "Build Cache", "Containers", "Images")
+_DOCKER_LOCAL_VOLUME_USAGE_HEADERS = (
+    "local volumes space usage:",
+    "local volumes:",
+)
 _DOCKER_SIZE_UNITS = {
     "b": Decimal(1),
     "kb": Decimal(1000),
@@ -681,7 +685,7 @@ def _parse_volume_usage(output: str) -> dict[str, _VolumeUsage]:
     saw_volume_header = False
     for line in output.splitlines():
         stripped_line = line.strip()
-        if stripped_line == "Local Volumes space usage:":
+        if stripped_line.lower() in _DOCKER_LOCAL_VOLUME_USAGE_HEADERS:
             in_volume_section = True
             continue
         if not in_volume_section:
