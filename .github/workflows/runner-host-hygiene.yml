@@ -18,6 +18,11 @@ name: Runner Host Hygiene
         required: false
         default: "0"
         type: string
+      prune_until:
+        description: Docker builder prune age filter
+        required: false
+        default: 168h
+        type: string
 
 permissions:
   contents: read
@@ -29,7 +34,10 @@ concurrency:
 
 jobs:
   docker-cache-prune:
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - launchplane
+      - chris-testing-ops-gate
     env:
       LAUNCHPLANE_SERVICE_URL: >-
         ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
@@ -42,22 +50,6 @@ jobs:
       RUNNER_REPOSITORY_SCOPE: ${{ github.repository }}
       RUNNER_RETAINED_WARM_BUILDERS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST: >-
-        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER: >-
-        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY: >-
-        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS: >-
-        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID: >-
-        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET: >-
-        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE: >-
-        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE }}
-      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS: >-
-        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -81,41 +73,10 @@ jobs:
           require_env RUNNER_EXECUTION_LANE
           require_env RUNNER_SERVICE_USER
           require_env RUNNER_RETAINED_WARM_BUILDERS
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID
-          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS
-
-          ts_audience="${LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE:-}"
-          ts_secret="${LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET:-}"
-          if [ -z "$ts_audience" ] && [ -z "$ts_secret" ]; then
-            echo "Missing Tailscale auth secret or audience." >&2
+          if [ "$(id -un)" != "$RUNNER_SERVICE_USER" ]; then
+            echo "Runner must execute as ${RUNNER_SERVICE_USER}." >&2
             exit 1
           fi
-
-      - name: Tailscale using workload identity
-        if: ${{ env.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE != '' }}
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: >-
-            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
-          audience: >-
-            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE }}
-          tags: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
-          ping: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
-
-      - name: Tailscale using OAuth secret
-        if: ${{ env.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE == '' }}
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: >-
-            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
-          oauth-secret: >-
-            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET }}
-          tags: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
-          ping: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
 
       - name: Run approved runner host hygiene executor
         shell: bash
@@ -161,7 +122,7 @@ jobs:
             mutate_flag="--mutate"
           fi
 
-          uv run launchplane work-graph runner-host-hygiene-ssh-executor \
+          uv run launchplane work-graph runner-host-hygiene-executor \
             --host-name "$RUNNER_HOST_NAME" \
             --execution-lane "$RUNNER_EXECUTION_LANE" \
             --service-user "$RUNNER_SERVICE_USER" \
@@ -170,6 +131,7 @@ jobs:
             "${builder_args[@]}" \
             "$mutate_flag" \
             --minimum-free-disk-bytes "${{ inputs.minimum_free_disk_bytes }}" \
+            --prune-until "${{ inputs.prune_until }}" \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             | tee runner-host-hygiene-result.json
 

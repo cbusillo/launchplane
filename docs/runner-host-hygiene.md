@@ -19,8 +19,8 @@ Runner host hygiene has two separate phases:
   and runner service restarts disabled.
 
 The current Launchplane surface implements report-only evidence, local
-apply-boundary planning, durable audit evidence, and a constrained SSH executor
-for the approved first lane.
+apply-boundary planning, durable audit evidence, and a constrained self-hosted
+ops executor for the approved first lane.
 
 ## Report Contract
 
@@ -105,17 +105,21 @@ under `runner_host_hygiene_audit.write`. The local planner only prints the
 planned record; the approved executor calls the service route after it captures
 the required pre/post host evidence.
 
-## Approved SSH Executor
+## Approved Ops-Lane Executor
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
-on GitHub-hosted infrastructure, joins the private tailnet through the official
-Tailscale GitHub Action, authenticates back to Launchplane with GitHub Actions
-OIDC, and reaches the approved runner host over SSH as a constrained service
-user. It supports only `prune_docker_cache`, implemented as:
+on a dedicated self-hosted ops lane with labels `self-hosted`, `launchplane`,
+and `chris-testing-ops-gate`, authenticates back to Launchplane with GitHub
+Actions OIDC, and executes on the runner host as the constrained service user.
+It supports only `prune_docker_cache`, implemented as a bounded BuildKit prune:
 
 ```bash
-docker builder prune --all --force
+flock -n /tmp/launchplane-runner-host-hygiene.lock \
+  docker builder prune --force --filter until=168h
 ```
+
+Operators can override the age bound through the workflow's `prune_until` input,
+but the executor does not expose an unbounded `--all` prune.
 
 The workflow requires these repository variables:
 
@@ -123,28 +127,16 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS`
 
-It requires these repository secrets:
-
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS`
-- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID`
-
-For Tailscale authentication, set either
-`LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE` for workload identity or
-`LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET` for an OAuth secret. The
-workflow fails closed if neither authentication mode is configured.
-
-The executor fails closed unless the configured SSH user matches the requested
-service user, retained warm builders are present in pre-apply evidence, the
-apply plan is ready, and `mutate=true` is explicitly supplied to the workflow.
-It writes a `planned` audit before mutation, then writes `completed` only when
-the prune command succeeds and post-apply evidence is healthy. If the prune
-command fails or post evidence reports a missing warm builder, it writes
-`failed`. It does not attempt runner service restart or automatic rollback.
+The executor fails closed unless the process user matches the requested service
+user, the GitHub repository matches the requested repository scope, retained
+warm builders are present in pre-apply evidence, the apply plan is ready, no
+active GitHub worker or Docker build client process is observed, and
+`mutate=true` is explicitly supplied to the workflow. It writes a `planned`
+audit before mutation, then writes `completed` only when the bounded prune
+command succeeds and post-apply evidence is healthy. If the idle preflight,
+prune command, or post evidence fails, it writes `failed`. It does not attempt
+runner service restart or automatic rollback.
 
 ## Adapter Boundary Planning
 
@@ -187,7 +179,7 @@ is ready, the host is approved, the proposal names an allowed adapter type,
 execution lane, service user, repository scope, narrow privileged scope, audit
 record key prefix, pre/post evidence set, and rollback or stop condition. It
 does not call Docker, systemd, SSH, GitHub runner registration APIs, or a host
-executor; the dedicated SSH executor is the separate apply surface.
+executor; the dedicated ops-lane executor is the separate apply surface.
 
 The privileged scope must match the planned action exactly:
 
