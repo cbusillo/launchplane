@@ -889,6 +889,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Explicit zero-link BuildKit state volume to remove. Repeat as needed.",
 )
 @click.option(
+    "--allowed-buildkit-state-volume",
+    "allowed_buildkit_state_volumes",
+    multiple=True,
+    help="BuildKit state volume policy allows removal for. Repeat as needed.",
+)
+@click.option(
     "--mutate/--dry-run",
     default=False,
     show_default=True,
@@ -934,6 +940,7 @@ def runner_host_hygiene_executor(
     audit_record_key: str,
     retained_warm_builders: tuple[str, ...],
     target_buildkit_state_volumes: tuple[str, ...],
+    allowed_buildkit_state_volumes: tuple[str, ...],
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
@@ -954,6 +961,7 @@ def runner_host_hygiene_executor(
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
             target_buildkit_state_volumes=target_buildkit_state_volumes,
+            allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             mutate=mutate,
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             timeout_seconds=timeout_seconds,
