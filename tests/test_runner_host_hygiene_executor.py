@@ -24,6 +24,7 @@ class _CommandRunner:
         image_present_after: bool = True,
         active_build_processes: str = "",
         docker_summary: str | None = None,
+        docker_verbose_summary: str | None = None,
         image_inventory: str | None = None,
         container_inventory: str | None = None,
         volume_inventory: str | None = None,
@@ -33,6 +34,12 @@ class _CommandRunner:
         self._image_present_after = image_present_after
         self._active_build_processes = active_build_processes
         self._docker_summary = docker_summary or "Images 1 1GB 500MB\n"
+        self._docker_verbose_summary = docker_verbose_summary or (
+            "Local Volumes space usage:\n\n"
+            "VOLUME NAME     LINKS     SIZE\n"
+            "runner-cache    0         45.5GB\n\n"
+            "Build cache usage: 1GB\n"
+        )
         self._image_inventory = image_inventory or _json_lines(
             {
                 "CreatedAt": "2026-05-23 12:00:00 +0000 UTC",
@@ -87,6 +94,8 @@ class _CommandRunner:
             "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
         ):
             return RemoteCommandResult(returncode=0, stdout=self._docker_summary)
+        if command_tuple == ("docker", "system", "df", "-v"):
+            return RemoteCommandResult(returncode=0, stdout=self._docker_verbose_summary)
         if command_tuple == (
             "docker",
             "image",
@@ -260,10 +269,11 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertTrue(dangling_image.dangling)
         volume = post_apply_report.volume_inventory[0]
         self.assertEqual(volume.name, "runner-cache")
-        self.assertEqual(volume.size_bytes, 1234)
+        self.assertEqual(volume.size_bytes, 45_500_000_000)
         self.assertEqual(volume.referenced_by_containers, 0)
         self.assertTrue(volume.dangling)
         self.assertEqual(volume.labels, ("launchplane.scope=test",))
+        self.assertIn(("docker", "system", "df", "-v"), command_runner.commands)
         self.assertIn(
             (
                 "bash",
