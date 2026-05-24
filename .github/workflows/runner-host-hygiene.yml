@@ -8,11 +8,25 @@ name: Runner Host Hygiene
         description: Launchplane audit record key
         required: true
         type: string
+      action:
+        description: Approved hygiene action
+        required: true
+        default: prune_docker_cache
+        type: choice
+        options:
+          - prune_docker_cache
+          - remove_buildkit_state_volumes
       mutate:
-        description: Execute the approved Docker cache prune
+        description: Execute the approved hygiene action
         required: true
         default: false
         type: boolean
+      target_buildkit_state_volumes:
+        description: >-
+          Comma-separated zero-link BuildKit state volumes for removal
+        required: false
+        default: ""
+        type: string
       minimum_free_disk_bytes:
         description: Minimum free disk bytes required in pre/post evidence
         required: false
@@ -101,18 +115,30 @@ jobs:
             exit 1
           fi
 
+          volume_args=()
+          target_volumes="${{ inputs.target_buildkit_state_volumes }}"
+          IFS=',' read -r -a volumes <<< "$target_volumes"
+          for volume in "${volumes[@]}"; do
+            trimmed="$(xargs <<< "$volume")"
+            if [ -n "$trimmed" ]; then
+              volume_args+=(--target-buildkit-state-volume "$trimmed")
+            fi
+          done
+
           mutate_flag="--dry-run"
           if [ "${{ inputs.mutate }}" = "true" ]; then
             mutate_flag="--mutate"
           fi
 
           uv run launchplane work-graph runner-host-hygiene-executor \
+            --action "${{ inputs.action }}" \
             --host-name "$RUNNER_HOST_NAME" \
             --execution-lane "$RUNNER_EXECUTION_LANE" \
             --service-user "$RUNNER_SERVICE_USER" \
             --repository-scope "$RUNNER_REPOSITORY_SCOPE" \
             --audit-record-key "${{ inputs.audit_record_key }}" \
             "${builder_args[@]}" \
+            "${volume_args[@]}" \
             "$mutate_flag" \
             --minimum-free-disk-bytes "${{ inputs.minimum_free_disk_bytes }}" \
             --prune-until "${{ inputs.prune_until }}" \
