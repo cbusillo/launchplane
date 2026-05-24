@@ -34,15 +34,15 @@ from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
+from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
 from control_plane.workflows.runner_host_hygiene_executor import (
-    RunnerHostHygieneSshExecutorRequest,
+    build_service_audit_poster,
 )
-from control_plane.workflows.runner_host_hygiene_executor import build_service_audit_poster
-from control_plane.workflows.runner_host_hygiene_executor import build_ssh_remote_runner
 from control_plane.workflows.runner_host_hygiene_executor import (
-    execute_runner_host_hygiene_ssh_executor,
+    execute_runner_host_hygiene_executor,
 )
-from control_plane.workflows.runner_host_hygiene_executor import validate_ssh_executor_environment
+from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -58,8 +58,8 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
         name="runner-host-hygiene-adapter-boundary-plan",
     )
     work_graph.add_command(
-        runner_host_hygiene_ssh_executor,
-        name="runner-host-hygiene-ssh-executor",
+        runner_host_hygiene_executor,
+        name="runner-host-hygiene-executor",
     )
 
 
@@ -806,11 +806,11 @@ def runner_host_hygiene_adapter_boundary_plan(
     )
 
 
-@click.command("runner-host-hygiene-ssh-executor")
+@click.command("runner-host-hygiene-executor")
 @click.option(
     "--host-name",
     required=True,
-    help="Approved runner host name. Must match the configured SSH target boundary.",
+    help="Approved runner host name. Must match the self-hosted ops lane boundary.",
 )
 @click.option(
     "--execution-lane",
@@ -820,7 +820,7 @@ def runner_host_hygiene_adapter_boundary_plan(
 @click.option(
     "--service-user",
     required=True,
-    help="Constrained SSH service user expected on the remote host.",
+    help="Constrained service user expected to run the self-hosted ops lane.",
 )
 @click.option(
     "--repository-scope",
@@ -853,6 +853,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Minimum post/pre free disk policy in bytes.",
 )
 @click.option(
+    "--prune-until",
+    default="168h",
+    show_default=True,
+    help="Bounded Docker builder cache prune age filter, passed as until=<value>.",
+)
+@click.option(
     "--timeout-seconds",
     default=120,
     show_default=True,
@@ -870,7 +876,7 @@ def runner_host_hygiene_adapter_boundary_plan(
     show_default=True,
     help="Environment variable containing a GitHub OIDC bearer token.",
 )
-def runner_host_hygiene_ssh_executor(
+def runner_host_hygiene_executor(
     host_name: str,
     execution_lane: str,
     service_user: str,
@@ -879,6 +885,7 @@ def runner_host_hygiene_ssh_executor(
     retained_warm_builders: tuple[str, ...],
     mutate: bool,
     minimum_free_disk_bytes: int,
+    prune_until: str,
     timeout_seconds: int,
     service_url: str,
     bearer_token_env: str,
@@ -890,7 +897,7 @@ def runner_host_hygiene_ssh_executor(
         bearer_token = os.environ.get(token_env, "").strip()
         if not bearer_token:
             raise click.ClickException(f"Missing Launchplane bearer token in {token_env}.")
-        request = RunnerHostHygieneSshExecutorRequest(
+        request = RunnerHostHygieneExecutorRequest(
             action="prune_docker_cache",
             host_name=host_name,
             execution_lane=execution_lane,
@@ -901,11 +908,12 @@ def runner_host_hygiene_ssh_executor(
             mutate=mutate,
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             timeout_seconds=timeout_seconds,
+            prune_until=prune_until,
         )
-        validate_ssh_executor_environment(request=request)
-        result = execute_runner_host_hygiene_ssh_executor(
+        validate_local_executor_environment(request=request)
+        result = execute_runner_host_hygiene_executor(
             request=request,
-            remote_runner=build_ssh_remote_runner(),
+            remote_runner=build_local_command_runner(),
             audit_poster=build_service_audit_poster(
                 service_url=service_url,
                 bearer_token=bearer_token,

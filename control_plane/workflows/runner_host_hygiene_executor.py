@@ -4,9 +4,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
+import pwd
 import subprocess
-from tempfile import TemporaryDirectory
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -17,6 +16,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAc
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditStatus
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
@@ -26,11 +26,9 @@ from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-SSH_PRIVATE_KEY_ENV_VAR = "LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY"
-SSH_KNOWN_HOSTS_ENV_VAR = "LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS"
-SSH_HOST_ENV_VAR = "LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST"
-SSH_USER_ENV_VAR = "LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER"
 AUDIT_ROUTE_PATH = "/v1/evidence/runner-host-hygiene/audits"
+DEFAULT_PRUNE_UNTIL = "168h"
+HOST_LOCK_PATH = "/tmp/launchplane-runner-host-hygiene.lock"
 
 
 @dataclass(frozen=True)
@@ -44,7 +42,7 @@ RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
 AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, object]]
 
 
-class RunnerHostHygieneSshExecutorRequest(BaseModel):
+class RunnerHostHygieneExecutorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
@@ -58,35 +56,39 @@ class RunnerHostHygieneSshExecutorRequest(BaseModel):
     mutate: bool = False
     minimum_free_disk_bytes: int = Field(default=0, ge=0)
     timeout_seconds: int = Field(default=120, ge=1)
+    prune_until: str = DEFAULT_PRUNE_UNTIL
 
     @model_validator(mode="after")
-    def _validate_first_lane(self) -> "RunnerHostHygieneSshExecutorRequest":
+    def _validate_first_lane(self) -> "RunnerHostHygieneExecutorRequest":
         if self.action != "prune_docker_cache":
-            raise ValueError("runner host SSH executor only supports prune_docker_cache")
+            raise ValueError("runner host hygiene executor only supports prune_docker_cache")
         self.host_name = self.host_name.strip()
         self.execution_lane = self.execution_lane.strip()
         self.service_user = self.service_user.strip()
         self.repository_scope = self.repository_scope.strip()
         self.audit_record_key = self.audit_record_key.strip()
+        self.prune_until = self.prune_until.strip()
         self.retained_warm_builders = tuple(
             token.strip().lower() for token in self.retained_warm_builders if token.strip()
         )
         if not self.host_name:
-            raise ValueError("runner host SSH executor requires host_name")
+            raise ValueError("runner host hygiene executor requires host_name")
         if not self.execution_lane:
-            raise ValueError("runner host SSH executor requires execution_lane")
+            raise ValueError("runner host hygiene executor requires execution_lane")
         if not self.service_user:
-            raise ValueError("runner host SSH executor requires service_user")
+            raise ValueError("runner host hygiene executor requires service_user")
         if "/" not in self.repository_scope:
-            raise ValueError("runner host SSH executor requires repository_scope as owner/name")
+            raise ValueError("runner host hygiene executor requires repository_scope as owner/name")
         if not self.audit_record_key:
-            raise ValueError("runner host SSH executor requires audit_record_key")
+            raise ValueError("runner host hygiene executor requires audit_record_key")
         if not self.retained_warm_builders:
-            raise ValueError("runner host SSH executor requires retained_warm_builders")
+            raise ValueError("runner host hygiene executor requires retained_warm_builders")
+        if not self.prune_until:
+            raise ValueError("runner host hygiene executor requires prune_until")
         return self
 
 
-class RunnerHostHygieneSshExecutorResult(BaseModel):
+class RunnerHostHygieneExecutorResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str
@@ -96,12 +98,12 @@ class RunnerHostHygieneSshExecutorResult(BaseModel):
     message: str
 
 
-def execute_runner_host_hygiene_ssh_executor(
+def execute_runner_host_hygiene_executor(
     *,
-    request: RunnerHostHygieneSshExecutorRequest,
+    request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
     audit_poster: AuditPoster,
-) -> RunnerHostHygieneSshExecutorResult:
+) -> RunnerHostHygieneExecutorResult:
     pre_report = collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
@@ -135,15 +137,52 @@ def execute_runner_host_hygiene_ssh_executor(
         f"runner-host-hygiene:{request.audit_record_key}:planned",
     )
     if apply_plan.status != "ready":
-        return RunnerHostHygieneSshExecutorResult(
+        return RunnerHostHygieneExecutorResult(
             status="blocked",
             audit_record_key=request.audit_record_key,
             planned_response=planned_response,
             message=apply_plan.summary,
         )
 
+    idle_result = _check_host_idle(request=request, remote_runner=remote_runner)
+    if idle_result is not None:
+        post_report = collect_runner_host_hygiene_report(
+            request=request,
+            remote_runner=remote_runner,
+        )
+        terminal_message = (
+            f"runner host hygiene apply blocked by active build processes: {idle_result}"
+        )
+        terminal_response = _post_terminal_audit(
+            audit_poster=audit_poster,
+            request=apply_request,
+            apply_plan=apply_plan,
+            pre_report=pre_report,
+            post_report=post_report,
+            status="failed",
+            message=terminal_message,
+        )
+        return RunnerHostHygieneExecutorResult(
+            status="failed",
+            audit_record_key=request.audit_record_key,
+            planned_response=planned_response,
+            terminal_response=terminal_response,
+            message=terminal_message,
+        )
+
     prune_result = remote_runner(
-        ("docker", "builder", "prune", "--all", "--force"), request.timeout_seconds
+        (
+            "flock",
+            "-n",
+            HOST_LOCK_PATH,
+            "docker",
+            "builder",
+            "prune",
+            "--force",
+            "--filter",
+            f"until={request.prune_until}",
+        ),
+        request.timeout_seconds,
     )
     post_report = collect_runner_host_hygiene_report(
         request=request,
@@ -155,20 +194,16 @@ def execute_runner_host_hygiene_ssh_executor(
         else "failed"
     )
     terminal_message = _terminal_message(prune_result=prune_result, post_report=post_report)
-    terminal_audit = RunnerHostHygieneApplyAuditRecord(
-        audit_record_key=request.audit_record_key,
-        status=terminal_status,
+    terminal_response = _post_terminal_audit(
+        audit_poster=audit_poster,
         request=apply_request,
-        plan=apply_plan,
-        pre_apply_report=pre_report,
-        post_apply_report=post_report,
+        apply_plan=apply_plan,
+        pre_report=pre_report,
+        post_report=post_report,
+        status=terminal_status,
         message=terminal_message,
     )
-    terminal_response = audit_poster(
-        terminal_audit,
-        f"runner-host-hygiene:{request.audit_record_key}:{terminal_status}",
-    )
-    return RunnerHostHygieneSshExecutorResult(
+    return RunnerHostHygieneExecutorResult(
         status=terminal_status,
         audit_record_key=request.audit_record_key,
         planned_response=planned_response,
@@ -179,7 +214,7 @@ def execute_runner_host_hygiene_ssh_executor(
 
 def collect_runner_host_hygiene_report(
     *,
-    request: RunnerHostHygieneSshExecutorRequest,
+    request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> RunnerHostHygieneReport:
     df_result = _require_remote_success(
@@ -219,47 +254,40 @@ def collect_runner_host_hygiene_report(
     )
 
 
-def build_ssh_remote_runner(env: Mapping[str, str] | None = None) -> RemoteCommandRunner:
-    resolved_env = env or os.environ
-
+def build_local_command_runner() -> RemoteCommandRunner:
     def run(command_args: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
-        with TemporaryDirectory(prefix="launchplane-runner-host-hygiene-") as material_dir_name:
-            identity_file, known_hosts_file = _write_ssh_material(
-                material_dir=Path(material_dir_name), env=resolved_env
-            )
-            command = _build_ssh_command(
-                command_args,
-                identity_file=identity_file,
-                known_hosts_file=known_hosts_file,
-                env=resolved_env,
-            )
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=max(timeout_seconds, 1),
-            )
-            return RemoteCommandResult(
-                returncode=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
+        completed = subprocess.run(
+            tuple(command_args),
+            capture_output=True,
+            text=True,
+            timeout=max(timeout_seconds, 1),
+        )
+        return RemoteCommandResult(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
 
     return run
 
 
-def validate_ssh_executor_environment(
-    *, request: RunnerHostHygieneSshExecutorRequest, env: Mapping[str, str] | None = None
+def validate_local_executor_environment(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    env: Mapping[str, str] | None = None,
+    current_user: str | None = None,
 ) -> None:
     resolved_env = env or os.environ
-    configured_user = _required_env(resolved_env, SSH_USER_ENV_VAR)
-    if configured_user != request.service_user:
+    resolved_current_user = current_user or pwd.getpwuid(os.geteuid()).pw_name
+    if resolved_current_user != request.service_user:
         raise click.ClickException(
-            "Runner host hygiene SSH user must match the approved service user."
+            "Runner host hygiene executor user must match the approved service user."
         )
-    _required_env(resolved_env, SSH_HOST_ENV_VAR)
-    _required_env(resolved_env, SSH_PRIVATE_KEY_ENV_VAR)
-    _required_env(resolved_env, SSH_KNOWN_HOSTS_ENV_VAR)
+    github_repository = resolved_env.get("GITHUB_REPOSITORY", "").strip()
+    if github_repository and github_repository != request.repository_scope:
+        raise click.ClickException(
+            "Runner host hygiene repository scope must match GITHUB_REPOSITORY."
+        )
 
 
 def build_service_audit_poster(*, service_url: str, bearer_token: str) -> AuditPoster:
@@ -306,49 +334,6 @@ def _audit_route_payload(audit: RunnerHostHygieneApplyAuditRecord) -> dict[str, 
     }
 
 
-def _write_ssh_material(*, material_dir: Path, env: Mapping[str, str]) -> tuple[str, str]:
-    private_key = _required_env(env, SSH_PRIVATE_KEY_ENV_VAR)
-    known_hosts = _required_env(env, SSH_KNOWN_HOSTS_ENV_VAR)
-    identity_file = material_dir / "runner-host-hygiene-key"
-    known_hosts_file = material_dir / "known_hosts"
-    _write_secret_file(path=identity_file, value=private_key)
-    _write_secret_file(path=known_hosts_file, value=known_hosts)
-    return str(identity_file), str(known_hosts_file)
-
-
-def _write_secret_file(*, path: Path, value: str) -> None:
-    path.write_text(f"{value.rstrip()}\n", encoding="utf-8")
-    path.chmod(0o600)
-
-
-def _build_ssh_command(
-    command_args: Sequence[str],
-    *,
-    identity_file: str,
-    known_hosts_file: str,
-    env: Mapping[str, str],
-) -> list[str]:
-    ssh_host = _required_env(env, SSH_HOST_ENV_VAR)
-    ssh_user = _required_env(env, SSH_USER_ENV_VAR)
-    return [
-        "ssh",
-        "-F",
-        "/dev/null",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts_file}",
-        "-i",
-        identity_file,
-        f"{ssh_user}@{ssh_host}",
-        *command_args,
-    ]
-
-
 def _required_env(env: Mapping[str, str], name: str) -> str:
     value = env.get(name, "").strip()
     if not value:
@@ -380,6 +365,55 @@ def _parse_df_available_bytes(output: str) -> int:
 def _compact_evidence(output: str) -> str:
     compact = " | ".join(line.strip() for line in output.splitlines() if line.strip())
     return compact[:500]
+
+
+def _check_host_idle(
+    *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
+) -> str | None:
+    active_processes = _require_remote_success(
+        remote_runner(
+            (
+                "bash",
+                "-lc",
+                "pgrep -af 'Runner.Worker|docker buildx|docker build|buildctl' || true",
+            ),
+            request.timeout_seconds,
+        ),
+        evidence_name="active_build_processes",
+    )
+    lines = tuple(
+        line.strip()
+        for line in active_processes.stdout.splitlines()
+        if line.strip() and "runner-host-hygiene" not in line
+    )
+    if lines:
+        return _compact_evidence("\n".join(lines))
+    return None
+
+
+def _post_terminal_audit(
+    *,
+    audit_poster: AuditPoster,
+    request: RunnerHostHygieneApplyRequest,
+    apply_plan: RunnerHostHygieneApplyPlan,
+    pre_report: RunnerHostHygieneReport,
+    post_report: RunnerHostHygieneReport,
+    status: RunnerHostHygieneApplyAuditStatus,
+    message: str,
+) -> dict[str, object]:
+    terminal_audit = RunnerHostHygieneApplyAuditRecord(
+        audit_record_key=request.audit_record_key,
+        status=status,
+        request=request,
+        plan=apply_plan,
+        pre_apply_report=pre_report,
+        post_apply_report=post_report,
+        message=message,
+    )
+    return audit_poster(
+        terminal_audit,
+        f"runner-host-hygiene:{request.audit_record_key}:{status}",
+    )
 
 
 def _terminal_message(
