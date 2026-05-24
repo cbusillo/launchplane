@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from collections.abc import Sequence
@@ -23,12 +24,49 @@ class _CommandRunner:
         image_present_after: bool = True,
         active_build_processes: str = "",
         docker_summary: str | None = None,
+        image_inventory: str | None = None,
+        container_inventory: str | None = None,
+        volume_inventory: str | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
         self._image_present_after = image_present_after
         self._active_build_processes = active_build_processes
         self._docker_summary = docker_summary or "Images 1 1GB 500MB\n"
+        self._image_inventory = image_inventory or _json_lines(
+            {
+                "CreatedAt": "2026-05-23 12:00:00 +0000 UTC",
+                "ID": "sha256:warm-builder-id",
+                "Repository": "odoo-docker-chris-testing",
+                "Size": "1.2GB",
+                "Tag": "latest",
+            },
+            {
+                "CreatedAt": "2026-05-20 12:00:00 +0000 UTC",
+                "ID": "sha256:dangling-id",
+                "Repository": "<none>",
+                "Size": "500MB",
+                "Tag": "<none>",
+            },
+        )
+        self._container_inventory = container_inventory or _json_lines(
+            {
+                "ID": "container-id",
+                "Image": "odoo-docker-chris-testing:latest",
+                "ImageID": "sha256:warm-builder-id",
+            }
+        )
+        self._volume_inventory = volume_inventory or json.dumps(
+            [
+                {
+                    "Driver": "local",
+                    "Labels": {"launchplane.scope": "test"},
+                    "Mountpoint": "/var/lib/docker/volumes/runner-cache/_data",
+                    "Name": "runner-cache",
+                    "UsageData": {"RefCount": 0, "Size": 1234},
+                }
+            ]
+        )
         self._pruned = False
 
     def __call__(self, command: Sequence[str], _timeout_seconds: int) -> RemoteCommandResult:
@@ -49,6 +87,31 @@ class _CommandRunner:
             "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
         ):
             return RemoteCommandResult(returncode=0, stdout=self._docker_summary)
+        if command_tuple == (
+            "docker",
+            "image",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{json .}}",
+        ):
+            return RemoteCommandResult(returncode=0, stdout=self._image_inventory)
+        if command_tuple == (
+            "docker",
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--format",
+            "{{json .}}",
+        ):
+            return RemoteCommandResult(returncode=0, stdout=self._container_inventory)
+        if command_tuple == (
+            "bash",
+            "-lc",
+            "docker volume ls -q | xargs -r docker volume inspect",
+        ):
+            return RemoteCommandResult(returncode=0, stdout=self._volume_inventory)
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
@@ -164,6 +227,50 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(
             post_apply_report.docker_reclaimable_bytes,
             reclaimable_bytes,
+        )
+
+    def test_executor_records_read_only_resource_inventory(self) -> None:
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "completed")
+        terminal_audit = audit_poster.audits[-1]
+        post_apply_report = terminal_audit.post_apply_report
+        self.assertIsNotNone(post_apply_report)
+        assert post_apply_report is not None
+        warm_image = next(
+            image
+            for image in post_apply_report.image_inventory
+            if image.repository == "odoo-docker-chris-testing"
+        )
+        self.assertEqual(warm_image.tag, "latest")
+        self.assertEqual(warm_image.size_bytes, 1_200_000_000)
+        self.assertTrue(warm_image.in_use)
+        self.assertFalse(warm_image.dangling)
+        self.assertTrue(warm_image.is_warm_builder)
+        dangling_image = next(
+            image for image in post_apply_report.image_inventory if image.image_id == "dangling-id"
+        )
+        self.assertTrue(dangling_image.dangling)
+        volume = post_apply_report.volume_inventory[0]
+        self.assertEqual(volume.name, "runner-cache")
+        self.assertEqual(volume.size_bytes, 1234)
+        self.assertEqual(volume.referenced_by_containers, 0)
+        self.assertTrue(volume.dangling)
+        self.assertEqual(volume.labels, ("launchplane.scope=test",))
+        self.assertIn(
+            (
+                "bash",
+                "-lc",
+                "docker volume ls -q | xargs -r docker volume inspect",
+            ),
+            command_runner.commands,
         )
 
     def test_executor_fails_closed_when_docker_summary_is_unparseable(self) -> None:
@@ -289,3 +396,7 @@ def _request(*, mutate: bool) -> RunnerHostHygieneExecutorRequest:
         retained_warm_builders=("odoo-docker-chris-testing",),
         mutate=mutate,
     )
+
+
+def _json_lines(*rows: dict[str, object]) -> str:
+    return "".join(f"{json.dumps(row)}\n" for row in rows)

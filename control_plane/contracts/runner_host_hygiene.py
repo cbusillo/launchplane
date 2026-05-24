@@ -87,6 +87,8 @@ class RunnerHostHygieneObservation(BaseModel):
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
     runner_workdir_bytes: int = Field(default=0, ge=0)
     warm_builders: tuple[str, ...] = ()
+    image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
+    volume_inventory: tuple["RunnerHostHygieneVolumeInventoryItem", ...] = ()
     orphan_buildkit_containers: int = Field(default=0, ge=0)
     orphan_buildkit_volumes: int = Field(default=0, ge=0)
     notes: tuple[str, ...] = ()
@@ -100,7 +102,56 @@ class RunnerHostHygieneObservation(BaseModel):
             self.observed_at, "runner host hygiene observation requires observed_at"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
+        self.image_inventory = _sorted_image_inventory(self.image_inventory)
+        self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         self.notes = tuple(note.strip() for note in self.notes if note.strip())
+        return self
+
+
+class RunnerHostHygieneImageInventoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_id: str
+    repository: str
+    tag: str
+    size_bytes: int = Field(default=0, ge=0)
+    created_at: str = ""
+    dangling: bool = False
+    in_use: bool = False
+    is_warm_builder: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_item(self) -> "RunnerHostHygieneImageInventoryItem":
+        self.image_id = _required_text(
+            self.image_id, "runner host hygiene image inventory item requires image_id"
+        )
+        self.repository = self.repository.strip().lower()
+        self.tag = self.tag.strip().lower()
+        self.created_at = self.created_at.strip()
+        return self
+
+
+class RunnerHostHygieneVolumeInventoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    driver: str
+    mountpoint: str = ""
+    labels: tuple[str, ...] = ()
+    size_bytes: int = Field(default=0, ge=0)
+    referenced_by_containers: int = Field(default=0, ge=0)
+    dangling: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_item(self) -> "RunnerHostHygieneVolumeInventoryItem":
+        self.name = _required_text(
+            self.name, "runner host hygiene volume inventory item requires name"
+        )
+        self.driver = _required_text(
+            self.driver, "runner host hygiene volume inventory item requires driver"
+        )
+        self.mountpoint = self.mountpoint.strip()
+        self.labels = tuple(sorted(label.strip() for label in self.labels if label.strip()))
         return self
 
 
@@ -126,6 +177,8 @@ class RunnerHostHygieneReport(BaseModel):
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
     runner_workdir_bytes: int = Field(default=0, ge=0)
     warm_builders: tuple[str, ...] = ()
+    image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
+    volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...] = ()
     orphan_buildkit_containers: int = Field(default=0, ge=0)
     orphan_buildkit_volumes: int = Field(default=0, ge=0)
     findings: tuple[RunnerHostHygieneFinding, ...] = ()
@@ -138,6 +191,8 @@ class RunnerHostHygieneReport(BaseModel):
             self.host_name, "runner host hygiene report requires host_name"
         )
         self.warm_builders = _normalized_tokens(self.warm_builders)
+        self.image_inventory = _sorted_image_inventory(self.image_inventory)
+        self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         self.findings = tuple(sorted(self.findings, key=lambda finding: finding.code))
         self.summary = _required_text(self.summary, "runner host hygiene report requires summary")
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
@@ -496,6 +551,8 @@ def evaluate_runner_host_hygiene(
         docker_reclaimable_bytes=observation.docker_reclaimable_bytes,
         runner_workdir_bytes=observation.runner_workdir_bytes,
         warm_builders=observation.warm_builders,
+        image_inventory=observation.image_inventory,
+        volume_inventory=observation.volume_inventory,
         orphan_buildkit_containers=observation.orphan_buildkit_containers,
         orphan_buildkit_volumes=observation.orphan_buildkit_volumes,
         findings=tuple(findings),
@@ -879,6 +936,18 @@ def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalized_repositories(values: tuple[str, ...]) -> tuple[str, ...]:
     return _normalized_values(values, _normalized_repository)
+
+
+def _sorted_image_inventory(
+    values: tuple[RunnerHostHygieneImageInventoryItem, ...],
+) -> tuple[RunnerHostHygieneImageInventoryItem, ...]:
+    return tuple(sorted(values, key=lambda item: (item.repository, item.tag, item.image_id)))
+
+
+def _sorted_volume_inventory(
+    values: tuple[RunnerHostHygieneVolumeInventoryItem, ...],
+) -> tuple[RunnerHostHygieneVolumeInventoryItem, ...]:
+    return tuple(sorted(values, key=lambda item: (item.name, item.driver)))
 
 
 def _normalized_values(values: tuple[str, ...], normalize: Callable[[str], str]) -> tuple[str, ...]:

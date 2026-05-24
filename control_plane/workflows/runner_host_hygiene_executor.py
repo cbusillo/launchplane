@@ -20,9 +20,11 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneReport
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeInventoryItem
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.workflows.ship import utc_now_timestamp
@@ -269,12 +271,22 @@ def collect_runner_host_hygiene_report(
         ).returncode
         == 0
     )
+    image_inventory = _collect_image_inventory(
+        request=request,
+        remote_runner=remote_runner,
+    )
+    volume_inventory = _collect_volume_inventory(
+        request=request,
+        remote_runner=remote_runner,
+    )
     observation = RunnerHostHygieneObservation(
         host_name=request.host_name,
         observed_at=utc_now_timestamp(),
         free_disk_bytes=_parse_df_available_bytes(df_result.stdout),
         docker_reclaimable_bytes=_parse_docker_system_df_reclaimable_bytes(docker_summary.stdout),
         warm_builders=warm_builders,
+        image_inventory=image_inventory,
+        volume_inventory=volume_inventory,
         notes=(
             f"execution_lane={request.execution_lane}",
             f"service_user={request.service_user}",
@@ -418,6 +430,143 @@ def _parse_df_available_bytes(output: str) -> int:
     return int(available)
 
 
+def _collect_image_inventory(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> tuple[RunnerHostHygieneImageInventoryItem, ...]:
+    image_result = _require_remote_success(
+        remote_runner(
+            (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ),
+            request.timeout_seconds,
+        ),
+        evidence_name="image_inventory",
+    )
+    container_images = _collect_container_image_references(
+        request=request,
+        remote_runner=remote_runner,
+    )
+    inventory: list[RunnerHostHygieneImageInventoryItem] = []
+    retained_builders = set(request.retained_warm_builders)
+    for row in _parse_json_lines(image_result.stdout, evidence_name="image_inventory"):
+        image_id = _docker_json_text(row, "ID").removeprefix("sha256:")
+        repository = _docker_json_text(row, "Repository").lower()
+        tag = _docker_json_text(row, "Tag").lower()
+        if not image_id:
+            raise click.ClickException(
+                "runner host hygiene image inventory evidence did not include image IDs"
+            )
+        reference = _image_reference(repository=repository, tag=tag)
+        inventory.append(
+            RunnerHostHygieneImageInventoryItem(
+                image_id=image_id,
+                repository=repository,
+                tag=tag,
+                size_bytes=_parse_optional_docker_size_bytes(_docker_json_text(row, "Size")),
+                created_at=_docker_json_text(row, "CreatedAt"),
+                dangling=_is_dangling_image(repository=repository, tag=tag),
+                in_use=reference in container_images or image_id in container_images,
+                is_warm_builder=_is_warm_builder_image(
+                    repository=repository,
+                    reference=reference,
+                    retained_builders=retained_builders,
+                ),
+            )
+        )
+    return tuple(inventory)
+
+
+def _collect_container_image_references(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> set[str]:
+    result = _require_remote_success(
+        remote_runner(
+            (
+                "docker",
+                "ps",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ),
+            request.timeout_seconds,
+        ),
+        evidence_name="container_inventory",
+    )
+    references: set[str] = set()
+    for row in _parse_json_lines(result.stdout, evidence_name="container_inventory"):
+        image = _docker_json_text(row, "Image").lower()
+        image_id = _docker_json_text(row, "ImageID").removeprefix("sha256:").lower()
+        if image:
+            references.add(image)
+        if image_id:
+            references.add(image_id)
+    return references
+
+
+def _collect_volume_inventory(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> tuple[RunnerHostHygieneVolumeInventoryItem, ...]:
+    result = _require_remote_success(
+        remote_runner(
+            (
+                "bash",
+                "-lc",
+                "docker volume ls -q | xargs -r docker volume inspect",
+            ),
+            request.timeout_seconds,
+        ),
+        evidence_name="volume_inventory",
+    )
+    if not result.stdout.strip():
+        return ()
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise click.ClickException(
+            "runner host hygiene volume inventory evidence was not valid JSON"
+        ) from error
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            "runner host hygiene volume inventory evidence was not a JSON array"
+        )
+
+    inventory: list[RunnerHostHygieneVolumeInventoryItem] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            raise click.ClickException(
+                "runner host hygiene volume inventory evidence contained a non-object row"
+            )
+        usage_data = row.get("UsageData")
+        if not isinstance(usage_data, dict):
+            usage_data = {}
+        ref_count = _non_negative_int(usage_data.get("RefCount"))
+        inventory.append(
+            RunnerHostHygieneVolumeInventoryItem(
+                name=_docker_json_text(row, "Name"),
+                driver=_docker_json_text(row, "Driver"),
+                mountpoint=_docker_json_text(row, "Mountpoint"),
+                labels=_docker_labels(row.get("Labels")),
+                size_bytes=_non_negative_int(usage_data.get("Size")),
+                referenced_by_containers=ref_count,
+                dangling=ref_count == 0,
+            )
+        )
+    return tuple(inventory)
+
+
 def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
     total = 0
     parsed_rows = 0
@@ -441,6 +590,85 @@ def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
             "runner host hygiene docker summary evidence did not include reclaimable bytes"
         )
     return total
+
+
+def _parse_json_lines(output: str, *, evidence_name: str) -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    for line in output.splitlines():
+        stripped_line = line.strip()
+        if not stripped_line:
+            continue
+        try:
+            payload = json.loads(stripped_line)
+        except json.JSONDecodeError as error:
+            raise click.ClickException(
+                f"runner host hygiene {evidence_name} evidence was not valid JSON"
+            ) from error
+        if not isinstance(payload, dict):
+            raise click.ClickException(
+                f"runner host hygiene {evidence_name} evidence contained a non-object row"
+            )
+        rows.append(payload)
+    return tuple(rows)
+
+
+def _docker_json_text(row: Mapping[str, object], key: str) -> str:
+    value = row.get(key)
+    return _optional_scalar_text(value)
+
+
+def _docker_labels(value: object) -> tuple[str, ...]:
+    if not isinstance(value, dict):
+        return ()
+    labels = []
+    for label_key, label_value in value.items():
+        normalized_key = _optional_scalar_text(label_key)
+        if not normalized_key:
+            continue
+        labels.append(f"{normalized_key}={_optional_scalar_text(label_value)}")
+    return tuple(labels)
+
+
+def _non_negative_int(value: object) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    try:
+        parsed_value = int(_optional_scalar_text(value))
+    except ValueError:
+        return 0
+    return max(parsed_value, 0)
+
+
+def _optional_scalar_text(value: object) -> str:
+    if value is None or isinstance(value, bool | dict | list | tuple):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, int | float | Decimal):
+        return f"{value}".strip()
+    return ""
+
+
+def _parse_optional_docker_size_bytes(value: str) -> int:
+    if not value.strip() or value.strip() in {"N/A", "-"}:
+        return 0
+    return _parse_docker_size_bytes(value)
+
+
+def _image_reference(*, repository: str, tag: str) -> str:
+    if _is_dangling_image(repository=repository, tag=tag):
+        return ""
+    return f"{repository}:{tag}"
+
+
+def _is_warm_builder_image(*, repository: str, reference: str, retained_builders: set[str]) -> bool:
+    return repository in retained_builders or reference in retained_builders
+
+
+def _is_dangling_image(*, repository: str, tag: str) -> bool:
+    return repository in {"", "<none>"} or tag in {"", "<none>"}
 
 
 def _parse_docker_size_bytes(value: str) -> int:
