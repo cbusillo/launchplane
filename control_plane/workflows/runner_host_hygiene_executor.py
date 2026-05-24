@@ -74,11 +74,15 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     minimum_free_disk_bytes: int = Field(default=0, ge=0)
     timeout_seconds: int = Field(default=120, ge=1)
     prune_until: str = DEFAULT_PRUNE_UNTIL
+    target_buildkit_state_volumes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_first_lane(self) -> "RunnerHostHygieneExecutorRequest":
-        if self.action != "prune_docker_cache":
-            raise ValueError("runner host hygiene executor only supports prune_docker_cache")
+    def _validate_request(self) -> "RunnerHostHygieneExecutorRequest":
+        if self.action not in {"prune_docker_cache", "remove_buildkit_state_volumes"}:
+            raise ValueError(
+                "runner host hygiene executor only supports prune_docker_cache "
+                "and remove_buildkit_state_volumes"
+            )
         (
             self.host_name,
             self.execution_lane,
@@ -97,6 +101,17 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
         self.retained_warm_builders = tuple(
             token.strip().lower() for token in self.retained_warm_builders if token.strip()
         )
+        self.target_buildkit_state_volumes = tuple(
+            sorted(
+                {
+                    volume_name.strip()
+                    for volume_name in self.target_buildkit_state_volumes
+                    if volume_name.strip()
+                }
+            )
+        )
+        if self.action == "prune_docker_cache" and self.target_buildkit_state_volumes:
+            raise ValueError("Docker cache prune requests cannot include target volumes")
         if not self.host_name:
             raise ValueError("runner host hygiene executor requires host_name")
         if not self.execution_lane:
@@ -143,13 +158,16 @@ def execute_runner_host_hygiene_executor(
         host_name=request.host_name,
         mutate=request.mutate,
         retained_warm_builders=request.retained_warm_builders,
+        target_buildkit_state_volumes=request.target_buildkit_state_volumes,
         audit_record_key=request.audit_record_key,
     )
     apply_plan = plan_runner_host_hygiene_apply(
         policy=RunnerHostHygieneApplyPolicy(
             approved_hosts=(request.host_name,),
             required_retained_warm_builders=request.retained_warm_builders,
-            allow_docker_cache_prune=True,
+            allow_docker_cache_prune=request.action == "prune_docker_cache",
+            allow_buildkit_state_volume_remove=(request.action == "remove_buildkit_state_volumes"),
+            allowed_buildkit_state_volumes=request.target_buildkit_state_volumes,
         ),
         request=apply_request,
         report=pre_report,
@@ -200,30 +218,21 @@ def execute_runner_host_hygiene_executor(
             message=terminal_message,
         )
 
-    prune_result = remote_runner(
-        (
-            "flock",
-            "-n",
-            HOST_LOCK_PATH,
-            "docker",
-            "builder",
-            "prune",
-            "--force",
-            "--filter",
-            f"until={request.prune_until}",
-        ),
-        request.timeout_seconds,
-    )
+    action_result = _execute_apply_action(request=request, remote_runner=remote_runner)
     post_report = collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
     )
     terminal_status: RunnerHostHygieneApplyAuditStatus = (
         "completed"
-        if prune_result.returncode == 0 and post_report.status == "healthy"
+        if action_result.returncode == 0 and post_report.status == "healthy"
         else "failed"
     )
-    terminal_message = _terminal_message(prune_result=prune_result, post_report=post_report)
+    terminal_message = _terminal_message(
+        action=request.action,
+        action_result=action_result,
+        post_report=post_report,
+    )
     terminal_response = _post_terminal_audit(
         audit_poster=audit_poster,
         request=apply_request,
@@ -239,6 +248,38 @@ def execute_runner_host_hygiene_executor(
         planned_response=planned_response,
         terminal_response=terminal_response,
         message=terminal_message,
+    )
+
+
+def _execute_apply_action(
+    *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
+) -> RemoteCommandResult:
+    if request.action == "remove_buildkit_state_volumes":
+        return remote_runner(
+            (
+                "flock",
+                "-n",
+                HOST_LOCK_PATH,
+                "docker",
+                "volume",
+                "rm",
+                *request.target_buildkit_state_volumes,
+            ),
+            request.timeout_seconds,
+        )
+    return remote_runner(
+        (
+            "flock",
+            "-n",
+            HOST_LOCK_PATH,
+            "docker",
+            "builder",
+            "prune",
+            "--force",
+            "--filter",
+            f"until={request.prune_until}",
+        ),
+        request.timeout_seconds,
     )
 
 
@@ -833,11 +874,22 @@ def _post_terminal_audit(
 
 
 def _terminal_message(
-    *, prune_result: RemoteCommandResult, post_report: RunnerHostHygieneReport
+    *,
+    action: RunnerHostHygieneApplyAction,
+    action_result: RemoteCommandResult,
+    post_report: RunnerHostHygieneReport,
 ) -> str:
-    if prune_result.returncode != 0:
-        detail = prune_result.stderr.strip() or prune_result.stdout.strip() or "unknown error"
-        return f"runner host Docker cache prune failed: {detail}"
+    action_label = (
+        "BuildKit state volume removal"
+        if action == "remove_buildkit_state_volumes"
+        else "Docker cache prune"
+    )
+    if action_result.returncode != 0:
+        detail = action_result.stderr.strip() or action_result.stdout.strip() or "unknown error"
+        return f"runner host {action_label} failed: {detail}"
     if post_report.status != "healthy":
-        return f"runner host Docker cache prune completed but post evidence is not healthy: {post_report.summary}"
-    return "runner host Docker cache prune completed and post evidence is healthy"
+        return (
+            f"runner host {action_label} completed but post evidence is not healthy: "
+            f"{post_report.summary}"
+        )
+    return f"runner host {action_label} completed and post evidence is healthy"

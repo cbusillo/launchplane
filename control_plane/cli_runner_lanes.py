@@ -489,7 +489,14 @@ def runner_host_hygiene_report(
     "--action",
     "apply_action",
     required=True,
-    type=click.Choice(("prune_docker_cache", "prune_runner_workdir", "restart_runner_service")),
+    type=click.Choice(
+        (
+            "prune_docker_cache",
+            "remove_buildkit_state_volumes",
+            "prune_runner_workdir",
+            "restart_runner_service",
+        )
+    ),
     help="Runner host hygiene apply action to plan. The command never mutates hosts.",
 )
 @click.option("--host-name", required=True, help="Runner host name to plan against.")
@@ -523,10 +530,28 @@ def runner_host_hygiene_report(
     help="Warm builder policy requires the apply request to retain. Repeat for each builder.",
 )
 @click.option(
+    "--target-buildkit-state-volume",
+    "target_buildkit_state_volumes",
+    multiple=True,
+    help="BuildKit state volume the request targets for removal. Repeat for each volume.",
+)
+@click.option(
+    "--allowed-buildkit-state-volume",
+    "allowed_buildkit_state_volumes",
+    multiple=True,
+    help="BuildKit state volume policy allows removal for. Repeat for each volume.",
+)
+@click.option(
     "--allow-docker-cache-prune/--disallow-docker-cache-prune",
     default=False,
     show_default=True,
     help="Enable Docker cache prune planning in the local policy.",
+)
+@click.option(
+    "--allow-buildkit-state-volume-remove/--disallow-buildkit-state-volume-remove",
+    default=False,
+    show_default=True,
+    help="Enable allowlisted BuildKit state volume removal planning in the local policy.",
 )
 @click.option(
     "--allow-runner-workdir-prune/--disallow-runner-workdir-prune",
@@ -566,7 +591,10 @@ def runner_host_hygiene_apply_plan(
     approved_hosts: tuple[str, ...],
     retained_warm_builders: tuple[str, ...],
     required_retained_warm_builders: tuple[str, ...],
+    target_buildkit_state_volumes: tuple[str, ...],
+    allowed_buildkit_state_volumes: tuple[str, ...],
     allow_docker_cache_prune: bool,
+    allow_buildkit_state_volume_remove: bool,
     allow_runner_workdir_prune: bool,
     allow_runner_service_restart: bool,
     require_healthy_report: bool,
@@ -581,6 +609,8 @@ def runner_host_hygiene_apply_plan(
             require_healthy_report=require_healthy_report,
             require_audit_record=require_audit_record,
             allow_docker_cache_prune=allow_docker_cache_prune,
+            allow_buildkit_state_volume_remove=allow_buildkit_state_volume_remove,
+            allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
             allow_runner_workdir_prune=allow_runner_workdir_prune,
             allow_runner_service_restart=allow_runner_service_restart,
         )
@@ -589,6 +619,7 @@ def runner_host_hygiene_apply_plan(
             host_name=host_name,
             mutate=mutate,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_state_volumes=target_buildkit_state_volumes,
             audit_record_key=audit_record_key,
         )
         plan = plan_runner_host_hygiene_apply(
@@ -646,7 +677,7 @@ def runner_host_hygiene_apply_plan(
     "--privileged-scope",
     "privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "runner_service", "runner_workdir")),
+    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
     help="Privileged host capability requested by the adapter. Repeat for each scope.",
 )
 @click.option(
@@ -706,7 +737,7 @@ def runner_host_hygiene_apply_plan(
     "--allowed-privileged-scope",
     "allowed_privileged_scopes",
     multiple=True,
-    type=click.Choice(("docker_cache", "runner_service", "runner_workdir")),
+    type=click.Choice(("docker_cache", "docker_volume", "runner_service", "runner_workdir")),
     help="Privileged host scope allowed by local policy. Repeat for each scope.",
 )
 @click.option(
@@ -812,6 +843,14 @@ def runner_host_hygiene_adapter_boundary_plan(
 
 @click.command("runner-host-hygiene-executor")
 @click.option(
+    "--action",
+    "apply_action",
+    default="prune_docker_cache",
+    show_default=True,
+    type=click.Choice(("prune_docker_cache", "remove_buildkit_state_volumes")),
+    help="Approved runner host hygiene executor action.",
+)
+@click.option(
     "--host-name",
     required=True,
     help="Approved runner host name. Must match the self-hosted ops lane boundary.",
@@ -842,6 +881,12 @@ def runner_host_hygiene_adapter_boundary_plan(
     multiple=True,
     required=True,
     help="Warm builder image/tag that must remain after cleanup. Repeat as needed.",
+)
+@click.option(
+    "--target-buildkit-state-volume",
+    "target_buildkit_state_volumes",
+    multiple=True,
+    help="Explicit zero-link BuildKit state volume to remove. Repeat as needed.",
 )
 @click.option(
     "--mutate/--dry-run",
@@ -881,12 +926,14 @@ def runner_host_hygiene_adapter_boundary_plan(
     help="Environment variable containing a GitHub OIDC bearer token.",
 )
 def runner_host_hygiene_executor(
+    apply_action: RunnerHostHygieneApplyAction,
     host_name: str,
     execution_lane: str,
     service_user: str,
     repository_scope: str,
     audit_record_key: str,
     retained_warm_builders: tuple[str, ...],
+    target_buildkit_state_volumes: tuple[str, ...],
     mutate: bool,
     minimum_free_disk_bytes: int,
     prune_until: str,
@@ -899,13 +946,14 @@ def runner_host_hygiene_executor(
         if not token_env:
             raise click.ClickException("runner host hygiene executor requires --bearer-token-env.")
         request = RunnerHostHygieneExecutorRequest(
-            action="prune_docker_cache",
+            action=apply_action,
             host_name=host_name,
             execution_lane=execution_lane,
             service_user=service_user,
             repository_scope=repository_scope,
             audit_record_key=audit_record_key,
             retained_warm_builders=retained_warm_builders,
+            target_buildkit_state_volumes=target_buildkit_state_volumes,
             mutate=mutate,
             minimum_free_disk_bytes=minimum_free_disk_bytes,
             timeout_seconds=timeout_seconds,

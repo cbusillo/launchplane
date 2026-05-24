@@ -14,9 +14,10 @@ Runner host hygiene has two separate phases:
   policy. This phase is safe for normal development because it does not mutate
   Docker, runner services, GitHub runner registrations, or product state.
 - Apply workflow: clean Docker state, restart services, or change runner lanes
-  through an approved Launchplane-owned host adapter. The first approved lane is
-  limited to remote Docker cache pruning and keeps runner work-directory pruning
-  and runner service restarts disabled.
+  through an approved Launchplane-owned host adapter. The first approved lanes
+  are limited to bounded Docker cache pruning and explicit zero-link BuildKit
+  state-volume removal; runner work-directory pruning and runner service
+  restarts stay disabled.
 
 The current Launchplane surface implements report-only evidence, local
 apply-boundary planning, durable audit evidence, and a constrained self-hosted
@@ -123,7 +124,7 @@ The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
 on a dedicated self-hosted ops lane with labels `self-hosted`, `launchplane`,
 and `chris-testing-ops-gate`, authenticates back to Launchplane with GitHub
 Actions OIDC, and executes on the runner host as the constrained service user.
-It supports only `prune_docker_cache`, implemented as a bounded BuildKit prune:
+It supports `prune_docker_cache`, implemented as a bounded BuildKit prune:
 
 ```bash
 flock -n /tmp/launchplane-runner-host-hygiene.lock \
@@ -132,6 +133,13 @@ flock -n /tmp/launchplane-runner-host-hygiene.lock \
 
 Operators can override the age bound through the workflow's `prune_until` input,
 but the executor does not expose an unbounded `--all` prune.
+
+It also supports `remove_buildkit_state_volumes`, implemented as named
+`docker volume rm` calls under the same lock. This action is intentionally not
+`docker volume prune`: the apply plan must name every target volume, the policy
+must allowlist the same names, and the pre-apply report must show each target is
+a `buildx_buildkit_*_state` volume with zero container links. Linked warm
+builder state volumes remain blocked even when explicitly requested.
 
 The workflow requires these repository variables:
 
@@ -147,11 +155,11 @@ active Docker build client process is observed, and
 `mutate=true` is explicitly supplied to the workflow. It writes a `planned`
 audit before mutation, then writes `completed` only when the bounded prune
 command succeeds and post-apply evidence is healthy. If the idle preflight,
-prune command, or post evidence fails, it writes `failed`. It does not attempt
-runner service restart or automatic rollback. Operators should use the captured
-image and volume inventory to decide any later phase-two cleanup lane; the
-current executor still only prunes old BuildKit cache through the bounded
-`docker builder prune` command above.
+mutation command, or post evidence fails, it writes `failed`. It does not run
+`docker system prune`, `docker image prune -a`, generic `docker volume prune`,
+runner work-directory deletion, runner service restart, builder deletion, or
+automatic rollback. Operators should use the captured image and volume inventory
+to decide any later phase-two cleanup lane.
 
 ## Adapter Boundary Planning
 
@@ -199,6 +207,9 @@ executor; the dedicated ops-lane executor is the separate apply surface.
 The privileged scope must match the planned action exactly:
 
 - `prune_docker_cache` requires `docker_cache`.
+- `remove_buildkit_state_volumes` requires `docker_volume` and may only remove
+  explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state` named
+  volumes observed in the pre-apply report.
 - `prune_runner_workdir` requires `runner_workdir`.
 - `restart_runner_service` requires `runner_service`.
 

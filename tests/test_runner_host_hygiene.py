@@ -345,6 +345,107 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         self.assertEqual(plan.blockers, ())
         self.assertIn("pre-apply", plan.next_steps[0])
 
+    def test_apply_plan_can_target_allowlisted_zero_link_buildkit_state_volume(
+        self,
+    ) -> None:
+        target_volume = "buildx_buildkit_launchplane-ci0_state"
+
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                required_retained_warm_builders=("odoo-docker-chris-testing",),
+                allow_buildkit_state_volume_remove=True,
+                allowed_buildkit_state_volumes=(target_volume,),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="remove_buildkit_state_volumes",
+                host_name="chris-testing",
+                mutate=True,
+                retained_warm_builders=("odoo-docker-chris-testing",),
+                target_buildkit_state_volumes=(target_volume,),
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing",
+            ),
+            report=_healthy_report_with_volumes(
+                RunnerHostHygieneVolumeInventoryItem(
+                    name=target_volume,
+                    driver="local",
+                    size_bytes=50_490_000_000,
+                    dangling=True,
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.blockers, ())
+        self.assertIn("zero-link BuildKit state volumes", plan.next_steps[1])
+
+    def test_apply_plan_blocks_active_or_unapproved_buildkit_state_volume(
+        self,
+    ) -> None:
+        target_volume = "buildx_buildkit_odoo-docker-chris-testing0_state"
+
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                required_retained_warm_builders=("odoo-docker-chris-testing",),
+                allow_buildkit_state_volume_remove=True,
+                allowed_buildkit_state_volumes=("buildx_buildkit_other_state",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="remove_buildkit_state_volumes",
+                host_name="chris-testing",
+                mutate=True,
+                retained_warm_builders=("odoo-docker-chris-testing",),
+                target_buildkit_state_volumes=(target_volume,),
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing",
+            ),
+            report=_healthy_report_with_volumes(
+                RunnerHostHygieneVolumeInventoryItem(
+                    name=target_volume,
+                    driver="local",
+                    size_bytes=32_480_000_000,
+                    referenced_by_containers=1,
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertEqual(
+            [blocker.code for blocker in plan.blockers],
+            ["target_volume_active", "target_volume_not_allowlisted"],
+        )
+
+    def test_apply_plan_requires_buildkit_state_volume_target_shape(self) -> None:
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                required_retained_warm_builders=("odoo-docker-chris-testing",),
+                allow_buildkit_state_volume_remove=True,
+                allowed_buildkit_state_volumes=("runner-cache",),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="remove_buildkit_state_volumes",
+                host_name="chris-testing",
+                mutate=True,
+                retained_warm_builders=("odoo-docker-chris-testing",),
+                target_buildkit_state_volumes=("runner-cache",),
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing",
+            ),
+            report=_healthy_report_with_volumes(
+                RunnerHostHygieneVolumeInventoryItem(
+                    name="runner-cache",
+                    driver="local",
+                    dangling=True,
+                )
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertIn(
+            "target_volume_not_buildkit_state",
+            [blocker.code for blocker in plan.blockers],
+        )
+
     def test_apply_plan_rejects_report_for_different_host(self) -> None:
         plan = plan_runner_host_hygiene_apply(
             policy=RunnerHostHygieneApplyPolicy(
@@ -828,6 +929,12 @@ class RunnerHostHygieneApplyPlanCliTests(unittest.TestCase):
 
 
 def _healthy_report() -> RunnerHostHygieneReport:
+    return _healthy_report_with_volumes()
+
+
+def _healthy_report_with_volumes(
+    *volumes: RunnerHostHygieneVolumeInventoryItem,
+) -> RunnerHostHygieneReport:
     return evaluate_runner_host_hygiene(
         policy=RunnerHostHygienePolicy(required_warm_builders=("odoo-docker-chris-testing",)),
         observation=RunnerHostHygieneObservation(
@@ -835,6 +942,7 @@ def _healthy_report() -> RunnerHostHygieneReport:
             observed_at="2026-05-23T13:00:00Z",
             free_disk_bytes=500,
             warm_builders=("odoo-docker-chris-testing",),
+            volume_inventory=volumes,
         ),
     )
 
