@@ -197,6 +197,14 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 current_user="launchplane-runner-hygiene",
             )
 
+    @staticmethod
+    def test_executor_environment_honors_explicit_empty_env_mapping() -> None:
+        validate_local_executor_environment(
+            request=_request(mutate=True),
+            env={},
+            current_user="launchplane-runner-hygiene",
+        )
+
 
 def _request(*, mutate: bool) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(

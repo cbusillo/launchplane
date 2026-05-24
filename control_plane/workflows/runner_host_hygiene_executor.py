@@ -62,12 +62,21 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     def _validate_first_lane(self) -> "RunnerHostHygieneExecutorRequest":
         if self.action != "prune_docker_cache":
             raise ValueError("runner host hygiene executor only supports prune_docker_cache")
-        self.host_name = self.host_name.strip()
-        self.execution_lane = self.execution_lane.strip()
-        self.service_user = self.service_user.strip()
-        self.repository_scope = self.repository_scope.strip()
-        self.audit_record_key = self.audit_record_key.strip()
-        self.prune_until = self.prune_until.strip()
+        (
+            self.host_name,
+            self.execution_lane,
+            self.service_user,
+            self.repository_scope,
+            self.audit_record_key,
+            self.prune_until,
+        ) = _strip_text_fields(
+            self.host_name,
+            self.execution_lane,
+            self.service_user,
+            self.repository_scope,
+            self.audit_record_key,
+            self.prune_until,
+        )
         self.retained_warm_builders = tuple(
             token.strip().lower() for token in self.retained_warm_builders if token.strip()
         )
@@ -96,6 +105,10 @@ class RunnerHostHygieneExecutorResult(BaseModel):
     planned_response: dict[str, object]
     terminal_response: dict[str, object] | None = None
     message: str
+
+
+def _strip_text_fields(*values: str) -> tuple[str, ...]:
+    return tuple(value.strip() for value in values)
 
 
 def execute_runner_host_hygiene_executor(
@@ -286,7 +299,7 @@ def validate_local_executor_environment(
     env: Mapping[str, str] | None = None,
     current_user: str | None = None,
 ) -> None:
-    resolved_env = env or os.environ
+    resolved_env = os.environ if env is None else env
     resolved_current_user = current_user or pwd.getpwuid(os.geteuid()).pw_name
     if resolved_current_user != request.service_user:
         raise click.ClickException(
