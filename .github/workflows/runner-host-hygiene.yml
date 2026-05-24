@@ -23,6 +23,11 @@ name: Runner Host Hygiene
         required: false
         default: 168h
         type: string
+      timeout_seconds:
+        description: Timeout for each local host evidence or prune command
+        required: false
+        default: "300"
+        type: string
 
 permissions:
   contents: read
@@ -132,6 +137,7 @@ jobs:
             "$mutate_flag" \
             --minimum-free-disk-bytes "${{ inputs.minimum_free_disk_bytes }}" \
             --prune-until "${{ inputs.prune_until }}" \
+            --timeout-seconds "${{ inputs.timeout_seconds }}" \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             | tee runner-host-hygiene-result.json
 

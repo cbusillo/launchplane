@@ -222,7 +222,16 @@ def collect_runner_host_hygiene_report(
         evidence_name="df",
     )
     docker_summary = _require_remote_success(
-        remote_runner(("docker", "system", "df"), request.timeout_seconds),
+        remote_runner(
+            (
+                "docker",
+                "system",
+                "df",
+                "--format",
+                "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
+            ),
+            request.timeout_seconds,
+        ),
         evidence_name="docker_summary",
     )
     warm_builders = tuple(
@@ -375,7 +384,7 @@ def _check_host_idle(
             (
                 "bash",
                 "-lc",
-                "pgrep -af 'Runner.Worker|docker buildx|docker build|buildctl' || true",
+                "pgrep -af 'docker buildx|docker build|buildctl' || true",
             ),
             request.timeout_seconds,
         ),
