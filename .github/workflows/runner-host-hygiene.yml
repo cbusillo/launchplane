@@ -2,6 +2,8 @@
 name: Runner Host Hygiene
 
 "on":
+  schedule:
+    - cron: "17 10 * * *"
   workflow_dispatch:
     inputs:
       audit_record_key:
@@ -52,7 +54,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  docker-cache-prune:
+  runner-host-hygiene:
     runs-on:
       - self-hosted
       - launchplane
@@ -102,6 +104,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          apply_action="${{ inputs.action }}"
+          if [ -z "$apply_action" ]; then
+            apply_action="prune_docker_cache"
+          fi
+
+          audit_record_key="${{ inputs.audit_record_key }}"
+          if [ -z "$audit_record_key" ]; then
+            audit_date="$(date -u +%F)"
+            audit_record_key="runner-host-hygiene/${audit_date}/"
+            audit_record_key+="${RUNNER_HOST_NAME}-scheduled-report-${GITHUB_RUN_ID}"
+          fi
+
+          minimum_free_disk_bytes="${{ inputs.minimum_free_disk_bytes }}"
+          if [ -z "$minimum_free_disk_bytes" ]; then
+            minimum_free_disk_bytes="0"
+          fi
+
+          prune_until="${{ inputs.prune_until }}"
+          if [ -z "$prune_until" ]; then
+            prune_until="168h"
+          fi
+
+          timeout_seconds="${{ inputs.timeout_seconds }}"
+          if [ -z "$timeout_seconds" ]; then
+            timeout_seconds="300"
+          fi
+
           builder_args=()
           IFS=',' read -r -a builders <<< "$RUNNER_RETAINED_WARM_BUILDERS"
           for builder in "${builders[@]}"; do
@@ -126,23 +155,24 @@ jobs:
           done
 
           mutate_flag="--dry-run"
-          if [ "${{ inputs.mutate }}" = "true" ]; then
+          if [ "${{ github.event_name }}" != "schedule" ] &&
+            [ "${{ inputs.mutate }}" = "true" ]; then
             mutate_flag="--mutate"
           fi
 
           uv run launchplane work-graph runner-host-hygiene-executor \
-            --action "${{ inputs.action }}" \
+            --action "$apply_action" \
             --host-name "$RUNNER_HOST_NAME" \
             --execution-lane "$RUNNER_EXECUTION_LANE" \
             --service-user "$RUNNER_SERVICE_USER" \
             --repository-scope "$RUNNER_REPOSITORY_SCOPE" \
-            --audit-record-key "${{ inputs.audit_record_key }}" \
+            --audit-record-key "$audit_record_key" \
             "${builder_args[@]}" \
             "${volume_args[@]}" \
             "$mutate_flag" \
-            --minimum-free-disk-bytes "${{ inputs.minimum_free_disk_bytes }}" \
-            --prune-until "${{ inputs.prune_until }}" \
-            --timeout-seconds "${{ inputs.timeout_seconds }}" \
+            --minimum-free-disk-bytes "$minimum_free_disk_bytes" \
+            --prune-until "$prune_until" \
+            --timeout-seconds "$timeout_seconds" \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             | tee runner-host-hygiene-result.json
 

@@ -124,6 +124,10 @@ The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
 on a dedicated self-hosted ops lane with labels `self-hosted`, `launchplane`,
 and `chris-testing-ops-gate`, authenticates back to Launchplane with GitHub
 Actions OIDC, and executes on the runner host as the constrained service user.
+The workflow runs daily on a schedule in dry-run mode and can also be manually
+dispatched for approved mutations. Scheduled runs generate an audit key under
+`runner-host-hygiene/<date>/<host>-scheduled-report-<run-id>` and always pass
+`--dry-run`, even if a future workflow default changes.
 It supports `prune_docker_cache`, implemented as a bounded BuildKit prune:
 
 ```bash
@@ -152,14 +156,16 @@ The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
 warm builders are present in pre-apply evidence, the apply plan is ready, no
 active Docker build client process is observed, and
-`mutate=true` is explicitly supplied to the workflow. It writes a `planned`
-audit before mutation, then writes `completed` only when the bounded prune
-command succeeds and post-apply evidence is healthy. If the idle preflight,
-mutation command, or post evidence fails, it writes `failed`. It does not run
-`docker system prune`, `docker image prune -a`, generic `docker volume prune`,
-runner work-directory deletion, runner service restart, builder deletion, or
-automatic rollback. Operators should use the captured image and volume inventory
-to decide any later phase-two cleanup lane.
+`mutate=true` is explicitly supplied to a manual workflow dispatch. Scheduled
+runs write a planned audit and stop at the `mutate_not_requested` blocker, which
+keeps the cadence report-only while preserving typed pre-apply evidence. Manual
+mutating runs write a `planned` audit before mutation, then write `completed`
+only when the bounded mutation command succeeds and post-apply evidence is
+healthy. If the idle preflight, mutation command, or post evidence fails, it
+writes `failed`. It does not run `docker system prune`, `docker image prune -a`,
+generic `docker volume prune`, runner work-directory deletion, runner service
+restart, builder deletion, or automatic rollback. Operators should use the
+captured image and volume inventory to decide any later phase-two cleanup lane.
 
 ## Adapter Boundary Planning
 
