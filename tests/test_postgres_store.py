@@ -942,6 +942,25 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertIn("idempotency_scope", repaired_columns)
 
+    def test_runner_host_hygiene_audit_downgrade_tolerates_missing_table(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, "c2d4e6f8a0b2")
+            alembic_command.stamp(config, "c3e5f7a9b1d2")
+
+            alembic_command.downgrade(config, "c2d4e6f8a0b2")
+
+            engine = create_engine(database_url)
+            table_names = set(inspect(engine).get_table_names())
+            engine.dispose()
+
+        self.assertNotIn("launchplane_runner_host_hygiene_audits", table_names)
+
     def test_alembic_baseline_downgrades_to_empty_schema(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
