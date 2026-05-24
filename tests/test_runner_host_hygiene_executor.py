@@ -18,6 +18,7 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
 )
+from control_plane.workflows.runner_host_hygiene_executor import _parse_volume_usage
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
 
 
@@ -315,6 +316,19 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             ),
             command_runner.commands,
         )
+
+    def test_volume_usage_parser_accepts_documented_local_volume_header(
+        self,
+    ) -> None:
+        volume_usage = _parse_volume_usage(
+            "Local Volumes:\n\n"
+            "VOLUME NAME     LINKS     SIZE\n"
+            "runner-cache    0         45.5GB\n\n"
+            "Build cache usage: 1GB\n"
+        )
+
+        self.assertEqual(volume_usage["runner-cache"].links, 0)
+        self.assertEqual(volume_usage["runner-cache"].size_bytes, 45_500_000_000)
 
     def test_executor_fails_closed_when_docker_summary_is_unparseable(self) -> None:
         command_runner = _CommandRunner(docker_summary="TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n")
