@@ -50,6 +50,14 @@ jobs:
         ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY }}
       LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS: >-
         ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID: >-
+        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET: >-
+        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE: >-
+        ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE }}
+      LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -57,7 +65,7 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Run approved runner host hygiene executor
+      - name: Validate workflow configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -77,6 +85,42 @@ jobs:
           require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER
           require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY
           require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID
+          require_env LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS
+
+          ts_audience="${LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE:-}"
+          ts_secret="${LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET:-}"
+          if [ -z "$ts_audience" ] && [ -z "$ts_secret" ]; then
+            echo "Missing Tailscale auth secret or audience." >&2
+            exit 1
+          fi
+
+      - name: Tailscale using workload identity
+        if: ${{ env.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE != '' }}
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
+          audience: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE }}
+          tags: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
+          ping: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
+
+      - name: Tailscale using OAuth secret
+        if: ${{ env.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE == '' }}
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID }}
+          oauth-secret: >-
+            ${{ secrets.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET }}
+          tags: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS }}
+          ping: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST }}
+
+      - name: Run approved runner host hygiene executor
+        shell: bash
+        run: |
+          set -euo pipefail
 
           service_audience="$({
             python3 - <<'PY'
