@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
+from urllib.request import Request
 
 from click import Command
 from click.testing import CliRunner
@@ -22,6 +25,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneVolumeI
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
+from control_plane.cli_runner_lanes import _runner_host_hygiene_bearer_token
 
 
 CLI_MAIN = cast(Command, main)
@@ -219,6 +223,59 @@ class RunnerHostHygieneCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["report"]["status"], "healthy")
+
+    def test_executor_bearer_token_prefers_configured_env_token(self) -> None:
+        with patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": " env-token "}, clear=True):
+            token = _runner_host_hygiene_bearer_token(
+                service_url="https://launchplane.example",
+                token_env="LAUNCHPLANE_SERVICE_TOKEN",
+            )
+
+        self.assertEqual(token, "env-token")
+
+    def test_executor_bearer_token_mints_actions_oidc_token_on_demand(self) -> None:
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"value": "fresh-oidc-token"}'
+
+        captured_urls: list[str] = []
+        captured_authorization: list[str | None] = []
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            captured_urls.append(getattr(request, "full_url"))
+            captured_authorization.append(request.get_header("Authorization"))
+            return _Response()
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.example/request?api-version=2",
+                },
+                clear=True,
+            ),
+            patch("control_plane.cli_runner_lanes.urlopen", side_effect=fake_urlopen),
+        ):
+            token = _runner_host_hygiene_bearer_token(
+                service_url="https://launchplane.example/base",
+                token_env="LAUNCHPLANE_SERVICE_TOKEN",
+            )
+
+        self.assertEqual(token, "fresh-oidc-token")
+        self.assertEqual(captured_authorization, ["Bearer request-token"])
+        self.assertEqual(
+            captured_urls,
+            ["https://token.actions.example/request?api-version=2&audience=launchplane.example"],
+        )
 
 
 class RunnerHostHygieneApplyPlanTests(unittest.TestCase):

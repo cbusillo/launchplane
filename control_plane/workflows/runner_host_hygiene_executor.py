@@ -56,6 +56,7 @@ class RemoteCommandResult:
 
 RemoteCommandRunner = Callable[[Sequence[str], int], RemoteCommandResult]
 AuditPoster = Callable[[RunnerHostHygieneApplyAuditRecord, str], dict[str, object]]
+BearerTokenProvider = Callable[[], str]
 
 
 class RunnerHostHygieneExecutorRequest(BaseModel):
@@ -359,21 +360,33 @@ def validate_local_executor_environment(
 
 
 def build_service_audit_poster(*, service_url: str, bearer_token: str) -> AuditPoster:
-    normalized_service_url = service_url.strip().rstrip("/")
     normalized_bearer_token = bearer_token.strip()
-    if not normalized_service_url:
-        raise click.ClickException("runner host hygiene executor requires service_url")
     if not normalized_bearer_token:
         raise click.ClickException("runner host hygiene executor requires bearer token")
+    return build_refreshing_service_audit_poster(
+        service_url=service_url,
+        bearer_token_provider=lambda: normalized_bearer_token,
+    )
+
+
+def build_refreshing_service_audit_poster(
+    *, service_url: str, bearer_token_provider: BearerTokenProvider
+) -> AuditPoster:
+    normalized_service_url = service_url.strip().rstrip("/")
+    if not normalized_service_url:
+        raise click.ClickException("runner host hygiene executor requires service_url")
 
     def post(audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str) -> dict[str, object]:
+        bearer_token = bearer_token_provider().strip()
+        if not bearer_token:
+            raise click.ClickException("runner host hygiene executor requires bearer token")
         body = json.dumps(_audit_route_payload(audit)).encode()
         request = Request(
             f"{normalized_service_url}{AUDIT_ROUTE_PATH}",
             data=body,
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {normalized_bearer_token}",
+                "Authorization": f"Bearer {bearer_token}",
                 "Content-Type": "application/json",
                 "Idempotency-Key": idempotency_key,
             },

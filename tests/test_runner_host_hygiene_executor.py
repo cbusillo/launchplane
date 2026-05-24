@@ -6,10 +6,14 @@ import unittest
 from collections.abc import Sequence
 import subprocess
 from unittest.mock import patch
+from urllib.request import Request
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import (
+    build_refreshing_service_audit_poster,
+)
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
 )
@@ -394,6 +398,43 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertEqual(result.stdout, "partial stdout")
         self.assertEqual(result.stderr, "partial stderr")
 
+    def test_service_audit_poster_refreshes_token_per_post(self) -> None:
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b'{"status":"accepted"}'
+
+        observed_authorization_headers: list[str | None] = []
+        tokens = iter(("first-token", "second-token"))
+
+        def fake_urlopen(request: Request, timeout: int) -> _Response:
+            self.assertEqual(timeout, 30)
+            observed_authorization_headers.append(request.get_header("Authorization"))
+            return _Response()
+
+        poster = build_refreshing_service_audit_poster(
+            service_url="https://launchplane.example",
+            bearer_token_provider=lambda: next(tokens),
+        )
+        audit = _planned_audit()
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.urlopen",
+            side_effect=fake_urlopen,
+        ):
+            poster(audit, "idempotency-key-1")
+            poster(audit, "idempotency-key-2")
+
+        self.assertEqual(
+            observed_authorization_headers,
+            ["Bearer first-token", "Bearer second-token"],
+        )
+
 
 def _request(*, mutate: bool) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(
@@ -406,6 +447,17 @@ def _request(*, mutate: bool) -> RunnerHostHygieneExecutorRequest:
         retained_warm_builders=("odoo-docker-chris-testing",),
         mutate=mutate,
     )
+
+
+def _planned_audit() -> RunnerHostHygieneApplyAuditRecord:
+    command_runner = _CommandRunner()
+    audit_poster = _AuditPoster()
+    execute_runner_host_hygiene_executor(
+        request=_request(mutate=False),
+        remote_runner=command_runner,
+        audit_poster=audit_poster,
+    )
+    return audit_poster.audits[0]
 
 
 def _json_lines(*rows: dict[str, object]) -> str:
