@@ -293,12 +293,19 @@ def collect_runner_host_hygiene_report(
 
 def build_local_command_runner() -> RemoteCommandRunner:
     def run(command_args: Sequence[str], timeout_seconds: int) -> RemoteCommandResult:
-        completed = subprocess.run(
-            tuple(command_args),
-            capture_output=True,
-            text=True,
-            timeout=max(timeout_seconds, 1),
-        )
+        bounded_timeout = max(timeout_seconds, 1)
+        try:
+            completed = subprocess.run(
+                tuple(command_args),
+                capture_output=True,
+                text=True,
+                timeout=bounded_timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            stdout = _timeout_output_text(error.stdout)
+            stderr = _timeout_output_text(error.stderr)
+            detail = stderr or f"command timed out after {bounded_timeout} seconds"
+            return RemoteCommandResult(returncode=124, stdout=stdout, stderr=detail)
         return RemoteCommandResult(
             returncode=completed.returncode,
             stdout=completed.stdout,
@@ -306,6 +313,18 @@ def build_local_command_runner() -> RemoteCommandRunner:
         )
 
     return run
+
+
+def _timeout_output_text(output: str | bytes | bytearray | memoryview | None) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        return output.decode(errors="replace")
+    if isinstance(output, bytearray):
+        return bytes(output).decode(errors="replace")
+    if isinstance(output, memoryview):
+        return output.tobytes().decode(errors="replace")
+    return output
 
 
 def validate_local_executor_environment(

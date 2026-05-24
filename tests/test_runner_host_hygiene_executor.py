@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 
 from collections.abc import Sequence
+import subprocess
+from unittest.mock import patch
 
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
@@ -256,6 +258,24 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
             env={},
             current_user="launchplane-runner-hygiene",
         )
+
+    def test_local_command_runner_returns_structured_timeout_result(self) -> None:
+        from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
+
+        with patch(
+            "control_plane.workflows.runner_host_hygiene_executor.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=("docker", "system", "df"),
+                timeout=1,
+                output=b"partial stdout",
+                stderr=b"partial stderr",
+            ),
+        ):
+            result = build_local_command_runner()(("docker", "system", "df"), 1)
+
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "partial stdout")
+        self.assertEqual(result.stderr, "partial stderr")
 
 
 def _request(*, mutate: bool) -> RunnerHostHygieneExecutorRequest:
