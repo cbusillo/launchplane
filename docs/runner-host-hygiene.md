@@ -167,6 +167,58 @@ generic `docker volume prune`, runner work-directory deletion, runner service
 restart, builder deletion, or automatic rollback. Operators should use the
 captured image and volume inventory to decide any later phase-two cleanup lane.
 
+## Host Replacement Runbook
+
+`chris-testing` is no longer just a basic self-hosted runner. It also carries the
+Launchplane ops-gate lane used for runner-host hygiene, warm-builder evidence,
+and shared Docker state observation. Treat replacement as a controlled lane
+cutover, not as an interchangeable runner registration swap.
+
+Use this sequence when replacing `chris-testing` or standing up a parallel host:
+
+1. Provision the replacement host with Docker, GitHub Actions runner service
+   management, the constrained runner service user, and the same filesystem
+   permissions needed for Docker evidence and approved Docker cache or named
+   volume mutations. Do not copy host-level Docker credentials from the old
+   host.
+2. Register the replacement runner with the common Launchplane labels required
+   by [runner-lane-baseline.md](runner-lane-baseline.md), but keep the
+   `chris-testing-ops-gate` label and any production-shared lane label off until
+   the host passes readiness and hygiene evidence.
+3. Seed or rebuild the retained warm-builder images on the replacement host.
+   The hygiene executor must be able to observe every value configured in
+   `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS` before the host can
+   receive the ops-gate label.
+4. Run `runner-baseline-observe` from a job on the replacement host and evaluate
+   the baseline readiness. The result must show required labels, the expected
+   service user/home-root constraints when configured, and positive isolated
+   Docker credential evidence.
+5. Run the runner-host hygiene workflow manually with `mutate=false`, no target
+   volumes, and a replacement-specific audit key. The run must write an
+   accepted planned audit, block only on `mutate_not_requested`, observe the
+   retained warm builders, and include image/volume inventory for the new host.
+6. Update the repository variables that define the approved hygiene host,
+   execution lane, service user, and retained warm builders only after the new
+   host has passing baseline and hygiene dry-run evidence. Keep the old values
+   recoverable in the issue or runbook comment used for the cutover.
+7. Add the `chris-testing-ops-gate` label to the replacement runner and remove
+   it from the old runner in the same maintenance window. Avoid a period where
+   two hosts carry the ops-gate label unless the workflow concurrency group and
+   repository variables intentionally name the replacement host.
+8. Re-run the hygiene workflow with `mutate=false` after the label and variable
+   cutover. Treat any host mismatch, missing warm-builder evidence, missing
+   inventory, or unexpected active-build failure as a rollback signal.
+9. Leave the old host registered without shared or ops-gate labels until one
+   scheduled dry-run has succeeded on the replacement host. Then drain/remove
+   the old runner through the runner-control planning boundary and archive its
+   final hygiene audit evidence.
+
+Rollback is to remove the ops-gate label from the replacement runner, restore
+the previous hygiene repository variables, and rerun the workflow with
+`mutate=false` on the old host. Do not run ad hoc Docker cleanup on either host
+as part of rollback; use the Launchplane-owned hygiene workflow or add a reviewed
+service endpoint first.
+
 ## Adapter Boundary Planning
 
 Before a real host mutation adapter is implemented, operators can review the
