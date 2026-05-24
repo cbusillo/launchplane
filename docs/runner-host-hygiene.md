@@ -141,9 +141,11 @@ but the executor does not expose an unbounded `--all` prune.
 It also supports `remove_buildkit_state_volumes`, implemented as named
 `docker volume rm` calls under the same lock. This action is intentionally not
 `docker volume prune`: the apply plan must name every target volume, the policy
-must allowlist the same names, and the pre-apply report must show each target is
-a `buildx_buildkit_*_state` volume with zero container links. Linked warm
-builder state volumes remain blocked even when explicitly requested.
+must allowlist those names from the separate
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` repository
+variable, and the pre-apply report must show each target is a
+`buildx_buildkit_*_state` volume with zero container links. Linked warm builder
+state volumes remain blocked even when explicitly requested.
 
 The workflow requires these repository variables:
 
@@ -151,6 +153,9 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` for any
+  approved BuildKit state-volume retirement target. Leave it empty when no
+  named volume cleanup has been reviewed.
 
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained

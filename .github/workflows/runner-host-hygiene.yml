@@ -71,6 +71,9 @@ jobs:
       RUNNER_REPOSITORY_SCOPE: ${{ github.repository }}
       RUNNER_RETAINED_WARM_BUILDERS: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS }}
+      RUNNER_ALLOWED_BUILDKIT_STATE_VOLUMES: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES
+        }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -153,6 +156,17 @@ jobs:
               volume_args+=(--target-buildkit-state-volume "$trimmed")
             fi
           done
+
+          if [ "$apply_action" = "remove_buildkit_state_volumes" ]; then
+            allowed_volumes="$RUNNER_ALLOWED_BUILDKIT_STATE_VOLUMES"
+            IFS=',' read -r -a volumes <<< "$allowed_volumes"
+            for volume in "${volumes[@]}"; do
+              trimmed="$(xargs <<< "$volume")"
+              if [ -n "$trimmed" ]; then
+                volume_args+=(--allowed-buildkit-state-volume "$trimmed")
+              fi
+            done
+          fi
 
           mutate_flag="--dry-run"
           if [ "${{ github.event_name }}" != "schedule" ] &&

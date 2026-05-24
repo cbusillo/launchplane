@@ -409,6 +409,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 mutate=True,
                 action="remove_buildkit_state_volumes",
                 target_buildkit_state_volumes=(target_volume,),
+                allowed_buildkit_state_volumes=(target_volume,),
             ),
             remote_runner=command_runner,
             audit_poster=audit_poster,
@@ -465,6 +466,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 mutate=True,
                 action="remove_buildkit_state_volumes",
                 target_buildkit_state_volumes=(target_volume,),
+                allowed_buildkit_state_volumes=(target_volume,),
             ),
             remote_runner=command_runner,
             audit_poster=audit_poster,
@@ -476,6 +478,49 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertIn(
             "target_volume_active",
             [blocker.code for blocker in planned_audit.plan.blockers],
+        )
+
+    def test_executor_blocks_target_volume_without_independent_allowlist(
+        self,
+    ) -> None:
+        target_volume = "buildx_buildkit_launchplane-ci0_state"
+        command_runner = _CommandRunner(
+            docker_verbose_summary=(
+                "Local Volumes space usage:\n\n"
+                "VOLUME NAME     LINKS     SIZE\n"
+                f"{target_volume}    0         50.49GB\n"
+                "Build cache usage: 1GB\n"
+            ),
+            volume_inventory=json.dumps(
+                [
+                    {
+                        "Driver": "local",
+                        "Labels": {},
+                        "Mountpoint": f"/var/lib/docker/volumes/{target_volume}/_data",
+                        "Name": target_volume,
+                        "UsageData": {"RefCount": 0, "Size": 50_490_000_000},
+                    }
+                ]
+            ),
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                action="remove_buildkit_state_volumes",
+                target_buildkit_state_volumes=(target_volume,),
+            ),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(command_runner.removed_volumes, [])
+        planned_audit = audit_poster.audits[0]
+        self.assertEqual(
+            [blocker.code for blocker in planned_audit.plan.blockers],
+            ["target_volume_not_allowlisted"],
         )
 
     def test_executor_posts_failed_when_warm_builder_missing_after_prune(self) -> None:
@@ -588,6 +633,7 @@ def _request(
         "restart_runner_service",
     ] = "prune_docker_cache",
     target_buildkit_state_volumes: tuple[str, ...] = (),
+    allowed_buildkit_state_volumes: tuple[str, ...] = (),
 ) -> RunnerHostHygieneExecutorRequest:
     return RunnerHostHygieneExecutorRequest(
         action=action,
@@ -598,6 +644,7 @@ def _request(
         audit_record_key="runner-host-hygiene/2026-05-23/chris-testing",
         retained_warm_builders=("odoo-docker-chris-testing",),
         target_buildkit_state_volumes=target_buildkit_state_volumes,
+        allowed_buildkit_state_volumes=allowed_buildkit_state_volumes,
         mutate=mutate,
     )
 

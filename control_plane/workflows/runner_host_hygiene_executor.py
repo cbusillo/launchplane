@@ -79,6 +79,7 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
     timeout_seconds: int = Field(default=120, ge=1)
     prune_until: str = DEFAULT_PRUNE_UNTIL
     target_buildkit_state_volumes: tuple[str, ...] = ()
+    allowed_buildkit_state_volumes: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_request(self) -> "RunnerHostHygieneExecutorRequest":
@@ -114,8 +115,19 @@ class RunnerHostHygieneExecutorRequest(BaseModel):
                 }
             )
         )
+        self.allowed_buildkit_state_volumes = tuple(
+            sorted(
+                {
+                    volume_name.strip()
+                    for volume_name in self.allowed_buildkit_state_volumes
+                    if volume_name.strip()
+                }
+            )
+        )
         if self.action == "prune_docker_cache" and self.target_buildkit_state_volumes:
             raise ValueError("Docker cache prune requests cannot include target volumes")
+        if self.action == "prune_docker_cache" and self.allowed_buildkit_state_volumes:
+            raise ValueError("Docker cache prune requests cannot include allowed volumes")
         if not self.host_name:
             raise ValueError("runner host hygiene executor requires host_name")
         if not self.execution_lane:
@@ -171,7 +183,7 @@ def execute_runner_host_hygiene_executor(
             required_retained_warm_builders=request.retained_warm_builders,
             allow_docker_cache_prune=request.action == "prune_docker_cache",
             allow_buildkit_state_volume_remove=(request.action == "remove_buildkit_state_volumes"),
-            allowed_buildkit_state_volumes=request.target_buildkit_state_volumes,
+            allowed_buildkit_state_volumes=request.allowed_buildkit_state_volumes,
         ),
         request=apply_request,
         report=pre_report,
