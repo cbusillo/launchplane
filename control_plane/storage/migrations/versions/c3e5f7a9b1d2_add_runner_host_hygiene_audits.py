@@ -66,6 +66,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(_STATUS_INDEX, table_name=_TABLE)
-    op.drop_index(_HOST_INDEX, table_name=_TABLE)
+    if not _table_exists(_TABLE):
+        return
+    if _index_exists(_TABLE, _STATUS_INDEX):
+        op.drop_index(_STATUS_INDEX, table_name=_TABLE)
+    if _index_exists(_TABLE, _HOST_INDEX):
+        op.drop_index(_HOST_INDEX, table_name=_TABLE)
     op.drop_table(_TABLE)
