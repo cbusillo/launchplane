@@ -131,7 +131,7 @@ The workflow requires these repository variables:
 The executor fails closed unless the process user matches the requested service
 user, the GitHub repository matches the requested repository scope, retained
 warm builders are present in pre-apply evidence, the apply plan is ready, no
-active GitHub worker or Docker build client process is observed, and
+active Docker build client process is observed, and
 `mutate=true` is explicitly supplied to the workflow. It writes a `planned`
 audit before mutation, then writes `completed` only when the bounded prune
 command succeeds and post-apply evidence is healthy. If the idle preflight,
