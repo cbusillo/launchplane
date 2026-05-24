@@ -108,9 +108,10 @@ the required pre/post host evidence.
 ## Approved SSH Executor
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
-on GitHub-hosted infrastructure, authenticates back to Launchplane with GitHub
-Actions OIDC, and reaches the approved runner host over SSH as a constrained
-service user. It supports only `prune_docker_cache`, implemented as:
+on GitHub-hosted infrastructure, joins the private tailnet through the official
+Tailscale GitHub Action, authenticates back to Launchplane with GitHub Actions
+OIDC, and reaches the approved runner host over SSH as a constrained service
+user. It supports only `prune_docker_cache`, implemented as:
 
 ```bash
 docker builder prune --all --force
@@ -124,11 +125,18 @@ The workflow requires these repository variables:
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_RETAINED_WARM_BUILDERS`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_HOST`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_USER`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_TAGS`
 
 It requires these repository secrets:
 
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_PRIVATE_KEY`
 - `LAUNCHPLANE_RUNNER_HOST_HYGIENE_SSH_KNOWN_HOSTS`
+- `LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_CLIENT_ID`
+
+For Tailscale authentication, set either
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_AUDIENCE` for workload identity or
+`LAUNCHPLANE_RUNNER_HOST_HYGIENE_TS_OAUTH_SECRET` for an OAuth secret. The
+workflow fails closed if neither authentication mode is configured.
 
 The executor fails closed unless the configured SSH user matches the requested
 service user, retained warm builders are present in pre-apply evidence, the
