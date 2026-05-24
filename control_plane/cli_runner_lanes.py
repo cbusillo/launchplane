@@ -2,6 +2,10 @@ from json import JSONDecodeError
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.parse import urlsplit
+from urllib.request import Request
+from urllib.request import urlopen
 
 import click
 from pydantic import ValidationError
@@ -37,7 +41,7 @@ from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
 from control_plane.workflows.runner_host_hygiene_executor import (
-    build_service_audit_poster,
+    build_refreshing_service_audit_poster,
 )
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
@@ -894,9 +898,6 @@ def runner_host_hygiene_executor(
         token_env = bearer_token_env.strip()
         if not token_env:
             raise click.ClickException("runner host hygiene executor requires --bearer-token-env.")
-        bearer_token = os.environ.get(token_env, "").strip()
-        if not bearer_token:
-            raise click.ClickException(f"Missing Launchplane bearer token in {token_env}.")
         request = RunnerHostHygieneExecutorRequest(
             action="prune_docker_cache",
             host_name=host_name,
@@ -914,9 +915,12 @@ def runner_host_hygiene_executor(
         result = execute_runner_host_hygiene_executor(
             request=request,
             remote_runner=build_local_command_runner(),
-            audit_poster=build_service_audit_poster(
+            audit_poster=build_refreshing_service_audit_poster(
                 service_url=service_url,
-                bearer_token=bearer_token,
+                bearer_token_provider=lambda: _runner_host_hygiene_bearer_token(
+                    service_url=service_url,
+                    token_env=token_env,
+                ),
             ),
         )
     except (OSError, ValidationError, ValueError) as error:
@@ -965,6 +969,35 @@ def _load_runner_host_hygiene_apply_plan(apply_plan_file: Path) -> RunnerHostHyg
     if isinstance(payload, dict) and isinstance(payload.get("plan"), dict):
         payload = payload["plan"]
     return RunnerHostHygieneApplyPlan.model_validate(payload)
+
+
+def _runner_host_hygiene_bearer_token(*, service_url: str, token_env: str) -> str:
+    env_token = os.environ.get(token_env, "").strip()
+    if env_token:
+        return env_token
+
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "").strip()
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "").strip()
+    if not request_url or not request_token:
+        raise click.ClickException(f"Missing Launchplane bearer token in {token_env}.")
+
+    parsed_service_url = urlsplit(service_url.strip())
+    if not parsed_service_url.hostname:
+        raise click.ClickException("runner host hygiene service URL must include a hostname.")
+    separator = "&" if "?" in request_url else "?"
+    oidc_request = Request(
+        request_url + separator + urlencode({"audience": parsed_service_url.hostname}),
+        headers={"Authorization": f"Bearer {request_token}"},
+        method="GET",
+    )
+    with urlopen(oidc_request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise click.ClickException("GitHub OIDC token response was not an object.")
+    token = payload.get("value")
+    if not isinstance(token, str) or not token.strip():
+        raise click.ClickException("GitHub OIDC token response did not include a token.")
+    return token.strip()
 
 
 def _runner_baseline_runner_name(value: str) -> str:

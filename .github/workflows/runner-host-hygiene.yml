@@ -88,27 +88,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("service URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
-          token_json="$(curl -fsSL \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
-          oidc_token="$(jq -r '.value' <<<"$token_json")"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "GitHub OIDC token response did not include a token." >&2
-            exit 1
-          fi
-          export LAUNCHPLANE_SERVICE_TOKEN="$oidc_token"
-
           builder_args=()
           IFS=',' read -r -a builders <<< "$RUNNER_RETAINED_WARM_BUILDERS"
           for builder in "${builders[@]}"; do
