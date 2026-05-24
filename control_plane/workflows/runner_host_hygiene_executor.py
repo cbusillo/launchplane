@@ -519,6 +519,10 @@ def _collect_volume_inventory(
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
 ) -> tuple[RunnerHostHygieneVolumeInventoryItem, ...]:
+    volume_usage = _collect_volume_usage(
+        request=request,
+        remote_runner=remote_runner,
+    )
     result = _require_remote_success(
         remote_runner(
             (
@@ -552,19 +556,44 @@ def _collect_volume_inventory(
         usage_data = row.get("UsageData")
         if not isinstance(usage_data, dict):
             usage_data = {}
-        ref_count = _non_negative_int(usage_data.get("RefCount"))
+        name = _docker_json_text(row, "Name")
+        usage = volume_usage.get(name)
+        inspect_ref_count = _non_negative_int(usage_data.get("RefCount"))
+        ref_count = usage.links if usage is not None else inspect_ref_count
+        size_bytes = (
+            usage.size_bytes if usage is not None else _non_negative_int(usage_data.get("Size"))
+        )
         inventory.append(
             RunnerHostHygieneVolumeInventoryItem(
-                name=_docker_json_text(row, "Name"),
+                name=name,
                 driver=_docker_json_text(row, "Driver"),
                 mountpoint=_docker_json_text(row, "Mountpoint"),
                 labels=_docker_labels(row.get("Labels")),
-                size_bytes=_non_negative_int(usage_data.get("Size")),
+                size_bytes=size_bytes,
                 referenced_by_containers=ref_count,
                 dangling=ref_count == 0,
             )
         )
     return tuple(inventory)
+
+
+class _VolumeUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    links: int = Field(default=0, ge=0)
+    size_bytes: int = Field(default=0, ge=0)
+
+
+def _collect_volume_usage(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> dict[str, _VolumeUsage]:
+    result = _require_remote_success(
+        remote_runner(("docker", "system", "df", "-v"), request.timeout_seconds),
+        evidence_name="volume_usage",
+    )
+    return _parse_volume_usage(result.stdout)
 
 
 def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
@@ -590,6 +619,49 @@ def _parse_docker_system_df_reclaimable_bytes(output: str) -> int:
             "runner host hygiene docker summary evidence did not include reclaimable bytes"
         )
     return total
+
+
+def _parse_volume_usage(output: str) -> dict[str, _VolumeUsage]:
+    usage: dict[str, _VolumeUsage] = {}
+    in_volume_section = False
+    saw_volume_header = False
+    for line in output.splitlines():
+        stripped_line = line.strip()
+        if stripped_line == "Local Volumes space usage:":
+            in_volume_section = True
+            continue
+        if not in_volume_section:
+            continue
+        if not stripped_line:
+            continue
+        if stripped_line == "Build cache usage:":
+            break
+        if stripped_line.startswith("Build cache usage:"):
+            break
+        if stripped_line.startswith("VOLUME NAME"):
+            saw_volume_header = True
+            continue
+        if not saw_volume_header:
+            continue
+        columns = stripped_line.split()
+        if len(columns) < 3:
+            raise click.ClickException(
+                "runner host hygiene volume usage evidence contained an incomplete row"
+            )
+        name, links, size = columns[0], columns[1], columns[2]
+        if not links.isdigit():
+            raise click.ClickException(
+                "runner host hygiene volume usage evidence contained non-numeric links"
+            )
+        usage[name] = _VolumeUsage(
+            links=int(links),
+            size_bytes=_parse_docker_size_bytes(size),
+        )
+    if in_volume_section and not saw_volume_header:
+        raise click.ClickException(
+            "runner host hygiene volume usage evidence did not include a volume header"
+        )
+    return usage
 
 
 def _parse_json_lines(output: str, *, evidence_name: str) -> tuple[dict[str, object], ...]:
