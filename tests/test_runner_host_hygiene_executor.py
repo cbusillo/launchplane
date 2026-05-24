@@ -4,6 +4,7 @@ import unittest
 
 from collections.abc import Sequence
 
+from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import (
@@ -19,11 +20,13 @@ class _CommandRunner:
         prune_returncode: int = 0,
         image_present_after: bool = True,
         active_build_processes: str = "",
+        docker_summary: str | None = None,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
         self._image_present_after = image_present_after
         self._active_build_processes = active_build_processes
+        self._docker_summary = docker_summary or "Images 1 1GB 500MB\n"
         self._pruned = False
 
     def __call__(self, command: Sequence[str], _timeout_seconds: int) -> RemoteCommandResult:
@@ -43,7 +46,7 @@ class _CommandRunner:
             "--format",
             "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
         ):
-            return RemoteCommandResult(returncode=0, stdout="Images 1 1GB 500MB\n")
+            return RemoteCommandResult(returncode=0, stdout=self._docker_summary)
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
@@ -73,14 +76,16 @@ class _CommandRunner:
 class _AuditPoster:
     def __init__(self) -> None:
         self.records: list[tuple[str, str]] = []
+        self.audits: list[RunnerHostHygieneApplyAuditRecord] = []
 
-    def __call__(self, audit: object, idempotency_key: str) -> dict[str, object]:
-        status = getattr(audit, "status")
-        audit_record_key = getattr(audit, "audit_record_key")
-        self.records.append((str(status), idempotency_key))
+    def __call__(
+        self, audit: RunnerHostHygieneApplyAuditRecord, idempotency_key: str
+    ) -> dict[str, object]:
+        self.records.append((audit.status, idempotency_key))
+        self.audits.append(audit)
         return {
             "status": "accepted",
-            "records": {"runner_host_hygiene_audit_record_key": audit_record_key},
+            "records": {"runner_host_hygiene_audit_record_key": audit.audit_record_key},
         }
 
 
@@ -124,6 +129,53 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertNotIn(
             ("docker", "builder", "prune", "--all", "--force"), command_runner.commands
         )
+
+    def test_executor_records_typed_docker_reclaimable_bytes(self) -> None:
+        command_runner = _CommandRunner(
+            docker_summary=(
+                "Images 109 23.35GB 23.12GB (99%)\n"
+                "Containers 2 0B 0B\n"
+                "Local Volumes 38 161.5GB 97.47GB (60%)\n"
+                "Build Cache 1556 27.88GB 27.88GB\n"
+            )
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "completed")
+        reclaimable_bytes = 23_120_000_000 + 97_470_000_000 + 27_880_000_000
+        for audit in audit_poster.audits:
+            pre_apply_report = getattr(audit, "pre_apply_report")
+            self.assertEqual(
+                pre_apply_report.docker_reclaimable_bytes,
+                reclaimable_bytes,
+            )
+        terminal_audit = audit_poster.audits[-1]
+        post_apply_report = terminal_audit.post_apply_report
+        self.assertIsNotNone(post_apply_report)
+        assert post_apply_report is not None
+        self.assertEqual(
+            post_apply_report.docker_reclaimable_bytes,
+            reclaimable_bytes,
+        )
+
+    def test_executor_fails_closed_when_docker_summary_is_unparseable(self) -> None:
+        command_runner = _CommandRunner(docker_summary="TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n")
+        audit_poster = _AuditPoster()
+
+        with self.assertRaisesRegex(Exception, "did not include reclaimable bytes"):
+            execute_runner_host_hygiene_executor(
+                request=_request(mutate=True),
+                remote_runner=command_runner,
+                audit_poster=audit_poster,
+            )
+
+        self.assertEqual(audit_poster.records, [])
 
     def test_executor_blocks_before_prune_without_mutate_intent(self) -> None:
         command_runner = _CommandRunner()

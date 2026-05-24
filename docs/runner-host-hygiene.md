@@ -40,6 +40,10 @@ The report is intentionally conservative. Missing required warm builders, low
 free disk, Docker reclaimable bytes over budget, runner work-directory bytes over
 budget, and orphan BuildKit artifacts all produce `attention` unless policy
 explicitly permits that condition.
+Reports also carry the typed observation counters used for evaluation, so audit
+records preserve free disk, Docker reclaimable bytes, runner work-directory
+bytes, warm builders, and orphan BuildKit counts instead of relying only on raw
+operator notes.
 
 ## CLI
 

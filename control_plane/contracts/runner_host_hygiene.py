@@ -122,7 +122,12 @@ class RunnerHostHygieneReport(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     status: RunnerHostHygieneStatus
     host_name: str
+    free_disk_bytes: int = Field(default=0, ge=0)
+    docker_reclaimable_bytes: int = Field(default=0, ge=0)
+    runner_workdir_bytes: int = Field(default=0, ge=0)
     warm_builders: tuple[str, ...] = ()
+    orphan_buildkit_containers: int = Field(default=0, ge=0)
+    orphan_buildkit_volumes: int = Field(default=0, ge=0)
     findings: tuple[RunnerHostHygieneFinding, ...] = ()
     summary: str
     next_steps: tuple[str, ...] = ()
@@ -487,7 +492,12 @@ def evaluate_runner_host_hygiene(
     return RunnerHostHygieneReport(
         status=status,
         host_name=observation.host_name,
+        free_disk_bytes=observation.free_disk_bytes,
+        docker_reclaimable_bytes=observation.docker_reclaimable_bytes,
+        runner_workdir_bytes=observation.runner_workdir_bytes,
         warm_builders=observation.warm_builders,
+        orphan_buildkit_containers=observation.orphan_buildkit_containers,
+        orphan_buildkit_volumes=observation.orphan_buildkit_volumes,
         findings=tuple(findings),
         summary=(
             "runner host hygiene satisfies report-only policy"
