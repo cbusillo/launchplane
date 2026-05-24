@@ -397,7 +397,7 @@ def _check_host_idle(
             (
                 "bash",
                 "-lc",
-                "pgrep -af 'docker buildx|docker build|buildctl' || true",
+                "pgrep -af '[d]ocker buildx|[d]ocker build|[b]uildctl' || true",
             ),
             request.timeout_seconds,
         ),

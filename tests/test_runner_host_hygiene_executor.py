@@ -51,7 +51,7 @@ class _CommandRunner:
         if command_tuple == (
             "bash",
             "-lc",
-            "pgrep -af 'docker buildx|docker build|buildctl' || true",
+            "pgrep -af '[d]ocker buildx|[d]ocker build|[b]uildctl' || true",
         ):
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
         if command_tuple == (
@@ -142,7 +142,7 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         )
 
     def test_executor_blocks_prune_when_active_build_processes_are_present(self) -> None:
-        command_runner = _CommandRunner(active_build_processes="123 Runner.Worker build\n")
+        command_runner = _CommandRunner(active_build_processes="123 docker buildx build .\n")
         audit_poster = _AuditPoster()
 
         result = execute_runner_host_hygiene_executor(
