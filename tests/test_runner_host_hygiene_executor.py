@@ -36,6 +36,14 @@ class _CommandRunner:
             )
         if command_tuple == ("docker", "system", "df"):
             return RemoteCommandResult(returncode=0, stdout="TYPE TOTAL ACTIVE SIZE RECLAIMABLE\n")
+        if command_tuple == (
+            "docker",
+            "system",
+            "df",
+            "--format",
+            "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
+        ):
+            return RemoteCommandResult(returncode=0, stdout="Images 1 1GB 500MB\n")
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
@@ -43,7 +51,7 @@ class _CommandRunner:
         if command_tuple == (
             "bash",
             "-lc",
-            "pgrep -af 'Runner.Worker|docker buildx|docker build|buildctl' || true",
+            "pgrep -af 'docker buildx|docker build|buildctl' || true",
         ):
             return RemoteCommandResult(returncode=0, stdout=self._active_build_processes)
         if command_tuple == (
