@@ -914,6 +914,13 @@ _GENERIC_WEB_ROLLBACK_PLAN_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+_ODOO_ROLLBACK_PLAN_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-rollback-plan",
+    envelope_model=GenericWebRollbackPlanEnvelope,
+    denial_message="Workflow cannot plan the Odoo prod rollback for the requested product/context.",
+)
+
+
 class GenericWebRollbackEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     rollback: GenericWebRollbackPlanRequest
@@ -1320,6 +1327,7 @@ _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+        _ODOO_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
     }
@@ -11638,10 +11646,16 @@ def create_launchplane_service_app(
                     request=generic_web_workflow_request.workflow,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path == _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path:
-                generic_web_rollback_request = (
-                    _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.envelope_model.model_validate(payload)
+            elif path in {
+                _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+                _ODOO_ROLLBACK_PLAN_ROUTE.route_path,
+            }:
+                route_metadata = (
+                    _ODOO_ROLLBACK_PLAN_ROUTE
+                    if path == _ODOO_ROLLBACK_PLAN_ROUTE.route_path
+                    else _GENERIC_WEB_ROLLBACK_PLAN_ROUTE
                 )
+                generic_web_rollback_request = route_metadata.envelope_model.model_validate(payload)
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -11659,7 +11673,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=resolved_driver_context.profile.product,
                     context=resolved_driver_context.lane.context,
-                    denial_message=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE.denial_message,
+                    denial_message=route_metadata.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
