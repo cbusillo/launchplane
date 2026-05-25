@@ -214,6 +214,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertEqual(actions["prod_rollback_plan"].safety, "safe_write")
         self.assertEqual(
+            actions["prod_rollback"].route_path,
+            "/v1/drivers/generic-web/prod-rollback",
+        )
+        self.assertEqual(actions["prod_rollback"].safety, "destructive")
+        self.assertEqual(
             actions["stable_verification"].route_path,
             "/v1/drivers/generic-web/stable-verification",
         )
@@ -383,6 +388,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 "prod_rollback_plan": (
                     control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
                     control_plane_service.GenericWebRollbackPlanEnvelope,
+                    "rollback",
+                ),
+                "prod_rollback": (
+                    control_plane_service._GENERIC_WEB_ROLLBACK_ROUTE,
+                    control_plane_service.GenericWebRollbackEnvelope,
                     "rollback",
                 ),
                 "stable_verification": (

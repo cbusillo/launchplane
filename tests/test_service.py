@@ -153,6 +153,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
+from control_plane.workflows.generic_web_rollback import GenericWebRollbackApplyResult
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
@@ -13894,6 +13895,207 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "schema_version": 1,
                     "product": "sellyouroutboard",
                     "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-syo-prod-previous",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_generic_web_rollback_route_applies_ready_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-rollback",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "rollback": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "instance": "prod",
+                            "rollback_deployment_record_id": "deployment-syo-prod-previous",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-rollback-syo-prod"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(
+            payload["records"]["generic_web_rollback_plan_id"],
+            "generic-web-rollback-syo-prod",
+        )
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-prod-rollback")
+        self.assertEqual(payload["records"]["rollback_status"], "pass")
+        self.assertEqual(payload["records"]["deploy_status"], "pass")
+        rollback.assert_called_once()
+        self.assertEqual(rollback.call_args.kwargs["request"].product, "sellyouroutboard")
+
+    def test_generic_web_rollback_route_replays_idempotent_response_shape(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-syo-prod",
+                deployment_record_id="deployment-syo-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                rollback_deployment_record_id="deployment-syo-prod-previous",
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "rollback": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "instance": "prod",
+                    "rollback_deployment_record_id": "deployment-syo-prod-previous",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-rollback",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-rollback-replay-syo-prod"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-rollback",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-rollback-replay-syo-prod"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"], second_payload["records"])
+        self.assertEqual(second_payload["records"]["rollback_status"], "pass")
+        self.assertEqual(second_payload["records"]["deploy_status"], "pass")
+        self.assertTrue(second_payload["replayed"])
+        rollback.assert_called_once()
+
+    def test_generic_web_rollback_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["generic_web_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-rollback",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "rollback": {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
                         "instance": "prod",

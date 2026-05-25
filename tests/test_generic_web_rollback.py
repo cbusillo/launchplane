@@ -1,10 +1,12 @@
 import unittest
 from typing import Literal, cast
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
@@ -18,6 +20,8 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.generic_web_rollback import execute_generic_web_rollback
 from control_plane.workflows.ship import build_deployment_record
 
 
@@ -48,6 +52,13 @@ class _GenericWebRollbackStore:
     def write_generic_web_rollback_plan_record(self, record: object) -> None:
         self.rollback_plans.append(record)
 
+    def write_deployment_record(self, record: DeploymentRecord) -> None:
+        self.deployments[record.record_id] = record
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> None:
+        _ = record
+        return None
+
 
 def _profile() -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
@@ -73,6 +84,10 @@ def _profile() -> LaunchplaneProductProfileRecord:
         updated_at="2026-05-01T21:00:00Z",
         source="test",
     )
+
+
+def _inherited_profile() -> LaunchplaneProductProfileRecord:
+    return _profile().model_copy(update={"driver_id": "odoo", "product": "cm"})
 
 
 def _request(**overrides: object) -> GenericWebRollbackPlanRequest:
@@ -186,6 +201,80 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.status, "ready")
         self.assertEqual(store.rollback_plans, [plan])
+
+    def test_builds_plan_for_generic_web_based_driver(self) -> None:
+        store = _GenericWebRollbackStore(_inherited_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record()
+
+        plan = build_generic_web_rollback_plan(
+            record_store=store,
+            request=_request(product="cm"),
+        )
+
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.product, "cm")
+        self.assertEqual(plan.instance, "prod")
+
+    def test_execute_apply_writes_plan_before_deploying_previous_artifact(self) -> None:
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record()
+        deploy_result = GenericWebDeployResult(
+            deployment_record_id="deployment-syo-prod-rollback",
+            deploy_status="pass",
+            deploy_started_at="2026-05-25T12:00:00Z",
+            deploy_finished_at="2026-05-25T12:01:00Z",
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="prod",
+            target_name="syo-prod-app",
+            target_type="application",
+            target_id="app-prod",
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_rollback.execute_generic_web_deploy",
+            return_value=deploy_result,
+        ) as deploy:
+            result = execute_generic_web_rollback(
+                control_plane_root=__import__("pathlib").Path("/tmp/launchplane"),
+                record_store=store,
+                request=_request(timeout_seconds=90, no_cache=True),
+            )
+
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.deployment_record_id, "deployment-syo-prod-rollback")
+        self.assertEqual(len(store.rollback_plans), 1)
+        deploy.assert_called_once()
+        deploy_request = deploy.call_args.kwargs["request"]
+        self.assertEqual(deploy_request.product, "sellyouroutboard")
+        self.assertEqual(deploy_request.instance, "prod")
+        self.assertEqual(
+            deploy_request.artifact_id,
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        )
+        self.assertEqual(deploy_request.source_git_ref, "abc123")
+        self.assertEqual(deploy_request.timeout_seconds, 90)
+        self.assertTrue(deploy_request.no_cache)
+
+    def test_execute_apply_returns_blocked_without_deploying(self) -> None:
+        store = _GenericWebRollbackStore(_profile())
+
+        with patch(
+            "control_plane.workflows.generic_web_rollback.execute_generic_web_deploy"
+        ) as deploy:
+            result = execute_generic_web_rollback(
+                control_plane_root=__import__("pathlib").Path("/tmp/launchplane"),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(result.rollback_status, "blocked")
+        self.assertEqual(result.deploy_status, "skipped")
+        self.assertEqual(result.deployment_record_id, "")
+        self.assertEqual([blocker.code for blocker in result.blockers], ["missing_rollback_target"])
+        self.assertEqual(len(store.rollback_plans), 1)
+        deploy.assert_not_called()
 
     def test_blocks_missing_rollback_target(self) -> None:
         store = _GenericWebRollbackStore(_profile())

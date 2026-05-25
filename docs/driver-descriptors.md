@@ -123,9 +123,15 @@ The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
 Launchplane reads the product profile, destination lane, selected deployment
 record, and optional backup gate evidence, then writes a
-`GenericWebRollbackPlanRecord`. It does not mutate the provider. A future
-explicit apply action can consume a ready plan and call the normal generic-web
-deploy path.
+`GenericWebRollbackPlanRecord`. It does not mutate the provider.
+
+The `prod_rollback` action routes to
+`POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
+validation, persists the plan record, and applies ready plans through the normal
+generic-web deploy path using the previous immutable artifact identity. Product
+drivers keep their own `prod_rollback` action only when they need additional
+product-specific gates, such as Odoo backup, release tuple, manifest, migration,
+or post-deploy checks.
 
 The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the

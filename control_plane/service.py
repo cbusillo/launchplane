@@ -294,6 +294,7 @@ from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
     dispatch_generic_web_promotion_workflow,
 )
+from control_plane.workflows.generic_web_rollback import execute_generic_web_rollback
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
@@ -913,6 +914,28 @@ _GENERIC_WEB_ROLLBACK_PLAN_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+class GenericWebRollbackEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    rollback: GenericWebRollbackPlanRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebRollbackEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web rollback requires product")
+        if self.product.strip() != self.rollback.product.strip():
+            raise ValueError("generic web rollback requires matching product values")
+        return self
+
+
+_GENERIC_WEB_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/prod-rollback",
+    envelope_model=GenericWebRollbackEnvelope,
+    denial_message=(
+        "Workflow cannot execute the generic web prod rollback for the requested product/context."
+    ),
+)
+
+
 class GenericWebStableVerificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1297,6 +1320,7 @@ _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+        _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
     }
 )
@@ -4879,6 +4903,7 @@ def _accepted_payload(
     trace_id: str,
     result: dict[str, object],
     driver_result: BaseModel | dict[str, object] | None,
+    extra_record_keys: frozenset[str] = frozenset(),
     replayed: bool = False,
     original_trace_id: str = "",
 ) -> dict[str, object]:
@@ -4932,9 +4957,10 @@ def _accepted_payload(
         "runner_host_hygiene_audit_record_key",
         "generic_web_rollback_plan_id",
     }
+    accepted_record_keys = record_keys | extra_record_keys
     records: dict[str, object] = {}
     for key, value in result.items():
-        if key not in record_keys:
+        if key not in accepted_record_keys:
             continue
         if key.endswith("_preview_verification") and isinstance(value, dict):
             records[key] = value
@@ -4950,6 +4976,12 @@ def _accepted_payload(
         payload["replayed"] = True
         payload["original_trace_id"] = original_trace_id
     return payload
+
+
+def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
+    if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
+        return frozenset({"rollback_status", "deploy_status"})
+    return frozenset()
 
 
 def _operation_payload(
@@ -5311,6 +5343,7 @@ def _replay_idempotent_response(
         trace_id=trace_id,
         result=dict(stored_payload.get("records") or {}),
         driver_result=stored_driver_result if isinstance(stored_driver_result, dict) else None,
+        extra_record_keys=_accepted_payload_extra_record_keys(route_path=stored_record.route_path),
         replayed=True,
         original_trace_id=stored_record.response_trace_id,
     )
@@ -11648,6 +11681,55 @@ def create_launchplane_service_app(
                     request=generic_web_rollback_request.rollback_plan,
                 )
                 result = {"generic_web_rollback_plan_id": driver_result.plan_id}
+            elif path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
+                generic_web_rollback_apply_request = (
+                    _GENERIC_WEB_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                )
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=generic_web_rollback_apply_request.rollback.product,
+                    instance=generic_web_rollback_apply_request.rollback.instance,
+                    require_profile=True,
+                )
+                if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
+                    raise ProductDriverMismatchError(
+                        "Generic web rollback requires a product profile lane."
+                    )
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=resolved_driver_context.profile.product,
+                    context=resolved_driver_context.lane.context,
+                    denial_message=_GENERIC_WEB_ROLLBACK_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_generic_web_rollback(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=generic_web_rollback_apply_request.rollback,
+                )
+                result = {
+                    "generic_web_rollback_plan_id": driver_result.plan_id,
+                    "deployment_record_id": driver_result.deployment_record_id,
+                    "rollback_status": driver_result.rollback_status,
+                    "deploy_status": driver_result.deploy_status,
+                }
             elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
                 generic_web_desired_state_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
@@ -13919,6 +14001,7 @@ def create_launchplane_service_app(
             trace_id=request_trace_id,
             result=result,
             driver_result=driver_result,
+            extra_record_keys=_accepted_payload_extra_record_keys(route_path=path),
         )
         should_store_idempotency = _should_store_idempotency_record(
             path=path,

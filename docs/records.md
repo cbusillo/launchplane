@@ -423,10 +423,12 @@ state/
 - Generic-web rollback planning writes `GenericWebRollbackPlanRecord` entries
   under `generic_web_rollback_plans` in file-backed state and
   `launchplane_generic_web_rollback_plans` in DB-backed state. These records are
-  safe-write plans, not provider mutations. They store the destination lane,
-  selected deployment-record id, immutable artifact identity, source git ref,
-  planned deploy payload, backup-gate evidence, target health evidence, and any
-  blockers that prevent a rollback apply.
+  safe-write plans when written by the plan route and audit records when written
+  by the apply route before mutation. They store the destination lane, selected
+  deployment-record id, immutable artifact identity, source git ref, planned
+  deploy payload, backup-gate evidence, target health evidence, and any blockers
+  that prevent a rollback apply. Generic-web rollback apply then writes the
+  normal deployment and inventory records through the generic deploy path.
 - Direct `ship` and `promote` execution fail closed if the referenced artifact
   id does not already have a stored manifest in control-plane state.
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
