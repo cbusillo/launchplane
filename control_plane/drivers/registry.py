@@ -404,6 +404,17 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             authz_action="preview_destroy.execute",
             writes_records=("preview",),
         ),
+        _action(
+            "preview_verification",
+            "Record preview verification",
+            "Record product smoke verification for the latest generic-web preview generation.",
+            safety="safe_write",
+            scope="preview",
+            route_path="/v1/drivers/generic-web/preview-verification",
+            authz_action="preview_generation.write",
+            operator_visible=False,
+            writes_records=("preview", "preview_generation"),
+        ),
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(
