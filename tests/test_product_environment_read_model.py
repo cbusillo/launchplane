@@ -101,6 +101,19 @@ def _site_profile_payload(
     }
 
 
+def _odoo_profile_payload() -> dict[str, object]:
+    payload = _site_profile_payload(
+        product="odoo-tenant-cm",
+        preview_context="cm",
+        testing_context="cm",
+        prod_context="cm",
+    )
+    payload["display_name"] = "Odoo Tenant CM"
+    payload["repository"] = "cbusillo/odoo-tenant-cm"
+    payload["driver_id"] = "odoo"
+    return payload
+
+
 def _preview_record(
     *,
     preview_id: str,
@@ -442,6 +455,24 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         actions = {action.action_id: action for action in overview.available_actions}
         self.assertNotIn("testing_verification", actions)
+        self.assertNotIn("preview_verification", actions)
+
+    def test_odoo_product_site_overview_uses_inherited_generic_web_actions(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
+        self.assertEqual(
+            actions["preview_refresh"].route_path,
+            "/v1/drivers/generic-web/preview-refresh",
+        )
+        self.assertEqual(actions["preview_apply"].route_path, "/v1/drivers/odoo/preview-apply")
         self.assertNotIn("preview_verification", actions)
 
     def test_product_site_overview_raises_for_unknown_product(self) -> None:
@@ -890,7 +921,6 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertIn("odoo-devkit", detail.model_dump_json())
 
-
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -932,9 +962,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             )
 
         runtime_statuses = {item.key: item.status for item in config_status.runtime_settings}
-        secret_statuses = {
-            item.binding_key: item.status for item in config_status.managed_secrets
-        }
+        secret_statuses = {item.binding_key: item.status for item in config_status.managed_secrets}
         self.assertEqual(runtime_statuses, {"RESEND_FROM_EMAIL": "configured"})
         self.assertEqual(
             secret_statuses,

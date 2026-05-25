@@ -29,6 +29,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIde
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.drivers.registry import (
     build_driver_context_view,
+    effective_driver_actions,
     list_driver_descriptors,
     read_driver_descriptor,
 )
@@ -1248,7 +1249,7 @@ def _action_availability(
 ) -> tuple[ProductActionAvailability, ...]:
     descriptor_actions = {
         action.action_id: action
-        for action in (descriptor.actions if descriptor is not None else ())
+        for action in (effective_driver_actions(descriptor) if descriptor is not None else ())
         if action.operator_visible
     }
     action_ids = tuple(descriptor_actions)
