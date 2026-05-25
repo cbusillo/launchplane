@@ -138,14 +138,16 @@ flock -n /tmp/launchplane-runner-host-hygiene.lock \
 Operators can override the age bound through the workflow's `prune_until` input,
 but the executor does not expose an unbounded `--all` prune.
 
-It also supports `remove_buildkit_state_volumes`, implemented as named
-`docker volume rm` calls under the same lock. This action is intentionally not
-`docker volume prune`: the apply plan must name every target volume, the policy
-must allowlist those names from the separate
+It also supports `remove_buildkit_state_volumes`, implemented as a named
+single-volume `docker volume rm` call under the same lock. This action is
+intentionally not `docker volume prune`: the apply plan must name every target
+volume, the policy must allowlist those names from the separate
 `LAUNCHPLANE_RUNNER_HOST_HYGIENE_ALLOWED_BUILDKIT_STATE_VOLUMES` repository
 variable, and the pre-apply report must show each target is a
 `buildx_buildkit_*_state` volume with zero container links. Linked warm builder
-state volumes remain blocked even when explicitly requested.
+state volumes remain blocked even when explicitly requested. Only one target
+volume is accepted per mutation run so a failed removal cannot hide an earlier
+successful deletion in the same command.
 
 The workflow requires these repository variables:
 
@@ -271,8 +273,8 @@ The privileged scope must match the planned action exactly:
 
 - `prune_docker_cache` requires `docker_cache`.
 - `remove_buildkit_state_volumes` requires `docker_volume` and may only remove
-  explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state` named
-  volumes observed in the pre-apply report.
+  one explicitly requested, allowlisted, zero-link `buildx_buildkit_*_state`
+  named volume observed in the pre-apply report.
 - `prune_runner_workdir` requires `runner_workdir`.
 - `restart_runner_service` requires `runner_service`.
 

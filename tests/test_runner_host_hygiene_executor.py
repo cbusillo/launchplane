@@ -4,6 +4,7 @@ import json
 import unittest
 
 from collections.abc import Sequence
+from collections.abc import Mapping
 import subprocess
 from typing import Literal
 from unittest.mock import patch
@@ -22,6 +23,16 @@ from control_plane.workflows.runner_host_hygiene_executor import _parse_volume_u
 from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
 
 
+_VOLUME_RM_PREFIX = (
+    "flock",
+    "-n",
+    "/tmp/launchplane-runner-host-hygiene.lock",
+    "docker",
+    "volume",
+    "rm",
+)
+
+
 class _CommandRunner:
     def __init__(
         self,
@@ -30,6 +41,7 @@ class _CommandRunner:
         image_present_after: bool = True,
         active_build_processes: str = "",
         volume_remove_returncode: int = 0,
+        volume_remove_partial_failure: bool = False,
         docker_summary: str | None = None,
         docker_verbose_summary: str | None = None,
         image_inventory: str | None = None,
@@ -40,6 +52,7 @@ class _CommandRunner:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
         self._volume_remove_returncode = volume_remove_returncode
+        self._volume_remove_partial_failure = volume_remove_partial_failure
         self._image_present_after = image_present_after
         self._active_build_processes = active_build_processes
         self._docker_summary = docker_summary or "Images 1 1GB 500MB\n"
@@ -175,20 +188,33 @@ class _CommandRunner:
         ):
             self._pruned = True
             return RemoteCommandResult(returncode=self._prune_returncode, stderr="prune failed")
-        if command_tuple[:6] == (
-            "flock",
-            "-n",
-            "/tmp/launchplane-runner-host-hygiene.lock",
-            "docker",
-            "volume",
-            "rm",
-        ):
+        if command_tuple[:6] == _VOLUME_RM_PREFIX:
+            if self._volume_remove_partial_failure and len(command_tuple[6:]) > 1:
+                self.removed_volumes.append(command_tuple[6])
+                return RemoteCommandResult(
+                    returncode=1,
+                    stderr="second volume still in use",
+                )
             self.removed_volumes.extend(command_tuple[6:])
             return RemoteCommandResult(
                 returncode=self._volume_remove_returncode,
                 stderr="volume rm failed",
             )
         return RemoteCommandResult(returncode=127, stderr="unexpected command")
+
+
+def _buildkit_volume_evidence(
+    volume_name: str, *, size_bytes: int = 50_490_000_000, links: int = 0
+) -> tuple[str, Mapping[str, object]]:
+    summary_row = f"{volume_name}    {links}         {size_bytes}B\n"
+    inventory_row = {
+        "Driver": "local",
+        "Labels": {},
+        "Mountpoint": f"/var/lib/docker/volumes/{volume_name}/_data",
+        "Name": volume_name,
+        "UsageData": {"RefCount": links, "Size": size_bytes},
+    }
+    return summary_row, inventory_row
 
 
 class _AuditPoster:
@@ -459,24 +485,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         target_volume = "buildx_buildkit_launchplane-ci0_state"
+        summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
         command_runner = _CommandRunner(
             docker_verbose_summary=(
                 "Local Volumes space usage:\n\n"
                 "VOLUME NAME     LINKS     SIZE\n"
-                f"{target_volume}    0         50.49GB\n"
+                f"{summary_row}"
                 "Build cache usage: 1GB\n"
             ),
-            volume_inventory=json.dumps(
-                [
-                    {
-                        "Driver": "local",
-                        "Labels": {},
-                        "Mountpoint": f"/var/lib/docker/volumes/{target_volume}/_data",
-                        "Name": target_volume,
-                        "UsageData": {"RefCount": 0, "Size": 50_490_000_000},
-                    }
-                ]
-            ),
+            volume_inventory=json.dumps([inventory_row]),
         )
         audit_poster = _AuditPoster()
 
@@ -512,6 +529,51 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self.assertNotIn(
             target_volume,
             [volume.name for volume in post_apply_report.volume_inventory],
+        )
+
+    def test_executor_blocks_multiple_buildkit_state_volume_targets_without_mutating(
+        self,
+    ) -> None:
+        first_volume = "buildx_buildkit_launchplane-ci0_state"
+        second_volume = "buildx_buildkit_verireel-ci0_state"
+        first_summary_row, first_inventory_row = _buildkit_volume_evidence(first_volume)
+        second_summary_row, second_inventory_row = _buildkit_volume_evidence(
+            second_volume,
+            size_bytes=12_480_000_000,
+        )
+        command_runner = _CommandRunner(
+            volume_remove_partial_failure=True,
+            docker_verbose_summary=(
+                "Local Volumes space usage:\n\n"
+                "VOLUME NAME     LINKS     SIZE\n"
+                f"{first_summary_row}"
+                f"{second_summary_row}"
+                "Build cache usage: 1GB\n"
+            ),
+            volume_inventory=json.dumps([first_inventory_row, second_inventory_row]),
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(
+                mutate=True,
+                action="remove_buildkit_state_volumes",
+                target_buildkit_state_volumes=(first_volume, second_volume),
+                allowed_buildkit_state_volumes=(first_volume, second_volume),
+            ),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(command_runner.removed_volumes, [])
+        self.assertFalse(
+            any(command[:6] == _VOLUME_RM_PREFIX for command in command_runner.commands)
+        )
+        planned_audit = audit_poster.audits[0]
+        self.assertIn(
+            "target_volume_multiple_requested",
+            [blocker.code for blocker in planned_audit.plan.blockers],
         )
 
     def test_executor_blocks_active_buildkit_state_volume_removal(self) -> None:
@@ -560,24 +622,15 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
         self,
     ) -> None:
         target_volume = "buildx_buildkit_launchplane-ci0_state"
+        summary_row, inventory_row = _buildkit_volume_evidence(target_volume)
         command_runner = _CommandRunner(
             docker_verbose_summary=(
                 "Local Volumes space usage:\n\n"
                 "VOLUME NAME     LINKS     SIZE\n"
-                f"{target_volume}    0         50.49GB\n"
+                f"{summary_row}"
                 "Build cache usage: 1GB\n"
             ),
-            volume_inventory=json.dumps(
-                [
-                    {
-                        "Driver": "local",
-                        "Labels": {},
-                        "Mountpoint": f"/var/lib/docker/volumes/{target_volume}/_data",
-                        "Name": target_volume,
-                        "UsageData": {"RefCount": 0, "Size": 50_490_000_000},
-                    }
-                ]
-            ),
+            volume_inventory=json.dumps([inventory_row]),
         )
         audit_poster = _AuditPoster()
 

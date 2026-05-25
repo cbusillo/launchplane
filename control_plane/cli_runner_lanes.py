@@ -533,7 +533,7 @@ def runner_host_hygiene_report(
     "--target-buildkit-state-volume",
     "target_buildkit_state_volumes",
     multiple=True,
-    help="BuildKit state volume the request targets for removal. Repeat for each volume.",
+    help="BuildKit state volume the request targets for removal. Supply at most one.",
 )
 @click.option(
     "--allowed-buildkit-state-volume",
@@ -886,7 +886,7 @@ def runner_host_hygiene_adapter_boundary_plan(
     "--target-buildkit-state-volume",
     "target_buildkit_state_volumes",
     multiple=True,
-    help="Explicit zero-link BuildKit state volume to remove. Repeat as needed.",
+    help="Explicit zero-link BuildKit state volume to remove. Supply at most one.",
 )
 @click.option(
     "--allowed-buildkit-state-volume",

@@ -30,6 +30,7 @@ RunnerHostHygieneApplyBlockerCode = Literal[
     "report_host_mismatch",
     "target_volume_active",
     "target_volume_missing_from_report",
+    "target_volume_multiple_requested",
     "target_volume_not_allowlisted",
     "target_volume_not_buildkit_state",
     "target_volume_not_requested",
@@ -886,6 +887,16 @@ def _target_volume_blockers(
             _apply_blocker(
                 "target_volume_not_requested",
                 "runner host hygiene volume cleanup requires at least one target volume",
+            )
+        )
+    if len(request.target_buildkit_state_volumes) > 1:
+        blockers.append(
+            _apply_blocker(
+                "target_volume_multiple_requested",
+                (
+                    "runner host hygiene volume cleanup accepts one target "
+                    "volume per mutation run"
+                ),
             )
         )
     volume_by_name = {volume.name: volume for volume in report.volume_inventory}

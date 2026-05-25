@@ -25,7 +25,7 @@ name: Runner Host Hygiene
         type: boolean
       target_buildkit_state_volumes:
         description: >-
-          Comma-separated zero-link BuildKit state volumes for removal
+          One zero-link BuildKit state volume for removal
         required: false
         default: ""
         type: string
