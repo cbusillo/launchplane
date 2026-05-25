@@ -90,6 +90,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
+  - `POST /v1/drivers/generic-web/prod-rollback-plan`
   - `POST /v1/drivers/generic-web/stable-verification`
   - `POST /v1/drivers/generic-web/preview-desired-state`
   - `POST /v1/drivers/generic-web/preview-refresh`

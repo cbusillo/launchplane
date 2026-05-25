@@ -312,7 +312,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             capability_id="image_deployable",
             label="Image deployable",
             description="Deploy immutable container images and record stable-lane deployment evidence.",
-            actions=("stable_deploy", "prod_promotion"),
+            actions=("stable_deploy", "prod_promotion", "prod_rollback_plan"),
             panels=("lane_health", "deployment_evidence", "promotion_evidence"),
         ),
         DriverCapabilityDescriptor(
@@ -372,6 +372,16 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/generic-web/prod-promotion-workflow",
             authz_action="generic_web_prod_promotion.dispatch",
             writes_records=(),
+        ),
+        _action(
+            "prod_rollback_plan",
+            "Plan prod rollback",
+            "Build and persist a generic-web rollback plan from a previous good deployment record.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/generic-web/prod-rollback-plan",
+            authz_action="generic_web_prod_rollback.plan",
+            writes_records=("generic_web_rollback_plan",),
         ),
         _action(
             "stable_verification",

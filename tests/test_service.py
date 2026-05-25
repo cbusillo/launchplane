@@ -13768,6 +13768,143 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-testing")
         deploy.assert_called_once()
 
+    def test_generic_web_rollback_plan_route_writes_plan_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            deployment_record = DeploymentRecord(
+                record_id="deployment-syo-prod-previous",
+                artifact_identity=ArtifactIdentityReference(
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+                ),
+                context="sellyouroutboard-testing",
+                instance="prod",
+                source_git_ref="abc123",
+                destination_health=HealthcheckEvidence(status="pass"),
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application",
+                    target_id="app-prod",
+                    target_name="syo-prod-app",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="syo-prod-app",
+                    target_type="application",
+                    deploy_mode="dokploy-application-api",
+                    deployment_id="deployment-provider-1",
+                    status="pass",
+                    started_at="2026-05-25T12:00:00Z",
+                    finished_at="2026-05-25T12:01:00Z",
+                ),
+            )
+            store.write_deployment_record(deployment_record)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_rollback.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-rollback-plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-syo-prod-previous",
+                    },
+                },
+                headers={"Idempotency-Key": "generic-web-rollback-plan-syo-prod"},
+            )
+
+            plans = store.list_generic_web_rollback_plan_records(
+                context_name="sellyouroutboard-testing",
+                instance_name="prod",
+                limit=1,
+            )
+            plan = plans[0]
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["generic_web_rollback_plan_id"], plan.plan_id)
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.product, "sellyouroutboard")
+        self.assertEqual(plan.context, "sellyouroutboard-testing")
+        self.assertEqual(plan.rollback_deployment_record_id, "deployment-syo-prod-previous")
+
+    def test_generic_web_rollback_plan_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["generic_web_prod_rollback.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-rollback-plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-syo-prod-previous",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_generic_web_deploy_route_resolves_literal_generic_web_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

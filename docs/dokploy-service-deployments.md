@@ -173,7 +173,8 @@ exist, Launchplane verifies the source and destination lane health around the
 deployment and writes promotion evidence.
 
 Rollback begins with a Launchplane-owned rollback plan. The generic-web planner
-is a safe-write contract: it reads the product profile, destination lane, a
+is exposed through `POST /v1/drivers/generic-web/prod-rollback-plan` as a
+safe-write contract: it reads the product profile, destination lane, a
 Launchplane deployment record selected as the rollback target, and optional
 backup-gate evidence, then writes a rollback-plan record. It does not mutate
 Dokploy or trigger a product workflow.
