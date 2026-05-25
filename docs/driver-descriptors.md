@@ -125,30 +125,38 @@ the product key; Launchplane resolves the preview context, owning repository,
 anchor repo, and slug template from the DB-backed product profile before writing
 desired preview state records.
 
-The `preview_refresh`, `preview_inventory`, `preview_readiness`, and
-`preview_destroy` actions route to `POST /v1/drivers/generic-web/preview-refresh`,
+The `preview_refresh`, `preview_inventory`, `preview_readiness`,
+`preview_destroy`, and `preview_verification` actions route to
+`POST /v1/drivers/generic-web/preview-refresh`,
 `POST /v1/drivers/generic-web/preview-inventory`,
-`POST /v1/drivers/generic-web/preview-readiness`, and
-`POST /v1/drivers/generic-web/preview-destroy`. Refresh runs readiness first,
-then creates or updates a stateless Dokploy application from the DB-backed
-template lane, derives the live preview URL from the context-level
+`POST /v1/drivers/generic-web/preview-readiness`,
+`POST /v1/drivers/generic-web/preview-destroy`, and
+`POST /v1/drivers/generic-web/preview-verification`. Refresh runs readiness
+first, then creates or updates a stateless Dokploy application from the
+DB-backed template lane, derives the live preview URL from the context-level
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record plus the preview slug,
 applies explicit settings transport, deploys the submitted image, and checks the
 product health path. Inventory and destroy scan and delete Dokploy applications
-by the product profile's preview application-name prefix.
+by the product profile's preview application-name prefix. Verification records
+common post-refresh smoke evidence against the latest Launchplane preview
+generation and is available to any product profile that uses the generic-web
+base driver.
 
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
-Odoo declares `base_driver_id="generic-web"` and exposes Odoo-shaped preview
-routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
+Odoo declares `base_driver_id="generic-web"` and keeps Odoo-shaped preview
+routes as compatibility aliases for the same lifecycle:
+`POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-refresh`,
 `POST /v1/drivers/odoo/preview-inventory`,
 `POST /v1/drivers/odoo/preview-readiness`,
 `POST /v1/drivers/odoo/preview-destroy`, and
-`POST /v1/drivers/odoo/preview-verification`. The lower-level
+`POST /v1/drivers/odoo/preview-verification`. New product workflows should use
+the generic-web routes for generic lifecycle evidence unless the product driver
+documents a narrower product-specific contract. The lower-level
 `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
 Dokploy plan to provider state after service authorization and idempotency
 checks. The route resolves runtime env values from Launchplane-owned
@@ -158,9 +166,9 @@ evidence, and keeps secret runtime values inside the service boundary. The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same
 Launchplane preview and preview-generation records as generic-web previews.
-The preview-verification route accepts optional checked URL evidence and returns
-a typed `odoo_preview_verification` result while only mutating Launchplane
-preview-generation records.
+The compatibility preview-verification route accepts optional checked URL
+evidence and returns a typed `odoo_preview_verification` result while delegating
+the durable record mutation to the same generic-web preview verification writer.
 Odoo's staged compose preview MVP is now retired. Generic-web preview readiness
 blocks compose template lanes, including historical Odoo bootstrap-mode compose
 profiles; Odoo PR previews must enter through `plan_odoo_preview_runtime` and

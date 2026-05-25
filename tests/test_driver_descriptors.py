@@ -204,6 +204,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/generic-web/preview-destroy",
         )
         self.assertEqual(actions["preview_destroy"].safety, "destructive")
+        self.assertEqual(
+            actions["preview_verification"].route_path,
+            "/v1/drivers/generic-web/preview-verification",
+        )
+        self.assertEqual(actions["preview_verification"].safety, "safe_write")
+        self.assertFalse(actions["preview_verification"].operator_visible)
         setting_groups = {group.group_id: group for group in descriptor.setting_groups}
         self.assertIn("preview_runtime_environment", setting_groups)
         preview_settings = setting_groups["preview_runtime_environment"]
@@ -252,6 +258,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertFalse(
             route_actions["/v1/drivers/verireel/preview-verification"].operator_visible
+        )
+        self.assertEqual(
+            route_actions["/v1/drivers/generic-web/preview-verification"].authz_action,
+            "preview_generation.write",
+        )
+        self.assertFalse(
+            route_actions["/v1/drivers/generic-web/preview-verification"].operator_visible
         )
         self.assertEqual(
             route_actions["/v1/drivers/odoo/preview-verification"].authz_action,
@@ -335,6 +348,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
                     control_plane_service.GenericWebPreviewDestroyEnvelope,
                     "destroy generic",
+                ),
+                "preview_verification": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+                    control_plane_service.GenericWebPreviewVerificationEnvelope,
+                    "preview verification",
                 ),
             },
         )

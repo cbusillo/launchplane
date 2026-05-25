@@ -136,7 +136,10 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewGenerationState,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import (
     PreviewInventoryScanRecord,
@@ -151,6 +154,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
+from control_plane.contracts.preview_record import PreviewState
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
@@ -994,6 +998,81 @@ _GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+class GenericWebPreviewVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    verification_status: ReleaseStatus
+    verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    failure_summary: str = ""
+
+    @field_validator("verification_status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(value, label="Generic web preview verification status")
+
+    @field_validator("checked_urls", mode="before")
+    @classmethod
+    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
+        return _normalize_preview_verification_checked_urls(
+            value, label="Generic web preview verification"
+        )
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "GenericWebPreviewVerificationRequest":
+        if not self.context.strip():
+            raise ValueError("Generic web preview verification requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("Generic web preview verification requires anchor_repo.")
+        if self.verification_status not in {"pass", "fail"}:
+            raise ValueError("Generic web preview verification status must be pass or fail.")
+        if not self.verified_at.strip():
+            raise ValueError("Generic web preview verification requires verified_at.")
+        if self.checked_urls and self.timeout_seconds is None:
+            raise ValueError(
+                "Generic web preview verification checked_urls require timeout_seconds."
+            )
+        return self
+
+
+class GenericWebPreviewVerificationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: str
+    preview_generation_id: str
+    preview_state: str
+    generation_state: str
+    verification_status: ReleaseStatus
+    verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = None
+    failure_summary: str = ""
+
+
+class GenericWebPreviewVerificationEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    verification: GenericWebPreviewVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewVerificationEnvelope":
+        _validate_driver_envelope_product(self.product, label="Generic web preview verification")
+        return self
+
+
+_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-verification",
+    envelope_model=GenericWebPreviewVerificationEnvelope,
+    denial_message=(
+        "Workflow cannot write generic web preview verification for the requested product/context."
+    ),
+)
+
+
 _ODOO_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-desired-state",
     envelope_model=GenericWebPreviewDesiredStateEnvelope,
@@ -1649,18 +1728,9 @@ class OdooPreviewVerificationRequest(BaseModel):
     @field_validator("checked_urls", mode="before")
     @classmethod
     def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
-        if value is None:
-            return ()
-        if isinstance(value, (list, tuple)):
-            raw_values = tuple(value)
-        else:
-            raise ValueError("Odoo preview verification checked_urls must be a list.")
-        if any(not isinstance(item, str) for item in raw_values):
-            raise ValueError("Odoo preview verification checked_urls must be strings.")
-        checked_urls = tuple(item.strip() for item in cast(tuple[str, ...], raw_values))
-        if any(not item for item in checked_urls):
-            raise ValueError("Odoo preview verification checked_urls cannot contain blanks.")
-        return checked_urls
+        return _normalize_preview_verification_checked_urls(
+            value, label="Odoo preview verification"
+        )
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooPreviewVerificationRequest":
@@ -1705,6 +1775,19 @@ _ODOO_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-verification",
     envelope_model=OdooPreviewVerificationEnvelope,
     denial_message="Workflow cannot write Odoo preview verification for the requested product/context.",
+)
+
+_PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset(
+    {
+        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+        _ODOO_PREVIEW_VERIFICATION_ROUTE.route_path,
+    }
+)
+_GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
+    _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS | _PREVIEW_VERIFICATION_ROUTE_PATHS
+)
+_GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
+    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
 
 
@@ -1782,6 +1865,21 @@ def _normalize_release_status(value: object, *, label: str) -> ReleaseStatus:
     if normalized in {"pending", "in_progress", "in-progress"}:
         return "pending"
     raise ValueError(f"{label} must be pass, fail, skipped, or pending.")
+
+
+def _normalize_preview_verification_checked_urls(value: object, *, label: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        raw_values = tuple(value)
+    else:
+        raise ValueError(f"{label} checked_urls must be a list.")
+    if any(not isinstance(item, str) for item in raw_values):
+        raise ValueError(f"{label} checked_urls must be strings.")
+    checked_urls = tuple(item.strip() for item in cast(tuple[str, ...], raw_values))
+    if any(not item for item in checked_urls):
+        raise ValueError(f"{label} checked_urls cannot contain blanks.")
+    return checked_urls
 
 
 class VeriReelTestingVerificationRequest(BaseModel):
@@ -4708,6 +4806,7 @@ def _accepted_payload(
         "preview_generation_id",
         "verification_status",
         "verified_at",
+        "generic_web_preview_verification",
         "odoo_preview_verification",
         "request_id",
         "feedback_id",
@@ -4725,7 +4824,7 @@ def _accepted_payload(
     for key, value in result.items():
         if key not in record_keys:
             continue
-        if key == "odoo_preview_verification" and isinstance(value, dict):
+        if key.endswith("_preview_verification") and isinstance(value, dict):
             records[key] = value
             continue
         records[key] = str(value)
@@ -6994,75 +7093,30 @@ def _apply_verireel_preview_verification_records(
     record_store: object,
     request: VeriReelPreviewVerificationRequest,
 ) -> dict[str, object]:
-    typed_record_store = _preview_generation_mutation_store(record_store)
-    preview = find_preview_record(
-        record_store=typed_record_store,
-        context_name=request.context,
+    generic_request = GenericWebPreviewVerificationRequest(
+        context=request.context,
         anchor_repo=request.anchor_repo,
         anchor_pr_number=request.anchor_pr_number,
+        verification_status=cast(ReleaseStatus, request.verification_status),
+        verified_at=request.verified_at,
+        failure_summary=request.failure_summary,
     )
-    if preview is None:
-        raise click.ClickException(
-            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
-        )
-    generation_id = preview.latest_generation_id or preview.active_generation_id
-    if not generation_id:
-        raise click.ClickException(
-            f"No Launchplane preview generation found for {preview.preview_id}."
-        )
-    generation = typed_record_store.read_preview_generation_record(generation_id)
-    verified_at = request.verified_at.strip()
-    verification_passed = request.verification_status.strip() == "pass"
-    failure_summary = request.failure_summary.strip() or "Preview E2E verification failed."
-    result = apply_launchplane_generation_evidence(
+    return _apply_generic_web_preview_verification_records(
         control_plane_root_path=control_plane_root_path,
-        record_store=typed_record_store,
-        preview_request=PreviewMutationRequest(
-            context=preview.context,
-            anchor_repo=preview.anchor_repo,
-            anchor_pr_number=preview.anchor_pr_number,
-            anchor_pr_url=preview.anchor_pr_url,
-            canonical_url=preview.canonical_url,
-            state="active" if verification_passed else "failed",
-            created_at=preview.created_at,
-            updated_at=verified_at,
-            eligible_at=preview.eligible_at,
-        ),
-        generation_request=PreviewGenerationMutationRequest(
-            context=preview.context,
-            anchor_repo=preview.anchor_repo,
-            anchor_pr_number=preview.anchor_pr_number,
-            anchor_pr_url=preview.anchor_pr_url,
-            anchor_head_sha=generation.anchor_summary.head_sha,
-            sequence=generation.sequence,
-            generation_id=generation.generation_id,
-            state="ready" if verification_passed else "failed",
-            requested_reason=generation.requested_reason,
-            requested_at=generation.requested_at,
-            started_at=generation.started_at,
-            ready_at=verified_at if verification_passed else "",
-            finished_at=verified_at,
-            failed_at="" if verification_passed else verified_at,
-            resolved_manifest_fingerprint=generation.resolved_manifest_fingerprint,
-            artifact_id=generation.artifact_id,
-            baseline_release_tuple_id=generation.baseline_release_tuple_id,
-            source_map=generation.source_map,
-            companion_summaries=generation.companion_summaries,
-            deploy_status=generation.deploy_status,
-            verify_status="pass" if verification_passed else "fail",
-            overall_health_status="pass" if verification_passed else "fail",
-            failure_stage="" if verification_passed else "verify",
-            failure_summary="" if verification_passed else failure_summary,
-        ),
+        record_store=record_store,
+        request=generic_request,
+        result_key="verireel_preview_verification",
+        default_failure_summary="Preview E2E verification failed.",
     )
-    return result
 
 
-def _apply_odoo_preview_verification_records(
+def _apply_generic_web_preview_verification_records(
     *,
     control_plane_root_path: Path,
     record_store: object,
-    request: OdooPreviewVerificationRequest,
+    request: GenericWebPreviewVerificationRequest,
+    result_key: str = "generic_web_preview_verification",
+    default_failure_summary: str = "Preview verification failed.",
 ) -> dict[str, object]:
     typed_record_store = _preview_generation_mutation_store(record_store)
     preview = find_preview_record(
@@ -7083,7 +7137,9 @@ def _apply_odoo_preview_verification_records(
     generation = typed_record_store.read_preview_generation_record(generation_id)
     verified_at = request.verified_at.strip()
     verification_passed = request.verification_status == "pass"
-    failure_summary = request.failure_summary.strip() or "Odoo preview verification failed."
+    failure_summary = request.failure_summary.strip() or default_failure_summary
+    preview_state: PreviewState = "active" if verification_passed else "failed"
+    generation_state: PreviewGenerationState = "ready" if verification_passed else "failed"
     result = apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
         record_store=typed_record_store,
@@ -7093,7 +7149,7 @@ def _apply_odoo_preview_verification_records(
             anchor_pr_number=preview.anchor_pr_number,
             anchor_pr_url=preview.anchor_pr_url,
             canonical_url=preview.canonical_url,
-            state="active" if verification_passed else "failed",
+            state=preview_state,
             created_at=preview.created_at,
             updated_at=verified_at,
             eligible_at=preview.eligible_at,
@@ -7106,7 +7162,7 @@ def _apply_odoo_preview_verification_records(
             anchor_head_sha=generation.anchor_summary.head_sha,
             sequence=generation.sequence,
             generation_id=generation.generation_id,
-            state="ready" if verification_passed else "failed",
+            state=generation_state,
             requested_reason=generation.requested_reason,
             requested_at=generation.requested_at,
             started_at=generation.started_at,
@@ -7125,9 +7181,7 @@ def _apply_odoo_preview_verification_records(
             failure_summary="" if verification_passed else failure_summary,
         ),
     )
-    preview_state = "active" if verification_passed else "failed"
-    generation_state = "ready" if verification_passed else "failed"
-    verification_result = OdooPreviewVerificationResult(
+    verification_result = GenericWebPreviewVerificationResult(
         preview_id=preview.preview_id,
         preview_generation_id=generation.generation_id,
         preview_state=preview_state,
@@ -7142,6 +7196,53 @@ def _apply_odoo_preview_verification_records(
     result["preview_generation_id"] = generation.generation_id
     result["verification_status"] = request.verification_status
     result["verified_at"] = verified_at
+    result[result_key] = verification_result.model_dump(mode="json")
+    return result
+
+
+def _apply_odoo_preview_verification_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: OdooPreviewVerificationRequest,
+) -> dict[str, object]:
+    generic_request = GenericWebPreviewVerificationRequest(
+        context=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+        verification_status=request.verification_status,
+        verified_at=request.verified_at,
+        checked_urls=request.checked_urls,
+        timeout_seconds=request.timeout_seconds,
+        failure_summary=request.failure_summary,
+    )
+    result = _apply_generic_web_preview_verification_records(
+        control_plane_root_path=control_plane_root_path,
+        record_store=record_store,
+        request=generic_request,
+        result_key="odoo_preview_verification",
+        default_failure_summary="Odoo preview verification failed.",
+    )
+    preview_generation_id = str(result["preview_generation_id"])
+    preview_state = str(result["preview_state"])
+    generation_state = "ready" if request.verification_status == "pass" else "failed"
+    verification_result = OdooPreviewVerificationResult(
+        preview_id=str(result["preview_id"]),
+        preview_generation_id=preview_generation_id,
+        preview_state=preview_state,
+        generation_state=generation_state,
+        verification_status=request.verification_status,
+        verified_at=request.verified_at.strip(),
+        checked_urls=request.checked_urls,
+        timeout_seconds=request.timeout_seconds if request.checked_urls else None,
+        failure_summary=(
+            ""
+            if request.verification_status == "pass"
+            else str(
+                cast(dict[str, object], result["odoo_preview_verification"])["failure_summary"]
+            )
+        ),
+    )
     result["odoo_preview_verification"] = verification_result.model_dump(mode="json")
     return result
 
@@ -11546,6 +11647,42 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
+            elif path == _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path:
+                generic_web_preview_verification_request = (
+                    _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
+                )
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=generic_web_preview_verification_request.product,
+                )
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=profile.product,
+                    context=generic_web_preview_verification_request.verification.context,
+                    denial_message=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _apply_generic_web_preview_verification_records(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    request=generic_web_preview_verification_request.verification,
+                )
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
                 odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(
                     payload
