@@ -151,11 +151,17 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
         self.assertNotIn("preview_refresh", actions)
+        self.assertNotIn("preview_verification", actions)
         self.assertEqual(
             route_aliases["preview_refresh"].route_path,
             "/v1/drivers/odoo/preview-refresh",
         )
         self.assertFalse(route_aliases["preview_refresh"].operator_visible)
+        self.assertEqual(
+            route_aliases["preview_verification"].route_path,
+            "/v1/drivers/odoo/preview-verification",
+        )
+        self.assertFalse(route_aliases["preview_verification"].operator_visible)
         self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
@@ -175,7 +181,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["preview_destroy"].safety, "destructive")
         self.assertEqual(
             actions["preview_verification"].route_path,
-            "/v1/drivers/odoo/preview-verification",
+            "/v1/drivers/generic-web/preview-verification",
         )
 
     def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
@@ -463,6 +469,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ].action_id,
             "preview_refresh",
         )
+        self.assertEqual(
+            control_plane_service._driver_route_metadata_from_descriptors()[
+                "/v1/drivers/odoo/preview-verification"
+            ].action_id,
+            "preview_verification",
+        )
+        self.assertIs(
+            control_plane_service._ODOO_PREVIEW_VERIFICATION_ROUTE.envelope_model,
+            control_plane_service.OdooPreviewVerificationEnvelope,
+        )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",
             route_metadata_by_action={
@@ -470,11 +486,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._ODOO_PREVIEW_APPLY_ROUTE,
                     control_plane_service.OdooPreviewApplyEnvelope,
                     "apply Odoo preview",
-                ),
-                "preview_verification": (
-                    control_plane_service._ODOO_PREVIEW_VERIFICATION_ROUTE,
-                    control_plane_service.OdooPreviewVerificationEnvelope,
-                    "Odoo preview verification",
                 ),
             },
         )
