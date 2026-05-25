@@ -289,14 +289,15 @@ The HTTP service admits product-driver POST routes from descriptor action route
 paths and reads product-driver handler authorization actions from descriptor
 route metadata, so new drivers do not need a second hardcoded router allowlist
 or authz-action entry.
-The same route metadata also drives product-driver compatibility checks. A
+Descriptor route metadata and service compatibility policy also drive
+product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
-shared preview routes when its profile owns the requested preview context, which
-keeps reusable preview plumbing in Launchplane instead of copied into every site
-repo. Base-driver compatibility is route-scoped: stable deploy and promotion
-routes require the profile's concrete `driver_id` to match the requested driver,
-so Odoo or other generic-web-based products do not inherit generic-web stable
-mutation authority.
+shared lifecycle routes when its profile owns the requested stable lane or
+preview context, which keeps reusable deploy, promotion, workflow-dispatch, and
+preview plumbing in Launchplane instead of copied into every site repo.
+Base-driver compatibility stays route-scoped: products only inherit descriptor
+routes that are part of the base driver contract, while child-driver routes keep
+their concrete product-specific admission and authorization checks.
 
 Preview read models are capability-driven. A driver that exposes
 `previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the

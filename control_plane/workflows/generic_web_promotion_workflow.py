@@ -10,6 +10,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
 BumpLevel = Literal["patch", "minor", "major"]
@@ -61,6 +62,11 @@ def dispatch_generic_web_promotion_workflow(
 ) -> GenericWebPromotionWorkflowResult:
     if profile.product.strip() != request.product:
         raise click.ClickException("Generic-web promotion workflow product does not match profile.")
+    if not product_profile_uses_generic_web_base(profile):
+        raise click.ClickException(
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
+        )
     contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
     if request.context not in contexts:
         raise click.ClickException(
@@ -78,7 +84,7 @@ def dispatch_generic_web_promotion_workflow(
     workflow = profile.promotion_workflow
     workflow_id = workflow.workflow_id.strip()
     ref = workflow.ref.strip()
-    bump = _normalize_bump(request.bump or workflow.default_bump.strip())
+    bump = _normalize_bump(request.bump if request.bump is not None else workflow.default_bump)
     previous_run_ids = _workflow_dispatch_run_ids(
         owner=owner,
         repo=repo,
@@ -237,9 +243,11 @@ def _workflow_dispatch_runs(
 
 def _repository_parts(repository: str) -> tuple[str, str]:
     owner, separator, repo = repository.strip().partition("/")
-    if not separator or not owner.strip() or not repo.strip() or "/" in repo.strip():
+    owner = owner.strip()
+    repo = repo.strip()
+    if not separator or not owner or not repo or "/" in repo:
         raise click.ClickException("GitHub repository must use owner/repo format.")
-    return owner.strip(), repo.strip()
+    return owner, repo
 
 
 def _string_value(value: object) -> str:

@@ -270,6 +270,7 @@ def execute_generic_web_prod_promotion(
             timeout_seconds=request.timeout_seconds,
             no_cache=request.no_cache,
         ),
+        profile=profile,
         lane=destination_lane,
     )
     deployment_record = _read_deployment_record(
@@ -443,7 +444,10 @@ def _validate_source_inventory_matches_request(
     inventory_artifact_id = ""
     if source_inventory.artifact_identity is not None:
         inventory_artifact_id = source_inventory.artifact_identity.artifact_id.strip()
-    if inventory_artifact_id != request.artifact_id or source_inventory.source_git_ref != request.source_git_ref:
+    if (
+        inventory_artifact_id != request.artifact_id
+        or source_inventory.source_git_ref != request.source_git_ref
+    ):
         raise click.ClickException(
             "Generic web prod promotion request does not match current source inventory. "
             f"Inventory artifact={inventory_artifact_id or '<missing>'} "

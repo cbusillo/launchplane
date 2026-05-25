@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import (
@@ -79,9 +80,10 @@ def resolve_generic_web_profile_lane(
     *, record_store: GenericWebDeployStore, request: GenericWebDeployRequest
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
     profile = record_store.read_product_profile_record(request.product)
-    if profile.driver_id != "generic-web":
+    if not product_profile_uses_generic_web_base(profile):
         raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, not generic-web."
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
         )
     for lane in profile.lanes:
         if lane.instance == request.instance:
@@ -89,6 +91,16 @@ def resolve_generic_web_profile_lane(
     raise click.ClickException(
         f"Product {profile.product!r} has no generic-web lane for instance {request.instance!r}."
     )
+
+
+def product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileRecord) -> bool:
+    driver_id = profile.driver_id.strip()
+    if driver_id == "generic-web":
+        return True
+    try:
+        return read_driver_descriptor(driver_id).base_driver_id == "generic-web"
+    except FileNotFoundError:
+        return False
 
 
 def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTargetType) -> str:

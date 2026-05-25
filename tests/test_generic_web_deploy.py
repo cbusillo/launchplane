@@ -39,12 +39,12 @@ class _GenericWebDeployStore:
         self.inventories.append(record)
 
 
-def _profile() -> LaunchplaneProductProfileRecord:
+def _profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="sellyouroutboard",
         display_name="SellYourOutboard.com",
         repository="cbusillo/sellyouroutboard",
-        driver_id="generic-web",
+        driver_id=driver_id,
         image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
         runtime_port=3000,
         health_path="/api/health",
@@ -256,6 +256,20 @@ class GenericWebDeployTests(unittest.TestCase):
             resolve_generic_web_profile_lane(record_store=store, request=_request(instance="prod"))
 
         self.assertEqual(store.deployments, [])
+
+    def test_resolve_generic_web_profile_lane_accepts_based_driver(self) -> None:
+        store = _GenericWebDeployStore(_profile(driver_id="odoo"))
+
+        profile, lane = resolve_generic_web_profile_lane(record_store=store, request=_request())
+
+        self.assertEqual(profile.driver_id, "odoo")
+        self.assertEqual(lane.instance, "testing")
+
+    def test_resolve_generic_web_profile_lane_rejects_unbased_driver(self) -> None:
+        store = _GenericWebDeployStore(_profile(driver_id="missing-driver"))
+
+        with self.assertRaises(click.ClickException):
+            resolve_generic_web_profile_lane(record_store=store, request=_request())
 
 
 if __name__ == "__main__":

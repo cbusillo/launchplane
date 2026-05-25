@@ -1135,12 +1135,22 @@ _PREVIEW_READINESS_ROUTE_PATHS = frozenset(
 _PREVIEW_DESTROY_ROUTE_PATHS = frozenset(
     {_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path, _ODOO_PREVIEW_DESTROY_ROUTE.route_path}
 )
+_GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
+    {
+        _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+    }
+)
 _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     _PREVIEW_DESIRED_STATE_ROUTE_PATHS
     | _PREVIEW_INVENTORY_ROUTE_PATHS
     | _PREVIEW_REFRESH_ROUTE_PATHS
     | _PREVIEW_READINESS_ROUTE_PATHS
     | _PREVIEW_DESTROY_ROUTE_PATHS
+)
+_GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
+    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
 
 
@@ -6141,7 +6151,10 @@ def _product_driver_compatible(
     profile_driver_id = profile.driver_id.strip()
     if profile_driver_id == expected:
         return True
-    descriptor = read_driver_descriptor(profile_driver_id)
+    try:
+        descriptor = read_driver_descriptor(profile_driver_id)
+    except FileNotFoundError:
+        return False
     return descriptor.base_driver_id == expected
 
 
@@ -6150,12 +6163,9 @@ def _product_driver_route_compatible(
 ) -> bool:
     if profile.driver_id.strip() == expected_driver_id.strip():
         return True
-    return (
-        route_path in _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
-        and _product_driver_compatible(
-            profile=profile,
-            expected_driver_id=expected_driver_id,
-        )
+    return route_path in _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS and _product_driver_compatible(
+        profile=profile,
+        expected_driver_id=expected_driver_id,
     )
 
 
