@@ -405,6 +405,27 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             writes_records=("preview",),
         ),
     ),
+    setting_groups=(
+        DriverSettingGroupDescriptor(
+            group_id="preview_runtime_environment",
+            label="Preview runtime environment",
+            description=(
+                "DB-backed preview routing and runtime settings shared by generic-web "
+                "preview lifecycle actions."
+            ),
+            scope="context",
+            fields=(
+                "LAUNCHPLANE_PREVIEW_BASE_URL",
+                "preview.required_template_env_keys",
+                "preview.copied_env_keys",
+                "preview.omitted_env_keys",
+                "preview.override_env",
+                "preview.preview_url_env_keys",
+                "preview.preview_domain_env_keys",
+            ),
+            secret_bindings=("preview.copied_env_keys",),
+        ),
+    ),
 )
 
 

@@ -22514,6 +22514,123 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(destroy_request.anchor_repo, "video-site")
         self.assertEqual(updated_preview.state, "destroyed")
 
+    def test_preview_lifecycle_cleanup_endpoint_uses_generic_base_for_odoo_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _odoo_preview_profile_payload(product="odoo-tenant-cm")
+            profile_payload["preview"] = {
+                "enabled": True,
+                "context": "cm",
+                "slug_template": "odoo-pr-{number}",
+                "app_name_prefix": "cm-odoo-preview",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-cm-odoo-tenant-cm-pr-41",
+                    context="cm",
+                    anchor_repo="odoo-tenant-cm",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/cbusillo/odoo-tenant-cm/pull/41",
+                    preview_label="odoo-tenant-cm/pr-41",
+                    canonical_url="https://odoo-pr-41.preview.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-cm-20260429T195838Z",
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    planned_at="2026-04-29T19:58:38Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-cm-20260429T195837Z",
+                    actual_slugs=("odoo-pr-41",),
+                    orphaned_slugs=("odoo-pr-41",),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview-janitor.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_generic_web_preview_destroy",
+                return_value=GenericWebPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-04-29T20:00:00Z",
+                    destroy_finished_at="2026-04-29T20:00:05Z",
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    preview_slug="odoo-pr-41",
+                    application_name="cm-odoo-preview-odoo-pr-41",
+                    application_id="app-41",
+                ),
+            ) as execute_generic_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/lifecycle-cleanup",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "plan_id": "preview-lifecycle-plan-cm-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                        "destroy_reason": "external_preview_janitor_cleanup_completed",
+                    },
+                )
+
+            updated_preview = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-cm-odoo-tenant-cm-pr-41"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["destroyed_slugs"], ["odoo-pr-41"])
+        execute_generic_mock.assert_called_once()
+        destroy_request = execute_generic_mock.call_args.kwargs["request"]
+        self.assertEqual(destroy_request.product, "odoo-tenant-cm")
+        self.assertEqual(destroy_request.preview_slug, "odoo-pr-41")
+        self.assertEqual(updated_preview.state, "destroyed")
+
     def test_preview_lifecycle_cleanup_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
