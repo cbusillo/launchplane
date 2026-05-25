@@ -1222,7 +1222,8 @@ preview targets while the isolated runtime migration is being exercised.
 
 For
 Odoo preview smoke follow-ups, `POST /v1/drivers/odoo/preview-verification`
-accepts the product, context, anchor repo/PR, `verification_status`,
+remains a compatibility alias for the generic-web preview verification action.
+It accepts the product, context, anchor repo/PR, `verification_status`,
 `verified_at`, optional checked URLs as an explicit list plus
 `timeout_seconds`, and an optional failure summary, then marks the latest preview
 generation ready or failed. Scalar or object-shaped `checked_urls` payloads are

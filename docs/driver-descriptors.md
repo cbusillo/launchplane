@@ -162,12 +162,13 @@ workflows: `POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-refresh`,
 `POST /v1/drivers/odoo/preview-inventory`,
 `POST /v1/drivers/odoo/preview-readiness`, and
-`POST /v1/drivers/odoo/preview-destroy`. New product workflows should use the
-generic-web routes for generic lifecycle evidence unless the product driver
-documents a narrower product-specific contract. The Odoo-specific
-`POST /v1/drivers/odoo/preview-verification` route remains a driver action
-because it returns the typed `odoo_preview_verification` response shape. The lower-level
-`POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
+`POST /v1/drivers/odoo/preview-destroy`. Odoo preview verification is also a
+non-operator route alias: it keeps the typed `odoo_preview_verification`
+response shape for existing workflows while the advertised action and durable
+record mutation belong to generic-web preview verification. New product
+workflows should use the generic-web routes for generic lifecycle evidence
+unless the product driver documents a narrower product-specific contract. The
+lower-level `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
 Dokploy plan to provider state after service authorization and idempotency
 checks. The route resolves runtime env values from Launchplane-owned
 runtime-environment records and managed secret overlays, derives preview-specific
