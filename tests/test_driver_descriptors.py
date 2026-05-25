@@ -19,6 +19,7 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.drivers import registry
 from control_plane.drivers.registry import (
     build_driver_context_view,
+    effective_driver_actions,
     list_driver_descriptors,
     read_driver_descriptor,
 )
@@ -140,20 +141,41 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_odoo_descriptor_marks_prod_rollback_as_destructive(self) -> None:
         descriptor = read_driver_descriptor("odoo")
         actions = {action.action_id: action for action in descriptor.actions}
+        route_aliases = {
+            route_alias.action_id: route_alias for route_alias in descriptor.route_aliases
+        }
 
         self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
         self.assertEqual(actions["prod_promotion"].safety, "mutation")
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
-        self.assertEqual(actions["preview_refresh"].route_path, "/v1/drivers/odoo/preview-refresh")
-        self.assertEqual(actions["preview_refresh"].scope, "preview")
-        self.assertEqual(actions["preview_inventory"].safety, "safe_write")
-        self.assertEqual(actions["preview_destroy"].safety, "destructive")
+        self.assertNotIn("preview_refresh", actions)
+        self.assertEqual(
+            route_aliases["preview_refresh"].route_path,
+            "/v1/drivers/odoo/preview-refresh",
+        )
+        self.assertFalse(route_aliases["preview_refresh"].operator_visible)
         self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
             "/v1/drivers/odoo/stable-bootstrap",
+        )
+
+    def test_effective_odoo_actions_inherit_generic_web_preview_routes(self) -> None:
+        descriptor = read_driver_descriptor("odoo")
+        actions = {action.action_id: action for action in effective_driver_actions(descriptor)}
+
+        self.assertEqual(
+            actions["preview_refresh"].route_path,
+            "/v1/drivers/generic-web/preview-refresh",
+        )
+        self.assertEqual(actions["preview_refresh"].scope, "preview")
+        self.assertEqual(actions["preview_inventory"].safety, "safe_write")
+        self.assertEqual(actions["preview_destroy"].safety, "destructive")
+        self.assertEqual(
+            actions["preview_verification"].route_path,
+            "/v1/drivers/odoo/preview-verification",
         )
 
     def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
@@ -237,14 +259,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_driver_actions_declare_route_authorization_metadata(self) -> None:
-        route_actions = {
-            action.route_path: action
-            for descriptor in list_driver_descriptors()
-            for action in descriptor.actions
-            if action.route_path
-        }
+        route_actions = control_plane_service._driver_route_metadata_from_descriptors()
 
-        self.assertTrue(all(action.authz_action for action in route_actions.values()))
+        self.assertTrue(
+            all(route_metadata.authz_action for route_metadata in route_actions.values())
+        )
         self.assertEqual(
             route_actions["/v1/drivers/verireel/testing-verification"].authz_action,
             "deployment.write",
@@ -284,6 +303,19 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             for action in descriptor.actions
             if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
         }
+        descriptor_post_route_metadata.update(
+            {
+                route_alias.route_path: (
+                    descriptor.driver_id,
+                    route_alias.action_id,
+                    route_alias.authz_action,
+                )
+                for descriptor in list_driver_descriptors()
+                for route_alias in descriptor.route_aliases
+                if route_alias.method == "POST"
+                and route_alias.route_path.startswith("/v1/drivers/")
+            }
+        )
         service_route_metadata = control_plane_service._driver_route_metadata_from_descriptors()
 
         self.assertTrue(descriptor_post_route_metadata)
@@ -407,38 +439,24 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:
+        self.assertEqual(
+            control_plane_service._driver_route_metadata_from_descriptors()[
+                "/v1/drivers/odoo/preview-refresh"
+            ].action_id,
+            "preview_refresh",
+        )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",
             route_metadata_by_action={
-                "preview_desired_state": (
-                    control_plane_service._ODOO_PREVIEW_DESIRED_STATE_ROUTE,
-                    control_plane_service.GenericWebPreviewDesiredStateEnvelope,
-                    "Odoo preview desired state",
-                ),
-                "preview_inventory": (
-                    control_plane_service._ODOO_PREVIEW_INVENTORY_ROUTE,
-                    control_plane_service.GenericWebPreviewInventoryEnvelope,
-                    "Odoo preview inventory",
-                ),
-                "preview_refresh": (
-                    control_plane_service._ODOO_PREVIEW_REFRESH_ROUTE,
-                    control_plane_service.GenericWebPreviewRefreshEnvelope,
-                    "refresh Odoo",
-                ),
-                "preview_readiness": (
-                    control_plane_service._ODOO_PREVIEW_READINESS_ROUTE,
-                    control_plane_service.GenericWebPreviewReadinessEnvelope,
-                    "Odoo preview readiness",
-                ),
-                "preview_destroy": (
-                    control_plane_service._ODOO_PREVIEW_DESTROY_ROUTE,
-                    control_plane_service.GenericWebPreviewDestroyEnvelope,
-                    "destroy Odoo",
-                ),
                 "preview_apply": (
                     control_plane_service._ODOO_PREVIEW_APPLY_ROUTE,
                     control_plane_service.OdooPreviewApplyEnvelope,
                     "apply Odoo preview",
+                ),
+                "preview_verification": (
+                    control_plane_service._ODOO_PREVIEW_VERIFICATION_ROUTE,
+                    control_plane_service.OdooPreviewVerificationEnvelope,
+                    "Odoo preview verification",
                 ),
             },
         )
@@ -593,7 +611,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             ),
         )
 
-        with patch.object(registry, "_DESCRIPTORS", (descriptor,)):
+        with patch.object(registry, "_DESCRIPTORS", (registry.GENERIC_WEB_DRIVER, descriptor)):
             view = build_driver_context_view(
                 record_store=_PreviewStore(),
                 context_name="custom-web-preview",
@@ -623,10 +641,24 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertIn("odoo-tenant-cm", drivers)
         self.assertEqual(drivers["odoo-tenant-cm"].descriptor.base_driver_id, "generic-web")
         inherited_actions = {
-            action.action_id for action in drivers["odoo-tenant-cm"].available_actions
+            action.action_id: action for action in drivers["odoo-tenant-cm"].available_actions
         }
-        self.assertIn("stable_deploy", inherited_actions)
-        self.assertIn("prod_promotion", inherited_actions)
+        self.assertEqual(
+            inherited_actions["stable_deploy"].route_path,
+            "/v1/drivers/generic-web/deploy",
+        )
+        self.assertEqual(
+            inherited_actions["prod_promotion"].route_path,
+            "/v1/drivers/generic-web/prod-promotion",
+        )
+        self.assertEqual(
+            inherited_actions["preview_refresh"].route_path,
+            "/v1/drivers/generic-web/preview-refresh",
+        )
+        self.assertEqual(
+            inherited_actions["preview_verification"].route_path,
+            "/v1/drivers/generic-web/preview-verification",
+        )
 
     def test_unknown_driver_descriptor_is_missing(self) -> None:
         with self.assertRaises(FileNotFoundError):
