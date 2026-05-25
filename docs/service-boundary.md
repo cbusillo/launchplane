@@ -95,6 +95,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
   - `POST /v1/drivers/generic-web/preview-readiness`
+  - `POST /v1/drivers/generic-web/preview-verification`
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
