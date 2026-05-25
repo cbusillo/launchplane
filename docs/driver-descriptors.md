@@ -119,6 +119,14 @@ prod inventory after successful verified deploys. Product-specific drivers such
 as VeriReel or Odoo can wrap this common action when they need additional gates
 such as backups, migrations, rollout checks, or tenant-specific validation.
 
+The `prod_rollback_plan` action routes to
+`POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
+Launchplane reads the product profile, destination lane, selected deployment
+record, and optional backup gate evidence, then writes a
+`GenericWebRollbackPlanRecord`. It does not mutate the provider. A future
+explicit apply action can consume a ready plan and call the normal generic-web
+deploy path.
+
 The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
 deployment record, optional promotion record, checked URLs, and pass/fail status;

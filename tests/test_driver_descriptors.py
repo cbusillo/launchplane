@@ -209,6 +209,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
         self.assertEqual(actions["stable_deploy"].safety, "mutation")
         self.assertEqual(
+            actions["prod_rollback_plan"].route_path,
+            "/v1/drivers/generic-web/prod-rollback-plan",
+        )
+        self.assertEqual(actions["prod_rollback_plan"].safety, "safe_write")
+        self.assertEqual(
             actions["stable_verification"].route_path,
             "/v1/drivers/generic-web/stable-verification",
         )
@@ -374,6 +379,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
                     control_plane_service.GenericWebPromotionWorkflowEnvelope,
                     "prod promotion workflow",
+                ),
+                "prod_rollback_plan": (
+                    control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
+                    control_plane_service.GenericWebRollbackPlanEnvelope,
+                    "rollback",
                 ),
                 "stable_verification": (
                     control_plane_service._GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
