@@ -552,6 +552,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                 in {
                     "generic_web_prod_promotion.dispatch",
                     "generic_web_prod_promotion.execute",
+                    "generic_web_prod_rollback.plan",
                 }
                 and context == "example-site-prod"
             )
@@ -565,7 +566,51 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         actions = {action.action_id: action for action in overview.available_actions}
         self.assertTrue(actions["prod_promotion_workflow"].enabled)
         self.assertTrue(actions["prod_promotion"].enabled)
+        self.assertTrue(actions["prod_rollback_plan"].enabled)
         self.assertFalse(actions["preview_refresh"].enabled)
+
+    def test_odoo_product_site_overview_uses_prod_context_for_inherited_rollback_plan(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
+        seen_contexts: list[tuple[str, str]] = []
+
+        def action_allowed(action: str, _product: str, context: str) -> bool:
+            if action == "generic_web_prod_rollback.plan":
+                seen_contexts.append((action, context))
+                return context == "cm"
+            return True
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=action_allowed,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertEqual(
+            actions["prod_rollback_plan"].route_path,
+            "/v1/drivers/generic-web/prod-rollback-plan",
+        )
+        self.assertTrue(actions["prod_rollback_plan"].enabled)
+        self.assertTrue(seen_contexts)
+        self.assertEqual({context for _action, context in seen_contexts}, {"cm"})
+
+    def test_inherited_rollback_plan_is_disabled_without_prod_lane(self) -> None:
+        payload = _odoo_profile_payload()
+        lanes = cast(tuple[dict[str, object], ...], payload["lanes"])
+        payload["lanes"] = tuple(lane for lane in lanes if lane["instance"] != "prod")
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertFalse(actions["prod_rollback_plan"].enabled)
+        self.assertIn("prod lane", actions["prod_rollback_plan"].disabled_reasons[0])
 
     def test_product_site_overview_uses_testing_context_for_deploy_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
