@@ -179,6 +179,14 @@ Launchplane deployment record selected as the rollback target, and optional
 backup-gate evidence, then writes a rollback-plan record. It does not mutate
 Dokploy or trigger a product workflow.
 
+Launchplane applies generic-web rollback through
+`POST /v1/drivers/generic-web/prod-rollback`. The apply route rebuilds and
+persists the rollback plan from current records, then calls the normal
+generic-web deploy path with the selected previous immutable artifact. Drivers
+such as Odoo can keep a product-specific rollback action while they still need
+extra gates around backups, release tuples, manifests, migrations, or post-deploy
+validation.
+
 Required planner input:
 
 - `product`

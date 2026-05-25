@@ -553,6 +553,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     "generic_web_prod_promotion.dispatch",
                     "generic_web_prod_promotion.execute",
                     "generic_web_prod_rollback.plan",
+                    "generic_web_prod_rollback.execute",
                 }
                 and context == "example-site-prod"
             )
@@ -567,6 +568,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(actions["prod_promotion_workflow"].enabled)
         self.assertTrue(actions["prod_promotion"].enabled)
         self.assertTrue(actions["prod_rollback_plan"].enabled)
+        self.assertTrue(actions["prod_rollback"].enabled)
         self.assertFalse(actions["preview_refresh"].enabled)
 
     def test_odoo_product_site_overview_uses_prod_context_for_inherited_rollback_plan(

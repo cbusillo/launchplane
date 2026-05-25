@@ -15,6 +15,7 @@ from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
 )
+from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.workflows.ship import utc_now_timestamp
 
 GenericWebRollbackPlanStatus = Literal["ready", "blocked"]
@@ -389,9 +390,10 @@ def _resolve_generic_web_profile_lane(
     instance: str,
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
     profile = record_store.read_product_profile_record(product)
-    if profile.driver_id != "generic-web":
+    if not _product_profile_uses_generic_web_base(profile):
         raise ValueError(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, not generic-web."
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
         )
     for lane in profile.lanes:
         if lane.instance == instance:
@@ -399,6 +401,16 @@ def _resolve_generic_web_profile_lane(
     raise ValueError(
         f"Product {profile.product!r} has no generic-web lane for instance {instance!r}."
     )
+
+
+def _product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileRecord) -> bool:
+    driver_id = profile.driver_id.strip()
+    if driver_id == "generic-web":
+        return True
+    try:
+        return read_driver_descriptor(driver_id).base_driver_id == "generic-web"
+    except FileNotFoundError:
+        return False
 
 
 def _immutable_artifact_id(
