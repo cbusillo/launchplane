@@ -35,6 +35,7 @@ class _CommandRunner:
         image_inventory: str | None = None,
         container_inventory: str | None = None,
         volume_inventory: str | None = None,
+        runner_workdir_bytes: int = 0,
     ) -> None:
         self.commands: list[tuple[str, ...]] = []
         self._prune_returncode = prune_returncode
@@ -82,6 +83,7 @@ class _CommandRunner:
                 }
             ]
         )
+        self._runner_workdir_bytes = runner_workdir_bytes
         self._pruned = False
         self.removed_volumes: list[str] = []
 
@@ -142,6 +144,14 @@ class _CommandRunner:
                     self.removed_volumes,
                 ),
             )
+        if command_tuple == (
+            "bash",
+            "-lc",
+            "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work "
+            "-exec du -sb {} + 2>/dev/null | "
+            "awk '{ total += $1 } END { print total + 0 }'",
+        ):
+            return RemoteCommandResult(returncode=0, stdout=f"{self._runner_workdir_bytes}\n")
         if command_tuple[:3] == ("docker", "image", "inspect"):
             if not self._pruned or self._image_present_after:
                 return RemoteCommandResult(returncode=0, stdout="[]\n")
@@ -315,6 +325,72 @@ class RunnerHostHygieneExecutorTests(unittest.TestCase):
                 "docker volume ls -q | xargs -r docker volume inspect",
             ),
             command_runner.commands,
+        )
+
+    def test_executor_records_runner_workdir_bytes(self) -> None:
+        command_runner = _CommandRunner(runner_workdir_bytes=12_345_678)
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=True),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "completed")
+        terminal_audit = audit_poster.audits[-1]
+        post_apply_report = terminal_audit.post_apply_report
+        self.assertIsNotNone(post_apply_report)
+        assert post_apply_report is not None
+        self.assertEqual(post_apply_report.runner_workdir_bytes, 12_345_678)
+
+    def test_executor_flags_orphan_buildkit_artifacts_from_live_evidence(self) -> None:
+        command_runner = _CommandRunner(
+            container_inventory=_json_lines(
+                {
+                    "ID": "buildkit-container",
+                    "Image": "moby/buildkit:buildx-stable-1",
+                    "ImageID": "sha256:buildkit-id",
+                    "Names": "buildx_buildkit_old0",
+                    "State": "exited",
+                    "Status": "Exited (0) 2 days ago",
+                }
+            ),
+            docker_verbose_summary=(
+                "Local Volumes space usage:\n\n"
+                "VOLUME NAME     LINKS     SIZE\n"
+                "buildx_buildkit_old0_state    0         12GB\n"
+                "Build cache usage: 1GB\n"
+            ),
+            volume_inventory=json.dumps(
+                [
+                    {
+                        "Driver": "local",
+                        "Labels": {},
+                        "Mountpoint": "/var/lib/docker/volumes/buildx_buildkit_old0_state/_data",
+                        "Name": "buildx_buildkit_old0_state",
+                        "UsageData": {"RefCount": 0, "Size": 12_000_000_000},
+                    }
+                ]
+            ),
+        )
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_host_hygiene_executor(
+            request=_request(mutate=False),
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "blocked")
+        planned_audit = audit_poster.audits[0]
+        pre_apply_report = planned_audit.pre_apply_report
+        self.assertEqual(pre_apply_report.status, "attention")
+        self.assertEqual(pre_apply_report.orphan_buildkit_containers, 1)
+        self.assertEqual(pre_apply_report.orphan_buildkit_volumes, 1)
+        self.assertIn(
+            "orphan_buildkit_present",
+            [finding.code for finding in pre_apply_report.findings],
         )
 
     def test_volume_usage_parser_accepts_documented_local_volume_header(

@@ -38,6 +38,11 @@ _DOCKER_LOCAL_VOLUME_USAGE_HEADERS = (
     "local volumes space usage:",
     "local volumes:",
 )
+_RUNNER_WORKDIR_BYTES_COMMAND = (
+    "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work "
+    "-exec du -sb {} + 2>/dev/null | "
+    "awk '{ total += $1 } END { print total + 0 }'"
+)
 _DOCKER_SIZE_UNITS = {
     "b": Decimal(1),
     "kb": Decimal(1000),
@@ -181,6 +186,7 @@ def execute_runner_host_hygiene_executor(
         policy=RunnerHostHygieneApplyPolicy(
             approved_hosts=(request.host_name,),
             required_retained_warm_builders=request.retained_warm_builders,
+            require_healthy_report=request.action != "remove_buildkit_state_volumes",
             allow_docker_cache_prune=request.action == "prune_docker_cache",
             allow_buildkit_state_volume_remove=(request.action == "remove_buildkit_state_volumes"),
             allowed_buildkit_state_volumes=request.allowed_buildkit_state_volumes,
@@ -333,6 +339,10 @@ def collect_runner_host_hygiene_report(
         request=request,
         remote_runner=remote_runner,
     )
+    container_inventory = _collect_container_inventory(
+        request=request,
+        remote_runner=remote_runner,
+    )
     volume_inventory = _collect_volume_inventory(
         request=request,
         remote_runner=remote_runner,
@@ -342,9 +352,15 @@ def collect_runner_host_hygiene_report(
         observed_at=utc_now_timestamp(),
         free_disk_bytes=_parse_df_available_bytes(df_result.stdout),
         docker_reclaimable_bytes=_parse_docker_system_df_reclaimable_bytes(docker_summary.stdout),
+        runner_workdir_bytes=_collect_runner_workdir_bytes(
+            request=request,
+            remote_runner=remote_runner,
+        ),
         warm_builders=warm_builders,
         image_inventory=image_inventory,
         volume_inventory=volume_inventory,
+        orphan_buildkit_containers=_count_orphan_buildkit_containers(container_inventory),
+        orphan_buildkit_volumes=_count_orphan_buildkit_volumes(volume_inventory),
         notes=(
             f"execution_lane={request.execution_lane}",
             f"service_user={request.service_user}",
@@ -554,11 +570,11 @@ def _collect_image_inventory(
     return tuple(inventory)
 
 
-def _collect_container_image_references(
+def _collect_container_inventory(
     *,
     request: RunnerHostHygieneExecutorRequest,
     remote_runner: RemoteCommandRunner,
-) -> set[str]:
+) -> tuple[dict[str, object], ...]:
     result = _require_remote_success(
         remote_runner(
             (
@@ -573,8 +589,22 @@ def _collect_container_image_references(
         ),
         evidence_name="container_inventory",
     )
+    return _parse_json_lines(result.stdout, evidence_name="container_inventory")
+
+
+def _collect_container_image_references(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> set[str]:
+    return _container_image_references(
+        _collect_container_inventory(request=request, remote_runner=remote_runner)
+    )
+
+
+def _container_image_references(rows: tuple[dict[str, object], ...]) -> set[str]:
     references: set[str] = set()
-    for row in _parse_json_lines(result.stdout, evidence_name="container_inventory"):
+    for row in rows:
         image = _docker_json_text(row, "Image").lower()
         image_id = _docker_json_text(row, "ImageID").removeprefix("sha256:").lower()
         if image:
@@ -582,6 +612,72 @@ def _collect_container_image_references(
         if image_id:
             references.add(image_id)
     return references
+
+
+def _count_orphan_buildkit_containers(rows: tuple[dict[str, object], ...]) -> int:
+    return sum(1 for row in rows if _is_orphan_buildkit_container(row))
+
+
+def _is_orphan_buildkit_container(row: Mapping[str, object]) -> bool:
+    name = _docker_json_text(row, "Names").lower()
+    image = _docker_json_text(row, "Image").lower()
+    state = _docker_json_text(row, "State").lower()
+    status = _docker_json_text(row, "Status").lower()
+    is_buildkit = name.startswith("buildx_buildkit_") or "buildkit" in image
+    if not is_buildkit:
+        return False
+    if state:
+        return state not in {"running", "restarting"}
+    return not status.startswith(("up ", "restarting"))
+
+
+def _count_orphan_buildkit_volumes(
+    volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...],
+) -> int:
+    return sum(
+        1
+        for volume in volume_inventory
+        if _is_buildkit_state_volume_name(volume.name)
+        and (volume.dangling or volume.referenced_by_containers == 0)
+    )
+
+
+def _collect_runner_workdir_bytes(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> int:
+    result = _require_remote_success(
+        remote_runner(
+            ("bash", "-lc", _RUNNER_WORKDIR_BYTES_COMMAND),
+            request.timeout_seconds,
+        ),
+        evidence_name="runner_workdir_bytes",
+    )
+    return _parse_non_negative_int_evidence(
+        result.stdout,
+        evidence_name="runner_workdir_bytes",
+    )
+
+
+def _is_buildkit_state_volume_name(value: str) -> bool:
+    return value.startswith("buildx_buildkit_") and value.endswith("_state")
+
+
+def _parse_non_negative_int_evidence(output: str, *, evidence_name: str) -> int:
+    stripped_output = output.strip()
+    if not stripped_output:
+        raise click.ClickException(f"runner host hygiene {evidence_name} evidence was empty")
+    first_line = stripped_output.splitlines()[0].strip()
+    try:
+        value = int(first_line)
+    except ValueError as error:
+        raise click.ClickException(
+            f"runner host hygiene {evidence_name} evidence was not an integer"
+        ) from error
+    if value < 0:
+        raise click.ClickException(f"runner host hygiene {evidence_name} evidence was negative")
+    return value
 
 
 def _collect_volume_inventory(
