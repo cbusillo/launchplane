@@ -203,6 +203,12 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
         self.assertEqual(actions["stable_deploy"].safety, "mutation")
         self.assertEqual(
+            actions["stable_verification"].route_path,
+            "/v1/drivers/generic-web/stable-verification",
+        )
+        self.assertEqual(actions["stable_verification"].safety, "safe_write")
+        self.assertFalse(actions["stable_verification"].operator_visible)
+        self.assertEqual(
             actions["preview_desired_state"].route_path,
             "/v1/drivers/generic-web/preview-desired-state",
         )
@@ -286,6 +292,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             route_actions["/v1/drivers/generic-web/preview-verification"].operator_visible
         )
         self.assertEqual(
+            route_actions["/v1/drivers/generic-web/stable-verification"].authz_action,
+            "deployment.write",
+        )
+        self.assertFalse(
+            route_actions["/v1/drivers/generic-web/stable-verification"].operator_visible
+        )
+        self.assertEqual(
             route_actions["/v1/drivers/odoo/preview-verification"].authz_action,
             "preview_generation.write",
         )
@@ -355,6 +368,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
                     control_plane_service.GenericWebPromotionWorkflowEnvelope,
                     "prod promotion workflow",
+                ),
+                "stable_verification": (
+                    control_plane_service._GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+                    control_plane_service.GenericWebStableVerificationEnvelope,
+                    "stable verification",
                 ),
                 "preview_desired_state": (
                     control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
@@ -650,6 +668,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(
             inherited_actions["prod_promotion"].route_path,
             "/v1/drivers/generic-web/prod-promotion",
+        )
+        self.assertEqual(
+            inherited_actions["stable_verification"].route_path,
+            "/v1/drivers/generic-web/stable-verification",
         )
         self.assertEqual(
             inherited_actions["preview_refresh"].route_path,

@@ -90,6 +90,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
   - `POST /v1/drivers/generic-web/prod-promotion-workflow`
+  - `POST /v1/drivers/generic-web/stable-verification`
   - `POST /v1/drivers/generic-web/preview-desired-state`
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
@@ -1229,12 +1230,14 @@ with the generation identity, final states, status, checked URLs, timeout, and
 failure summary. The route is safe-write evidence ingestion only; it does not
 mutate provider state.
 
-For stable Odoo smoke follow-ups, `POST /v1/drivers/odoo/stable-verification`
-accepts the product, context, instance, deployment record, optional promotion
-record, checked URLs, `verification_status`, `verified_at`, and optional failure
-summary. Launchplane updates deployment health evidence and, when a promotion
-record is supplied, promotion/inventory evidence. The route is safe-write
-evidence ingestion only; it does not mutate provider state.
+For stable smoke follow-ups,
+`POST /v1/drivers/generic-web/stable-verification` accepts the product, context,
+instance, deployment record, optional promotion record, checked URLs,
+`verification_status`, `verified_at`, and optional failure summary. Launchplane
+updates deployment health evidence and, when a promotion record is supplied,
+promotion/inventory evidence. Product-shaped routes such as
+`POST /v1/drivers/odoo/stable-verification` remain compatibility aliases. The
+route is safe-write evidence ingestion only; it does not mutate provider state.
 
 `POST /v1/evidence/previews/generations`
 
