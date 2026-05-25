@@ -1037,6 +1037,8 @@ def _product_action_authorization_context(
         return ""
     if action.route_path == "/v1/drivers/generic-web/prod-promotion-workflow":
         return _lane_context_for_instance(profile=profile, preferred_instances=("testing", "prod"))
+    if action.route_path == "/v1/drivers/generic-web/prod-rollback-plan":
+        return _lane_context_if_present(profile=profile, instance="prod")
     if action.route_path in {
         "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-promotion",
@@ -1331,6 +1333,7 @@ def _action_support_reason(
         return ""
     if action.route_path in {
         "/v1/drivers/generic-web/prod-promotion-workflow",
+        "/v1/drivers/generic-web/prod-rollback-plan",
         "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
