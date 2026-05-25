@@ -13272,7 +13272,7 @@ def create_launchplane_service_app(
                     cleanup_profile = record_store.read_product_profile_record(
                         preview_lifecycle_cleanup_request.product
                     )
-                    cleanup_driver_id = cleanup_profile.driver_id
+                    cleanup_driver_id = _preview_lifecycle_cleanup_driver_id(cleanup_profile)
                     cleanup_slug_template = cleanup_profile.preview.slug_template
                 except FileNotFoundError:
                     pass

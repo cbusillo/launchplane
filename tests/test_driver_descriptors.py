@@ -25,9 +25,13 @@ from control_plane.drivers.registry import (
 
 
 class _PreviewStore:
+    def __init__(self) -> None:
+        self.preview_generation_limit: int | None = None
+
     def list_preview_summaries(
         self, *, context_name: str, generation_limit: int
     ) -> tuple[LaunchplanePreviewSummary, ...]:
+        self.preview_generation_limit = generation_limit
         return (
             LaunchplanePreviewSummary(
                 preview=PreviewRecord(
@@ -49,6 +53,7 @@ class _PreviewStore:
 
 class _ProfileStore(_PreviewStore):
     def __init__(self, *profiles: LaunchplaneProductProfileRecord) -> None:
+        super().__init__()
         self.profiles = tuple(profiles)
 
     def list_product_profile_records(
@@ -82,7 +87,6 @@ def _product_profile(*, driver_id: str = "generic-web") -> LaunchplaneProductPro
         preview=ProductPreviewProfile(
             enabled=True,
             context="cm",
-            slug_template="pr-{number}",
             app_name_prefix="cm-odoo-preview",
         ),
         updated_at="2026-05-25T12:00:00Z",
@@ -90,11 +94,7 @@ def _product_profile(*, driver_id: str = "generic-web") -> LaunchplaneProductPro
     )
 
 
-RouteMetadataExpectation = tuple[
-    control_plane_service._DriverRouteExecutionMetadata[Any],
-    type[Any],
-    str,
-]
+RouteMetadataExpectation = tuple[Any, type[Any], str]
 
 
 class DriverDescriptorRegistryTests(unittest.TestCase):
@@ -204,6 +204,31 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/generic-web/preview-destroy",
         )
         self.assertEqual(actions["preview_destroy"].safety, "destructive")
+        setting_groups = {group.group_id: group for group in descriptor.setting_groups}
+        self.assertIn("preview_runtime_environment", setting_groups)
+        preview_settings = setting_groups["preview_runtime_environment"]
+        self.assertEqual(preview_settings.scope, "context")
+        self.assertIn("LAUNCHPLANE_PREVIEW_BASE_URL", preview_settings.fields)
+        self.assertIn("preview.copied_env_keys", preview_settings.fields)
+
+    def test_generic_web_child_profile_inherits_base_preview_setting_groups(self) -> None:
+        view = build_driver_context_view(
+            record_store=_ProfileStore(_product_profile(driver_id="odoo")),
+            context_name="cm",
+        )
+
+        product_driver = next(
+            driver for driver in view.drivers if driver.driver_id == "odoo-tenant-cm"
+        )
+        setting_groups = {
+            group.group_id: group for group in product_driver.descriptor.setting_groups
+        }
+
+        self.assertIn("preview_runtime_environment", setting_groups)
+        self.assertIn(
+            "LAUNCHPLANE_PREVIEW_BASE_URL",
+            setting_groups["preview_runtime_environment"].fields,
+        )
 
     def test_driver_actions_declare_route_authorization_metadata(self) -> None:
         route_actions = {

@@ -101,6 +101,12 @@ public website, but the driver still owns immutable image deployment, optional
 health evidence, and deployment records. The product-specific contract for this
 shape is [dokploy-service-deployments.md](dokploy-service-deployments.md).
 
+Generic web also declares the shared preview runtime-environment setting group,
+including the context-level `LAUNCHPLANE_PREVIEW_BASE_URL` value and product
+profile preview transport keys. Product drivers that inherit `generic-web` reuse
+that setting metadata instead of redeclaring common preview routing and runtime
+transport fields.
+
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
 runtime target bindings from DB-backed Dokploy target records.
@@ -247,11 +253,12 @@ the workflow. This keeps product repos on stable Launchplane routes while
 allowing new Odoo- or VeriReel-shaped products to be added by product profile and
 authz records instead of code forks.
 
-VeriReel preview lifecycle cleanup also uses the product and context on the
-preview lifecycle plan as the cleanup boundary. A VeriReel-shaped product can
-therefore clean up previews recorded under its own product key and preview
-context instead of being pinned to the canonical `verireel`/`verireel-testing`
-pair.
+Preview lifecycle cleanup also follows the product profile's driver boundary.
+VeriReel-shaped products use the VeriReel cleanup executor, while products whose
+driver descriptor inherits `base_driver_id="generic-web"`, including Odoo, use
+the generic-web cleanup executor with the product profile's preview slug
+template. This keeps cleanup truth in Launchplane records and prevents product
+repos from carrying separate provider cleanup wiring.
 
 VeriReel stable-lane actions follow the same product-profile boundary. For
 non-canonical products, service dispatch verifies that the requested context and
