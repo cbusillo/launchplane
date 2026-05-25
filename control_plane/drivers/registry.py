@@ -698,6 +698,11 @@ ODOO_DRIVER = DriverDescriptor(
             "/v1/drivers/odoo/stable-verification",
             "deployment.write",
         ),
+        _route_alias(
+            "prod_rollback_plan",
+            "/v1/drivers/odoo/prod-rollback-plan",
+            "generic_web_prod_rollback.plan",
+        ),
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(

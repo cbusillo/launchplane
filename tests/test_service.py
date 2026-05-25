@@ -13906,6 +13906,163 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_odoo_rollback_plan_alias_writes_generic_plan_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            deployment_record = DeploymentRecord(
+                record_id="deployment-cm-prod-previous",
+                artifact_identity=ArtifactIdentityReference(
+                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+                ),
+                context="cm",
+                instance="prod",
+                source_git_ref="abc123",
+                destination_health=HealthcheckEvidence(status="pass"),
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application",
+                    target_id="app-cm-prod",
+                    target_name="cm-prod-app",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="cm-prod-app",
+                    target_type="application",
+                    deploy_mode="dokploy-application-api",
+                    deployment_id="deployment-provider-1",
+                    status="pass",
+                    started_at="2026-05-25T12:00:00Z",
+                    finished_at="2026-05-25T12:01:00Z",
+                ),
+            )
+            store.write_deployment_record(deployment_record)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["generic_web_prod_rollback.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-rollback-plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-cm-prod-previous",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-rollback-plan-cm-prod"},
+            )
+
+            plans = store.list_generic_web_rollback_plan_records(
+                context_name="cm",
+                instance_name="prod",
+                limit=1,
+            )
+            plan = plans[0]
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["generic_web_rollback_plan_id"], plan.plan_id)
+        self.assertEqual(plan.status, "ready")
+        self.assertEqual(plan.product, "odoo-tenant-cm")
+        self.assertEqual(plan.context, "cm")
+        self.assertEqual(plan.rollback_deployment_record_id, "deployment-cm-prod-previous")
+
+    def test_odoo_rollback_plan_alias_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["other-context"],
+                            "actions": ["generic_web_prod_rollback.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-rollback-plan",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "rollback_plan": {
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "instance": "prod",
+                        "rollback_deployment_record_id": "deployment-cm-prod-previous",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_generic_web_rollback_route_applies_ready_plan(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

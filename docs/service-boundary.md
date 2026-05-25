@@ -110,6 +110,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/stable-verification`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
+  - `POST /v1/drivers/odoo/prod-rollback-plan`
   - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/testing-verification`

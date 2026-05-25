@@ -187,6 +187,11 @@ such as Odoo can keep a product-specific rollback action while they still need
 extra gates around backups, release tuples, manifests, migrations, or post-deploy
 validation.
 
+Odoo accepts `POST /v1/drivers/odoo/prod-rollback-plan` as a compatibility alias
+for the generic-web rollback planner. The alias is plan-only: it writes the same
+generic rollback-plan record and does not change Odoo's product-specific
+`POST /v1/drivers/odoo/prod-rollback` apply route.
+
 Required planner input:
 
 - `product`

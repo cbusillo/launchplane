@@ -162,6 +162,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/odoo/preview-verification",
         )
         self.assertFalse(route_aliases["preview_verification"].operator_visible)
+        self.assertEqual(
+            route_aliases["prod_rollback_plan"].route_path,
+            "/v1/drivers/odoo/prod-rollback-plan",
+        )
+        self.assertFalse(route_aliases["prod_rollback_plan"].operator_visible)
         self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
@@ -182,6 +187,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(
             actions["preview_verification"].route_path,
             "/v1/drivers/generic-web/preview-verification",
+        )
+        self.assertEqual(
+            actions["prod_rollback_plan"].route_path,
+            "/v1/drivers/generic-web/prod-rollback-plan",
         )
 
     def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
@@ -494,6 +503,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 "/v1/drivers/odoo/preview-verification"
             ].action_id,
             "preview_verification",
+        )
+        self.assertEqual(
+            control_plane_service._driver_route_metadata_from_descriptors()[
+                "/v1/drivers/odoo/prod-rollback-plan"
+            ].action_id,
+            "prod_rollback_plan",
+        )
+        self.assertIn(
+            "/v1/drivers/odoo/prod-rollback-plan",
+            control_plane_service._build_write_routes(),
         )
         self.assertIs(
             control_plane_service._ODOO_PREVIEW_VERIFICATION_ROUTE.envelope_model,
