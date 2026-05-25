@@ -84,6 +84,7 @@ def _profile(
     *,
     health_path: str = "/api/health",
     explicit_health_urls: bool = True,
+    driver_id: str = "generic-web",
 ) -> LaunchplaneProductProfileRecord:
     testing_health_url = ""
     prod_health_url = ""
@@ -94,7 +95,7 @@ def _profile(
         product="sellyouroutboard",
         display_name="SellYourOutboard.com",
         repository="cbusillo/sellyouroutboard",
-        driver_id="generic-web",
+        driver_id=driver_id,
         image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
         runtime_port=3000,
         health_path=health_path,
@@ -182,21 +183,19 @@ def _runtime_identity_payload(**overrides: object) -> dict[str, object]:
 
 
 def _testing_inventory(**overrides: object) -> EnvironmentInventory:
-    deployment_record = _deployment_record().model_copy(
-        update={"instance": "testing"}
-    )
-    payload = {
-        "context": "sellyouroutboard-testing",
-        "instance": "testing",
-        "artifact_identity": ArtifactIdentityReference(
+    deployment_record = _deployment_record().model_copy(update={"instance": "testing"})
+    payload = EnvironmentInventory(
+        context="sellyouroutboard-testing",
+        instance="testing",
+        artifact_identity=ArtifactIdentityReference(
             artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
         ),
-        "source_git_ref": "abc123",
-        "deploy": deployment_record.deploy,
-        "destination_health": HealthcheckEvidence(status="pass"),
-        "updated_at": "2026-05-01T21:01:00Z",
-        "deployment_record_id": "deployment-syo-testing",
-    }
+        source_git_ref="abc123",
+        deploy=deployment_record.deploy,
+        destination_health=HealthcheckEvidence(status="pass"),
+        updated_at="2026-05-01T21:01:00Z",
+        deployment_record_id="deployment-syo-testing",
+    ).model_dump(mode="python")
     payload.update(overrides)
     return EnvironmentInventory.model_validate(payload)
 
@@ -218,6 +217,41 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
 
 
 class GenericWebProdPromotionTests(unittest.TestCase):
+    def test_execute_accepts_based_driver_product_profile(self) -> None:
+        store = _GenericWebPromotionStore(_profile(driver_id="odoo"))
+        store.write_environment_inventory(_testing_inventory())
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            store.write_deployment_record(_deployment_record())
+            profile = cast(LaunchplaneProductProfileRecord, kwargs["profile"])
+            self.assertEqual(profile.driver_id, "odoo")
+            return _deploy_result()
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ) as deploy,
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+                return_value=HealthcheckPass(
+                    payload={"runtime_identity": _runtime_identity_payload()}
+                ),
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(result.promotion_status, "pass")
+        deploy.assert_called_once()
+
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())
@@ -345,7 +379,9 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             if path.endswith("/releases/tags/v0.3.0"):
                 raise click.ClickException("GitHub API request failed: HTTP Error 404: Not Found")
             if method == "POST" and path.endswith("/releases"):
-                return {"html_url": "https://github.com/cbusillo/sellyouroutboard/releases/tag/v0.3.0"}
+                return {
+                    "html_url": "https://github.com/cbusillo/sellyouroutboard/releases/tag/v0.3.0"
+                }
             raise AssertionError(path)
 
         with (
@@ -729,6 +765,44 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
 
 class GenericWebPromotionWorkflowTests(unittest.TestCase):
+    def test_dispatch_accepts_based_driver_product_profile(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                return_value={"workflow_runs": []},
+            ),
+        ):
+            result = dispatch_generic_web_promotion_workflow(
+                control_plane_root=Path("."),
+                profile=_profile(driver_id="odoo"),
+                request=GenericWebPromotionWorkflowRequest(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    dry_run=True,
+                    observe_timeout_seconds=0,
+                ),
+            )
+
+        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
+        self.assertTrue(result.dry_run)
+
+    def test_dispatch_rejects_unbased_driver_product_profile(self) -> None:
+        with self.assertRaises(click.ClickException):
+            dispatch_generic_web_promotion_workflow(
+                control_plane_root=Path("."),
+                profile=_profile(driver_id="missing-driver"),
+                request=GenericWebPromotionWorkflowRequest(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    dry_run=True,
+                    observe_timeout_seconds=0,
+                ),
+            )
+
     def test_dispatches_product_workflow_and_observes_run(self) -> None:
         requests: list[tuple[str, str, dict[str, object] | None]] = []
         listed_once = False

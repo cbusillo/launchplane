@@ -8,6 +8,12 @@ from control_plane.contracts.driver_descriptor import (
     DriverCapabilityDescriptor,
     DriverDescriptor,
 )
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.drivers import registry
@@ -39,6 +45,49 @@ class _PreviewStore:
                 )
             ),
         )
+
+
+class _ProfileStore(_PreviewStore):
+    def __init__(self, *profiles: LaunchplaneProductProfileRecord) -> None:
+        self.profiles = tuple(profiles)
+
+    def list_product_profile_records(
+        self, *, driver_id: str | None = None
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        normalized_driver_id = (driver_id or "").strip()
+        if not normalized_driver_id:
+            return self.profiles
+        return tuple(
+            profile for profile in self.profiles if profile.driver_id == normalized_driver_id
+        )
+
+
+def _product_profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="odoo-tenant-cm",
+        display_name="CM Odoo",
+        repository="cbusillo/odoo-tenant-cm",
+        driver_id=driver_id,
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
+        runtime_port=8069,
+        health_path="/web/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="cm",
+                base_url="https://cm-testing.example.com",
+                health_url="https://cm-testing.example.com/web/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context="cm",
+            slug_template="pr-{number}",
+            app_name_prefix="cm-odoo-preview",
+        ),
+        updated_at="2026-05-25T12:00:00Z",
+        source="test",
+    )
 
 
 RouteMetadataExpectation = tuple[
@@ -518,6 +567,23 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             preview_inventory_provenance.detail,
             "Preview identity record exists, but no generation evidence is recorded.",
         )
+
+    def test_driver_context_view_includes_generic_web_base_for_child_profile(self) -> None:
+        view = build_driver_context_view(
+            record_store=_ProfileStore(_product_profile(driver_id="odoo")),
+            context_name="cm",
+        )
+
+        drivers = {driver.driver_id: driver for driver in view.drivers}
+
+        self.assertIn("odoo", drivers)
+        self.assertIn("odoo-tenant-cm", drivers)
+        self.assertEqual(drivers["odoo-tenant-cm"].descriptor.base_driver_id, "generic-web")
+        inherited_actions = {
+            action.action_id for action in drivers["odoo-tenant-cm"].available_actions
+        }
+        self.assertIn("stable_deploy", inherited_actions)
+        self.assertIn("prod_promotion", inherited_actions)
 
     def test_unknown_driver_descriptor_is_missing(self) -> None:
         with self.assertRaises(FileNotFoundError):

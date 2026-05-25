@@ -905,6 +905,18 @@ def _descriptor_for_product_profile(
     )
 
 
+def _profile_uses_driver(
+    *, profile: LaunchplaneProductProfileRecord, descriptor: DriverDescriptor
+) -> bool:
+    profile_driver_id = profile.driver_id.strip()
+    if profile_driver_id == descriptor.driver_id:
+        return True
+    try:
+        return read_driver_descriptor(profile_driver_id).base_driver_id == descriptor.driver_id
+    except FileNotFoundError:
+        return False
+
+
 def _product_profile_descriptors(
     *, record_store: object, descriptor: DriverDescriptor, context_name: str
 ) -> tuple[DriverDescriptor, ...]:
@@ -912,13 +924,14 @@ def _product_profile_descriptors(
     if list_profiles is None:
         return ()
     try:
-        profiles = list_profiles(driver_id=descriptor.driver_id)
+        profiles = list_profiles()
     except FileNotFoundError:
         return ()
     return tuple(
         _descriptor_for_product_profile(descriptor=descriptor, profile=profile)
         for profile in profiles
-        if _product_profile_matches_context(profile=profile, context_name=context_name)
+        if _profile_uses_driver(profile=profile, descriptor=descriptor)
+        and _product_profile_matches_context(profile=profile, context_name=context_name)
     )
 
 

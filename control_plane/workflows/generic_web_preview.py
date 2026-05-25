@@ -26,11 +26,11 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
 )
+from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
@@ -617,16 +617,7 @@ def resolve_generic_web_preview_profile(
     *, record_store: GenericWebPreviewProfileStore, product: str
 ) -> LaunchplaneProductProfileRecord:
     profile = record_store.read_product_profile_record(product)
-    driver_id = profile.driver_id.strip()
-    driver_is_generic_web = driver_id == "generic-web"
-    if not driver_is_generic_web:
-        try:
-            driver_is_generic_web = (
-                read_driver_descriptor(driver_id).base_driver_id == "generic-web"
-            )
-        except FileNotFoundError:
-            driver_is_generic_web = False
-    if not driver_is_generic_web:
+    if not product_profile_uses_generic_web_base(profile):
         raise click.ClickException(
             f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
             "not generic-web or a generic-web based driver."
@@ -1283,6 +1274,8 @@ def execute_generic_web_preview_refresh(
         preview_url=preview_url,
         readiness=readiness,
     )
+
+
 def discover_generic_web_preview_desired_state(
     *,
     control_plane_root: Path,
