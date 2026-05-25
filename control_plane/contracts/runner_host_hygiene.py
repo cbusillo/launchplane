@@ -254,7 +254,7 @@ class RunnerHostHygieneApplyRequest(BaseModel):
         if not self.host_name:
             raise ValueError("runner host hygiene apply requires host_name")
         self.retained_warm_builders = _normalized_tokens(self.retained_warm_builders)
-        self.target_buildkit_state_volumes = _normalized_volume_names(
+        self.target_buildkit_state_volumes = _normalized_volume_name_entries(
             self.target_buildkit_state_volumes
         )
         self.audit_record_key = self.audit_record_key.strip()
@@ -893,10 +893,7 @@ def _target_volume_blockers(
         blockers.append(
             _apply_blocker(
                 "target_volume_multiple_requested",
-                (
-                    "runner host hygiene volume cleanup accepts one target "
-                    "volume per mutation run"
-                ),
+                "runner host hygiene volume cleanup accepts one target volume per mutation run",
             )
         )
     volume_by_name = {volume.name: volume for volume in report.volume_inventory}
@@ -1028,6 +1025,10 @@ def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalized_volume_names(values: tuple[str, ...]) -> tuple[str, ...]:
     return _normalized_values(values, _normalized_volume_name)
+
+
+def _normalized_volume_name_entries(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(normalized for value in values if (normalized := _normalized_volume_name(value)))
 
 
 def _normalized_repositories(values: tuple[str, ...]) -> tuple[str, ...]:
