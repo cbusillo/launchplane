@@ -277,6 +277,7 @@ def _execute_apply_action(
     *, request: RunnerHostHygieneExecutorRequest, remote_runner: RemoteCommandRunner
 ) -> RemoteCommandResult:
     if request.action == "remove_buildkit_state_volumes":
+        target_volume = request.target_buildkit_state_volumes[0]
         return remote_runner(
             (
                 "flock",
@@ -285,7 +286,7 @@ def _execute_apply_action(
                 "docker",
                 "volume",
                 "rm",
-                *request.target_buildkit_state_volumes,
+                target_volume,
             ),
             request.timeout_seconds,
         )

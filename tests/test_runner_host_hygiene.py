@@ -379,6 +379,47 @@ class RunnerHostHygieneApplyPlanTests(unittest.TestCase):
         self.assertEqual(plan.blockers, ())
         self.assertIn("zero-link BuildKit state volumes", plan.next_steps[1])
 
+    def test_apply_plan_blocks_multiple_buildkit_state_volume_targets(self) -> None:
+        first_volume = "buildx_buildkit_launchplane-ci0_state"
+        second_volume = "buildx_buildkit_verireel-ci0_state"
+
+        plan = plan_runner_host_hygiene_apply(
+            policy=RunnerHostHygieneApplyPolicy(
+                approved_hosts=("chris-testing",),
+                required_retained_warm_builders=("odoo-docker-chris-testing",),
+                allow_buildkit_state_volume_remove=True,
+                allowed_buildkit_state_volumes=(first_volume, second_volume),
+            ),
+            request=RunnerHostHygieneApplyRequest(
+                action="remove_buildkit_state_volumes",
+                host_name="chris-testing",
+                mutate=True,
+                retained_warm_builders=("odoo-docker-chris-testing",),
+                target_buildkit_state_volumes=(first_volume, second_volume),
+                audit_record_key="runner-host-hygiene/2026-05-24/chris-testing",
+            ),
+            report=_healthy_report_with_volumes(
+                RunnerHostHygieneVolumeInventoryItem(
+                    name=first_volume,
+                    driver="local",
+                    size_bytes=1,
+                    dangling=True,
+                ),
+                RunnerHostHygieneVolumeInventoryItem(
+                    name=second_volume,
+                    driver="local",
+                    size_bytes=1,
+                    dangling=True,
+                ),
+            ),
+        )
+
+        self.assertEqual(plan.status, "blocked")
+        self.assertIn(
+            "target_volume_multiple_requested",
+            [blocker.code for blocker in plan.blockers],
+        )
+
     def test_apply_plan_blocks_active_or_unapproved_buildkit_state_volume(
         self,
     ) -> None:
