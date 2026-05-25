@@ -887,6 +887,57 @@ _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+class GenericWebStableVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: str
+    deployment_record_id: str
+    promotion_record_id: str = ""
+    verification_status: ReleaseStatus
+    verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    failure_summary: str = ""
+
+    @field_validator("verification_status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(value, label="Generic web stable verification status")
+
+    @field_validator("checked_urls", mode="before")
+    @classmethod
+    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
+        return _normalize_preview_verification_checked_urls(
+            value, label="Generic web stable verification"
+        )
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "GenericWebStableVerificationRequest":
+        _validate_stable_verification_request(self, label="Generic web stable verification")
+        return self
+
+
+class GenericWebStableVerificationEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    verification: GenericWebStableVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebStableVerificationEnvelope":
+        _validate_driver_envelope_product(self.product, label="Generic web stable verification")
+        return self
+
+
+_GENERIC_WEB_STABLE_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/stable-verification",
+    envelope_model=GenericWebStableVerificationEnvelope,
+    denial_message=(
+        "Workflow cannot write generic web stable verification for the requested product/context."
+    ),
+)
+
+
 class GenericWebPreviewDesiredStateEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     desired_state: GenericWebPreviewDesiredStateRequest
@@ -1219,6 +1270,7 @@ _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
     }
 )
 _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
@@ -1810,18 +1862,14 @@ class OdooStableVerificationRequest(BaseModel):
     def _normalize_status(cls, value: object) -> ReleaseStatus:
         return _normalize_release_status(value, label="Odoo stable verification status")
 
+    @field_validator("checked_urls", mode="before")
+    @classmethod
+    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
+        return _normalize_preview_verification_checked_urls(value, label="Odoo stable verification")
+
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooStableVerificationRequest":
-        if not self.context.strip():
-            raise ValueError("Odoo stable verification requires context.")
-        if not self.deployment_record_id.strip():
-            raise ValueError("Odoo stable verification requires deployment_record_id.")
-        if self.verification_status not in {"pass", "fail"}:
-            raise ValueError("Odoo stable verification status must be pass or fail.")
-        if not self.verified_at.strip():
-            raise ValueError("Odoo stable verification requires verified_at.")
-        if self.checked_urls and self.timeout_seconds is None:
-            raise ValueError("Odoo stable verification checked_urls require timeout_seconds.")
+        _validate_stable_verification_request(self, label="Odoo stable verification")
         return self
 
 
@@ -1880,6 +1928,25 @@ def _normalize_preview_verification_checked_urls(value: object, *, label: str) -
     if any(not item for item in checked_urls):
         raise ValueError(f"{label} checked_urls cannot contain blanks.")
     return checked_urls
+
+
+def _validate_stable_verification_request(
+    request: GenericWebStableVerificationRequest | OdooStableVerificationRequest,
+    *,
+    label: str,
+) -> None:
+    if not request.context.strip():
+        raise ValueError(f"{label} requires context.")
+    if not request.instance.strip():
+        raise ValueError(f"{label} requires instance.")
+    if not request.deployment_record_id.strip():
+        raise ValueError(f"{label} requires deployment_record_id.")
+    if request.verification_status not in {"pass", "fail"}:
+        raise ValueError(f"{label} status must be pass or fail.")
+    if not request.verified_at.strip():
+        raise ValueError(f"{label} requires verified_at.")
+    if request.checked_urls and request.timeout_seconds is None:
+        raise ValueError(f"{label} checked_urls require timeout_seconds.")
 
 
 class VeriReelTestingVerificationRequest(BaseModel):
@@ -7265,7 +7332,7 @@ def _apply_odoo_preview_verification_records(
 
 
 def _stable_verification_health_evidence(
-    *, request: OdooStableVerificationRequest
+    *, request: GenericWebStableVerificationRequest | OdooStableVerificationRequest
 ) -> HealthcheckEvidence:
     return HealthcheckEvidence(
         verified=bool(request.checked_urls),
@@ -7275,10 +7342,11 @@ def _stable_verification_health_evidence(
     )
 
 
-def _apply_odoo_stable_verification_records(
+def _apply_generic_web_stable_verification_records(
     *,
     record_store: object,
-    request: OdooStableVerificationRequest,
+    request: GenericWebStableVerificationRequest | OdooStableVerificationRequest,
+    label: str = "Generic web stable verification",
 ) -> dict[str, object]:
     evidence_store = cast(EvidenceIngestionStore, record_store)
     try:
@@ -7288,13 +7356,9 @@ def _apply_odoo_stable_verification_records(
             f"No Launchplane deployment record found for {request.deployment_record_id}."
         ) from exc
     if deployment_record.context != request.context:
-        raise click.ClickException(
-            "Odoo stable verification context does not match deployment record context."
-        )
+        raise click.ClickException(f"{label} context does not match deployment record context.")
     if deployment_record.instance != request.instance:
-        raise click.ClickException(
-            "Odoo stable verification instance does not match deployment record instance."
-        )
+        raise click.ClickException(f"{label} instance does not match deployment record instance.")
 
     health_evidence = _stable_verification_health_evidence(request=request)
     updated_deployment = deployment_record.model_copy(
@@ -7317,19 +7381,17 @@ def _apply_odoo_stable_verification_records(
                 f"No Launchplane promotion record found for {promotion_record_id}."
             ) from exc
         if promotion_record.context != request.context:
-            raise click.ClickException(
-                "Odoo stable verification context does not match promotion record context."
-            )
+            raise click.ClickException(f"{label} context does not match promotion record context.")
         if promotion_record.to_instance != request.instance:
             raise click.ClickException(
-                "Odoo stable verification instance does not match promotion destination instance."
+                f"{label} instance does not match promotion destination instance."
             )
         if promotion_record.deployment_record_id.strip() not in {
             "",
             request.deployment_record_id,
         }:
             raise click.ClickException(
-                "Odoo stable verification deployment_record_id does not match linked promotion record."
+                f"{label} deployment_record_id does not match linked promotion record."
             )
         updated_promotion = promotion_record.model_copy(
             update={"destination_health": health_evidence}
@@ -7343,6 +7405,18 @@ def _apply_odoo_stable_verification_records(
         result["promotion_health_status"] = request.verification_status
 
     return result
+
+
+def _apply_odoo_stable_verification_records(
+    *,
+    record_store: object,
+    request: OdooStableVerificationRequest,
+) -> dict[str, object]:
+    return _apply_generic_web_stable_verification_records(
+        record_store=record_store,
+        request=request,
+        label="Odoo stable verification",
+    )
 
 
 def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
@@ -11699,6 +11773,48 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
                     request=generic_web_preview_verification_request.verification,
+                )
+            elif path == _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path:
+                generic_web_stable_verification_request = (
+                    _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
+                )
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=generic_web_stable_verification_request.product,
+                    context=generic_web_stable_verification_request.verification.context,
+                    instance=generic_web_stable_verification_request.verification.instance,
+                )
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=generic_web_stable_verification_request.product,
+                    context=generic_web_stable_verification_request.verification.context,
+                    denial_message=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                if resolved_driver_context.lane is None:
+                    raise ProductDriverMismatchError(
+                        "Generic web stable verification requires a product profile lane."
+                    )
+                result = _apply_generic_web_stable_verification_records(
+                    record_store=record_store,
+                    request=generic_web_stable_verification_request.verification,
                 )
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
                 odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(

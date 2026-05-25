@@ -19659,6 +19659,105 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertTrue(replay_payload["replayed"])
             self.assertEqual(replay_payload["records"], payload["records"])
 
+    def test_generic_web_stable_verification_route_accepts_odoo_base_driver_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-cm-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="cm",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="cm-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "instance": "testing",
+                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                        "verification_status": "success",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://cm-testing.example.com/web/health"],
+                        "timeout_seconds": 45,
+                    },
+                },
+                headers={"Idempotency-Key": "generic-stable-verification:cm:testing:1"},
+            )
+
+            self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                    "inventory_record_id": "cm-testing",
+                },
+            )
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")
+            inventory = store.read_environment_inventory(context_name="cm", instance_name="testing")
+            self.assertEqual(deployment.destination_health.status, "pass")
+            self.assertEqual(
+                deployment.destination_health.urls,
+                ("https://cm-testing.example.com/web/health",),
+            )
+            self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+
     def test_odoo_stable_verification_driver_updates_prod_promotion_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

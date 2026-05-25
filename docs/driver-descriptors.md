@@ -119,6 +119,14 @@ prod inventory after successful verified deploys. Product-specific drivers such
 as VeriReel or Odoo can wrap this common action when they need additional gates
 such as backups, migrations, rollout checks, or tenant-specific validation.
 
+The `stable_verification` action routes to
+`POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
+deployment record, optional promotion record, checked URLs, and pass/fail status;
+Launchplane updates deployment, promotion, and inventory evidence without
+mutating provider state. Product-shaped stable verification paths, such as
+`POST /v1/drivers/odoo/stable-verification`, are compatibility aliases unless a
+driver documents additional product-specific evidence.
+
 The `preview_desired_state` action routes to
 `POST /v1/drivers/generic-web/preview-desired-state`. Product workflows provide
 the product key; Launchplane resolves the preview context, owning repository,
@@ -226,11 +234,9 @@ The verification route is a Launchplane-owned evidence ingress for follow-up
 browser or product smoke checks: it marks the latest preview generation ready or
 failed through the same preview-generation records without mutating provider
 state.
-Stable smoke follow-ups use the same shape at
-`POST /v1/drivers/odoo/stable-verification`: product workflows submit the
-deployment record, optional promotion record, checked URLs, and pass/fail status;
-Launchplane updates deployment, promotion, and inventory evidence without
-mutating provider state.
+Stable smoke follow-ups should use
+`POST /v1/drivers/generic-web/stable-verification`; the Odoo-shaped stable
+verification route remains a compatibility alias for existing workflows.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
 instance-scoped action. It is enabled per product-profile lane through

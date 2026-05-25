@@ -374,6 +374,17 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             writes_records=(),
         ),
         _action(
+            "stable_verification",
+            "Record stable verification",
+            "Record smoke verification for an existing generic-web stable deployment or promotion.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/generic-web/stable-verification",
+            authz_action="deployment.write",
+            operator_visible=False,
+            writes_records=("deployment", "promotion", "inventory"),
+        ),
+        _action(
             "preview_desired_state",
             "Discover desired previews",
             "Discover labeled pull requests for a generic-web product profile and record desired preview state.",
@@ -588,17 +599,6 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("preview", "preview_generation"),
         ),
         _action(
-            "stable_verification",
-            "Record stable verification",
-            "Record Odoo product smoke verification for an existing stable deployment or promotion.",
-            safety="safe_write",
-            scope="instance",
-            route_path="/v1/drivers/odoo/stable-verification",
-            authz_action="deployment.write",
-            operator_visible=False,
-            writes_records=("deployment", "promotion", "inventory"),
-        ),
-        _action(
             "prod_backup_gate",
             "Capture prod backup gate",
             "Capture concrete backup evidence before a prod-changing action.",
@@ -673,6 +673,11 @@ ODOO_DRIVER = DriverDescriptor(
             "preview_destroy",
             "/v1/drivers/odoo/preview-destroy",
             "preview_destroy.execute",
+        ),
+        _route_alias(
+            "stable_verification",
+            "/v1/drivers/odoo/stable-verification",
+            "deployment.write",
         ),
     ),
     setting_groups=(
