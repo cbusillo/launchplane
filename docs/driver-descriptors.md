@@ -147,16 +147,18 @@ generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
-Odoo declares `base_driver_id="generic-web"` and keeps Odoo-shaped preview
-routes as compatibility aliases for the same lifecycle:
-`POST /v1/drivers/odoo/preview-desired-state`,
+Odoo declares `base_driver_id="generic-web"` and inherits generic-web preview
+actions as its advertised lifecycle surface. Odoo-shaped preview routes remain
+registered as non-operator `route_aliases` for compatibility with existing
+workflows: `POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-refresh`,
 `POST /v1/drivers/odoo/preview-inventory`,
-`POST /v1/drivers/odoo/preview-readiness`,
-`POST /v1/drivers/odoo/preview-destroy`, and
-`POST /v1/drivers/odoo/preview-verification`. New product workflows should use
-the generic-web routes for generic lifecycle evidence unless the product driver
-documents a narrower product-specific contract. The lower-level
+`POST /v1/drivers/odoo/preview-readiness`, and
+`POST /v1/drivers/odoo/preview-destroy`. New product workflows should use the
+generic-web routes for generic lifecycle evidence unless the product driver
+documents a narrower product-specific contract. The Odoo-specific
+`POST /v1/drivers/odoo/preview-verification` route remains a driver action
+because it returns the typed `odoo_preview_verification` response shape. The lower-level
 `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
 Dokploy plan to provider state after service authorization and idempotency
 checks. The route resolves runtime env values from Launchplane-owned
@@ -295,15 +297,17 @@ VeriReel exposes:
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
 
-Descriptor actions are also the source of truth for driver route authorization
-metadata. `authz_action` must match the live service handler authorization
-string for that route. Some service callback routes, such as verification
-writeback routes, are declared with `operator_visible=false`; they remain in the
-driver route authorization map but are not surfaced as operator actions.
-The HTTP service admits product-driver POST routes from descriptor action route
-paths and reads product-driver handler authorization actions from descriptor
-route metadata, so new drivers do not need a second hardcoded router allowlist
-or authz-action entry.
+Descriptor actions are also the source of truth for advertised driver route
+authorization metadata. `authz_action` must match the live service handler
+authorization string for that route. Some service callback routes, such as
+verification writeback routes, are declared with `operator_visible=false`; they
+remain in the driver route authorization map but are not surfaced as operator
+actions. Compatibility routes that should remain callable but not advertised as
+current driver actions belong in `route_aliases` with `operator_visible=false`.
+The HTTP service admits product-driver POST routes from descriptor action and
+route-alias paths and reads product-driver handler authorization actions from
+descriptor route metadata, so new drivers do not need a second hardcoded router
+allowlist or authz-action entry.
 Descriptor route metadata and service compatibility policy also drive
 product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's

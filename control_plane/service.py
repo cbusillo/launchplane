@@ -2780,6 +2780,23 @@ def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]
                 authz_action=action.authz_action,
                 operator_visible=action.operator_visible,
             )
+        for route_alias in descriptor.route_aliases:
+            if not route_alias.route_path.startswith("/v1/drivers/"):
+                continue
+            if not route_alias.authz_action:
+                raise ValueError(
+                    f"Driver route alias {descriptor.driver_id}.{route_alias.action_id} "
+                    "must declare authz_action."
+                )
+            if route_alias.route_path in route_metadata:
+                raise ValueError(f"Duplicate driver action route path: {route_alias.route_path}")
+            route_metadata[route_alias.route_path] = _DriverRouteMetadata(
+                driver_id=descriptor.driver_id,
+                action_id=route_alias.action_id,
+                method=route_alias.method,
+                authz_action=route_alias.authz_action,
+                operator_visible=route_alias.operator_visible,
+            )
     return route_metadata
 
 

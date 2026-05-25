@@ -15,6 +15,7 @@ from control_plane.contracts.driver_descriptor import (
     DriverCapabilityDescriptor,
     DriverContextView,
     DriverDescriptor,
+    DriverRouteAliasDescriptor,
     DriverSettingGroupDescriptor,
     DriverView,
 )
@@ -280,6 +281,22 @@ def _action(
     )
 
 
+def _route_alias(
+    action_id: str,
+    route_path: str,
+    authz_action: str,
+    *,
+    method: Literal["GET", "POST"] = "POST",
+) -> DriverRouteAliasDescriptor:
+    return DriverRouteAliasDescriptor(
+        action_id=action_id,
+        route_path=route_path,
+        method=method,
+        authz_action=authz_action,
+        operator_visible=False,
+    )
+
+
 GENERIC_WEB_DRIVER = DriverDescriptor(
     driver_id="generic-web",
     label="Generic web",
@@ -479,14 +496,14 @@ ODOO_DRIVER = DriverDescriptor(
                 "Create, refresh, inventory, and destroy Odoo PR previews through the "
                 "generic-web preview lifecycle."
             ),
-            actions=("preview_desired_state", "preview_refresh"),
+            actions=("preview_apply", "preview_verification"),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
         DriverCapabilityDescriptor(
             capability_id="preview_inventory_managed",
             label="Preview inventory managed",
             description="Read provider inventory and reconcile current Odoo preview state.",
-            actions=("preview_inventory", "preview_destroy"),
+            actions=("preview_apply",),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
     ),
@@ -549,54 +566,6 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/stable-bootstrap",
             authz_action="odoo_stable_bootstrap.execute",
             writes_records=("deployment", "inventory"),
-        ),
-        _action(
-            "preview_desired_state",
-            "Discover desired previews",
-            "Discover labeled Odoo pull requests and record desired preview state.",
-            safety="safe_write",
-            scope="context",
-            route_path="/v1/drivers/odoo/preview-desired-state",
-            authz_action="preview_desired_state.discover",
-            writes_records=("preview_desired_state",),
-        ),
-        _action(
-            "preview_refresh",
-            "Refresh preview",
-            "Create or update an Odoo preview through the generic-web preview lifecycle.",
-            safety="mutation",
-            scope="preview",
-            route_path="/v1/drivers/odoo/preview-refresh",
-            authz_action="preview_refresh.execute",
-        ),
-        _action(
-            "preview_inventory",
-            "Read preview inventory",
-            "Scan provider state for active Odoo previews and record inventory evidence.",
-            safety="safe_write",
-            scope="context",
-            route_path="/v1/drivers/odoo/preview-inventory",
-            authz_action="preview_inventory.read",
-            writes_records=("preview_inventory_scan",),
-        ),
-        _action(
-            "preview_readiness",
-            "Evaluate preview readiness",
-            "Validate Odoo preview template settings before provider mutation.",
-            safety="read",
-            scope="context",
-            route_path="/v1/drivers/odoo/preview-readiness",
-            authz_action="preview_readiness.evaluate",
-        ),
-        _action(
-            "preview_destroy",
-            "Destroy preview",
-            "Destroy an Odoo preview application and record cleanup evidence.",
-            safety="destructive",
-            scope="preview",
-            route_path="/v1/drivers/odoo/preview-destroy",
-            authz_action="preview_destroy.execute",
-            writes_records=("preview",),
         ),
         _action(
             "preview_apply",
@@ -677,6 +646,33 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/target-replacement-apply",
             authz_action="odoo_target_replacement_apply.execute",
             writes_records=("deployment", "inventory"),
+        ),
+    ),
+    route_aliases=(
+        _route_alias(
+            "preview_desired_state",
+            "/v1/drivers/odoo/preview-desired-state",
+            "preview_desired_state.discover",
+        ),
+        _route_alias(
+            "preview_refresh",
+            "/v1/drivers/odoo/preview-refresh",
+            "preview_refresh.execute",
+        ),
+        _route_alias(
+            "preview_inventory",
+            "/v1/drivers/odoo/preview-inventory",
+            "preview_inventory.read",
+        ),
+        _route_alias(
+            "preview_readiness",
+            "/v1/drivers/odoo/preview-readiness",
+            "preview_readiness.evaluate",
+        ),
+        _route_alias(
+            "preview_destroy",
+            "/v1/drivers/odoo/preview-destroy",
+            "preview_destroy.execute",
         ),
     ),
     setting_groups=(
@@ -935,6 +931,17 @@ def _descriptor_for_product_profile(
             "context_patterns": _product_profile_lanes(profile),
         }
     )
+
+
+def effective_driver_actions(descriptor: DriverDescriptor) -> tuple[DriverActionDescriptor, ...]:
+    actions_by_id: dict[str, DriverActionDescriptor] = {}
+    if descriptor.base_driver_id:
+        base_descriptor = read_driver_descriptor(descriptor.base_driver_id)
+        actions_by_id.update(
+            (action.action_id, action) for action in effective_driver_actions(base_descriptor)
+        )
+    actions_by_id.update((action.action_id, action) for action in descriptor.actions)
+    return tuple(actions_by_id.values())
 
 
 def _profile_uses_driver(
@@ -1318,7 +1325,7 @@ def build_driver_context_view(
                 DriverView(
                     driver_id=matched_descriptor.driver_id,
                     descriptor=matched_descriptor,
-                    available_actions=matched_descriptor.actions,
+                    available_actions=effective_driver_actions(matched_descriptor),
                     lane_summary=lane_summary,
                     preview_summaries=preview_summaries,
                     preview_inventory_provenance=preview_inventory_provenance,
