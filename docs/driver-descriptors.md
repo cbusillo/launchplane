@@ -109,7 +109,12 @@ transport fields.
 
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
-runtime target bindings from DB-backed Dokploy target records.
+runtime target bindings from DB-backed Dokploy target records. Generic-web deploy
+records post-deploy evidence as `skipped` unless a based driver explicitly
+provides a product post-deploy extension. That extension point is the boundary
+for product-only work after a provider deploy succeeds; it must return terminal
+post-deploy evidence and must keep deploy status distinct from post-deploy
+status.
 
 The `prod_promotion` action routes to
 `POST /v1/drivers/generic-web/prod-promotion`. It promotes a generic-web
@@ -131,7 +136,10 @@ and persisted record remain generic-web-owned.
 The `prod_rollback` action routes to
 `POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
 validation, persists the plan record, and applies ready plans through the normal
-generic-web deploy path using the previous immutable artifact identity. Product
+generic-web deploy path using the previous immutable artifact identity. Generic
+rollback also forwards the generic deploy post-deploy extension hook, so a
+based driver can keep product-only post-deploy checks while reusing the common
+rollback deployment path once its other invariants are represented. Product
 drivers keep their own `prod_rollback` action only when they need additional
 product-specific gates, such as Odoo backup, release tuple, manifest, migration,
 or post-deploy checks. Odoo keeps `POST /v1/drivers/odoo/prod-rollback` as its

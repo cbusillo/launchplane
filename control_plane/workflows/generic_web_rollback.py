@@ -14,6 +14,7 @@ from control_plane.contracts.generic_web_rollback import (
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebDeployStore,
+    GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
 )
 
@@ -70,6 +71,7 @@ def execute_generic_web_rollback(
     control_plane_root: Path,
     record_store: GenericWebRollbackApplyStore,
     request: GenericWebRollbackPlanRequest,
+    post_deploy_executor: GenericWebPostDeployExecutor | None = None,
 ) -> GenericWebRollbackApplyResult:
     plan = build_generic_web_rollback_plan(record_store=record_store, request=request)
     record_store.write_generic_web_rollback_plan_record(plan)
@@ -95,11 +97,17 @@ def execute_generic_web_rollback(
             timeout_seconds=planned_deploy.timeout_seconds,
             no_cache=planned_deploy.no_cache,
         ),
+        post_deploy_executor=post_deploy_executor,
     )
     return GenericWebRollbackApplyResult(
         plan_id=plan.plan_id,
         deployment_record_id=deploy_result.deployment_record_id,
-        rollback_status="pass" if deploy_result.deploy_status == "pass" else "fail",
+        rollback_status=(
+            "pass"
+            if deploy_result.deploy_status == "pass"
+            and deploy_result.post_deploy_status in {"pass", "skipped"}
+            else "fail"
+        ),
         deploy_status=deploy_result.deploy_status,
         product=plan.product,
         context=plan.context,

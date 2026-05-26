@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Callable, Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,7 +15,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
@@ -73,7 +73,47 @@ class GenericWebDeployResult(BaseModel):
     target_name: str = ""
     target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
+    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
+
+
+class GenericWebPostDeployContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: str
+    deployment_record_id: str
+    target_name: str
+    target_type: DokployTargetType
+    target_id: str
+    artifact_id: str
+    source_git_ref: str
+
+    @model_validator(mode="after")
+    def _validate_context(self) -> "GenericWebPostDeployContext":
+        if not self.product.strip():
+            raise ValueError("generic web post-deploy context requires product")
+        if not self.context.strip():
+            raise ValueError("generic web post-deploy context requires context")
+        if not self.instance.strip():
+            raise ValueError("generic web post-deploy context requires instance")
+        if not self.deployment_record_id.strip():
+            raise ValueError("generic web post-deploy context requires deployment_record_id")
+        if not self.target_name.strip():
+            raise ValueError("generic web post-deploy context requires target_name")
+        if not self.target_id.strip():
+            raise ValueError("generic web post-deploy context requires target_id")
+        if not self.artifact_id.strip():
+            raise ValueError("generic web post-deploy context requires artifact_id")
+        if not self.source_git_ref.strip():
+            raise ValueError("generic web post-deploy context requires source_git_ref")
+        return self
+
+
+GenericWebPostDeployExecutor = Callable[
+    [Path, GenericWebDeployStore, GenericWebPostDeployContext], PostDeployUpdateEvidence
+]
 
 
 def resolve_generic_web_profile_lane(
@@ -254,6 +294,7 @@ def execute_generic_web_deploy(
     request: GenericWebDeployRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
     lane: ProductLaneProfile | None = None,
+    post_deploy_executor: GenericWebPostDeployExecutor | None = None,
 ) -> GenericWebDeployResult:
     resolved_profile = profile
     resolved_lane = lane
@@ -304,6 +345,8 @@ def execute_generic_web_deploy(
             error_message=str(exc),
         )
 
+    deploy_completed = False
+    post_deploy_update = PostDeployUpdateEvidence()
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
             control_plane_root=control_plane_root
@@ -321,22 +364,53 @@ def execute_generic_web_deploy(
                 deployment_record_id=record_id,
             ),
         )
+        deploy_completed = True
+        if post_deploy_executor is not None:
+            post_deploy_update = _terminal_post_deploy_update(
+                post_deploy_executor(
+                    control_plane_root,
+                    record_store,
+                    GenericWebPostDeployContext(
+                        product=resolved_profile.product,
+                        context=resolved_lane.context,
+                        instance=resolved_lane.instance,
+                        deployment_record_id=record_id,
+                        target_name=resolved_target.target_name,
+                        target_type=resolved_target.target_type,
+                        target_id=resolved_target.target_id,
+                        artifact_id=ship_request.artifact_id,
+                        source_git_ref=ship_request.source_git_ref,
+                    ),
+                )
+            )
+            if post_deploy_update.status == "fail":
+                raise click.ClickException(
+                    post_deploy_update.detail or "Generic web post-deploy extension failed."
+                )
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
+        deployment_status: Literal["pass", "fail"] = "pass" if deploy_completed else "fail"
+        if deploy_completed and post_deploy_update.status == "skipped":
+            post_deploy_update = PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail=str(exc),
+            )
         record_store.write_deployment_record(
             build_deployment_record(
                 request=ship_request,
                 record_id=record_id,
                 deployment_id="control-plane-dokploy",
-                deployment_status="fail",
+                deployment_status=deployment_status,
                 started_at=started_at,
                 finished_at=finished_at,
                 resolved_target=resolved_target,
+                post_deploy_update=post_deploy_update,
             )
         )
         return GenericWebDeployResult(
             deployment_record_id=record_id,
-            deploy_status="fail",
+            deploy_status=deployment_status,
             deploy_started_at=started_at,
             deploy_finished_at=finished_at,
             product=resolved_profile.product,
@@ -345,6 +419,7 @@ def execute_generic_web_deploy(
             target_name=resolved_target.target_name,
             target_type=resolved_target.target_type,
             target_id=resolved_target.target_id,
+            post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
 
@@ -357,6 +432,7 @@ def execute_generic_web_deploy(
         started_at=started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
+        post_deploy_update=post_deploy_update,
         runtime_identity=_build_runtime_identity(
             profile=resolved_profile,
             lane=resolved_lane,
@@ -383,4 +459,23 @@ def execute_generic_web_deploy(
         target_name=resolved_target.target_name,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
+        post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
+
+
+def _generic_web_deploy_post_deploy_status(
+    post_deploy_update: PostDeployUpdateEvidence,
+) -> Literal["pass", "fail", "skipped"]:
+    if post_deploy_update.status == "pending":
+        return "fail"
+    return post_deploy_update.status
+
+
+def _terminal_post_deploy_update(
+    post_deploy_update: PostDeployUpdateEvidence,
+) -> PostDeployUpdateEvidence:
+    if post_deploy_update.status == "pending":
+        raise click.ClickException(
+            "Generic web post-deploy extensions must return terminal evidence."
+        )
+    return post_deploy_update
