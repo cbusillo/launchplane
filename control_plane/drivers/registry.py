@@ -532,14 +532,14 @@ ODOO_DRIVER = DriverDescriptor(
                 "Create, refresh, inventory, and destroy Odoo PR previews through the "
                 "generic-web preview lifecycle."
             ),
-            actions=("preview_apply", "preview_verification"),
+            actions=("preview_apply_inputs", "preview_apply", "preview_verification"),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
         DriverCapabilityDescriptor(
             capability_id="preview_inventory_managed",
             label="Preview inventory managed",
             description="Read provider inventory and reconcile current Odoo preview state.",
-            actions=("preview_apply",),
+            actions=("preview_apply_inputs", "preview_apply"),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
     ),
@@ -602,6 +602,15 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/stable-bootstrap",
             authz_action="odoo_stable_bootstrap.execute",
             writes_records=("deployment", "inventory"),
+        ),
+        _action(
+            "preview_apply_inputs",
+            "Resolve preview apply inputs",
+            "Resolve Launchplane-owned Odoo preview runtime and provider dry-run inputs.",
+            safety="read",
+            scope="preview",
+            route_path="/v1/drivers/odoo/preview-apply-inputs",
+            authz_action="odoo_preview_apply_inputs.read",
         ),
         _action(
             "preview_apply",

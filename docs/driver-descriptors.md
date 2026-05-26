@@ -206,6 +206,18 @@ checks. The route resolves runtime env values from Launchplane-owned
 runtime-environment records and managed secret overlays, derives preview-specific
 database and volume names inside the service, returns the adapter's redacted step
 evidence, and keeps secret runtime values inside the service boundary. The
+companion `POST /v1/drivers/odoo/preview-apply-inputs` route is the thin-workflow
+entry point for planning that provider apply. Callers provide product, PR,
+image, and source facts only; Launchplane derives the preview slug, public URL,
+runtime binding evidence, template compose id, Dokploy environment id, Odoo
+runtime plan, and redacted provider dry-run plan from product profiles,
+runtime-environment records, managed secrets, and tracked Dokploy target records.
+The route is read-only, returns no plaintext runtime or secret values, and is
+refresh-only until Launchplane has inventory-backed discovery for existing Odoo
+preview targets. Tenant workflows should call this route before
+`preview-apply` instead of assembling Odoo runtime or Dokploy plan payloads in
+the tenant repo.
+The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same
 Launchplane preview and preview-generation records as generic-web previews.

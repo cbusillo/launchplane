@@ -106,6 +106,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/website-bootstrap-override`
   - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/target-replacement-apply`
+  - `POST /v1/drivers/odoo/preview-apply-inputs`
   - `POST /v1/drivers/odoo/preview-apply`
   - `POST /v1/drivers/odoo/stable-verification`
   - `POST /v1/drivers/odoo/prod-backup-gate`
@@ -1113,6 +1114,8 @@ retries do not collide. The regular cleanup workflow uses
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
 - Odoo preview refresh driver:
   `odoo-preview-refresh:<product>:<anchor_pr_number>:<sha>`
+- Odoo isolated preview apply-inputs driver:
+  `odoo-preview-apply-inputs:<product>:<preview_slug>:<sha>`
 - Odoo isolated preview apply driver:
   `odoo-preview-apply:<product>:<preview_slug>:<operation>:<sha-or-destroy>`
 - Odoo preview destroy driver:
@@ -1135,6 +1138,19 @@ Odoo-shaped routes so authz and driver views remain product-specific, while
 Launchplane still derives the live preview URL from runtime-environment records
 and writes the shared preview and preview-generation records from DB-backed
 product profile preview configuration.
+
+`POST /v1/drivers/odoo/preview-apply-inputs` is the Launchplane-owned handoff
+between thin tenant preview workflows and isolated Odoo provider apply. The
+caller supplies only product, PR number, image reference, source git ref, and
+optional preview slug or URL override. Launchplane derives the generic preview
+URL, runtime binding evidence, template compose id, Dokploy environment id,
+Odoo runtime plan, and redacted Dokploy dry-run plan from DB-backed product
+profile, runtime-environment, managed secret, and target records. Ready
+responses can be posted to `POST /v1/drivers/odoo/preview-apply`; blocked
+responses include planner blockers but never plaintext runtime values or secret
+material. The route currently supports refresh only. Destroy and existing-target
+update planning remain blocked until Launchplane can discover Odoo preview
+targets from inventory rather than relying on tenant-supplied provider ids.
 
 The CM tenant preview workflow uses two product scopes deliberately. Artifact
 publish input and publish evidence requests use product `odoo` for context `cm`,

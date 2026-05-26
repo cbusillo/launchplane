@@ -13,7 +13,7 @@ import threading
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import BinaryIO, Callable, Generic, Iterable, Literal, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Callable, Generic, Iterable, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import WSGIApplication
@@ -314,7 +314,9 @@ from control_plane.workflows.generic_web_preview import (
 )
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
+    OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
+    build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
@@ -1233,6 +1235,18 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooPreviewApplyInputsEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    inputs: OdooPreviewApplyInputsRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooPreviewApplyInputsEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo preview apply inputs")
+        if self.product.strip() != self.inputs.product.strip():
+            raise ValueError("Odoo preview apply inputs require matching product values.")
+        return self
+
+
 class OdooPreviewApplyConfigError(click.ClickException):
     def __init__(self, *, context: str, instance: str, missing_keys: tuple[str, ...]) -> None:
         super().__init__("Odoo preview apply runtime environment is incomplete.")
@@ -1300,10 +1314,35 @@ def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
     return f"{normalized}_{suffix_identifier}" if suffix_identifier else normalized
 
 
+def _odoo_preview_apply_inputs_response_result(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyInputsRequest,
+    database_url: str | None,
+) -> dict[str, object]:
+    driver_result = build_odoo_preview_apply_inputs(
+        control_plane_root=control_plane_root,
+        record_store=cast(Any, record_store),
+        profile=profile,
+        request=request,
+        database_url=database_url,
+    )
+    return driver_result.model_dump(mode="json")
+
+
 _ODOO_PREVIEW_APPLY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-apply",
     envelope_model=OdooPreviewApplyEnvelope,
     denial_message="Workflow cannot apply Odoo preview provider state for the requested product/context.",
+)
+
+
+_ODOO_PREVIEW_APPLY_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-apply-inputs",
+    envelope_model=OdooPreviewApplyInputsEnvelope,
+    denial_message="Workflow cannot read Odoo preview apply inputs for the requested product/context.",
 )
 
 
@@ -1899,7 +1938,9 @@ _PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset(
     }
 )
 _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
-    _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS | _PREVIEW_VERIFICATION_ROUTE_PATHS
+    _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
+    | _PREVIEW_VERIFICATION_ROUTE_PATHS
+    | {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path}
 )
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
@@ -13168,6 +13209,41 @@ def create_launchplane_service_app(
                     database_url=database_url,
                 )
                 result = driver_result.model_dump(mode="json")
+            elif path == _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path:
+                odoo_preview_inputs_request = (
+                    _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.envelope_model.model_validate(payload)
+                )
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=odoo_preview_inputs_request.product,
+                    require_profile=True,
+                )
+                if resolved_driver_context.profile is None:
+                    raise ProductDriverMismatchError(
+                        "Odoo preview apply inputs require a product profile."
+                    )
+                authorization_context = resolved_driver_context.profile.preview.context
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=odoo_preview_inputs_request.product,
+                    context=authorization_context,
+                    denial_message=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                driver_result = _odoo_preview_apply_inputs_response_result(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    profile=resolved_driver_context.profile,
+                    request=odoo_preview_inputs_request.inputs,
+                    database_url=database_url,
+                )
+                result = driver_result
             elif path == _ODOO_STABLE_VERIFICATION_ROUTE.route_path:
                 odoo_stable_verification_request = (
                     _ODOO_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
@@ -739,15 +739,10 @@ def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> s
         raise click.ClickException(
             f"{_PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
         )
-    return urlunparse(
-        parsed._replace(
-            netloc=f"{preview_slug.strip()}.{parsed.hostname}",
-            path="",
-            params="",
-            query="",
-            fragment="",
-        )
-    )
+    host = f"{preview_slug.strip()}.{parsed.hostname}"
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return f"{parsed.scheme}://{host}"
 
 
 def resolve_generic_web_preview_url(
@@ -755,6 +750,7 @@ def resolve_generic_web_preview_url(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     request: GenericWebPreviewRefreshRequest,
+    database_url: str | None = None,
 ) -> str:
     explicit_preview_url = request.preview_url.strip()
     if explicit_preview_url:
@@ -762,6 +758,7 @@ def resolve_generic_web_preview_url(
     context_values = control_plane_runtime_environments.resolve_runtime_context_values(
         control_plane_root=control_plane_root,
         context_name=profile.preview.context,
+        database_url=database_url,
     )
     preview_base_url = str(context_values.get(_PREVIEW_BASE_URL_ENV_KEY) or "").strip()
     if not preview_base_url:

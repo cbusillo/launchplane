@@ -526,6 +526,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service.OdooPreviewApplyEnvelope,
                     "apply Odoo preview",
                 ),
+                "preview_apply_inputs": (
+                    control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+                    control_plane_service.OdooPreviewApplyInputsEnvelope,
+                    "preview apply inputs",
+                ),
             },
         )
 
