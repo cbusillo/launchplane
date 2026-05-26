@@ -268,7 +268,60 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.error_message, "post deploy failed")
         self.assertEqual(store.deployments[0].deploy.status, "pass")
         self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
-        self.assertEqual(store.inventories, [])
+        self.assertIsNotNone(store.deployments[0].runtime_identity)
+        self.assertEqual(len(store.inventories), 1)
+        self.assertEqual(store.inventories[0].post_deploy_update.status, "fail")
+        self.assertEqual(
+            store.inventories[0].deployment_record_id,
+            store.deployments[0].record_id,
+        )
+
+    def test_execute_generic_web_deploy_records_unexpected_post_deploy_exception(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_profile())
+
+        def post_deploy(
+            _root: Path,
+            _store: GenericWebDeployStore,
+            _context: GenericWebPostDeployContext,
+        ) -> PostDeployUpdateEvidence:
+            raise RuntimeError("unexpected post deploy failure")
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                post_deploy_executor=post_deploy,
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.error_message, "unexpected post deploy failure")
+        self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
+        self.assertEqual(
+            store.deployments[0].post_deploy_update.detail,
+            "unexpected post deploy failure",
+        )
+        self.assertIsNotNone(store.deployments[0].runtime_identity)
+        self.assertEqual(len(store.inventories), 1)
+        self.assertEqual(store.inventories[0].post_deploy_update.status, "fail")
 
     def test_execute_generic_web_deploy_treats_returned_post_deploy_failure_as_failed_extension(
         self,
@@ -314,7 +367,9 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(store.deployments[0].deploy.status, "pass")
         self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
         self.assertEqual(store.deployments[0].post_deploy_update.detail, "returned failure")
-        self.assertEqual(store.inventories, [])
+        self.assertIsNotNone(store.deployments[0].runtime_identity)
+        self.assertEqual(len(store.inventories), 1)
+        self.assertEqual(store.inventories[0].post_deploy_update.status, "fail")
 
     def test_execute_generic_web_deploy_uses_qualified_bare_tag(self) -> None:
         store = _GenericWebDeployStore(_profile())

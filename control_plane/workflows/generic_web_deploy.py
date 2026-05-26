@@ -366,22 +366,21 @@ def execute_generic_web_deploy(
         )
         deploy_completed = True
         if post_deploy_executor is not None:
-            post_deploy_update = _terminal_post_deploy_update(
-                post_deploy_executor(
-                    control_plane_root,
-                    record_store,
-                    GenericWebPostDeployContext(
-                        product=resolved_profile.product,
-                        context=resolved_lane.context,
-                        instance=resolved_lane.instance,
-                        deployment_record_id=record_id,
-                        target_name=resolved_target.target_name,
-                        target_type=resolved_target.target_type,
-                        target_id=resolved_target.target_id,
-                        artifact_id=ship_request.artifact_id,
-                        source_git_ref=ship_request.source_git_ref,
-                    ),
-                )
+            post_deploy_update = _run_post_deploy_extension(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                context=GenericWebPostDeployContext(
+                    product=resolved_profile.product,
+                    context=resolved_lane.context,
+                    instance=resolved_lane.instance,
+                    deployment_record_id=record_id,
+                    target_name=resolved_target.target_name,
+                    target_type=resolved_target.target_type,
+                    target_id=resolved_target.target_id,
+                    artifact_id=ship_request.artifact_id,
+                    source_git_ref=ship_request.source_git_ref,
+                ),
+                post_deploy_executor=post_deploy_executor,
             )
             if post_deploy_update.status == "fail":
                 raise click.ClickException(
@@ -396,18 +395,36 @@ def execute_generic_web_deploy(
                 status="fail",
                 detail=str(exc),
             )
-        record_store.write_deployment_record(
-            build_deployment_record(
-                request=ship_request,
-                record_id=record_id,
-                deployment_id="control-plane-dokploy",
-                deployment_status=deployment_status,
-                started_at=started_at,
-                finished_at=finished_at,
-                resolved_target=resolved_target,
-                post_deploy_update=post_deploy_update,
+        runtime_identity = (
+            _build_runtime_identity(
+                profile=resolved_profile,
+                lane=resolved_lane,
+                ship_request=ship_request,
+                deployment_record_id=record_id,
+                deployed_at=finished_at,
             )
+            if deploy_completed
+            else None
         )
+        deployment_record = build_deployment_record(
+            request=ship_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status=deployment_status,
+            started_at=started_at,
+            finished_at=finished_at,
+            resolved_target=resolved_target,
+            post_deploy_update=post_deploy_update,
+            runtime_identity=runtime_identity,
+        )
+        record_store.write_deployment_record(deployment_record)
+        if deploy_completed:
+            record_store.write_environment_inventory(
+                build_environment_inventory(
+                    deployment_record=deployment_record,
+                    updated_at=finished_at,
+                )
+            )
         return GenericWebDeployResult(
             deployment_record_id=record_id,
             deploy_status=deployment_status,
@@ -479,3 +496,20 @@ def _terminal_post_deploy_update(
             "Generic web post-deploy extensions must return terminal evidence."
         )
     return post_deploy_update
+
+
+def _run_post_deploy_extension(
+    *,
+    control_plane_root: Path,
+    record_store: GenericWebDeployStore,
+    context: GenericWebPostDeployContext,
+    post_deploy_executor: GenericWebPostDeployExecutor,
+) -> PostDeployUpdateEvidence:
+    try:
+        return _terminal_post_deploy_update(
+            post_deploy_executor(control_plane_root, record_store, context)
+        )
+    except click.ClickException:
+        raise
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
