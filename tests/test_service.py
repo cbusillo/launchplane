@@ -165,6 +165,10 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewSmokeResult,
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
+from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployStore,
+    GenericWebPostDeployContext,
+)
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
@@ -13643,6 +13647,70 @@ class LaunchplaneServiceTests(unittest.TestCase):
         _, kwargs = deploy.call_args
         self.assertEqual(kwargs["profile"].driver_id, "odoo")
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
+        self.assertIs(
+            kwargs["post_deploy_executor"],
+            control_plane_service._execute_odoo_generic_web_post_deploy,
+        )
+
+    def test_generic_web_deploy_route_keeps_literal_generic_products_without_post_deploy_adapter(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "deploy": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "instance": "testing",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-deploy-syo-no-adapter"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-testing")
+        deploy.assert_called_once()
+        self.assertIsNone(deploy.call_args.kwargs["post_deploy_executor"])
 
     def test_generic_web_deploy_route_rejects_unknown_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14063,6 +14131,83 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_odoo_generic_web_post_deploy_adapter_returns_terminal_evidence(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            context = GenericWebPostDeployContext(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="prod",
+                deployment_record_id="deployment-cm-prod",
+                target_name="cm-prod",
+                target_type="compose",
+                target_id="compose-cm-prod",
+                artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                source_git_ref="abc123",
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="prod",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                ),
+            ) as post_deploy:
+                evidence = control_plane_service._execute_odoo_generic_web_post_deploy(
+                    root,
+                    cast(GenericWebDeployStore, store),
+                    context,
+                )
+
+        self.assertTrue(evidence.attempted)
+        self.assertEqual(evidence.status, "pass")
+        self.assertIn("generic-web extension hook", evidence.detail)
+        post_deploy.assert_called_once()
+        request = post_deploy.call_args.kwargs["request"]
+        self.assertEqual(request.context, "cm")
+        self.assertEqual(request.instance, "prod")
+
+    def test_odoo_generic_web_post_deploy_adapter_preserves_failure_detail(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            context = GenericWebPostDeployContext(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="prod",
+                deployment_record_id="deployment-cm-prod",
+                target_name="cm-prod",
+                target_type="compose",
+                target_id="compose-cm-prod",
+                artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                source_git_ref="abc123",
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="prod",
+                    phase="deploy",
+                    post_deploy_status="fail",
+                    override_status="fail",
+                    error_message="override failed",
+                ),
+            ):
+                evidence = control_plane_service._execute_odoo_generic_web_post_deploy(
+                    root,
+                    cast(GenericWebDeployStore, store),
+                    context,
+                )
+
+        self.assertTrue(evidence.attempted)
+        self.assertEqual(evidence.status, "fail")
+        self.assertEqual(evidence.detail, "override failed")
+
     def test_generic_web_rollback_route_applies_ready_plan(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -14133,8 +14278,93 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-prod-rollback")
         self.assertEqual(payload["records"]["rollback_status"], "pass")
         self.assertEqual(payload["records"]["deploy_status"], "pass")
+        self.assertEqual(payload["records"]["post_deploy_status"], "skipped")
         rollback.assert_called_once()
         self.assertEqual(rollback.call_args.kwargs["request"].product, "sellyouroutboard")
+        self.assertIsNone(rollback.call_args.kwargs["post_deploy_executor"])
+
+    def test_generic_web_rollback_route_passes_odoo_post_deploy_adapter_for_odoo_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["generic_web_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebRollbackApplyResult(
+                plan_id="generic-web-rollback-cm-prod",
+                deployment_record_id="deployment-cm-prod-rollback",
+                rollback_status="pass",
+                deploy_status="pass",
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="prod",
+                rollback_deployment_record_id="deployment-cm-prod-previous",
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_rollback",
+                return_value=driver_result,
+            ) as rollback:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-rollback",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "rollback": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "instance": "prod",
+                            "rollback_deployment_record_id": "deployment-cm-prod-previous",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-rollback-cm-prod"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-cm-prod-rollback")
+        self.assertEqual(payload["records"]["post_deploy_status"], "skipped")
+        rollback.assert_called_once()
+        self.assertIs(
+            rollback.call_args.kwargs["post_deploy_executor"],
+            control_plane_service._execute_odoo_generic_web_post_deploy,
+        )
 
     def test_generic_web_rollback_route_replays_idempotent_response_shape(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14211,6 +14441,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(first_payload["records"], second_payload["records"])
         self.assertEqual(second_payload["records"]["rollback_status"], "pass")
         self.assertEqual(second_payload["records"]["deploy_status"], "pass")
+        self.assertEqual(second_payload["records"]["post_deploy_status"], "skipped")
         self.assertTrue(second_payload["replayed"])
         rollback.assert_called_once()
 

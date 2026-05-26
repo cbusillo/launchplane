@@ -30,6 +30,7 @@ class GenericWebRollbackApplyResult(BaseModel):
     deployment_record_id: str = ""
     rollback_status: Literal["pass", "fail", "blocked"]
     deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
+    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     product: str
     context: str
     instance: str
@@ -99,16 +100,18 @@ def execute_generic_web_rollback(
         ),
         post_deploy_executor=post_deploy_executor,
     )
+    rollback_status: Literal["pass", "fail"] = (
+        "pass"
+        if deploy_result.deploy_status == "pass"
+        and deploy_result.post_deploy_status in {"pass", "skipped"}
+        else "fail"
+    )
     return GenericWebRollbackApplyResult(
         plan_id=plan.plan_id,
         deployment_record_id=deploy_result.deployment_record_id,
-        rollback_status=(
-            "pass"
-            if deploy_result.deploy_status == "pass"
-            and deploy_result.post_deploy_status in {"pass", "skipped"}
-            else "fail"
-        ),
+        rollback_status=rollback_status,
         deploy_status=deploy_result.deploy_status,
+        post_deploy_status=deploy_result.post_deploy_status,
         product=plan.product,
         context=plan.context,
         instance=plan.instance,
