@@ -20,7 +20,10 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployResult,
+    GenericWebPostDeployExecutor,
+)
 from control_plane.workflows.generic_web_rollback import execute_generic_web_rollback
 from control_plane.workflows.ship import build_deployment_record
 
@@ -256,6 +259,73 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
         self.assertEqual(deploy_request.source_git_ref, "abc123")
         self.assertEqual(deploy_request.timeout_seconds, 90)
         self.assertTrue(deploy_request.no_cache)
+
+    def test_execute_apply_forwards_post_deploy_extension_to_generic_deploy(self) -> None:
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record()
+        deploy_result = GenericWebDeployResult(
+            deployment_record_id="deployment-syo-prod-rollback",
+            deploy_status="pass",
+            deploy_started_at="2026-05-25T12:00:00Z",
+            deploy_finished_at="2026-05-25T12:01:00Z",
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="prod",
+            target_name="syo-prod-app",
+            target_type="application",
+            target_id="app-prod",
+            post_deploy_status="pass",
+        )
+
+        def post_deploy_executor() -> None:
+            return None
+
+        with patch(
+            "control_plane.workflows.generic_web_rollback.execute_generic_web_deploy",
+            return_value=deploy_result,
+        ) as deploy:
+            result = execute_generic_web_rollback(
+                control_plane_root=__import__("pathlib").Path("/tmp/launchplane"),
+                record_store=store,
+                request=_request(),
+                post_deploy_executor=cast(GenericWebPostDeployExecutor, post_deploy_executor),
+            )
+
+        self.assertEqual(result.rollback_status, "pass")
+        deploy.assert_called_once()
+        self.assertIs(deploy.call_args.kwargs["post_deploy_executor"], post_deploy_executor)
+
+    def test_execute_apply_fails_when_post_deploy_extension_fails(self) -> None:
+        store = _GenericWebRollbackStore(_profile())
+        store.deployments["deployment-syo-prod-previous"] = _deployment_record()
+        deploy_result = GenericWebDeployResult(
+            deployment_record_id="deployment-syo-prod-rollback",
+            deploy_status="pass",
+            deploy_started_at="2026-05-25T12:00:00Z",
+            deploy_finished_at="2026-05-25T12:01:00Z",
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="prod",
+            target_name="syo-prod-app",
+            target_type="application",
+            target_id="app-prod",
+            post_deploy_status="fail",
+            error_message="post deploy failed",
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_rollback.execute_generic_web_deploy",
+            return_value=deploy_result,
+        ):
+            result = execute_generic_web_rollback(
+                control_plane_root=__import__("pathlib").Path("/tmp/launchplane"),
+                record_store=store,
+                request=_request(),
+            )
+
+        self.assertEqual(result.rollback_status, "fail")
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.error_message, "post deploy failed")
 
     def test_execute_apply_returns_blocked_without_deploying(self) -> None:
         store = _GenericWebRollbackStore(_profile())

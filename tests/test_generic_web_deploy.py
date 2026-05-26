@@ -6,6 +6,7 @@ import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -15,6 +16,8 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
+    GenericWebDeployStore,
+    GenericWebPostDeployContext,
     execute_generic_web_deploy,
     normalize_generic_web_artifact_id,
     resolve_generic_web_profile_lane,
@@ -140,6 +143,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_id, "target-123")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "skipped")
         self.assertEqual(len(store.inventories), 1)
         self.assertEqual(store.inventories[0].context, "sellyouroutboard-testing")
         self.assertEqual(store.inventories[0].instance, "testing")
@@ -175,6 +179,142 @@ class GenericWebDeployTests(unittest.TestCase):
             deploy.call_args.kwargs["runtime_identity"].deployment_record_id,
             store.deployments[0].record_id,
         )
+
+    def test_execute_generic_web_deploy_runs_post_deploy_extension_when_supplied(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_profile())
+        contexts: list[GenericWebPostDeployContext] = []
+
+        def post_deploy(
+            _root: Path,
+            _store: GenericWebDeployStore,
+            context: GenericWebPostDeployContext,
+        ) -> PostDeployUpdateEvidence:
+            contexts.append(context)
+            return PostDeployUpdateEvidence(
+                attempted=True,
+                status="pass",
+                detail="Product post-deploy extension completed.",
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                post_deploy_executor=post_deploy,
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.post_deploy_status, "pass")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "pass")
+        self.assertEqual(store.inventories[0].post_deploy_update.status, "pass")
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0].product, "sellyouroutboard")
+        self.assertEqual(contexts[0].deployment_record_id, store.deployments[0].record_id)
+        self.assertEqual(contexts[0].target_id, "target-123")
+
+    def test_execute_generic_web_deploy_keeps_deploy_pass_when_post_deploy_extension_fails(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_profile())
+
+        def post_deploy(
+            _root: Path,
+            _store: GenericWebDeployStore,
+            _context: GenericWebPostDeployContext,
+        ) -> PostDeployUpdateEvidence:
+            raise click.ClickException("post deploy failed")
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                post_deploy_executor=post_deploy,
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.error_message, "post deploy failed")
+        self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
+        self.assertEqual(store.inventories, [])
+
+    def test_execute_generic_web_deploy_treats_returned_post_deploy_failure_as_failed_extension(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_profile())
+
+        def post_deploy(
+            _root: Path,
+            _store: GenericWebDeployStore,
+            _context: GenericWebPostDeployContext,
+        ) -> PostDeployUpdateEvidence:
+            return PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail="returned failure",
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"),
+        ):
+            result = execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(),
+                post_deploy_executor=post_deploy,
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.error_message, "returned failure")
+        self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(store.deployments[0].post_deploy_update.status, "fail")
+        self.assertEqual(store.deployments[0].post_deploy_update.detail, "returned failure")
+        self.assertEqual(store.inventories, [])
 
     def test_execute_generic_web_deploy_uses_qualified_bare_tag(self) -> None:
         store = _GenericWebDeployStore(_profile())

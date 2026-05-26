@@ -168,6 +168,13 @@ A normal service deploy does this:
 4. Launchplane updates the Dokploy application image and triggers deployment.
 5. Launchplane writes a deployment record with the resolved target and status.
 
+Generic-web deploy records post-deploy evidence as `skipped` by default. A
+driver that inherits from generic-web can provide a product post-deploy
+extension for work that must happen after the provider deployment succeeds. That
+extension writes terminal post-deploy evidence without changing the underlying
+deploy status, so operators can distinguish "image deploy failed" from "image
+deploy passed but product maintenance failed".
+
 Promotion uses the same artifact identity and target records. When health URLs
 exist, Launchplane verifies the source and destination lane health around the
 deployment and writes promotion evidence.

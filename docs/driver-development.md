@@ -54,6 +54,19 @@ Product drivers that reuse common web behavior should declare
 than copying preview/deploy logic. The product-specific behavior still needs
 named capabilities and named routes.
 
+Generic-web stable deploy exposes a product post-deploy extension point for
+based drivers. The generic driver owns target resolution, artifact deployment,
+deployment records, and inventory writes; product drivers can pass an extension
+executor only for work that must happen after a provider deploy succeeds, such
+as Odoo override/application maintenance. The extension must return terminal
+`PostDeployUpdateEvidence` and must not hide provider deploy status: a failed
+extension can fail the lifecycle action while the deployment record still shows
+the underlying image deploy as `pass` and the post-deploy evidence as `fail`.
+Do not move a product apply route onto generic deploy until its remaining
+release, backup, promotion, migration, and post-deploy invariants are either
+represented in generic contracts or still explicitly wrapped by the product
+driver.
+
 ## Capability Design
 
 Use capability names to describe operator-visible behavior, not implementation
