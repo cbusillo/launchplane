@@ -118,8 +118,15 @@ Preview refresh routes receive only product-local facts:
 - run URL
 - primitive smoke/readiness facts when the check is product-specific
 
-Odoo CM is the exception where Launchplane now owns the stage-preview smoke
-contract after refresh: `/web/health`, `/cm-website/health`, `/cell-mechanic`,
+Odoo CM is the exception where Launchplane now owns both the isolated provider
+apply planning inputs and the stage-preview smoke contract after refresh. Product
+workflows should call `POST /v1/drivers/odoo/preview-apply-inputs` with PR,
+image, and source facts, then pass a ready redacted dry-run plan to
+`POST /v1/drivers/odoo/preview-apply` instead of assembling runtime bindings,
+Dokploy environment ids, template compose ids, or Odoo database and volume names
+inside the tenant repo. The route supports refresh only until Launchplane has
+inventory-backed discovery for existing preview targets. After refresh,
+Launchplane owns `/web/health`, `/cm-website/health`, `/cell-mechanic`,
 artifact/revision evidence, and module install/update evidence. Product
 workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
 ready-to-comment signal instead of independently deciding readiness from raw

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -11,11 +11,27 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import JsonObject
 from control_plane.contracts.odoo_preview_runtime_plan import (
+    OdooPreviewProviderCapabilities,
+    OdooPreviewRuntimeBindingEvidence,
+    OdooPreviewRuntimeBlocker,
     OdooPreviewRuntimeOperation,
     OdooPreviewRuntimePlan,
+    OdooPreviewRuntimePlanRequest,
     OdooPreviewRuntimePlanStatus,
+    plan_odoo_preview_runtime,
+)
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewRefreshRequest,
+    effective_preview_app_name_prefix,
+    preview_application_name,
+    resolve_generic_web_preview_url,
 )
 
 
@@ -50,6 +66,380 @@ ODOO_PREVIEW_REQUIRED_ENV_KEYS = (
     "ODOO_MASTER_PASSWORD",
     "ODOO_ADMIN_PASSWORD",
 )
+
+
+class OdooPreviewApplyInputsStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+
+class OdooPreviewApplyInputsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    operation: OdooPreviewRuntimeOperation = "refresh"
+    pr_number: int = Field(ge=1)
+    preview_slug: str = ""
+    preview_url: str = ""
+    image_reference: str = ""
+    source_git_ref: str = ""
+    source: str = "odoo-preview-apply-inputs"
+    timeout_seconds: int = Field(default=300, ge=1)
+    no_cache: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_request(self) -> "OdooPreviewApplyInputsRequest":
+        self.product = _required_text(self.product, "Odoo preview apply inputs requires product")
+        if self.preview_slug.strip():
+            self.preview_slug = self.preview_slug.strip()
+        self.preview_url = self.preview_url.strip()
+        self.image_reference = self.image_reference.strip()
+        self.source_git_ref = self.source_git_ref.strip()
+        self.source = _required_text(self.source, "Odoo preview apply inputs requires source")
+        return self
+
+
+class OdooPreviewApplyInputsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ready", "blocked"]
+    product: str
+    context: str
+    template_instance: str
+    operation: OdooPreviewRuntimeOperation
+    preview_slug: str
+    preview_url: str
+    repository: str
+    runtime_plan: OdooPreviewRuntimePlan
+    dry_run_plan: OdooPreviewDokployDryRunPlan
+    source: str
+    error_message: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_result(self) -> "OdooPreviewApplyInputsResult":
+        self.product = _required_text(
+            self.product, "Odoo preview apply inputs result requires product"
+        )
+        self.context = _required_text(
+            self.context, "Odoo preview apply inputs result requires context"
+        )
+        self.template_instance = _required_text(
+            self.template_instance, "Odoo preview apply inputs result requires template_instance"
+        )
+        self.preview_slug = _required_text(
+            self.preview_slug, "Odoo preview apply inputs result requires preview_slug"
+        )
+        self.repository = _required_text(
+            self.repository, "Odoo preview apply inputs result requires repository"
+        )
+        self.error_message = self.error_message.strip()
+        return self
+
+
+def build_odoo_preview_apply_inputs(
+    *,
+    control_plane_root: Path,
+    record_store: OdooPreviewApplyInputsStore,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyInputsRequest,
+    database_url: str | None = None,
+) -> OdooPreviewApplyInputsResult:
+    preview_profile = profile.preview
+    if not preview_profile.enabled or not preview_profile.context.strip():
+        raise click.ClickException(
+            f"Product {profile.product!r} does not have Odoo previews enabled."
+        )
+    if request.operation != "refresh":
+        return _blocked_apply_inputs_result(
+            profile=profile,
+            request=request,
+            preview_slug=_preview_slug(profile=profile, request=request),
+            preview_url=request.preview_url,
+            runtime_plan=None,
+            dry_run_plan=None,
+            message="Launchplane-owned Odoo preview apply inputs currently support refresh only.",
+        )
+
+    preview_slug = _preview_slug(profile=profile, request=request)
+    preview_refresh_request = GenericWebPreviewRefreshRequest(
+        product=profile.product,
+        preview_slug=preview_slug,
+        preview_url=request.preview_url,
+        image_reference=request.image_reference,
+        anchor_pr_number=request.pr_number,
+        anchor_head_sha=request.source_git_ref,
+        source=request.source,
+        timeout_seconds=request.timeout_seconds,
+        no_cache=request.no_cache,
+    )
+    preview_url = resolve_generic_web_preview_url(
+        control_plane_root=control_plane_root,
+        profile=profile,
+        request=preview_refresh_request,
+        database_url=database_url,
+    )
+    template_instance = preview_profile.template_instance.strip()
+    runtime_bindings = _preview_runtime_bindings(
+        record_store=record_store,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+    )
+    runtime_plan = plan_odoo_preview_runtime(
+        request=OdooPreviewRuntimePlanRequest(
+            operation=request.operation,
+            product=profile.product,
+            repository=profile.repository,
+            pr_number=request.pr_number,
+            preview_slug=preview_slug,
+            preview_url=preview_url,
+            strategy="isolated_dokploy_compose",
+            image_reference=request.image_reference,
+            source_git_ref=request.source_git_ref,
+            provider_capabilities=_odoo_preview_provider_capabilities(),
+            runtime_bindings=runtime_bindings,
+            required_runtime_keys=ODOO_PREVIEW_REQUIRED_ENV_KEYS,
+        )
+    )
+    template_compose_id = _preview_template_compose_id(
+        control_plane_root=control_plane_root,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+    )
+    environment_id = _preview_environment_id(
+        control_plane_root=control_plane_root,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+        database_url=database_url,
+    )
+    dry_run_plan = build_odoo_preview_dokploy_dry_run(
+        request=OdooPreviewDokployDryRunRequest(
+            runtime_plan=runtime_plan,
+            no_cache=request.no_cache,
+            delete_volumes=True,
+            runtime_port=profile.runtime_port,
+            compose_name=preview_application_name(
+                app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+                preview_slug=preview_slug,
+            ),
+            environment_id=environment_id,
+            template_compose_id=template_compose_id,
+        )
+    )
+    status: Literal["ready", "blocked"] = (
+        "ready" if runtime_plan.status == "ready" and dry_run_plan.status == "ready" else "blocked"
+    )
+    return OdooPreviewApplyInputsResult(
+        status=status,
+        product=profile.product,
+        context=preview_profile.context,
+        template_instance=template_instance,
+        operation=request.operation,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        repository=profile.repository,
+        runtime_plan=runtime_plan,
+        dry_run_plan=dry_run_plan,
+        source=request.source,
+        error_message="" if status == "ready" else _blocked_inputs_message(dry_run_plan),
+    )
+
+
+def _preview_slug(
+    *, profile: LaunchplaneProductProfileRecord, request: OdooPreviewApplyInputsRequest
+) -> str:
+    if request.preview_slug.strip():
+        return request.preview_slug.strip()
+    return profile.preview.slug_template.strip().replace("{number}", str(request.pr_number))
+
+
+def _preview_runtime_bindings(
+    *, record_store: OdooPreviewApplyInputsStore, context_name: str, instance_name: str
+) -> tuple[OdooPreviewRuntimeBindingEvidence, ...]:
+    bindings: list[OdooPreviewRuntimeBindingEvidence] = []
+    definition = (
+        control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+            record_store=record_store
+        )
+    )
+    if definition is not None:
+        merged_values = _preview_merged_runtime_environment_keys(
+            definition=definition,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        bindings.extend(
+            OdooPreviewRuntimeBindingEvidence(key=key, source="runtime_environment")
+            for key in sorted(merged_values)
+        )
+    secret_bindings = record_store.list_secret_bindings(
+        integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=None,
+    )
+    bindings.extend(
+        OdooPreviewRuntimeBindingEvidence(key=binding.binding_key, source="managed_secret")
+        for binding in secret_bindings
+        if binding.status == "configured"
+    )
+    bindings.extend(
+        OdooPreviewRuntimeBindingEvidence(key=key, source="generated")
+        for key in (
+            "ODOO_DB_NAME",
+            "ODOO_DATA_VOLUME",
+            "ODOO_LOG_VOLUME",
+            "ODOO_DB_VOLUME",
+        )
+    )
+    return tuple({binding.key: binding for binding in bindings}.values())
+
+
+def _preview_merged_runtime_environment_keys(
+    *,
+    definition: control_plane_runtime_environments.RuntimeEnvironmentDefinition,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, str]:
+    merged_values: dict[str, str] = {
+        key: str(value) for key, value in definition.shared_env.items()
+    }
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        return merged_values
+    merged_values.update({key: str(value) for key, value in context_definition.shared_env.items()})
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is not None:
+        merged_values.update({key: str(value) for key, value in instance_definition.env.items()})
+    return {key: value for key, value in merged_values.items() if value.strip()}
+
+
+def _odoo_preview_provider_capabilities() -> OdooPreviewProviderCapabilities:
+    return OdooPreviewProviderCapabilities(
+        can_create_compose=True,
+        can_update_compose_env=True,
+        can_deploy_compose=True,
+        can_bind_domain=True,
+        can_delete_compose=True,
+        can_delete_domain=True,
+    )
+
+
+def _preview_template_compose_id(
+    *, control_plane_root: Path, context_name: str, instance_name: str
+) -> str:
+    target_definition = _preview_template_target_definition(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if target_definition is None or target_definition.target_type != "compose":
+        return ""
+    return target_definition.target_id.strip()
+
+
+def _preview_environment_id(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    instance_name: str,
+    database_url: str | None,
+) -> str:
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
+        database_url=database_url,
+    )
+    return environment_values.get("DOKPLOY_ENVIRONMENT_ID", "").strip()
+
+
+def _preview_template_target_definition(
+    *, control_plane_root: Path, context_name: str, instance_name: str
+) -> control_plane_dokploy.DokployTargetDefinition | None:
+    try:
+        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+            control_plane_root=control_plane_root,
+            allow_incomplete_target_ids=True,
+            allowed_incomplete_target_routes=((context_name, instance_name),),
+        )
+    except click.ClickException:
+        return None
+    return control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+
+
+def _blocked_inputs_message(dry_run_plan: OdooPreviewDokployDryRunPlan) -> str:
+    messages = [blocker.message for blocker in dry_run_plan.blockers]
+    return "; ".join(messages) or "Odoo preview apply inputs are blocked."
+
+
+def _blocked_apply_inputs_result(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    request: OdooPreviewApplyInputsRequest,
+    preview_slug: str,
+    preview_url: str,
+    runtime_plan: OdooPreviewRuntimePlan | None,
+    dry_run_plan: OdooPreviewDokployDryRunPlan | None,
+    message: str,
+) -> OdooPreviewApplyInputsResult:
+    resolved_runtime_plan = runtime_plan or OdooPreviewRuntimePlan(
+        status="blocked",
+        operation=request.operation,
+        product=profile.product,
+        repository=profile.repository,
+        pr_number=request.pr_number,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        strategy="unknown",
+        blockers=(
+            OdooPreviewRuntimeBlocker(code="runtime_strategy_not_isolated", message=message),
+        ),
+        summary="Odoo preview runtime plan is blocked",
+    )
+    resolved_dry_run_plan = dry_run_plan or OdooPreviewDokployDryRunPlan(
+        status="blocked",
+        operation=request.operation,
+        product=profile.product,
+        repository=profile.repository,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        compose_ref=f"{profile.product}-{preview_slug}",
+        compose_name=preview_application_name(
+            app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+            preview_slug=preview_slug,
+        ),
+        blockers=(OdooPreviewDokployDryRunBlocker(code="runtime_plan_not_ready", message=message),),
+        summary="Odoo preview Dokploy dry-run plan is blocked",
+    )
+    return OdooPreviewApplyInputsResult(
+        status="blocked",
+        product=profile.product,
+        context=profile.preview.context,
+        template_instance=profile.preview.template_instance,
+        operation=request.operation,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        repository=profile.repository,
+        runtime_plan=resolved_runtime_plan,
+        dry_run_plan=resolved_dry_run_plan,
+        source=request.source,
+        error_message=message,
+    )
 
 
 class OdooPreviewDokployEndpointSpec(BaseModel):
@@ -421,9 +811,7 @@ def _execute_refresh(
     steps: list[OdooPreviewDokployApplyStep] = []
     try:
         if creating_compose and not plan.template_compose_id:
-            raise click.ClickException(
-                "Odoo preview compose create requires template_compose_id."
-            )
+            raise click.ClickException("Odoo preview compose create requires template_compose_id.")
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
         target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
             host=host,
@@ -715,9 +1103,7 @@ def _wait_for_smoke_check(*, preview_url: str, health_path: str, timeout_seconds
         time.sleep(sleep_seconds)
         deadline -= sleep_seconds
     if last_http_status is not None:
-        raise click.ClickException(
-            f"Odoo preview smoke check returned HTTP {last_http_status}."
-        )
+        raise click.ClickException(f"Odoo preview smoke check returned HTTP {last_http_status}.")
     raise click.ClickException(f"Timed out waiting for Odoo preview smoke check {smoke_url}.")
 
 

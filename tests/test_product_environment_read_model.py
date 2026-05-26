@@ -472,6 +472,10 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             actions["preview_refresh"].route_path,
             "/v1/drivers/generic-web/preview-refresh",
         )
+        self.assertEqual(
+            actions["preview_apply_inputs"].route_path,
+            "/v1/drivers/odoo/preview-apply-inputs",
+        )
         self.assertEqual(actions["preview_apply"].route_path, "/v1/drivers/odoo/preview-apply")
         self.assertNotIn("preview_verification", actions)
 

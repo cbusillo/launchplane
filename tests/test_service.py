@@ -16914,6 +16914,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
             )
             _write_odoo_preview_template_runtime_environment(store=store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="cm",
+                    instance="testing",
+                    env={
+                        "ODOO_DB_USER": "odoo",
+                        "DOKPLOY_ENVIRONMENT_ID": "env-cm-preview",
+                    },
+                    updated_at="2026-05-09T12:30:00Z",
+                    source_label="test",
+                )
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -17050,6 +17063,184 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 applied_request.environment_values["ODOO_DB_PASSWORD"],
                 "caller-secret-must-not-win",
             )
+
+    def test_odoo_preview_apply_inputs_route_derives_runtime_and_dry_run_plans(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            state_dir = root / "fallback-state"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="cm",
+                    env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.example.test"},
+                    updated_at="2026-05-09T12:25:00Z",
+                    source_label="test",
+                )
+            )
+            _write_odoo_preview_template_runtime_environment(store=store)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="cm",
+                    instance="testing",
+                    env={
+                        "ODOO_DB_USER": "odoo",
+                        "DOKPLOY_ENVIRONMENT_ID": "env-cm-preview",
+                    },
+                    updated_at="2026-05-09T12:30:00Z",
+                    source_label="test",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_preview_apply_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=DokploySourceOfTruth(
+                        schema_version=1,
+                        targets=(
+                            DokployTargetDefinition(
+                                context="cm",
+                                instance="testing",
+                                target_type="compose",
+                                target_id="compose-cm-testing",
+                                target_name="cm-testing",
+                            ),
+                        ),
+                    ),
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/preview-apply-inputs",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "inputs": {
+                            "product": "odoo-tenant-cm",
+                            "pr_number": 42,
+                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            result = payload["result"]
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["preview_slug"], "pr-42")
+            self.assertEqual(result["preview_url"], "https://pr-42.cm-preview.example.test")
+            self.assertEqual(result["runtime_plan"]["status"], "ready")
+            self.assertEqual(result["dry_run_plan"]["status"], "ready")
+            self.assertEqual(result["dry_run_plan"]["environment_id"], "env-cm-preview")
+            self.assertEqual(result["dry_run_plan"]["template_compose_id"], "compose-cm-testing")
+            self.assertNotIn("template-db-secret", json.dumps(payload))
+
+    def test_odoo_preview_apply_inputs_route_blocks_destroy_until_target_discovery_exists(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_preview_apply_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-apply-inputs",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "inputs": {
+                        "product": "odoo-tenant-cm",
+                        "operation": "destroy",
+                        "pr_number": 42,
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["result"]["status"], "blocked")
+            self.assertIn("refresh only", payload["result"]["error_message"])
 
     def test_odoo_preview_apply_route_blocks_missing_service_runtime_environment(
         self,
