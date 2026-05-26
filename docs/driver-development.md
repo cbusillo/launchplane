@@ -62,6 +62,9 @@ as Odoo override/application maintenance. The extension must return terminal
 `PostDeployUpdateEvidence` and must not hide provider deploy status: a failed
 extension can fail the lifecycle action while the deployment record still shows
 the underlying image deploy as `pass` and the post-deploy evidence as `fail`.
+Launchplane wires this extension for Odoo profiles when they execute generic-web
+deploy or rollback apply, so Odoo can reuse common provider deployment while its
+post-deploy maintenance remains explicit driver behavior.
 Do not move a product apply route onto generic deploy until its remaining
 release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product

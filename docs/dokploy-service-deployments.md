@@ -175,6 +175,11 @@ extension writes terminal post-deploy evidence without changing the underlying
 deploy status, so operators can distinguish "image deploy failed" from "image
 deploy passed but product maintenance failed".
 
+Odoo profiles that execute generic-web deploy or rollback apply use this
+extension to run the Odoo post-deploy driver after the provider deploy succeeds.
+The Odoo-specific rollback apply route remains available for rollback flows that
+still need Odoo release tuple and promotion-state updates.
+
 Promotion uses the same artifact identity and target records. When health URLs
 exist, Launchplane verifies the source and destination lane health around the
 deployment and writes promotion evidence.

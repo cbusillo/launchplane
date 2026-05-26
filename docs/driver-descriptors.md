@@ -114,7 +114,9 @@ records post-deploy evidence as `skipped` unless a based driver explicitly
 provides a product post-deploy extension. That extension point is the boundary
 for product-only work after a provider deploy succeeds; it must return terminal
 post-deploy evidence and must keep deploy status distinct from post-deploy
-status.
+status. Odoo profiles receive this extension when they execute generic-web
+deploy, which runs the Odoo post-deploy driver after the provider deploy
+succeeds.
 
 The `prod_promotion` action routes to
 `POST /v1/drivers/generic-web/prod-promotion`. It promotes a generic-web
@@ -139,7 +141,10 @@ validation, persists the plan record, and applies ready plans through the normal
 generic-web deploy path using the previous immutable artifact identity. Generic
 rollback also forwards the generic deploy post-deploy extension hook, so a
 based driver can keep product-only post-deploy checks while reusing the common
-rollback deployment path once its other invariants are represented. Product
+rollback deployment path once its other invariants are represented. Odoo profiles
+therefore run Odoo post-deploy through generic rollback apply, but the canonical
+Odoo rollback apply route remains product-specific until its release and
+promotion bookkeeping is generic-contract represented or explicitly wrapped. Product
 drivers keep their own `prod_rollback` action only when they need additional
 product-specific gates, such as Odoo backup, release tuple, manifest, migration,
 or post-deploy checks. Odoo keeps `POST /v1/drivers/odoo/prod-rollback` as its

@@ -283,6 +283,9 @@ from control_plane.workflows.evidence_ingestion import (
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
+    GenericWebDeployStore,
+    GenericWebPostDeployContext,
+    GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
 )
 from control_plane.workflows.generic_web_promotion import (
@@ -347,6 +350,7 @@ from control_plane.workflows.odoo_artifact_publish import (
 )
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
+    OdooPostDeployResult,
     execute_odoo_post_deploy,
 )
 from control_plane.contracts.odoo_stable_bootstrap import (
@@ -728,6 +732,7 @@ class _ResolvedProductDriverContext:
     lane: ProductLaneProfile | None = None
 
 
+_ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS = frozenset({"odoo"})
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
@@ -4988,7 +4993,7 @@ def _accepted_payload(
 
 def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
     if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
-        return frozenset({"rollback_status", "deploy_status"})
+        return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
     return frozenset()
 
 
@@ -6419,6 +6424,40 @@ def _product_driver_route_compatible(
         profile=profile,
         expected_driver_id=expected_driver_id,
     )
+
+
+def _post_deploy_evidence_from_odoo_result(
+    result: OdooPostDeployResult,
+) -> PostDeployUpdateEvidence:
+    return PostDeployUpdateEvidence(
+        attempted=True,
+        status=result.post_deploy_status,
+        detail=(
+            result.error_message
+            or "Odoo post-deploy completed through the generic-web extension hook."
+        ),
+    )
+
+
+def _execute_odoo_generic_web_post_deploy(
+    control_plane_root: Path,
+    record_store: GenericWebDeployStore,
+    context: GenericWebPostDeployContext,
+) -> PostDeployUpdateEvidence:
+    result = execute_odoo_post_deploy(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=OdooPostDeployRequest(context=context.context, instance=context.instance),
+    )
+    return _post_deploy_evidence_from_odoo_result(result)
+
+
+def _generic_web_post_deploy_executor_for_profile(
+    profile: LaunchplaneProductProfileRecord,
+) -> GenericWebPostDeployExecutor | None:
+    if profile.driver_id.strip() in _ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS:
+        return _execute_odoo_generic_web_post_deploy
+    return None
 
 
 def _find_product_profile_lane(
@@ -11523,6 +11562,7 @@ def create_launchplane_service_app(
                     request=generic_web_deploy_request.deploy,
                     profile=profile,
                     lane=lane,
+                    post_deploy_executor=_generic_web_post_deploy_executor_for_profile(profile),
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
@@ -11737,12 +11777,16 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     record_store=record_store,
                     request=generic_web_rollback_apply_request.rollback,
+                    post_deploy_executor=_generic_web_post_deploy_executor_for_profile(
+                        resolved_driver_context.profile
+                    ),
                 )
                 result = {
                     "generic_web_rollback_plan_id": driver_result.plan_id,
                     "deployment_record_id": driver_result.deployment_record_id,
                     "rollback_status": driver_result.rollback_status,
                     "deploy_status": driver_result.deploy_status,
+                    "post_deploy_status": driver_result.post_deploy_status,
                 }
             elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
                 generic_web_desired_state_request, profile, authorization_response = (
