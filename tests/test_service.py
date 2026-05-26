@@ -156,6 +156,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
+from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
 from control_plane.workflows.generic_web_rollback import GenericWebRollbackApplyResult
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
@@ -13710,6 +13711,92 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-testing")
         deploy.assert_called_once()
         self.assertIsNone(deploy.call_args.kwargs["post_deploy_executor"])
+
+    def test_generic_web_deploy_route_replays_post_deploy_failure_after_deploy_pass(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebDeployResult(
+                deployment_record_id="deployment-syo-testing-post-deploy-failed",
+                deploy_status="pass",
+                deploy_started_at="2026-05-26T02:00:00Z",
+                deploy_finished_at="2026-05-26T02:05:00Z",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_name="syo-testing",
+                target_type="application",
+                target_id="app-syo-testing",
+                post_deploy_status="fail",
+                error_message="post-deploy failed after deploy passed",
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "deploy": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "instance": "testing",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    "source_git_ref": "abc123",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-post-deploy-failed"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-post-deploy-failed"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"], second_payload["records"])
+        self.assertEqual(
+            second_payload["records"]["deployment_record_id"], driver_result.deployment_record_id
+        )
+        self.assertTrue(second_payload["replayed"])
+        deploy.assert_called_once()
 
     def test_generic_web_deploy_route_rejects_unknown_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
