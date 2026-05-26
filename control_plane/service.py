@@ -5618,11 +5618,30 @@ def _should_store_idempotency_record(
         return True
     if _driver_result_contains_status(driver_result, "blocked"):
         return False
+    if _driver_result_has_completed_deploy_with_post_deploy_failure(driver_result):
+        return True
     if _driver_result_contains_status(driver_result, "fail"):
         return False
     if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
         return not _driver_result_contains_status(driver_result, "pending")
     return True
+
+
+def _driver_result_has_completed_deploy_with_post_deploy_failure(
+    driver_result: BaseModel | dict[str, object] | object,
+) -> bool:
+    if isinstance(driver_result, BaseModel):
+        result_payload = driver_result.model_dump(mode="json")
+    elif isinstance(driver_result, dict):
+        result_payload = driver_result
+    elif hasattr(driver_result, "__dict__"):
+        result_payload = vars(driver_result)
+    else:
+        return False
+    return (
+        result_payload.get("deploy_status") == "pass"
+        and result_payload.get("post_deploy_status") == "fail"
+    )
 
 
 def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
