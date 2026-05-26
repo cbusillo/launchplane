@@ -143,6 +143,9 @@ from control_plane.workflows.verireel_rollout import VeriReelRolloutVerification
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+from control_plane.workflows.odoo_generic_web_post_deploy import (
+    execute_odoo_generic_web_post_deploy,
+)
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
@@ -165,10 +168,6 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewSmokeResult,
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
-from control_plane.workflows.generic_web_deploy import (
-    GenericWebDeployStore,
-    GenericWebPostDeployContext,
-)
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
@@ -13649,7 +13648,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["lane"].context, "sellyouroutboard-testing")
         self.assertIs(
             kwargs["post_deploy_executor"],
-            control_plane_service._execute_odoo_generic_web_post_deploy,
+            execute_odoo_generic_web_post_deploy,
         )
 
     def test_generic_web_deploy_route_keeps_literal_generic_products_without_post_deploy_adapter(
@@ -14131,83 +14130,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_odoo_generic_web_post_deploy_adapter_returns_terminal_evidence(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            context = GenericWebPostDeployContext(
-                product="odoo-tenant-cm",
-                context="cm",
-                instance="prod",
-                deployment_record_id="deployment-cm-prod",
-                target_name="cm-prod",
-                target_type="compose",
-                target_id="compose-cm-prod",
-                artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
-                source_git_ref="abc123",
-            )
-
-            with patch(
-                "control_plane.service.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="cm",
-                    instance="prod",
-                    phase="deploy",
-                    post_deploy_status="pass",
-                    override_status="pass",
-                ),
-            ) as post_deploy:
-                evidence = control_plane_service._execute_odoo_generic_web_post_deploy(
-                    root,
-                    cast(GenericWebDeployStore, store),
-                    context,
-                )
-
-        self.assertTrue(evidence.attempted)
-        self.assertEqual(evidence.status, "pass")
-        self.assertIn("generic-web extension hook", evidence.detail)
-        post_deploy.assert_called_once()
-        request = post_deploy.call_args.kwargs["request"]
-        self.assertEqual(request.context, "cm")
-        self.assertEqual(request.instance, "prod")
-
-    def test_odoo_generic_web_post_deploy_adapter_preserves_failure_detail(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            store = FilesystemRecordStore(state_dir=root / "state")
-            context = GenericWebPostDeployContext(
-                product="odoo-tenant-cm",
-                context="cm",
-                instance="prod",
-                deployment_record_id="deployment-cm-prod",
-                target_name="cm-prod",
-                target_type="compose",
-                target_id="compose-cm-prod",
-                artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
-                source_git_ref="abc123",
-            )
-
-            with patch(
-                "control_plane.service.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="cm",
-                    instance="prod",
-                    phase="deploy",
-                    post_deploy_status="fail",
-                    override_status="fail",
-                    error_message="override failed",
-                ),
-            ):
-                evidence = control_plane_service._execute_odoo_generic_web_post_deploy(
-                    root,
-                    cast(GenericWebDeployStore, store),
-                    context,
-                )
-
-        self.assertTrue(evidence.attempted)
-        self.assertEqual(evidence.status, "fail")
-        self.assertEqual(evidence.detail, "override failed")
-
     def test_generic_web_rollback_route_applies_ready_plan(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -14363,7 +14285,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         rollback.assert_called_once()
         self.assertIs(
             rollback.call_args.kwargs["post_deploy_executor"],
-            control_plane_service._execute_odoo_generic_web_post_deploy,
+            execute_odoo_generic_web_post_deploy,
         )
 
     def test_generic_web_rollback_route_replays_idempotent_response_shape(self) -> None:

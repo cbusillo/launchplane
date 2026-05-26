@@ -283,8 +283,6 @@ from control_plane.workflows.evidence_ingestion import (
 )
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
-    GenericWebDeployStore,
-    GenericWebPostDeployContext,
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
 )
@@ -350,8 +348,10 @@ from control_plane.workflows.odoo_artifact_publish import (
 )
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
-    OdooPostDeployResult,
     execute_odoo_post_deploy,
+)
+from control_plane.workflows.odoo_generic_web_post_deploy import (
+    generic_web_post_deploy_executor_for_driver_id,
 )
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
@@ -732,7 +732,6 @@ class _ResolvedProductDriverContext:
     lane: ProductLaneProfile | None = None
 
 
-_ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS = frozenset({"odoo"})
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
@@ -6426,38 +6425,10 @@ def _product_driver_route_compatible(
     )
 
 
-def _post_deploy_evidence_from_odoo_result(
-    result: OdooPostDeployResult,
-) -> PostDeployUpdateEvidence:
-    return PostDeployUpdateEvidence(
-        attempted=True,
-        status=result.post_deploy_status,
-        detail=(
-            result.error_message
-            or "Odoo post-deploy completed through the generic-web extension hook."
-        ),
-    )
-
-
-def _execute_odoo_generic_web_post_deploy(
-    control_plane_root: Path,
-    record_store: GenericWebDeployStore,
-    context: GenericWebPostDeployContext,
-) -> PostDeployUpdateEvidence:
-    result = execute_odoo_post_deploy(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooPostDeployRequest(context=context.context, instance=context.instance),
-    )
-    return _post_deploy_evidence_from_odoo_result(result)
-
-
 def _generic_web_post_deploy_executor_for_profile(
     profile: LaunchplaneProductProfileRecord,
 ) -> GenericWebPostDeployExecutor | None:
-    if profile.driver_id.strip() in _ODOO_GENERIC_WEB_POST_DEPLOY_DRIVERS:
-        return _execute_odoo_generic_web_post_deploy
-    return None
+    return generic_web_post_deploy_executor_for_driver_id(profile.driver_id)
 
 
 def _find_product_profile_lane(
