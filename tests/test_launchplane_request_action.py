@@ -115,9 +115,7 @@ process.on('beforeExit', () => {{
     def test_writes_mapped_response_value_to_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             response_output_path = Path(temporary_directory) / "result.json"
-            github_output_path = Path(temporary_directory) / "github-output.txt"
             result = self.run_action(
-                output_path=github_output_path,
                 inputs={
                     "launchplane-url": "https://launchplane.example",
                     "route-path": "/v1/drivers/generic-web/preview-refresh",
@@ -135,10 +133,6 @@ process.on('beforeExit', () => {{
                     "error_message": "",
                     "application_id": "app-123",
                 },
-            )
-            self.assertIn(
-                "response-output-file<<",
-                github_output_path.read_text(encoding="utf-8"),
             )
 
     def test_fails_when_driver_result_status_is_configured_as_failure(self) -> None:

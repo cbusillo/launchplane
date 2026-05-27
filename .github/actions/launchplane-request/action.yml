@@ -109,8 +109,6 @@ outputs:
     description: HTTP status code returned by Launchplane.
   response-body:
     description: Raw Launchplane response body.
-  response-output-file:
-    description: File path written by response-output-file, when configured.
 
 runs:
   using: node24
