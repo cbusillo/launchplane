@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
@@ -42,6 +43,16 @@ class OdooArtifactPublishStore(
     pass
 
 
+def _normalize_publish_scope(context: str, instance: str) -> tuple[str, str]:
+    normalized_context = context.strip().lower()
+    normalized_instance = instance.strip().lower()
+    if not normalized_context:
+        raise ValueError("Odoo artifact publish requires context.")
+    if normalized_instance not in {"testing", "prod"}:
+        raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
+    return normalized_context, normalized_instance
+
+
 class OdooArtifactPublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -58,14 +69,9 @@ class OdooArtifactPublishRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooArtifactPublishRequest":
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
+        self.context, self.instance = _normalize_publish_scope(self.context, self.instance)
         self.image_repository = self.image_repository.strip()
         self.image_tag = self.image_tag.strip()
-        if not self.context:
-            raise ValueError("Odoo artifact publish requires context.")
-        if self.instance not in {"testing", "prod"}:
-            raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
         if not self.image_repository:
             raise ValueError("Odoo artifact publish requires image_repository.")
         if not self.image_tag:
@@ -98,12 +104,7 @@ class OdooArtifactPublishEvidenceRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooArtifactPublishEvidenceRequest":
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
-        if not self.context:
-            raise ValueError("Odoo artifact publish requires context.")
-        if self.instance not in {"testing", "prod"}:
-            raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
+        self.context, self.instance = _normalize_publish_scope(self.context, self.instance)
         expected_prefix = f"artifact-{self.context}-"
         if not self.manifest.artifact_id.startswith(expected_prefix):
             raise ValueError(
@@ -119,15 +120,16 @@ class OdooArtifactPublishInputsRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     context: str
     instance: str = "testing"
+    pr_number: int | None = Field(default=None, ge=1)
+    preview_slug: str = ""
+    source_git_ref: str = ""
+    isolated: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooArtifactPublishInputsRequest":
-        self.context = self.context.strip().lower()
-        self.instance = self.instance.strip().lower()
-        if not self.context:
-            raise ValueError("Odoo artifact publish requires context.")
-        if self.instance not in {"testing", "prod"}:
-            raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
+        self.context, self.instance = _normalize_publish_scope(self.context, self.instance)
+        self.preview_slug = self.preview_slug.strip()
+        self.source_git_ref = self.source_git_ref.strip()
         return self
 
 
@@ -178,7 +180,6 @@ def _enforce_runtime_key_safety_for_publish_payload(
         integration="runtime_environment",
         context_name=context_name,
         instance_name=instance_name,
-        limit=None,
     )
     binding_keys = tuple(
         binding.binding_key for binding in bindings if binding.binding_key in environment_values
@@ -214,6 +215,7 @@ def build_odoo_artifact_publish_inputs(
     *,
     control_plane_root: Path,
     request: OdooArtifactPublishInputsRequest,
+    product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> dict[str, object]:
     environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
@@ -225,11 +227,57 @@ def build_odoo_artifact_publish_inputs(
         for env_key in PUBLISH_RUNTIME_ENVIRONMENT_KEYS
         if environment_values.get(env_key, "").strip()
     }
-    return {
+    payload: dict[str, object] = {
         "context": request.context,
         "instance": request.instance,
         "environment": publish_environment,
     }
+    if product_profile is not None:
+        payload["image_repository"] = product_profile.image.repository.strip().rstrip("/")
+        payload["repository"] = product_profile.repository.strip()
+        payload["product"] = product_profile.product.strip()
+    preview_slug = _publish_preview_slug(product_profile=product_profile, request=request)
+    if preview_slug:
+        payload["preview_slug"] = preview_slug
+    if request.source_git_ref:
+        payload["source_git_ref"] = request.source_git_ref
+    image_repository = (
+        product_profile.image.repository.strip() if product_profile is not None else ""
+    )
+    if image_repository and request.source_git_ref:
+        payload["image_tag"] = _publish_image_tag(
+            context=request.context,
+            preview_slug=preview_slug,
+            source_git_ref=request.source_git_ref,
+            isolated=request.isolated,
+        )
+    return payload
+
+
+def _publish_preview_slug(
+    *,
+    product_profile: LaunchplaneProductProfileRecord | None,
+    request: OdooArtifactPublishInputsRequest,
+) -> str:
+    if request.preview_slug:
+        return request.preview_slug
+    if request.pr_number is None:
+        return ""
+    if product_profile is None:
+        return f"pr-{request.pr_number}"
+    return product_profile.preview.slug_template.strip().replace("{number}", str(request.pr_number))
+
+
+def _publish_image_tag(
+    *, context: str, preview_slug: str, source_git_ref: str, isolated: bool
+) -> str:
+    normalized_source = source_git_ref.strip()
+    source_short = normalized_source[:8]
+    platform_suffix = "isolated-amd64" if isolated else "amd64"
+    slug = preview_slug.strip()
+    if slug:
+        return f"{context}-{slug}-{source_short}-{platform_suffix}"
+    return f"{context}-{source_short}-{platform_suffix}"
 
 
 def _publish_command(*, request: OdooArtifactPublishRequest, output_file: Path) -> list[str]:

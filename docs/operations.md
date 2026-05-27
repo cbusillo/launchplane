@@ -677,11 +677,12 @@ uv run launchplane odoo-artifacts publish \
 
 The Odoo artifact publish driver is the control-plane-owned handoff. It
 resolves the DB-backed runtime environment and managed secrets in Launchplane,
-passes them to `odoo-devkit` as a one-shot runtime payload for the publish
-subprocess, validates the returned artifact belongs to the requested context,
-and writes the artifact manifest back to Launchplane records. Do not point a
-local devkit checkout directly at the live Launchplane database or recreate
-runtime env files to publish artifacts.
+derives product-profile publish metadata such as preview slug, image repository,
+and image tag, passes the runtime payload to `odoo-devkit` as a one-shot runtime
+payload for the publish subprocess, validates the returned artifact belongs to
+the requested context, and writes the artifact manifest back to Launchplane
+records. Do not point a local devkit checkout directly at the live Launchplane
+database or recreate runtime env files to publish artifacts.
 
 ## Launchplane Preview Operations
 

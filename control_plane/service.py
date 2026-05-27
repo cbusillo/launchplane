@@ -1967,7 +1967,9 @@ _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     | {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path}
 )
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
-    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
+    _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS
+    | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
+    | {_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path}
 )
 
 
@@ -12342,15 +12344,19 @@ def create_launchplane_service_app(
                 odoo_inputs_request = (
                     _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(payload)
                 )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_inputs_request.product,
-                    authorization_context=odoo_inputs_request.inputs.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                resolved_driver_context, authorization_response = (
+                    _resolve_and_authorize_descriptor_route(
+                        route_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        product=odoo_inputs_request.product,
+                        authorization_context=odoo_inputs_request.inputs.context,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        descriptor_context=odoo_inputs_request.inputs.context,
+                        descriptor_instance=odoo_inputs_request.inputs.instance,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -12368,6 +12374,7 @@ def create_launchplane_service_app(
                 result = build_odoo_artifact_publish_inputs(
                     control_plane_root=resolved_root,
                     request=odoo_inputs_request.inputs,
+                    product_profile=resolved_driver_context.profile,
                 )
                 driver_result = result
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
