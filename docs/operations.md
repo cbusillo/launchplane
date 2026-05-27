@@ -362,14 +362,16 @@ Current derived-state behavior:
   identifiers, topology metadata, or timing/status for the caller to thread into
   later verification or promotion evidence.
 - Launchplane can also execute the Odoo stable-lane driver path directly:
-  `POST /v1/drivers/odoo/prod-backup-gate` captures DB and filestore backup
-  evidence, `POST /v1/drivers/odoo/prod-promotion` validates the stored
-  artifact, source release tuple, and required backup gate before promoting
-  `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback` deploys an
-  explicit previous artifact. These routes resolve target identity, runtime
-  values, override inputs, and managed secrets from DB-backed Launchplane
-  records; tenant workflows should only send thin OIDC-authenticated requests
-  and record returned IDs.
+  `POST /v1/drivers/odoo/prod-promotion-inputs` resolves the current testing
+  artifact, source ref, and deterministic backup-gate record ID from DB-backed
+  release tuple and artifact records, `POST /v1/drivers/odoo/prod-backup-gate`
+  captures DB and filestore backup evidence, `POST /v1/drivers/odoo/prod-promotion`
+  validates the stored artifact, source release tuple, and required backup gate
+  before promoting `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback`
+  deploys an explicit previous artifact. These routes resolve target identity,
+  runtime values, override inputs, and managed secrets from DB-backed
+  Launchplane records; tenant workflows should only send thin
+  OIDC-authenticated requests and record returned IDs.
 - Generic web products can use the common
   `POST /v1/drivers/generic-web/prod-promotion` route for testing-to-prod image
   promotion when product-specific gates are not needed. The route resolves

@@ -217,6 +217,13 @@ refresh-only until Launchplane has inventory-backed discovery for existing Odoo
 preview targets. Tenant workflows should call this route before
 `preview-apply` instead of assembling Odoo runtime or Dokploy plan payloads in
 the tenant repo.
+Odoo stable promotion also exposes
+`POST /v1/drivers/odoo/prod-promotion-inputs` as a read-only action before the
+backup gate and promotion mutation routes. The route resolves the promotable
+testing artifact and source ref from Launchplane release tuple and artifact
+records, then returns the deterministic backup-gate record ID for the caller's
+request ID. Tenant workflows should use that response instead of prompting an
+operator to enter artifact or source facts by hand.
 The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same

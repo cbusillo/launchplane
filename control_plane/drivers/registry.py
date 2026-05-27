@@ -522,7 +522,12 @@ ODOO_DRIVER = DriverDescriptor(
             capability_id="stable_promotion",
             label="Stable promotion",
             description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
-            actions=("prod_backup_gate", "prod_promotion", "prod_rollback"),
+            actions=(
+                "prod_promotion_inputs",
+                "prod_backup_gate",
+                "prod_promotion",
+                "prod_rollback",
+            ),
             panels=("lane_health", "deployment_evidence", "promotion_evidence", "backup_evidence"),
         ),
         DriverCapabilityDescriptor(
@@ -620,6 +625,15 @@ ODOO_DRIVER = DriverDescriptor(
             scope="preview",
             route_path="/v1/drivers/odoo/preview-apply",
             authz_action="odoo_preview_apply.execute",
+        ),
+        _action(
+            "prod_promotion_inputs",
+            "Resolve prod promotion inputs",
+            "Resolve the current testing artifact, source ref, and backup record ID for Odoo prod promotion.",
+            safety="read",
+            scope="instance",
+            route_path="/v1/drivers/odoo/prod-promotion-inputs",
+            authz_action="odoo_prod_promotion_inputs.read",
         ),
         _action(
             "prod_backup_gate",

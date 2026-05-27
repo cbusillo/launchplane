@@ -372,6 +372,11 @@ from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionStore,
     execute_odoo_prod_promotion,
 )
+from control_plane.workflows.odoo_prod_promotion_inputs import (
+    OdooProdPromotionInputsRequest,
+    OdooProdPromotionInputsStore,
+    resolve_odoo_prod_promotion_inputs,
+)
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
@@ -1791,12 +1796,31 @@ class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooProdPromotionInputsEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    inputs: OdooProdPromotionInputsRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdPromotionInputsEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo prod promotion inputs")
+        return self
+
+
 _ODOO_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/prod-backup-gate",
     envelope_model=OdooProdBackupGateEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo prod backup-gate driver"
         " for the requested product/context."
+    ),
+)
+
+
+_ODOO_PROD_PROMOTION_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-promotion-inputs",
+    envelope_model=OdooProdPromotionInputsEnvelope,
+    denial_message=(
+        "Workflow cannot read Odoo prod promotion inputs for the requested product/context."
     ),
 )
 
@@ -12385,6 +12409,44 @@ def create_launchplane_service_app(
                     "database_dump_path": driver_result.database_dump_path,
                     "filestore_archive_path": driver_result.filestore_archive_path,
                     "manifest_path": driver_result.manifest_path,
+                }
+            elif path == _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path:
+                odoo_prod_inputs_request = (
+                    _ODOO_PROD_PROMOTION_INPUTS_ROUTE.envelope_model.model_validate(payload)
+                )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_prod_inputs_request.product,
+                    authorization_context=odoo_prod_inputs_request.inputs.context,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = resolve_odoo_prod_promotion_inputs(
+                    record_store=cast(OdooProdPromotionInputsStore, record_store),
+                    request=odoo_prod_inputs_request.inputs,
+                )
+                result = {
+                    "artifact_id": driver_result.artifact_id,
+                    "backup_record_id": driver_result.backup_record_id,
+                    "release_tuple_id": driver_result.release_tuple_id,
+                    "source_git_ref": driver_result.source_git_ref,
+                    "input_status": driver_result.input_status,
                 }
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
                 odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(

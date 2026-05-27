@@ -1154,6 +1154,15 @@ responses include planner blockers but never plaintext runtime values or secret
 material. Destroy planning remains fail-closed when no matching preview compose
 and hostname can be discovered.
 
+`POST /v1/drivers/odoo/prod-promotion-inputs` is the stable-lane companion for
+thin tenant prod promotion workflows. The caller supplies product, context, and
+a request ID. Launchplane reads the current `testing` release tuple and artifact
+manifest, then returns the artifact ID, source git ref, release tuple ID,
+immutable image reference, and deterministic backup-gate record ID required by
+the backup-gate and promotion routes. Blocked responses are not cached as
+idempotent successes and explain which Launchplane record is missing, so a
+tenant workflow does not have to accept hand-entered artifact or source facts.
+
 The CM tenant preview workflow uses two product scopes deliberately. Artifact
 publish input and publish evidence requests use product `odoo` for context `cm`,
 because the publish handoff is an Odoo driver contract. Preview refresh and
