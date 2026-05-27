@@ -87,6 +87,16 @@ inputs:
       Comma-separated output=json.path mappings to expose as action outputs.
     required: false
     default: ""
+  response-output-file:
+    description: >-
+      Optional file path where a response JSON value should be written.
+    required: false
+    default: ""
+  response-output-path:
+    description: >-
+      JSON path to write to response-output-file. Defaults to the full response.
+    required: false
+    default: ""
 
 outputs:
   launchplane-url:

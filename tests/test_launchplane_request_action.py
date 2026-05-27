@@ -112,6 +112,29 @@ process.on('beforeExit', () => {{
             self.assertEqual(json.loads(calls[1]["body"])["product"], "sellyouroutboard")
             self.assertIn("application_id<<", output_path.read_text(encoding="utf-8"))
 
+    def test_writes_mapped_response_value_to_file(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            response_output_path = Path(temporary_directory) / "result.json"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/drivers/generic-web/preview-refresh",
+                    "payload": '{"schema_version":1,"product":"sellyouroutboard"}',
+                    "response-output-file": str(response_output_path),
+                    "response-output-path": "result",
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                json.loads(response_output_path.read_text(encoding="utf-8")),
+                {
+                    "refresh_status": "pass",
+                    "error_message": "",
+                    "application_id": "app-123",
+                },
+            )
+
     def test_fails_when_driver_result_status_is_configured_as_failure(self) -> None:
         result = self.run_action(
             inputs={

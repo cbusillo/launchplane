@@ -172,8 +172,11 @@ override for older callers.
 
 The action requests a GitHub OIDC token, sends the JSON request with a stable
 `Idempotency-Key`, exposes the raw response body, and can map response JSON paths
-to GitHub outputs. Product repos may still need small payload-builder scripts
-until Launchplane owns the next layer of product-specific request assembly.
+to GitHub outputs. When a later product step needs a JSON file instead of a
+scalar output, set `response-output-file` and, optionally,
+`response-output-path` to write the full response or a nested response value.
+Product repos may still need small payload-builder scripts until Launchplane
+owns the next layer of product-specific request assembly.
 
 For asynchronous Launchplane routes that report a temporary status, configure
 polling instead of reimplementing OIDC and retry logic in the product repo:

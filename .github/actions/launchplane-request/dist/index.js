@@ -186,6 +186,16 @@ function writeMappedOutputs(responseBody) {
   }
 }
 
+function writeResponseOutputFile(responseBody) {
+  const outputFile = getInput("response-output-file");
+  if (!outputFile) {
+    return;
+  }
+  const outputPath = getInput("response-output-path");
+  const outputValue = outputPath ? readJsonPath(responseBody, outputPath) : responseBody;
+  fs.writeFileSync(outputFile, `${JSON.stringify(outputValue ?? null)}\n`, "utf8");
+}
+
 function assertResultStatuses(responseBody) {
   const failStatuses = new Set(
     splitCommaSeparated(
@@ -322,6 +332,7 @@ async function main() {
   setOutput("status-code", response.status);
   setOutput("response-body", responseText);
   writeMappedOutputs(responseBody);
+  writeResponseOutputFile(responseBody);
 
   process.stdout.write(`${JSON.stringify(responseBody, null, 2)}\n`);
   if (!response.ok) {
