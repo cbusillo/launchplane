@@ -147,6 +147,7 @@ from control_plane.workflows.odoo_generic_web_post_deploy import (
     execute_odoo_generic_web_post_deploy,
 )
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
+from control_plane.workflows.odoo_prod_promotion_inputs import OdooProdPromotionInputsResult
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.odoo_stable_target_replacement import (
@@ -26226,6 +26227,136 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "context": "cm",
                         "instance": "prod",
                         "backup_record_id": "backup-gate-cm-prod-run-1",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_odoo_prod_promotion_inputs_driver_resolves_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_promotion_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.resolve_odoo_prod_promotion_inputs",
+                return_value=OdooProdPromotionInputsResult(
+                    context="cm",
+                    from_instance="testing",
+                    to_instance="prod",
+                    request_id="run-123-attempt-1",
+                    input_status="ready",
+                    artifact_id="artifact-cm-new",
+                    source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+                    backup_record_id="backup-gate-cm-prod-run-123-attempt-1",
+                    release_tuple_id="cm-testing-artifact-cm-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_digest="sha256:new",
+                ),
+            ) as resolve_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-promotion-inputs",
+                    payload={
+                        "product": "odoo",
+                        "inputs": {
+                            "context": "cm",
+                            "from_instance": "testing",
+                            "to_instance": "prod",
+                            "request_id": "run-123-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "artifact_id": "artifact-cm-new",
+                    "backup_record_id": "backup-gate-cm-prod-run-123-attempt-1",
+                    "release_tuple_id": "cm-testing-artifact-cm-new",
+                },
+            )
+            self.assertEqual(payload["result"]["input_status"], "ready")
+            self.assertEqual(
+                payload["result"]["source_git_ref"], "848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb"
+            )
+            resolve_mock.assert_called_once()
+
+    def test_odoo_prod_promotion_inputs_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/tenant-cm",
+                                "workflow_refs": [
+                                    "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_prod_promotion.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-promotion-inputs",
+                payload={
+                    "product": "odoo",
+                    "inputs": {
+                        "context": "cm",
+                        "request_id": "run-123-attempt-1",
                     },
                 },
             )

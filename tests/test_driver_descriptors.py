@@ -478,6 +478,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service.OdooProdBackupGateEnvelope,
                     "prod backup-gate driver",
                 ),
+                "prod_promotion_inputs": (
+                    control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+                    control_plane_service.OdooProdPromotionInputsEnvelope,
+                    "prod promotion inputs",
+                ),
                 "prod_promotion": (
                     control_plane_service._ODOO_PROD_PROMOTION_ROUTE,
                     control_plane_service.OdooProdPromotionEnvelope,

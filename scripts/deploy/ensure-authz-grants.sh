@@ -929,6 +929,23 @@ post_odoo_opw_preview_grant() {
     '*'
 }
 
+post_odoo_stable_grant() {
+  local repository="$1"
+  local context_name="$2"
+  local workflow_file="$3"
+  local action_name="$4"
+  local source_label="$5"
+  local idempotency_suffix="$6"
+  post_grant \
+    "$repository" \
+    "$workflow_file" \
+    odoo \
+    "$context_name" \
+    "$action_name" \
+    "$source_label" \
+    "$idempotency_suffix"
+}
+
 apply_product_onboarding \
   discord-blue
 apply_verireel_onboarding
@@ -1244,6 +1261,13 @@ post_odoo_cm_preview_grant \
   deploy:odoo-cm-preview-apply-manual-grant \
   odoo-cm-preview-apply-manual \
   workflow_dispatch
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
+  odoo-prod-promotion.yml \
+  odoo_prod_promotion_inputs.read \
+  deploy:odoo-cm-prod-promotion-inputs-grant \
+  odoo-cm-prod-promotion-inputs
 post_odoo_opw_preview_grant \
   odoo \
   odoo_artifact_publish_inputs.read \
@@ -1300,3 +1324,10 @@ post_odoo_opw_preview_grant \
   deploy:odoo-opw-preview-apply-manual-grant \
   odoo-opw-preview-apply-manual \
   workflow_dispatch
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
+  odoo-prod-promotion.yml \
+  odoo_prod_promotion_inputs.read \
+  deploy:odoo-opw-prod-promotion-inputs-grant \
+  odoo-opw-prod-promotion-inputs
