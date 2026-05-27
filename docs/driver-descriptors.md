@@ -41,6 +41,13 @@ The descriptor contracts live in
 - `DriverContextView`: context or context/instance read model composed from
   existing repository summaries.
 
+Artifact publish input derivation has a generic request/result contract in
+`control_plane/contracts/artifact_publish_inputs.py`. Product drivers should
+accept that shared shape, then add only product-specific derivation such as
+runtime environment key selection, image tag policy, or preview slug resolution.
+This keeps tenant repositories on a thin handoff instead of teaching them
+Launchplane product profile or runtime environment wiring.
+
 Action safety levels are intentionally coarse:
 
 - `read`: resolves or reads state without mutating Launchplane/product state.

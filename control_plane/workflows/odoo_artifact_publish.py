@@ -11,6 +11,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.contracts.artifact_publish_inputs import (
+    GenericArtifactPublishInputsRequest,
+    GenericArtifactPublishInputsResult,
+)
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
@@ -114,22 +118,10 @@ class OdooArtifactPublishEvidenceRequest(BaseModel):
         return self
 
 
-class OdooArtifactPublishInputsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    instance: str = "testing"
-    pr_number: int | None = Field(default=None, ge=1)
-    preview_slug: str = ""
-    source_git_ref: str = ""
-    isolated: bool = False
-
+class OdooArtifactPublishInputsRequest(GenericArtifactPublishInputsRequest):
     @model_validator(mode="after")
-    def _validate_request(self) -> "OdooArtifactPublishInputsRequest":
+    def _validate_odoo_request(self) -> "OdooArtifactPublishInputsRequest":
         self.context, self.instance = _normalize_publish_scope(self.context, self.instance)
-        self.preview_slug = self.preview_slug.strip()
-        self.source_git_ref = self.source_git_ref.strip()
         return self
 
 
@@ -256,7 +248,8 @@ def build_odoo_artifact_publish_inputs(
             source_git_ref=request.source_git_ref,
             isolated=request.isolated,
         )
-    return payload
+    result = GenericArtifactPublishInputsResult.model_validate(payload)
+    return result.model_dump(exclude_defaults=True)
 
 
 def _publish_metadata_requested(request: OdooArtifactPublishInputsRequest) -> bool:

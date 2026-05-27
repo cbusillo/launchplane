@@ -4,6 +4,10 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.artifact_publish_inputs import (
+    GenericArtifactPublishInputsRequest,
+    GenericArtifactPublishInputsResult,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.workflows.odoo_artifact_publish import (
@@ -63,6 +67,14 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
         self.assertEqual(payload["preview_slug"], "preview-28")
         self.assertEqual(payload["source_git_ref"], "abcdef1234567890")
         self.assertEqual(payload["image_tag"], "cm-preview-28-abcdef12-amd64")
+        GenericArtifactPublishInputsResult.model_validate(payload)
+
+    def test_publish_inputs_request_extends_generic_contract(self) -> None:
+        request = OdooArtifactPublishInputsRequest(context=" CM ", instance=" TESTING ")
+
+        self.assertIsInstance(request, GenericArtifactPublishInputsRequest)
+        self.assertEqual(request.context, "cm")
+        self.assertEqual(request.instance, "testing")
 
     def test_publish_inputs_can_derive_isolated_preview_image_tag(self) -> None:
         profile_payload = _profile_payload()
