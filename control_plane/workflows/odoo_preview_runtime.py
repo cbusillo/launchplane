@@ -252,7 +252,7 @@ def build_odoo_preview_apply_inputs(
             template_compose_id=template_compose_id,
         )
     )
-    if environment_error:
+    if environment_error and _needs_preview_environment_id(runtime_plan):
         dry_run_plan = _with_dry_run_blocker(
             dry_run_plan=dry_run_plan,
             blocker=OdooPreviewDokployDryRunBlocker(
@@ -279,6 +279,10 @@ def build_odoo_preview_apply_inputs(
             "" if status == "ready" else _blocked_inputs_message(runtime_plan, dry_run_plan)
         ),
     )
+
+
+def _needs_preview_environment_id(runtime_plan: OdooPreviewRuntimePlan) -> bool:
+    return runtime_plan.operation == "refresh" and runtime_plan.target is None
 
 
 def _preview_slug(
