@@ -32,6 +32,9 @@ from control_plane.runtime_key_safety import (
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
+from control_plane.workflows.preview_resource_destroy import (
+    destroy_dokploy_preview_resource,
+)
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
 
@@ -1143,6 +1146,8 @@ def execute_generic_web_preview_refresh(
     created_domain_id = ""
     stale_domain_ids: tuple[str, ...] = ()
     application_id = ""
+    host = ""
+    token = ""
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
             control_plane_root=control_plane_root
@@ -1378,7 +1383,6 @@ def execute_generic_web_preview_destroy(
         application_name=application_name,
     )
     application_id = str((application or {}).get("applicationId") or "").strip()
-    cleanup_errors: list[str] = []
     if not application_id:
         finished_at = utc_now_timestamp()
         return GenericWebPreviewDestroyResult(
@@ -1392,29 +1396,14 @@ def execute_generic_web_preview_destroy(
             application_id="",
             error_message=f"Preview application {application_name!r} was not found.",
         )
-    try:
-        raw_domains = control_plane_dokploy.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/domain.byApplicationId",
-            query={"applicationId": application_id},
-        )
-        if isinstance(raw_domains, list):
-            for raw_domain in raw_domains:
-                application_domain = control_plane_dokploy.as_json_object(raw_domain)
-                if application_domain is None:
-                    continue
-                domain_id = str(application_domain.get("domainId") or "").strip()
-                if domain_id:
-                    _delete_domain(host=host, token=token, domain_id=domain_id)
-    except click.ClickException as exc:
-        cleanup_errors.append(f"domain cleanup failed: {exc}")
-    try:
-        _delete_application(host=host, token=token, application_id=application_id)
-    except click.ClickException as exc:
-        cleanup_errors.append(f"application cleanup failed: {exc}")
+    destroy_result = destroy_dokploy_preview_resource(
+        host=host,
+        token=token,
+        resource_type="application",
+        resource_id=application_id,
+    )
     finished_at = utc_now_timestamp()
-    if cleanup_errors:
+    if destroy_result.cleanup_errors:
         return GenericWebPreviewDestroyResult(
             destroy_status="fail",
             destroy_started_at=started_at,
@@ -1424,7 +1413,7 @@ def execute_generic_web_preview_destroy(
             preview_slug=request.preview_slug,
             application_name=application_name,
             application_id=application_id,
-            error_message="; ".join(cleanup_errors),
+            error_message="; ".join(destroy_result.cleanup_errors),
         )
     return GenericWebPreviewDestroyResult(
         destroy_status="pass",

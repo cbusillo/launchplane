@@ -182,6 +182,13 @@ common post-refresh smoke evidence against the latest Launchplane preview
 generation and is available to any product profile that uses the generic-web
 base driver.
 
+Preview resource cleanup uses a shared Launchplane destroy helper for Dokploy
+applications and compose previews. The generic helper owns domain lookup,
+matching domain deletion, resource deletion, missing-resource handling, and
+cleanup error aggregation. Product drivers supply only the resource identity and
+policy knobs such as compose volume deletion or whether domain cleanup must fail
+closed before deleting the resource.
+
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
