@@ -12453,6 +12453,8 @@ def create_launchplane_service_app(
                     "backup_record_id": driver_result.backup_record_id,
                     "release_tuple_id": driver_result.release_tuple_id,
                     "source_git_ref": driver_result.source_git_ref,
+                    "image_repository": driver_result.image_repository,
+                    "image_digest": driver_result.image_digest,
                     "input_status": driver_result.input_status,
                 }
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:

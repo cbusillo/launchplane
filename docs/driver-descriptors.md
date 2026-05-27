@@ -48,6 +48,13 @@ runtime environment key selection, image tag policy, or preview slug resolution.
 This keeps tenant repositories on a thin handoff instead of teaching them
 Launchplane product profile or runtime environment wiring.
 
+Promotion input derivation follows the same boundary in
+`control_plane/contracts/generic_promotion_inputs.py`. The generic contract owns
+source-lane release tuple lookup, artifact manifest lookup, ready/blocked
+results, immutable image evidence, and deterministic backup-gate record id
+formatting. Product drivers keep stricter lane policy and any product-specific
+promotion gates.
+
 Action safety levels are intentionally coarse:
 
 - `read`: resolves or reads state without mutating Launchplane/product state.
