@@ -26313,6 +26313,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(
                 payload["result"]["source_git_ref"], "848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb"
             )
+            self.assertEqual(
+                payload["result"]["image_repository"], "ghcr.io/cbusillo/odoo-tenant-cm"
+            )
+            self.assertEqual(payload["result"]["image_digest"], "sha256:new")
             resolve_mock.assert_called_once()
 
     def test_odoo_prod_promotion_inputs_driver_rejects_unauthorized_workflow(self) -> None:
