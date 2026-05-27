@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Literal
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qsl, quote, unquote, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 import click
@@ -24,6 +24,9 @@ from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
+)
+from control_plane.workflows.preview_resource_destroy import (
+    destroy_dokploy_preview_resource,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
@@ -220,7 +223,7 @@ def _preview_url_host(preview_url: str) -> str:
 
 
 def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
-    parsed = urlparse(preview_base_url.strip())
+    parsed = urlparse(str(preview_base_url).strip())
     if parsed.scheme not in {"http", "https"}:
         raise click.ClickException(f"{PREVIEW_BASE_URL_ENV_KEY} must use http or https.")
     if not parsed.hostname:
@@ -229,15 +232,13 @@ def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> s
         raise click.ClickException(
             f"{PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
         )
-    return urlunparse(
-        parsed._replace(
-            netloc=f"{preview_slug}.{parsed.hostname}",
-            path="",
-            params="",
-            query="",
-            fragment="",
-        )
-    )
+    return parsed._replace(
+        netloc=f"{preview_slug}.{parsed.hostname}",
+        path="",
+        params="",
+        query="",
+        fragment="",
+    ).geturl()
 
 
 def _resolve_preview_base_url(*, control_plane_root: Path, context_name: str) -> str:
@@ -376,18 +377,16 @@ def _enforce_verireel_preview_runtime_key_safety(
 
 
 def _build_admin_database_url(database_url: str) -> str:
-    parsed = urlparse(database_url.strip())
+    parsed = urlparse(str(database_url).strip())
     query_items = [
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key != "schema"
     ]
-    return urlunparse(
-        parsed._replace(
-            path="/postgres",
-            query="&".join(f"{quote(key)}={quote(value)}" for key, value in query_items),
-        )
-    )
+    return parsed._replace(
+        path="/postgres",
+        query="&".join(f"{quote(key)}={quote(value)}" for key, value in query_items),
+    ).geturl()
 
 
 def _build_preview_database_url(
@@ -1183,9 +1182,7 @@ def execute_verireel_preview_refresh(
                     role_name=database_parts.username,
                     password=database_parts.password,
                 ),
-                **runtime_identity_env(
-                    _build_preview_runtime_identity(request=request)
-                ),
+                **runtime_identity_env(_build_preview_runtime_identity(request=request)),
             },
         )
         application = _ensure_application(
@@ -1366,27 +1363,13 @@ def execute_verireel_preview_destroy(
 
     cleanup_errors: list[str] = []
     if application_id:
-        try:
-            raw_domains = control_plane_dokploy.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/domain.byApplicationId",
-                query={"applicationId": application_id},
-            )
-            if isinstance(raw_domains, list):
-                for raw_domain in raw_domains:
-                    domain = control_plane_dokploy.as_json_object(raw_domain)
-                    if domain is None:
-                        continue
-                    domain_id = str(domain.get("domainId") or "").strip()
-                    if domain_id:
-                        _delete_domain(host=host, token=token, domain_id=domain_id)
-        except click.ClickException as exc:
-            cleanup_errors.append(f"domain cleanup failed: {exc}")
-        try:
-            _delete_application(host=host, token=token, application_id=application_id)
-        except click.ClickException as exc:
-            cleanup_errors.append(f"application cleanup failed: {exc}")
+        destroy_result = destroy_dokploy_preview_resource(
+            host=host,
+            token=token,
+            resource_type="application",
+            resource_id=application_id,
+        )
+        cleanup_errors.extend(destroy_result.cleanup_errors)
     try:
         _run_application_command_with_retries(
             host=host,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -33,6 +33,9 @@ from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
     preview_application_name,
     resolve_generic_web_preview_url,
+)
+from control_plane.workflows.preview_resource_destroy import (
+    destroy_dokploy_preview_resource,
 )
 
 
@@ -1113,45 +1116,37 @@ def _execute_destroy(
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
-    steps: list[OdooPreviewDokployApplyStep] = []
-    domain_ids: list[str] = []
-    try:
-        for domain in _compose_domains(host=host, token=token, compose_id=compose_id):
-            domain_id = str(domain.get("domainId") or "").strip()
-            domain_host = str(domain.get("host") or "").strip().lower()
-            if domain_id and domain_host == plan.domain_host:
-                domain_ids.append(domain_id)
-        steps.append(_step("domain_lookup", compose_id))
-        for domain_id in domain_ids:
-            _delete_domain(host=host, token=token, domain_id=domain_id)
-            steps.append(_step("domain_delete", domain_id))
-        try:
-            _delete_compose(
-                host=host,
-                token=token,
-                compose_id=compose_id,
-                delete_volumes=plan.delete_volumes,
-            )
-        except click.ClickException as exc:
-            if not _is_compose_delete_not_found(exc):
-                raise
-        steps.append(_step("compose_delete", compose_id))
+    destroy_result = destroy_dokploy_preview_resource(
+        host=host,
+        token=token,
+        resource_type="compose",
+        resource_id=compose_id,
+        domain_host=plan.domain_host,
+        delete_volumes=plan.delete_volumes,
+        continue_after_domain_cleanup_error=False,
+        missing_resource_is_clean=True,
+    )
+    steps = tuple(
+        _step(cast("OdooPreviewDokployOperationName", step.name), step.target)
+        for step in destroy_result.steps
+    )
+    domain_id = destroy_result.domain_ids[0] if destroy_result.domain_ids else ""
+    if destroy_result.status == "pass":
         return _apply_result(
             request=request,
             status="pass",
             compose_id=compose_id,
-            domain_id=domain_ids[0] if domain_ids else "",
-            steps=tuple(steps),
+            domain_id=domain_id,
+            steps=steps,
         )
-    except click.ClickException as exc:
-        return _apply_result(
-            request=request,
-            status="fail",
-            error_message=str(exc),
-            compose_id=compose_id,
-            domain_id=domain_ids[0] if domain_ids else "",
-            steps=tuple(steps),
-        )
+    return _apply_result(
+        request=request,
+        status="fail",
+        error_message="; ".join(destroy_result.cleanup_errors),
+        compose_id=compose_id,
+        domain_id=domain_id,
+        steps=steps,
+    )
 
 
 def _resolve_or_create_compose(
