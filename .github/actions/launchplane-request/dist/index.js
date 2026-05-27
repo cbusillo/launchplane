@@ -194,6 +194,7 @@ function writeResponseOutputFile(responseBody) {
   const outputPath = getInput("response-output-path");
   const outputValue = outputPath ? readJsonPath(responseBody, outputPath) : responseBody;
   fs.writeFileSync(outputFile, `${JSON.stringify(outputValue ?? null)}\n`, "utf8");
+  setOutput("response-output-file", outputFile);
 }
 
 function assertResultStatuses(responseBody) {
