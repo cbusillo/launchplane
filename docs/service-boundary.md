@@ -1145,12 +1145,14 @@ caller supplies only product, PR number, image reference, source git ref, and
 optional preview slug or URL override. Launchplane derives the generic preview
 URL, runtime binding evidence, template compose id, Dokploy environment id,
 Odoo runtime plan, and redacted Dokploy dry-run plan from DB-backed product
-profile, runtime-environment, managed secret, and target records. Ready
-responses can be posted to `POST /v1/drivers/odoo/preview-apply`; blocked
+profile, runtime-environment, managed secret, and target records. For existing
+preview refreshes and destroy planning, Launchplane discovers the per-PR Dokploy
+compose from provider inventory and verifies the matching preview hostname
+before it emits target evidence, so tenant workflows do not pass provider ids.
+Ready responses can be posted to `POST /v1/drivers/odoo/preview-apply`; blocked
 responses include planner blockers but never plaintext runtime values or secret
-material. The route currently supports refresh only. Destroy and existing-target
-update planning remain blocked until Launchplane can discover Odoo preview
-targets from inventory rather than relying on tenant-supplied provider ids.
+material. Destroy planning remains fail-closed when no matching preview compose
+and hostname can be discovered.
 
 The CM tenant preview workflow uses two product scopes deliberately. Artifact
 publish input and publish evidence requests use product `odoo` for context `cm`,

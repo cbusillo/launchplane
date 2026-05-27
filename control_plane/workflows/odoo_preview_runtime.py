@@ -20,6 +20,7 @@ from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewRuntimeOperation,
     OdooPreviewRuntimePlan,
     OdooPreviewRuntimePlanRequest,
+    OdooPreviewRuntimeTargetEvidence,
     OdooPreviewRuntimePlanStatus,
     plan_odoo_preview_runtime,
 )
@@ -160,33 +161,13 @@ def build_odoo_preview_apply_inputs(
         raise click.ClickException(
             f"Product {profile.product!r} does not have Odoo previews enabled."
         )
-    if request.operation != "refresh":
-        return _blocked_apply_inputs_result(
-            profile=profile,
-            request=request,
-            preview_slug=_preview_slug(profile=profile, request=request),
-            preview_url=request.preview_url,
-            runtime_plan=None,
-            dry_run_plan=None,
-            message="Launchplane-owned Odoo preview apply inputs currently support refresh only.",
-        )
 
     preview_slug = _preview_slug(profile=profile, request=request)
-    preview_refresh_request = GenericWebPreviewRefreshRequest(
-        product=profile.product,
-        preview_slug=preview_slug,
-        preview_url=request.preview_url,
-        image_reference=request.image_reference,
-        anchor_pr_number=request.pr_number,
-        anchor_head_sha=request.source_git_ref,
-        source=request.source,
-        timeout_seconds=request.timeout_seconds,
-        no_cache=request.no_cache,
-    )
-    preview_url = resolve_generic_web_preview_url(
+    preview_url = resolve_odoo_preview_url(
         control_plane_root=control_plane_root,
         profile=profile,
-        request=preview_refresh_request,
+        preview_slug=preview_slug,
+        preview_url=request.preview_url,
         database_url=database_url,
     )
     template_instance = preview_profile.template_instance.strip()
@@ -195,6 +176,23 @@ def build_odoo_preview_apply_inputs(
         context_name=preview_profile.context,
         instance_name=template_instance,
     )
+    compose_name = preview_application_name(
+        app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+        preview_slug=preview_slug,
+    )
+    target: OdooPreviewRuntimeTargetEvidence | None = None
+    discovery_error = ""
+    try:
+        target = _discover_odoo_preview_target(
+            control_plane_root=control_plane_root,
+            context_name=preview_profile.context,
+            preview_slug=preview_slug,
+            preview_url=preview_url,
+            compose_name=compose_name,
+            database_url=database_url,
+        )
+    except click.ClickException as exc:
+        discovery_error = str(exc)
     runtime_plan = plan_odoo_preview_runtime(
         request=OdooPreviewRuntimePlanRequest(
             operation=request.operation,
@@ -206,11 +204,20 @@ def build_odoo_preview_apply_inputs(
             strategy="isolated_dokploy_compose",
             image_reference=request.image_reference,
             source_git_ref=request.source_git_ref,
+            target=target,
             provider_capabilities=_odoo_preview_provider_capabilities(),
             runtime_bindings=runtime_bindings,
             required_runtime_keys=ODOO_PREVIEW_REQUIRED_ENV_KEYS,
         )
     )
+    if discovery_error and request.operation == "destroy":
+        runtime_plan = _with_runtime_blocker(
+            runtime_plan=runtime_plan,
+            blocker=OdooPreviewRuntimeBlocker(
+                code="runtime_target_discovery_failed",
+                message=discovery_error,
+            ),
+        )
     template_compose_id = _preview_template_compose_id(
         control_plane_root=control_plane_root,
         context_name=preview_profile.context,
@@ -228,10 +235,7 @@ def build_odoo_preview_apply_inputs(
             no_cache=request.no_cache,
             delete_volumes=True,
             runtime_port=profile.runtime_port,
-            compose_name=preview_application_name(
-                app_name_prefix=effective_preview_app_name_prefix(profile=profile),
-                preview_slug=preview_slug,
-            ),
+            compose_name=compose_name,
             environment_id=environment_id,
             template_compose_id=template_compose_id,
         )
@@ -261,6 +265,28 @@ def _preview_slug(
     if request.preview_slug.strip():
         return request.preview_slug.strip()
     return profile.preview.slug_template.strip().replace("{number}", str(request.pr_number))
+
+
+def resolve_odoo_preview_url(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    preview_slug: str,
+    preview_url: str,
+    database_url: str | None = None,
+) -> str:
+    preview_refresh_request = GenericWebPreviewRefreshRequest(
+        product=profile.product,
+        preview_slug=preview_slug,
+        preview_url=preview_url,
+        image_reference="__launchplane_url_resolution__",
+    )
+    return resolve_generic_web_preview_url(
+        control_plane_root=control_plane_root,
+        profile=profile,
+        request=preview_refresh_request,
+        database_url=database_url,
+    )
 
 
 def _preview_runtime_bindings(
@@ -380,6 +406,107 @@ def _preview_template_target_definition(
         context_name=context_name,
         instance_name=instance_name,
     )
+
+
+def _discover_odoo_preview_target(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    preview_slug: str,
+    preview_url: str,
+    compose_name: str,
+    database_url: str | None,
+) -> OdooPreviewRuntimeTargetEvidence | None:
+    domain_host = _domain_host(preview_url)
+    host, token = control_plane_dokploy.read_dokploy_config(
+        control_plane_root=control_plane_root,
+        database_url=database_url,
+    )
+    raw_projects = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/project.all",
+    )
+    matches: list[OdooPreviewRuntimeTargetEvidence] = []
+    for compose in _iter_dokploy_composes(raw_projects):
+        discovered_name = str(compose.get("name") or "").strip()
+        if discovered_name != compose_name:
+            continue
+        compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
+        if not compose_id:
+            continue
+        if domain_host and not _compose_has_domain(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            domain_host=domain_host,
+        ):
+            continue
+        matches.append(
+            OdooPreviewRuntimeTargetEvidence(
+                target_id=compose_id,
+                target_name=discovered_name,
+                context=context_name,
+                instance=preview_slug,
+                environment_kind="preview",
+                domain=domain_host,
+            )
+        )
+    if len(matches) > 1:
+        raise click.ClickException(
+            f"Discovered multiple Odoo preview composes named {compose_name!r}; refusing to plan mutation."
+        )
+    if matches:
+        return matches[0]
+    return None
+
+
+def _with_runtime_blocker(
+    *, runtime_plan: OdooPreviewRuntimePlan, blocker: OdooPreviewRuntimeBlocker
+) -> OdooPreviewRuntimePlan:
+    return runtime_plan.model_copy(
+        update={
+            "status": "blocked",
+            "blockers": (*runtime_plan.blockers, blocker),
+            "planned_actions": (),
+            "rollback_actions": (),
+            "summary": "Odoo preview runtime plan is blocked",
+        }
+    )
+
+
+def _iter_dokploy_composes(raw_projects: object) -> tuple[JsonObject, ...]:
+    if not isinstance(raw_projects, list):
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
+    composes: list[JsonObject] = []
+    for raw_project in raw_projects:
+        project = control_plane_dokploy.as_json_object(raw_project)
+        if project is None:
+            continue
+        raw_environments = project.get("environments")
+        if not isinstance(raw_environments, list):
+            continue
+        for raw_environment in raw_environments:
+            environment = control_plane_dokploy.as_json_object(raw_environment)
+            if environment is None:
+                continue
+            raw_composes = environment.get("composes")
+            if not isinstance(raw_composes, list):
+                continue
+            for raw_compose in raw_composes:
+                compose = control_plane_dokploy.as_json_object(raw_compose)
+                if compose is not None:
+                    composes.append(compose)
+    return tuple(composes)
+
+
+def _compose_has_domain(*, host: str, token: str, compose_id: str, domain_host: str) -> bool:
+    for domain in _compose_domains(host=host, token=token, compose_id=compose_id):
+        if str(domain.get("host") or "").strip().lower() == domain_host:
+            return True
+    return False
 
 
 def _blocked_inputs_message(dry_run_plan: OdooPreviewDokployDryRunPlan) -> str:

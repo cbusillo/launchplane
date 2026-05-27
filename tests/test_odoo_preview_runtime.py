@@ -1,11 +1,23 @@
 import unittest
 from email.message import Message
-from typing import Literal
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from typing import Iterator, Literal
 from unittest.mock import ANY, patch
 from urllib.error import HTTPError
 
 import click
 
+from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
     OdooPreviewRuntimeBindingEvidence,
@@ -18,7 +30,9 @@ from control_plane.workflows.odoo_preview_runtime import (
     OdooPreviewDokployApplyRequest,
     OdooPreviewDokployDryRunRequest,
     OdooPreviewDokployEndpointSpec,
+    OdooPreviewApplyInputsRequest,
     build_odoo_preview_dokploy_dry_run,
+    build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
     _wait_for_smoke_check,
 )
@@ -100,7 +114,381 @@ def _environment_values() -> dict[str, str]:
     }
 
 
+class _OdooApplyInputsStore:
+    @staticmethod
+    def list_runtime_environment_records(
+        *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        records = (
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context="cm-preview",
+                env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.example.test"},
+                updated_at="2026-05-10T05:30:00Z",
+                source_label="test",
+            ),
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="cm-preview",
+                instance="testing",
+                env={
+                    "ODOO_DB_USER": "odoo",
+                    "DOKPLOY_ENVIRONMENT_ID": "env-cm-preview",
+                },
+                updated_at="2026-05-10T05:31:00Z",
+                source_label="test",
+            ),
+        )
+        return tuple(
+            record
+            for record in records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    @staticmethod
+    def list_secret_bindings(
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            SecretBinding(
+                binding_id=f"secret-{key.lower()}-binding",
+                secret_id=f"secret-{key.lower()}",
+                integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                context="cm-preview",
+                instance="testing",
+                binding_key=key,
+                status="configured",
+                created_at="2026-05-10T05:32:00Z",
+                updated_at="2026-05-10T05:32:00Z",
+            )
+            for key in (
+                "ODOO_DB_PASSWORD",
+                "ODOO_MASTER_PASSWORD",
+                "ODOO_ADMIN_PASSWORD",
+            )
+        )
+        filtered = tuple(
+            binding
+            for binding in bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        if limit is not None:
+            return filtered[:limit]
+        return filtered
+
+
+def _profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="odoo-tenant-cm",
+        display_name="CM Odoo",
+        repository="cbusillo/odoo-tenant-cm",
+        driver_id="odoo",
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
+        runtime_port=8069,
+        health_path="/web/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="cm-preview",
+                base_url="https://cm-testing.example.test",
+                health_url="https://cm-testing.example.test/web/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context="cm-preview",
+            slug_template="pr-{number}",
+            app_name_prefix="cm-odoo-preview",
+            template_instance="testing",
+        ),
+        updated_at="2026-05-10T05:00:00Z",
+        source="test",
+    )
+
+
+def _source_of_truth() -> DokploySourceOfTruth:
+    return DokploySourceOfTruth(
+        schema_version=1,
+        targets=(
+            DokployTargetDefinition(
+                context="cm-preview",
+                instance="testing",
+                target_type="compose",
+                target_id="compose-template",
+                target_name="cm-template",
+            ),
+        ),
+    )
+
+
+def _preview_project_payload(
+    *, compose_id: str = "compose-cm-pr-45", compose_name: str = "cm-odoo-preview-pr-45"
+) -> list[dict[str, object]]:
+    return [
+        {
+            "environments": [
+                {
+                    "composes": [
+                        {
+                            "composeId": compose_id,
+                            "name": compose_name,
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+
+
+def _preview_domain_payload(
+    *,
+    domain_id: str = "domain-cm-pr-45",
+    domain_host: str = "pr-45.cm-preview.example.test",
+) -> list[dict[str, object]]:
+    return [{"domainId": domain_id, "host": domain_host}]
+
+
+@contextmanager
+def _patched_apply_inputs_runtime(*, dokploy_side_effect: object) -> Iterator[None]:
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=dokploy_side_effect,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_ENVIRONMENT_ID": "env-cm-preview"},
+            )
+        )
+        yield
+
+
 class OdooPreviewDokployDryRunTests(unittest.TestCase):
+    def test_apply_inputs_reuses_discovered_preview_compose_for_refresh(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return _preview_project_payload()
+            if path == "/api/domain.byComposeId":
+                return _preview_domain_payload()
+            raise AssertionError(path)
+
+        with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "ready")
+        self.assertIsNotNone(result.runtime_plan.target)
+        assert result.runtime_plan.target is not None
+        self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
+        self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
+        self.assertEqual(result.dry_run_plan.template_compose_id, "compose-template")
+        self.assertNotIn(
+            "compose_create",
+            {operation.name for operation in result.dry_run_plan.operations},
+        )
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/project.all", "/api/domain.byComposeId"],
+        )
+
+    def test_apply_inputs_builds_destroy_plan_for_discovered_preview_compose(self) -> None:
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return _preview_project_payload()
+            if path == "/api/domain.byComposeId":
+                return _preview_domain_payload()
+            raise AssertionError(path)
+
+        with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.runtime_plan.operation, "destroy")
+        self.assertIsNotNone(result.runtime_plan.target)
+        assert result.runtime_plan.target is not None
+        self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
+        self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
+        self.assertEqual(
+            [operation.name for operation in result.dry_run_plan.operations],
+            ["domain_lookup", "domain_delete", "compose_delete"],
+        )
+
+    def test_apply_inputs_destroy_blocks_without_matching_preview_compose(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                return_value=[{"environments": [{"composes": []}]}],
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_ENVIRONMENT_ID": "env-cm-preview"},
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "destroy_target_missing", {blocker.code for blocker in result.runtime_plan.blockers}
+        )
+
+    def test_apply_inputs_refresh_create_ignores_inventory_connection_failure(self) -> None:
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            raise click.ClickException("Dokploy inventory unavailable")
+
+        with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "ready")
+        self.assertIsNone(result.runtime_plan.target)
+        self.assertNotIn(
+            "runtime_target_discovery_failed",
+            {blocker.code for blocker in result.runtime_plan.blockers},
+        )
+
+    def test_apply_inputs_blocks_on_duplicate_discovered_preview_composes(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=(
+                    [
+                        {
+                            "environments": [
+                                {
+                                    "composes": [
+                                        {
+                                            "composeId": "compose-cm-pr-45-a",
+                                            "name": "cm-odoo-preview-pr-45",
+                                        },
+                                        {
+                                            "composeId": "compose-cm-pr-45-b",
+                                            "name": "cm-odoo-preview-pr-45",
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                    [
+                        {
+                            "domainId": "domain-cm-pr-45-a",
+                            "host": "pr-45.cm-preview.example.test",
+                        }
+                    ],
+                    [
+                        {
+                            "domainId": "domain-cm-pr-45-b",
+                            "host": "pr-45.cm-preview.example.test",
+                        }
+                    ],
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_ENVIRONMENT_ID": "env-cm-preview"},
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "runtime_target_discovery_failed",
+            {blocker.code for blocker in result.runtime_plan.blockers},
+        )
+
     def test_refresh_create_dry_run_blocks_missing_create_and_delete_paths(self) -> None:
         plan = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
@@ -693,7 +1081,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             return response
 
         with (
-            patch("control_plane.workflows.odoo_preview_runtime.urlopen", side_effect=_fake_urlopen),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.urlopen", side_effect=_fake_urlopen
+            ),
             patch("control_plane.workflows.odoo_preview_runtime.time.sleep") as sleep,
         ):
             _wait_for_smoke_check(

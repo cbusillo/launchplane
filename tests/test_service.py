@@ -17239,6 +17239,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         ),
                     ),
                 ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                    return_value=[{"environments": [{"composes": []}]}],
+                ),
             ):
                 status_code, payload = _invoke_app(
                     app,
@@ -17267,7 +17275,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(result["dry_run_plan"]["template_compose_id"], "compose-cm-testing")
             self.assertNotIn("template-db-secret", json.dumps(payload))
 
-    def test_odoo_preview_apply_inputs_route_blocks_destroy_until_target_discovery_exists(
+    def test_odoo_preview_apply_inputs_route_builds_destroy_for_discovered_target(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -17278,6 +17286,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
             )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="cm",
+                    env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.example.test"},
+                    updated_at="2026-05-09T12:25:00Z",
+                    source_label="test",
+                )
+            )
+            _write_odoo_preview_template_runtime_environment(store=store)
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -17310,24 +17328,85 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
 
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-apply-inputs",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "inputs": {
-                        "product": "odoo-tenant-cm",
-                        "operation": "destroy",
-                        "pr_number": 42,
+            def _fake_dokploy_request(**kwargs: object) -> object:
+                path = kwargs["path"]
+                if path == "/api/project.all":
+                    return [
+                        {
+                            "environments": [
+                                {
+                                    "composes": [
+                                        {
+                                            "composeId": "compose-cm-pr-42",
+                                            "name": "cm-odoo-preview-pr-42",
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                if path == "/api/domain.byComposeId":
+                    return [
+                        {
+                            "domainId": "domain-cm-pr-42",
+                            "host": "pr-42.cm-preview.example.test",
+                        }
+                    ]
+                raise AssertionError(path)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
                     },
-                },
-            )
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                    side_effect=_fake_dokploy_request,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=DokploySourceOfTruth(
+                        schema_version=1,
+                        targets=(
+                            DokployTargetDefinition(
+                                context="cm",
+                                instance="testing",
+                                target_type="compose",
+                                target_id="compose-cm-testing",
+                                target_name="cm-testing",
+                            ),
+                        ),
+                    ),
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/preview-apply-inputs",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "inputs": {
+                            "product": "odoo-tenant-cm",
+                            "operation": "destroy",
+                            "pr_number": 42,
+                        },
+                    },
+                )
 
             self.assertEqual(status_code, 202)
-            self.assertEqual(payload["result"]["status"], "blocked")
-            self.assertIn("refresh only", payload["result"]["error_message"])
+            result = payload["result"]
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["runtime_plan"]["target"]["target_id"], "compose-cm-pr-42")
+            self.assertEqual(result["dry_run_plan"]["compose_ref"], "compose-cm-pr-42")
+            self.assertEqual(result["dry_run_plan"]["operation"], "destroy")
 
     def test_odoo_preview_apply_route_blocks_missing_service_runtime_environment(
         self,

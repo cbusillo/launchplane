@@ -28,6 +28,7 @@ OdooPreviewRuntimeBlockerCode = Literal[
     "runtime_env_missing",
     "runtime_strategy_not_isolated",
     "runtime_target_not_preview",
+    "runtime_target_discovery_failed",
     "runtime_target_slug_mismatch",
     "preview_url_missing",
     "prod_secret_binding",
