@@ -217,6 +217,11 @@ def build_odoo_artifact_publish_inputs(
     request: OdooArtifactPublishInputsRequest,
     product_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> dict[str, object]:
+    if _publish_metadata_requested(request=request) and product_profile is None:
+        raise click.ClickException(
+            "Odoo artifact publish metadata requires a product profile. "
+            "Use a product-specific Odoo driver id instead of the generic 'odoo' driver."
+        )
     environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
         context_name=request.context,
@@ -252,6 +257,10 @@ def build_odoo_artifact_publish_inputs(
             isolated=request.isolated,
         )
     return payload
+
+
+def _publish_metadata_requested(request: OdooArtifactPublishInputsRequest) -> bool:
+    return bool(request.pr_number or request.preview_slug or request.source_git_ref)
 
 
 def _publish_preview_slug(

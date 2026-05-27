@@ -234,7 +234,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         }
         expected_grants = {
             (
-                "odoo",
+                "odoo-tenant-opw",
                 "odoo_artifact_publish_inputs.read",
                 "deploy:odoo-opw-preview-artifact-publish-inputs-manual-grant",
             ): ["workflow_dispatch"],

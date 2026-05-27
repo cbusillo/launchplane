@@ -2,6 +2,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import click
+
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.workflows.odoo_artifact_publish import (
@@ -86,6 +88,17 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
 
         self.assertEqual(payload["preview_slug"], "pr-28")
         self.assertEqual(payload["image_tag"], "cm-pr-28-abcdef12-isolated-amd64")
+
+    def test_publish_inputs_require_product_profile_for_preview_metadata(self) -> None:
+        with self.assertRaises(click.ClickException):
+            build_odoo_artifact_publish_inputs(
+                control_plane_root=Path("/launchplane"),
+                request=OdooArtifactPublishInputsRequest(
+                    context="cm",
+                    pr_number=28,
+                    source_git_ref="abcdef1234567890",
+                ),
+            )
 
     def test_authz_policy_allows_product_specific_publish_inputs_route(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(

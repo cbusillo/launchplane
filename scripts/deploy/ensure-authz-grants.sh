@@ -1202,12 +1202,12 @@ post_verireel_preview_grant \
   deploy:verireel-preview-cleanup-feedback-grant \
   verireel-preview-cleanup-feedback
 post_odoo_cm_preview_grant \
-  odoo \
+  odoo-tenant-cm \
   odoo_artifact_publish_inputs.read \
   deploy:odoo-cm-preview-artifact-publish-inputs-grant \
   odoo-cm-preview-artifact-publish-inputs
 post_odoo_cm_preview_grant \
-  odoo \
+  odoo-tenant-cm \
   odoo_artifact_publish_inputs.read \
   deploy:odoo-cm-preview-artifact-publish-inputs-manual-grant \
   odoo-cm-preview-artifact-publish-inputs-manual \
@@ -1269,7 +1269,7 @@ post_odoo_stable_grant \
   deploy:odoo-cm-prod-promotion-inputs-grant \
   odoo-cm-prod-promotion-inputs
 post_odoo_opw_preview_grant \
-  odoo \
+  odoo-tenant-opw \
   odoo_artifact_publish_inputs.read \
   deploy:odoo-opw-preview-artifact-publish-inputs-manual-grant \
   odoo-opw-preview-artifact-publish-inputs-manual \

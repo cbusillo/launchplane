@@ -392,6 +392,55 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             "destroy_target_missing", {blocker.code for blocker in result.runtime_plan.blockers}
         )
 
+    def test_apply_inputs_destroy_does_not_require_runtime_environment_id(self) -> None:
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return _preview_project_payload()
+            if path == "/api/domain.byComposeId":
+                return _preview_domain_payload()
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                side_effect=click.ClickException(
+                    "Missing DB-backed Launchplane runtime environment records."
+                ),
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "ready")
+        self.assertNotIn(
+            "environment_id_missing", {blocker.code for blocker in result.dry_run_plan.blockers}
+        )
+        self.assertEqual(result.dry_run_plan.operation, "destroy")
+
     def test_apply_inputs_refresh_create_ignores_inventory_connection_failure(self) -> None:
         def _fake_dokploy_request(**_kwargs: object) -> object:
             raise click.ClickException("Dokploy inventory unavailable")
@@ -493,7 +542,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         self.assertIn("Missing DB-backed Launchplane runtime environment", result.error_message)
 
-    def test_apply_inputs_blocks_existing_target_when_runtime_environment_authority_is_missing(
+    def test_apply_inputs_reuses_existing_target_when_runtime_environment_authority_is_missing(
         self,
     ) -> None:
         def _fake_dokploy_request(**kwargs: object) -> object:
@@ -537,13 +586,13 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(result.status, "blocked")
-        self.assertIn(
+        self.assertEqual(result.status, "ready")
+        self.assertNotIn(
             "environment_id_missing", {blocker.code for blocker in result.dry_run_plan.blockers}
         )
-        self.assertEqual(result.dry_run_plan.operations, ())
+        self.assertTrue(result.dry_run_plan.operations)
         self.assertEqual(result.dry_run_plan.rollback_operations, ())
-        self.assertIn("Missing DB-backed Launchplane runtime environment", result.error_message)
+        self.assertEqual(result.error_message, "")
 
     def test_apply_inputs_blocks_on_duplicate_discovered_preview_composes(self) -> None:
         with (
