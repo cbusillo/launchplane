@@ -1229,6 +1229,17 @@ post_odoo_cm_preview_grant \
   workflow_dispatch
 post_odoo_cm_preview_grant \
   odoo-tenant-cm \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-cm-preview-apply-inputs-grant \
+  odoo-cm-preview-apply-inputs
+post_odoo_cm_preview_grant \
+  odoo-tenant-cm \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-cm-preview-apply-inputs-manual-grant \
+  odoo-cm-preview-apply-inputs-manual \
+  workflow_dispatch
+post_odoo_cm_preview_grant \
+  odoo-tenant-cm \
   odoo_preview_apply.execute \
   deploy:odoo-cm-preview-apply-manual-grant \
   odoo-cm-preview-apply-manual \
@@ -1271,6 +1282,17 @@ post_odoo_opw_preview_grant \
   preview_destroy.execute \
   deploy:odoo-opw-preview-destroy-manual-grant \
   odoo-opw-preview-destroy-manual \
+  workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-opw-preview-apply-inputs-grant \
+  odoo-opw-preview-apply-inputs
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-opw-preview-apply-inputs-manual-grant \
+  odoo-opw-preview-apply-inputs-manual \
   workflow_dispatch
 post_odoo_opw_preview_grant \
   odoo-tenant-opw \
