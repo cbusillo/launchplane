@@ -163,13 +163,18 @@ def build_odoo_preview_apply_inputs(
         )
 
     preview_slug = _preview_slug(profile=profile, request=request)
-    preview_url = resolve_odoo_preview_url(
-        control_plane_root=control_plane_root,
-        profile=profile,
-        preview_slug=preview_slug,
-        preview_url=request.preview_url,
-        database_url=database_url,
-    )
+    preview_url_error = ""
+    try:
+        preview_url = resolve_odoo_preview_url(
+            control_plane_root=control_plane_root,
+            profile=profile,
+            preview_slug=preview_slug,
+            preview_url=request.preview_url,
+            database_url=database_url,
+        )
+    except click.ClickException as exc:
+        preview_url = request.preview_url.strip()
+        preview_url_error = str(exc)
     template_instance = preview_profile.template_instance.strip()
     runtime_bindings = _preview_runtime_bindings(
         record_store=record_store,
@@ -210,6 +215,14 @@ def build_odoo_preview_apply_inputs(
             required_runtime_keys=ODOO_PREVIEW_REQUIRED_ENV_KEYS,
         )
     )
+    if preview_url_error:
+        runtime_plan = _with_runtime_blocker(
+            runtime_plan=runtime_plan,
+            blocker=OdooPreviewRuntimeBlocker(
+                code="preview_url_missing",
+                message=preview_url_error,
+            ),
+        )
     if discovery_error and request.operation == "destroy":
         runtime_plan = _with_runtime_blocker(
             runtime_plan=runtime_plan,
@@ -223,7 +236,7 @@ def build_odoo_preview_apply_inputs(
         context_name=preview_profile.context,
         instance_name=template_instance,
     )
-    environment_id = _preview_environment_id(
+    environment_id, environment_error = _preview_environment_id(
         control_plane_root=control_plane_root,
         context_name=preview_profile.context,
         instance_name=template_instance,
@@ -233,13 +246,20 @@ def build_odoo_preview_apply_inputs(
         request=OdooPreviewDokployDryRunRequest(
             runtime_plan=runtime_plan,
             no_cache=request.no_cache,
-            delete_volumes=True,
             runtime_port=profile.runtime_port,
             compose_name=compose_name,
             environment_id=environment_id,
             template_compose_id=template_compose_id,
         )
     )
+    if environment_error:
+        dry_run_plan = _with_dry_run_blocker(
+            dry_run_plan=dry_run_plan,
+            blocker=OdooPreviewDokployDryRunBlocker(
+                code="environment_id_missing",
+                message=environment_error,
+            ),
+        )
     status: Literal["ready", "blocked"] = (
         "ready" if runtime_plan.status == "ready" and dry_run_plan.status == "ready" else "blocked"
     )
@@ -255,7 +275,9 @@ def build_odoo_preview_apply_inputs(
         runtime_plan=runtime_plan,
         dry_run_plan=dry_run_plan,
         source=request.source,
-        error_message="" if status == "ready" else _blocked_inputs_message(dry_run_plan),
+        error_message=(
+            "" if status == "ready" else _blocked_inputs_message(runtime_plan, dry_run_plan)
+        ),
     )
 
 
@@ -312,7 +334,6 @@ def _preview_runtime_bindings(
         integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
         context_name=context_name,
         instance_name=instance_name,
-        limit=None,
     )
     bindings.extend(
         OdooPreviewRuntimeBindingEvidence(key=binding.binding_key, source="managed_secret")
@@ -380,14 +401,17 @@ def _preview_environment_id(
     context_name: str,
     instance_name: str,
     database_url: str | None,
-) -> str:
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=context_name,
-        instance_name=instance_name,
-        database_url=database_url,
-    )
-    return environment_values.get("DOKPLOY_ENVIRONMENT_ID", "").strip()
+) -> tuple[str, str]:
+    try:
+        environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+            database_url=database_url,
+        )
+    except click.ClickException as exc:
+        return "", str(exc)
+    return environment_values.get("DOKPLOY_ENVIRONMENT_ID", "").strip(), ""
 
 
 def _preview_template_target_definition(
@@ -475,6 +499,25 @@ def _with_runtime_blocker(
     )
 
 
+def _with_dry_run_blocker(
+    *,
+    dry_run_plan: OdooPreviewDokployDryRunPlan,
+    blocker: OdooPreviewDokployDryRunBlocker,
+) -> OdooPreviewDokployDryRunPlan:
+    return dry_run_plan.model_copy(
+        update={
+            "status": "blocked",
+            "blockers": (
+                *(existing for existing in dry_run_plan.blockers if existing.code != blocker.code),
+                blocker,
+            ),
+            "operations": (),
+            "rollback_operations": (),
+            "summary": "Odoo preview Dokploy dry-run plan is blocked",
+        }
+    )
+
+
 def _iter_dokploy_composes(raw_projects: object) -> tuple[JsonObject, ...]:
     if not isinstance(raw_projects, list):
         raise click.ClickException(
@@ -509,8 +552,13 @@ def _compose_has_domain(*, host: str, token: str, compose_id: str, domain_host: 
     return False
 
 
-def _blocked_inputs_message(dry_run_plan: OdooPreviewDokployDryRunPlan) -> str:
-    messages = [blocker.message for blocker in dry_run_plan.blockers]
+def _blocked_inputs_message(
+    runtime_plan: OdooPreviewRuntimePlan, dry_run_plan: OdooPreviewDokployDryRunPlan
+) -> str:
+    messages = [
+        *[blocker.message for blocker in runtime_plan.blockers],
+        *[blocker.message for blocker in dry_run_plan.blockers],
+    ]
     return "; ".join(messages) or "Odoo preview apply inputs are blocked."
 
 

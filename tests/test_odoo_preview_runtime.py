@@ -162,7 +162,6 @@ class _OdooApplyInputsStore:
                 context="cm-preview",
                 instance="testing",
                 binding_key=key,
-                status="configured",
                 created_at="2026-05-10T05:32:00Z",
                 updated_at="2026-05-10T05:32:00Z",
             )
@@ -204,9 +203,7 @@ def _profile() -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(
             enabled=True,
             context="cm-preview",
-            slug_template="pr-{number}",
             app_name_prefix="cm-odoo-preview",
-            template_instance="testing",
         ),
         updated_at="2026-05-10T05:00:00Z",
         source="test",
@@ -220,7 +217,6 @@ def _source_of_truth() -> DokploySourceOfTruth:
             DokployTargetDefinition(
                 context="cm-preview",
                 instance="testing",
-                target_type="compose",
                 target_id="compose-template",
                 target_name="cm-template",
             ),
@@ -397,7 +393,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
 
     def test_apply_inputs_refresh_create_ignores_inventory_connection_failure(self) -> None:
-        def _fake_dokploy_request(**kwargs: object) -> object:
+        def _fake_dokploy_request(**_kwargs: object) -> object:
             raise click.ClickException("Dokploy inventory unavailable")
 
         with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
@@ -420,6 +416,134 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             "runtime_target_discovery_failed",
             {blocker.code for blocker in result.runtime_plan.blockers},
         )
+
+    def test_apply_inputs_blocks_when_preview_url_authority_is_missing(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                side_effect=click.ClickException("Dokploy inventory unavailable"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_context_values",
+                side_effect=click.ClickException(
+                    "Missing LAUNCHPLANE_PREVIEW_BASE_URL in Launchplane runtime-environment records for cm-preview."
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_ENVIRONMENT_ID": "env-cm-preview"},
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    pr_number=45,
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "preview_url_missing", {blocker.code for blocker in result.runtime_plan.blockers}
+        )
+        self.assertEqual(result.preview_url, "")
+        self.assertIn("LAUNCHPLANE_PREVIEW_BASE_URL", result.error_message)
+
+    def test_apply_inputs_blocks_when_runtime_environment_authority_is_missing(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                side_effect=click.ClickException("Dokploy inventory unavailable"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                side_effect=click.ClickException(
+                    "Missing DB-backed Launchplane runtime environment records."
+                ),
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "environment_id_missing", {blocker.code for blocker in result.dry_run_plan.blockers}
+        )
+        self.assertIn("Missing DB-backed Launchplane runtime environment", result.error_message)
+
+    def test_apply_inputs_blocks_existing_target_when_runtime_environment_authority_is_missing(
+        self,
+    ) -> None:
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return _preview_project_payload()
+            if path == "/api/domain.byComposeId":
+                return _preview_domain_payload()
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                side_effect=click.ClickException(
+                    "Missing DB-backed Launchplane runtime environment records."
+                ),
+            ),
+        ):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    source_git_ref="abc123",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "environment_id_missing", {blocker.code for blocker in result.dry_run_plan.blockers}
+        )
+        self.assertEqual(result.dry_run_plan.operations, ())
+        self.assertEqual(result.dry_run_plan.rollback_operations, ())
+        self.assertIn("Missing DB-backed Launchplane runtime environment", result.error_message)
 
     def test_apply_inputs_blocks_on_duplicate_discovered_preview_composes(self) -> None:
         with (
@@ -1062,7 +1186,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ["/api/domain.byComposeId", "/api/domain.delete", "/api/compose.delete"],
         )
 
-    def test_smoke_check_retries_transient_http_404(self) -> None:
+    @staticmethod
+    def test_smoke_check_retries_transient_http_404() -> None:
         responses: list[HTTPError | _SmokeResponse] = [
             HTTPError(
                 "https://pr-45.cm-preview.example.test/web/health",
@@ -1105,7 +1230,8 @@ class _SmokeResponse:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self) -> bytes:
+    @staticmethod
+    def read() -> bytes:
         return b"ok"
 
 
