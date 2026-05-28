@@ -161,6 +161,35 @@ process.on('beforeExit', () => {{
         self.assertIs(payload["rollback"]["wait_for_deploy"], False)
         self.assertEqual(payload["rollback"]["timeout_seconds"], 300)
 
+    def test_overlays_payload_json_files_before_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "artifact.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "artifact_id": "artifact-cm-123",
+                        "source_commit": "abc123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/drivers/odoo/artifact-publish",
+                    "payload": '{"schema_version":1,"product":"odoo","publish":{"schema_version":1,"context":"cm"}}',
+                    "payload-fields": "publish.instance=testing",
+                    "payload-json-files": f"publish.manifest={manifest_path}",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        payload = json.loads(calls[1]["body"])
+        self.assertEqual(payload["publish"]["instance"], "testing")
+        self.assertEqual(payload["publish"]["manifest"]["artifact_id"], "artifact-cm-123")
+        self.assertEqual(payload["publish"]["manifest"]["source_commit"], "abc123")
+
     def test_rejects_payload_fields_without_object_payload(self) -> None:
         result = self.run_action(
             inputs={
@@ -172,6 +201,18 @@ process.on('beforeExit', () => {{
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("payload-fields requires payload or payload-file", result.stderr)
+
+    def test_rejects_payload_json_files_without_object_payload(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/artifact-publish",
+                "payload-json-files": "publish.manifest=artifact.json",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("payload-json-files requires payload or payload-file", result.stderr)
 
     def test_fails_when_driver_result_status_is_configured_as_failure(self) -> None:
         result = self.run_action(

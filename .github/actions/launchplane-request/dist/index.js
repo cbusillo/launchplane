@@ -195,6 +195,34 @@ function applyPayloadFields(payload) {
   return payload;
 }
 
+function applyPayloadJsonFiles(payload) {
+  const payloadJsonFiles = getInput("payload-json-files");
+  if (!payloadJsonFiles) {
+    return payload;
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("payload-json-files requires payload or payload-file to contain a JSON object.");
+  }
+  for (const line of payloadJsonFiles.split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith("#")) {
+      continue;
+    }
+    const separatorIndex = trimmedLine.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid payload JSON file '${trimmedLine}'. Use json.path=file-path.`);
+    }
+    const path = trimmedLine.slice(0, separatorIndex).trim();
+    const filePath = line.slice(line.indexOf("=") + 1).trim();
+    if (!filePath) {
+      throw new Error(`Payload JSON file '${path}' requires a file path.`);
+    }
+    const fileValue = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    writeJsonPath(payload, path, fileValue);
+  }
+  return payload;
+}
+
 function splitCommaSeparated(value) {
   return String(value ?? "")
     .split(",")
@@ -354,7 +382,7 @@ async function main() {
   const requestUrl = new URL(routePath, launchplaneUrl).toString();
   const audience = getInput("audience") || launchplaneUrl.host;
   const idempotencyKey = getInput("idempotency-key");
-  const payload = applyPayloadFields(readPayload());
+  const payload = applyPayloadJsonFiles(applyPayloadFields(readPayload()));
   const options = getActionOptions();
   const token = await requestGitHubOidcToken(audience, options);
   const headers = {
