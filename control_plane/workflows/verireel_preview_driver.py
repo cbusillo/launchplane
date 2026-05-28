@@ -1213,9 +1213,14 @@ def execute_verireel_preview_refresh(
     existing_snapshot = None
     if existing_application is not None:
         application_id = str(existing_application.get("applicationId") or "").strip()
-        existing_snapshot = _fetch_application(
-            host=host, token=token, application_id=application_id
-        )
+        try:
+            existing_snapshot = _fetch_application(
+                host=host, token=token, application_id=application_id
+            )
+        except click.ClickException as exc:
+            if _is_dokploy_provider_failure(exc):
+                raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
+            raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     existing_database = _resolve_existing_preview_database(existing_snapshot)
     existing_env_map = control_plane_dokploy.parse_dokploy_env_text(
         str((existing_snapshot or {}).get("env") or "")
