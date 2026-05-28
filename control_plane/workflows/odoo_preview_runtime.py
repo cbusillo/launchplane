@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import JsonObject
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_preview_runtime_plan import (
     OdooPreviewProviderCapabilities,
     OdooPreviewRuntimeBindingEvidence,
@@ -97,6 +98,7 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     preview_slug: str = ""
     preview_url: str = ""
     image_reference: str = ""
+    manifest: ArtifactIdentityManifest | None = None
     source_git_ref: str = ""
     source: str = "odoo-preview-apply-inputs"
     timeout_seconds: int = Field(default=300, ge=1)
@@ -109,7 +111,15 @@ class OdooPreviewApplyInputsRequest(BaseModel):
             self.preview_slug = self.preview_slug.strip()
         self.preview_url = self.preview_url.strip()
         self.image_reference = self.image_reference.strip()
+        if self.manifest is not None or self.image_reference or self.operation == "refresh":
+            self.image_reference = _resolve_manifest_image_reference(
+                image_reference=self.image_reference,
+                manifest=self.manifest,
+                label="Odoo preview apply inputs",
+            )
         self.source_git_ref = self.source_git_ref.strip()
+        if self.manifest is not None and not self.source_git_ref:
+            self.source_git_ref = self.manifest.source_commit
         self.source = _required_text(self.source, "Odoo preview apply inputs requires source")
         return self
 
@@ -776,7 +786,8 @@ class OdooPreviewDokployApplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dry_run_plan: OdooPreviewDokployDryRunPlan
-    image_reference: str
+    image_reference: str = ""
+    manifest: ArtifactIdentityManifest | None = None
     environment_values: dict[str, str] = Field(default_factory=dict)
     compose_file: str = ""
     health_path: str = "/web/health"
@@ -786,8 +797,10 @@ class OdooPreviewDokployApplyRequest(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewDokployApplyRequest":
-        self.image_reference = _required_text(
-            self.image_reference, "Odoo preview apply requires image_reference"
+        self.image_reference = _resolve_manifest_image_reference(
+            image_reference=self.image_reference,
+            manifest=self.manifest,
+            label="Odoo preview apply",
         )
         self.compose_file = self.compose_file.strip()
         self.health_path = self.health_path.strip() or "/web/health"
@@ -1468,6 +1481,31 @@ def _required_text(value: str, message: str) -> str:
     if not normalized:
         raise ValueError(message)
     return normalized
+
+
+def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:
+    return f"{manifest.image.repository}@{manifest.image.digest}"
+
+
+def _resolve_manifest_image_reference(
+    *,
+    image_reference: str,
+    manifest: ArtifactIdentityManifest | None,
+    label: str,
+) -> str:
+    normalized_image_reference = image_reference.strip()
+    if manifest is None:
+        return _required_text(
+            normalized_image_reference,
+            f"{label} requires image_reference or manifest.",
+        )
+    manifest_image_reference = _artifact_image_reference(manifest)
+    if normalized_image_reference and normalized_image_reference != manifest_image_reference:
+        raise ValueError(
+            f"{label} image_reference does not match manifest image reference. "
+            f"Request={normalized_image_reference} manifest={manifest_image_reference}."
+        )
+    return manifest_image_reference
 
 
 def _normalized_unique_texts(values: tuple[str, ...]) -> tuple[str, ...]:

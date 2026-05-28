@@ -17065,6 +17065,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "summary": "ready isolated Odoo preview apply",
                 },
                 "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                "manifest": {
+                    "artifact_id": "artifact-cm-preview",
+                    "source_commit": "abc123",
+                    "enterprise_base_digest": "sha256:enterprise",
+                    "image": {
+                        "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                        "digest": "sha256:abc123",
+                    },
+                },
                 "environment_values": {
                     "ODOO_DB_PASSWORD": "caller-secret-must-not-win",
                 },
@@ -17121,6 +17130,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(kwargs["control_plane_root"], root)
             self.assertEqual(kwargs["database_url"], database_url)
             applied_request = kwargs["request"]
+            self.assertEqual(
+                applied_request.image_reference,
+                "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            )
             self.assertEqual(applied_request.dry_run_plan.environment_id, "env-cm-preview")
             self.assertEqual(applied_request.environment_values["ODOO_DB_USER"], "odoo")
             self.assertEqual(
@@ -17262,8 +17275,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "inputs": {
                             "product": "odoo-tenant-cm",
                             "pr_number": 42,
-                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
-                            "source_git_ref": "abc123",
+                            "manifest": {
+                                "artifact_id": "artifact-cm-preview",
+                                "source_commit": "abc123",
+                                "enterprise_base_digest": "sha256:enterprise",
+                                "image": {
+                                    "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                                    "digest": "sha256:abc123",
+                                },
+                            },
                         },
                     },
                 )
