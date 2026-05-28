@@ -17,6 +17,7 @@ from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
+from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshTransportError
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
 from control_plane.workflows.verireel_preview_driver import (
     _enforce_verireel_preview_runtime_key_safety,
@@ -340,6 +341,63 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 )
 
         run_command.assert_not_called()
+
+    def test_preview_refresh_maps_source_of_truth_backend_failure_to_transport(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                side_effect=click.ClickException(
+                    "Could not load tracked Dokploy targets from Launchplane Postgres storage: connection failed"
+                ),
+            ),
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshTransportError):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path(temporary_directory_name),
+                    request=_refresh_request(),
+                    record_store=None,
+                )
+
+    def test_preview_refresh_maps_template_payload_fetch_failure_to_transport(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=control_plane_dokploy.DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        control_plane_dokploy.DokployTargetDefinition(
+                            context="verireel",
+                            instance="testing",
+                            target_type="application",
+                            target_id="app-template",
+                            target_name="verireel-testing",
+                        ),
+                    ),
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=click.ClickException(
+                    "Dokploy API GET /api/application.one request failed: timed out"
+                ),
+            ),
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshTransportError):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path(temporary_directory_name),
+                    request=_refresh_request(),
+                    record_store=None,
+                )
 
     def test_preview_refresh_generates_preview_local_runtime_secrets(self) -> None:
         captured_env: dict[str, str] = {}
