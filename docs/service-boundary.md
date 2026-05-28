@@ -1037,6 +1037,14 @@ build/publish, browser verification, and the follow-up preview evidence write.
 Browser verification uses the preview URL returned by the driver plus
 allow-listed app maintenance actions keyed by preview slug when it needs remote
 owner-admin setup/cleanup.
+When a VeriReel preview-refresh request is syntactically valid but Launchplane
+cannot complete preflight because preview URL, runtime key-safety, managed
+secret, Dokploy target, or template `DATABASE_URL` configuration is incomplete,
+the route returns an accepted driver result with `refresh_status="fail"` and a
+public-safe `error_message`. The same response writes failed preview generation
+evidence so product workflows and PR feedback can surface the actionable reason
+instead of a generic `invalid_request` rejection. Malformed request payloads and
+unauthorized calls still fail closed before provider mutation.
 
 VeriReel app maintenance accepts an optional `intent` alongside the allow-listed
 action. Smoke/E2E helpers should set the narrow intent, such as

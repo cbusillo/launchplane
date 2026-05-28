@@ -141,6 +141,10 @@ class VeriReelPreviewRefreshResult(BaseModel):
     error_message: str = ""
 
 
+class VeriReelPreviewRefreshConfigError(click.ClickException):
+    """Public-safe preflight/configuration failure for preview refresh."""
+
+
 class VeriReelPreviewDestroyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,11 +229,13 @@ def _preview_url_host(preview_url: str) -> str:
 def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
     parsed = urlparse(str(preview_base_url).strip())
     if parsed.scheme not in {"http", "https"}:
-        raise click.ClickException(f"{PREVIEW_BASE_URL_ENV_KEY} must use http or https.")
+        raise VeriReelPreviewRefreshConfigError(
+            f"{PREVIEW_BASE_URL_ENV_KEY} must use http or https."
+        )
     if not parsed.hostname:
-        raise click.ClickException(f"{PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+        raise VeriReelPreviewRefreshConfigError(f"{PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             f"{PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
         )
     return parsed._replace(
@@ -248,7 +254,7 @@ def _resolve_preview_base_url(*, control_plane_root: Path, context_name: str) ->
     )
     preview_base_url = str(resolved_values.get(PREVIEW_BASE_URL_ENV_KEY) or "").strip()
     if not preview_base_url:
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             f"Missing {PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {context_name}."
         )
     return preview_base_url
@@ -290,16 +296,24 @@ def _preview_domain_from_url(preview_url: str) -> str:
 def _parse_database_url(database_url: str) -> _DatabaseParts:
     parsed = urlparse(database_url.strip())
     if not parsed.scheme:
-        raise click.ClickException("Preview template DATABASE_URL must include a scheme.")
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview template DATABASE_URL must include a scheme."
+        )
     if not parsed.hostname:
-        raise click.ClickException("Preview template DATABASE_URL must include a hostname.")
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview template DATABASE_URL must include a hostname."
+        )
     database_name = parsed.path.lstrip("/").strip()
     if not database_name:
-        raise click.ClickException("Preview template DATABASE_URL must include a database name.")
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview template DATABASE_URL must include a database name."
+        )
     username = unquote(parsed.username or "").strip()
     password = unquote(parsed.password or "")
     if not username:
-        raise click.ClickException("Preview template DATABASE_URL must include a username.")
+        raise VeriReelPreviewRefreshConfigError(
+            "Preview template DATABASE_URL must include a username."
+        )
     return _DatabaseParts(
         host=parsed.hostname,
         port=parsed.port or 5432,
@@ -342,13 +356,13 @@ def _enforce_verireel_preview_runtime_key_safety(
     if not required_binding_keys:
         return
     if record_store is None:
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             "VeriReel preview refresh copied runtime secrets require Launchplane database storage."
         )
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
     except ValueError as exc:
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             "VeriReel preview refresh copied runtime secrets require an active runtime "
             "key-safety policy."
         ) from exc
@@ -371,7 +385,7 @@ def _enforce_verireel_preview_runtime_key_safety(
         return
     finding_codes = ", ".join(finding.code for finding in evaluation.findings)
     checked_keys = ", ".join(evaluation.checked_binding_keys)
-    raise click.ClickException(
+    raise VeriReelPreviewRefreshConfigError(
         f"VeriReel preview runtime key-safety gate failed for {checked_keys}: {finding_codes}."
     )
 
@@ -405,30 +419,38 @@ def _random_password(length: int = 32) -> str:
 def _template_application_payload(
     *, control_plane_root: Path, host: str, token: str
 ) -> tuple[control_plane_dokploy.DokployTargetDefinition, JsonObject]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-        control_plane_root=control_plane_root,
-    )
+    try:
+        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+            control_plane_root=control_plane_root,
+        )
+    except click.ClickException as exc:
+        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
         source_of_truth,
         context_name="verireel",
         instance_name="testing",
     )
     if target_definition is None:
-        raise click.ClickException("No Dokploy target definition found for verireel/testing.")
+        raise VeriReelPreviewRefreshConfigError(
+            "No Dokploy target definition found for verireel/testing."
+        )
     if target_definition.target_type != "application":
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             "VeriReel preview driver requires the testing target to be a Dokploy application."
         )
     if not target_definition.target_id.strip():
-        raise click.ClickException(
+        raise VeriReelPreviewRefreshConfigError(
             "VeriReel testing target requires a Dokploy target_id before preview execution."
         )
-    payload = control_plane_dokploy.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type="application",
-        target_id=target_definition.target_id,
-    )
+    try:
+        payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=target_definition.target_id,
+        )
+    except click.ClickException as exc:
+        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     return target_definition, payload
 
 
@@ -1102,7 +1124,12 @@ def execute_verireel_preview_refresh(
     request: VeriReelPreviewRefreshRequest,
     record_store: RuntimeKeySafetyPolicyReadStore | None = None,
 ) -> VeriReelPreviewRefreshResult:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    try:
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
+    except click.ClickException as exc:
+        raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     template_target, template_application = _template_application_payload(
         control_plane_root=control_plane_root,
         host=host,
@@ -1113,7 +1140,9 @@ def execute_verireel_preview_refresh(
     )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
-        raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
+        raise VeriReelPreviewRefreshConfigError(
+            "VeriReel testing template application is missing DATABASE_URL."
+        )
     _enforce_verireel_preview_runtime_key_safety(
         record_store=record_store,
         template_target=template_target,
