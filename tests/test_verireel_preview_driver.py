@@ -1,3 +1,4 @@
+import base64
 import subprocess
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from unittest.mock import patch
 
 import click
 
+from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretClass,
@@ -22,6 +24,7 @@ from control_plane.workflows.verireel_preview_driver import (
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
+from control_plane.workflows.verireel_preview_driver import _verireel_template_runtime_secret_keys
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
 
 
@@ -211,9 +214,47 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             _enforce_verireel_preview_runtime_key_safety(
                 record_store=None,
                 template_target=_template_target(),
-                template_env_map={
+                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
+                request=_refresh_request(),
+            )
+
+    def test_verireel_template_runtime_secret_keys_skip_rewritten_database_url(self) -> None:
+        self.assertEqual(
+            _verireel_template_runtime_secret_keys(
+                {
                     "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
-                },
+                    "BETTER_AUTH_SECRET": "auth-secret",
+                    "VERIREEL_SECRETS_MASTER_KEY": "master-key",
+                    "VERIREEL_CRON_SECRET": "cron-secret",
+                    "NEXT_PUBLIC_SITE_URL": "https://testing.example",
+                }
+            ),
+            (),
+        )
+
+    def test_verireel_preview_runtime_key_safety_ignores_generated_preview_secrets(
+        self,
+    ) -> None:
+        _enforce_verireel_preview_runtime_key_safety(
+            record_store=None,
+            template_target=_template_target(),
+            template_env_map={
+                "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
+                "BETTER_AUTH_SECRET": "auth-secret",
+                "VERIREEL_SECRETS_MASTER_KEY": "master-key",
+                "VERIREEL_CRON_SECRET": "cron-secret",
+            },
+            request=_refresh_request(),
+        )
+
+    def test_verireel_preview_runtime_key_safety_requires_bindings_for_other_copied_secrets(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(click.ClickException, "binding_missing"):
+            _enforce_verireel_preview_runtime_key_safety(
+                record_store=_RuntimeKeySafetyStore(policies=(_runtime_policy(),)),
+                template_target=_template_target(),
+                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
                 request=_refresh_request(),
             )
 
@@ -221,17 +262,29 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self,
     ) -> None:
         store = _RuntimeKeySafetyStore(
-            policies=(_runtime_policy(secret_class="prod_only"),),
-            bindings=(_runtime_binding("DATABASE_URL"),),
+            policies=(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-prod-only-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T22:15:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="EXTERNAL_API_TOKEN",
+                            secret_class="prod_only",
+                            allowed_contexts=("verireel-testing",),
+                        ),
+                    ),
+                ),
+            ),
+            bindings=(_runtime_binding("EXTERNAL_API_TOKEN"),),
         )
 
         with self.assertRaisesRegex(click.ClickException, "secret_class_not_allowed"):
             _enforce_verireel_preview_runtime_key_safety(
                 record_store=store,
                 template_target=_template_target(),
-                template_env_map={
-                    "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
-                },
+                template_env_map={"EXTERNAL_API_TOKEN": "api-token"},
                 request=_refresh_request(),
             )
 
@@ -271,7 +324,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     _template_target(),
                     {
                         "applicationId": "app-template",
-                        "env": "DATABASE_URL=postgresql://user:pass@db.example/verireel_testing\n",
+                        "env": "DATABASE_URL=postgresql://user:pass@db.example/verireel_testing\nEXTERNAL_API_TOKEN=api-token\n",
                     },
                 ),
             ),
@@ -287,6 +340,166 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 )
 
         run_command.assert_not_called()
+
+    def test_preview_refresh_generates_preview_local_runtime_secrets(self) -> None:
+        captured_env: dict[str, str] = {}
+
+        def capture_environment(**kwargs: object) -> None:
+            captured_env.update(
+                control_plane_dokploy.parse_dokploy_env_text(str(kwargs["env_text"]))
+            )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": (
+                            "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n"
+                            "BETTER_AUTH_SECRET=template-auth-secret\n"
+                            "VERIREEL_SECRETS_MASTER_KEY=dGVtcGxhdGUtbWFzdGVyLWtleQ==\n"
+                            "VERIREEL_CRON_SECRET=template-cron-secret\n"
+                        ),
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value=None,
+            ),
+            patch("control_plane.workflows.verireel_preview_driver._run_application_command"),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_application",
+                return_value={"applicationId": "app-preview"},
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._configure_application",
+                side_effect=capture_environment,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_domain",
+                return_value=("domain-preview", ()),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.latest_deployment_for_target",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+            ),
+            patch("control_plane.workflows.verireel_preview_driver._wait_for_preview_health"),
+        ):
+            result = execute_verireel_preview_refresh(
+                control_plane_root=Path(temporary_directory_name),
+                request=_refresh_request(),
+                record_store=None,
+            )
+
+        self.assertEqual(result.refresh_status, "pass")
+        self.assertNotEqual(captured_env["BETTER_AUTH_SECRET"], "template-auth-secret")
+        self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
+        self.assertNotEqual(
+            captured_env["VERIREEL_SECRETS_MASTER_KEY"],
+            "dGVtcGxhdGUtbWFzdGVyLWtleQ==",
+        )
+        self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
+        self.assertIn("/verireel_preview_pr_71?", captured_env["DATABASE_URL"])
+
+    def test_preview_refresh_reuses_existing_preview_runtime_secrets(self) -> None:
+        captured_env: dict[str, str] = {}
+
+        def capture_environment(**kwargs: object) -> None:
+            captured_env.update(
+                control_plane_dokploy.parse_dokploy_env_text(str(kwargs["env_text"]))
+            )
+
+        existing_env = (
+            "DATABASE_URL=postgresql://existing:existing-pass@db.example/verireel_preview_pr_71?schema=public\n"
+            "BETTER_AUTH_SECRET=existing-auth-secret\n"
+            "VERIREEL_SECRETS_MASTER_KEY="
+            + base64.b64encode(bytes(range(32))).decode("ascii")
+            + "\n"
+            "VERIREEL_CRON_SECRET=existing-cron-secret\n"
+        )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value={"applicationId": "app-preview"},
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                return_value={"applicationId": "app-preview", "env": existing_env},
+            ),
+            patch("control_plane.workflows.verireel_preview_driver._run_application_command"),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_application",
+                return_value={"applicationId": "app-preview"},
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._configure_application",
+                side_effect=capture_environment,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._ensure_domain",
+                return_value=("", ()),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.latest_deployment_for_target",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
+            ),
+            patch("control_plane.workflows.verireel_preview_driver._wait_for_preview_health"),
+        ):
+            result = execute_verireel_preview_refresh(
+                control_plane_root=Path(temporary_directory_name),
+                request=_refresh_request(),
+                record_store=None,
+            )
+
+        self.assertEqual(result.refresh_status, "pass")
+        self.assertEqual(captured_env["BETTER_AUTH_SECRET"], "existing-auth-secret")
+        self.assertEqual(captured_env["VERIREEL_CRON_SECRET"], "existing-cron-secret")
+        self.assertEqual(
+            captured_env["VERIREEL_SECRETS_MASTER_KEY"],
+            base64.b64encode(bytes(range(32))).decode("ascii"),
+        )
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):

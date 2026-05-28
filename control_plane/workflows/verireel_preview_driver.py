@@ -6,7 +6,7 @@ import secrets
 import shlex
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlparse
 from urllib.request import Request, urlopen
@@ -36,6 +36,14 @@ PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
+_PREVIEW_REFRESH_GENERATED_ENV_KEYS = frozenset(
+    {
+        "BETTER_AUTH_SECRET",
+        "DATABASE_URL",
+        "VERIREEL_CRON_SECRET",
+        "VERIREEL_SECRETS_MASTER_KEY",
+    }
+)
 
 
 def _expected_preview_slug(anchor_pr_number: int) -> str:
@@ -338,9 +346,9 @@ def _verireel_template_runtime_secret_keys(
         normalized_key = key.strip()
         if not normalized_key or not str(value).strip():
             continue
-        if normalized_key == "DATABASE_URL" or _runtime_environment_key_requires_secret_store(
-            normalized_key
-        ):
+        if normalized_key in _PREVIEW_REFRESH_GENERATED_ENV_KEYS:
+            continue
+        if _runtime_environment_key_requires_secret_store(normalized_key):
             required_keys.append(normalized_key)
     return tuple(dict.fromkeys(required_keys))
 
@@ -414,6 +422,23 @@ def _build_preview_database_url(
 
 def _random_password(length: int = 32) -> str:
     return secrets.token_hex(length)[:length]
+
+
+def _random_base64_secret(byte_count: int = 32) -> str:
+    return base64.b64encode(secrets.token_bytes(byte_count)).decode("ascii")
+
+
+def _random_urlsafe_secret(byte_count: int = 32) -> str:
+    return secrets.token_urlsafe(byte_count)
+
+
+def _resolve_preview_secret(
+    *, existing_env_map: dict[str, str], key: str, generate: Callable[[], str]
+) -> str:
+    existing_value = existing_env_map.get(key, "").strip()
+    if existing_value:
+        return existing_value
+    return generate()
 
 
 def _template_application_payload(
@@ -1167,6 +1192,9 @@ def execute_verireel_preview_refresh(
             host=host, token=token, application_id=application_id
         )
     existing_database = _resolve_existing_preview_database(existing_snapshot)
+    existing_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str((existing_snapshot or {}).get("env") or "")
+    )
     database_name, role_name = _preview_database_identifiers(request.preview_slug)
     database_parts = existing_database or _DatabaseParts(
         host=template_database.host,
@@ -1210,6 +1238,21 @@ def execute_verireel_preview_refresh(
                     database_name=database_parts.database,
                     role_name=database_parts.username,
                     password=database_parts.password,
+                ),
+                "BETTER_AUTH_SECRET": _resolve_preview_secret(
+                    existing_env_map=existing_env_map,
+                    key="BETTER_AUTH_SECRET",
+                    generate=_random_urlsafe_secret,
+                ),
+                "VERIREEL_SECRETS_MASTER_KEY": _resolve_preview_secret(
+                    existing_env_map=existing_env_map,
+                    key="VERIREEL_SECRETS_MASTER_KEY",
+                    generate=_random_base64_secret,
+                ),
+                "VERIREEL_CRON_SECRET": _resolve_preview_secret(
+                    existing_env_map=existing_env_map,
+                    key="VERIREEL_CRON_SECRET",
+                    generate=_random_urlsafe_secret,
                 ),
                 **runtime_identity_env(_build_preview_runtime_identity(request=request)),
             },
