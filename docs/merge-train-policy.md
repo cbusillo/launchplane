@@ -490,7 +490,10 @@ candidate base SHA, and each PR merge uses the recorded head SHA guard so a
 changed PR head cannot be merged under stale validation. Retried landing is
 idempotent across already-merged entries when GitHub shows the pull request was
 merged with the exact recorded head SHA; unrelated base movement or mismatched
-head evidence still stops the landing attempt.
+head evidence still stops the landing attempt. When every landing-plan entry is
+already merged with its recorded head SHA and the live base branch is at the
+recorded final merge commit, the retry writes terminal landing evidence instead
+of continuing to advertise the stale `land_batch` action.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
