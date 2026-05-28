@@ -316,8 +316,10 @@ from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
     OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
+    OdooPreviewRefreshRequest,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
+    generic_preview_refresh_request_from_odoo,
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
@@ -1061,6 +1063,26 @@ class GenericWebPreviewInventoryEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooPreviewRefreshEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    refresh: GenericWebPreviewRefreshRequest
+
+    @field_validator("refresh", mode="before")
+    @classmethod
+    def _normalize_refresh(cls, value: object) -> GenericWebPreviewRefreshRequest:
+        return generic_preview_refresh_request_from_odoo(
+            OdooPreviewRefreshRequest.model_validate(value)
+        )
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooPreviewRefreshEnvelope":
+        if not self.product.strip():
+            raise ValueError("Odoo preview refresh requires product")
+        if self.product.strip() != self.refresh.product.strip():
+            raise ValueError("Odoo preview refresh requires matching product values")
+        return self
+
+
 _GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-refresh",
     envelope_model=GenericWebPreviewRefreshEnvelope,
@@ -1209,7 +1231,7 @@ _ODOO_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
 
 _ODOO_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-refresh",
-    envelope_model=GenericWebPreviewRefreshEnvelope,
+    envelope_model=OdooPreviewRefreshEnvelope,
     denial_message="Workflow cannot refresh Odoo preview state for the requested product/context.",
 )
 
@@ -2789,7 +2811,7 @@ def _generic_web_preview_inventory_route_metadata(
 
 def _generic_web_preview_refresh_route_metadata(
     path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewRefreshEnvelope]:
+) -> _DriverRouteExecutionMetadata[Any]:
     if path == _ODOO_PREVIEW_REFRESH_ROUTE.route_path:
         return _ODOO_PREVIEW_REFRESH_ROUTE
     return _GENERIC_WEB_PREVIEW_REFRESH_ROUTE

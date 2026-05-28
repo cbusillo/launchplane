@@ -16127,6 +16127,103 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(kwargs["profile"].preview.context, "cm")
             self.assertEqual(kwargs["request"].preview_url, "")
 
+    def test_odoo_preview_refresh_route_accepts_manifest(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _odoo_preview_profile_payload()
+            lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+            lanes.append(
+                {
+                    "instance": "prod",
+                    "context": "cm",
+                    "base_url": "https://cm.example.com",
+                    "health_url": "https://cm.example.com/web/health",
+                }
+            )
+            profile_payload["lanes"] = tuple(lanes)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-09T15:00:00Z",
+                    "refresh_finished_at": "2026-05-09T15:05:00Z",
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "preview_slug": "pr-42",
+                    "application_name": "cm-odoo-preview-pr-42",
+                    "application_id": "app-odoo-preview",
+                    "preview_url": "https://pr-42.cm.example.test",
+                },
+            ) as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "preview_slug": "pr-42",
+                            "manifest": {
+                                "artifact_id": "artifact-cm-preview",
+                                "source_commit": "abc123",
+                                "enterprise_base_digest": "sha256:enterprise",
+                                "image": {
+                                    "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+                                    "digest": "sha256:abc123",
+                                },
+                            },
+                        },
+                    },
+                    headers={"Idempotency-Key": "odoo-preview-refresh:cm:42:sha"},
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["result"]["application_id"], "app-odoo-preview")
+            refresh.assert_called_once()
+            _, kwargs = refresh.call_args
+            self.assertEqual(
+                kwargs["request"].image_reference,
+                "ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            )
+
     def test_odoo_preview_refresh_route_records_smoke_ready_evidence(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
