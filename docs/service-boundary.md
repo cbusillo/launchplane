@@ -1163,6 +1163,14 @@ the backup-gate and promotion routes. Blocked responses are not cached as
 idempotent successes and explain which Launchplane record is missing, so a
 tenant workflow does not have to accept hand-entered artifact or source facts.
 
+`POST /v1/drivers/odoo/prod-promotion-run` is the preferred thin-workflow
+mutation route for Odoo prod promotion. The tenant workflow supplies product,
+context, and a stable request ID; Launchplane resolves the promotable testing
+artifact, captures the prod backup gate, executes the testing-to-prod promotion,
+and returns the phase statuses and written record IDs. The lower-level inputs,
+backup-gate, and promotion routes remain available for diagnostics and explicit
+operator workflows, but product repos should not own the chain.
+
 The CM tenant preview workflow uses two product scopes deliberately. Artifact
 publish input and publish evidence requests use product `odoo` for context `cm`,
 because the publish handoff is an Odoo driver contract. Preview refresh and

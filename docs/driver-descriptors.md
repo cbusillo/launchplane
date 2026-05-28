@@ -245,6 +245,11 @@ testing artifact and source ref from Launchplane release tuple and artifact
 records, then returns the deterministic backup-gate record ID for the caller's
 request ID. Tenant workflows should use that response instead of prompting an
 operator to enter artifact or source facts by hand.
+The preferred tenant-facing mutation route is
+`POST /v1/drivers/odoo/prod-promotion-run`, which keeps the full inputs,
+backup-gate, and promotion sequence inside Launchplane while returning each
+phase status and the written record IDs. The lower-level routes remain available
+for diagnostics and explicit operator workflows.
 The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same
