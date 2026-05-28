@@ -1145,7 +1145,10 @@ profile resolver, URL derivation, and record writer. Product repos call the
 Odoo-shaped routes so authz and driver views remain product-specific, while
 Launchplane still derives the live preview URL from runtime-environment records
 and writes the shared preview and preview-generation records from DB-backed
-product profile preview configuration.
+product profile preview configuration. The Odoo preview-refresh route also
+accepts an artifact manifest in `refresh.manifest`; Launchplane resolves it to
+the exact immutable image reference before entering the shared generic preview
+executor so tenant workflows do not parse artifact manifests locally.
 
 `POST /v1/drivers/odoo/preview-apply-inputs` is the Launchplane-owned handoff
 between thin tenant preview workflows and isolated Odoo provider apply. The

@@ -124,6 +124,55 @@ class OdooPreviewApplyInputsRequest(BaseModel):
         return self
 
 
+class OdooPreviewRefreshRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    preview_slug: str
+    preview_url: str = ""
+    image_reference: str = ""
+    manifest: ArtifactIdentityManifest | None = None
+    anchor_pr_number: int | None = Field(default=None, ge=1)
+    anchor_pr_url: str = ""
+    anchor_head_sha: str = ""
+    source: str = "odoo-preview-refresh"
+    timeout_seconds: int = Field(default=300, ge=1)
+    no_cache: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_request(self) -> "OdooPreviewRefreshRequest":
+        self.product = _required_text(self.product, "Odoo preview refresh requires product.")
+        self.preview_slug = _required_text(
+            self.preview_slug, "Odoo preview refresh requires preview_slug."
+        )
+        self.image_reference = _resolve_manifest_image_reference(
+            image_reference=self.image_reference,
+            manifest=self.manifest,
+            label="Odoo preview refresh",
+        )
+        self.source = _required_text(self.source, "Odoo preview refresh requires source.")
+        return self
+
+
+def generic_preview_refresh_request_from_odoo(
+    request: OdooPreviewRefreshRequest,
+) -> "GenericWebPreviewRefreshRequest":
+    return GenericWebPreviewRefreshRequest(
+        schema_version=request.schema_version,
+        product=request.product,
+        preview_slug=request.preview_slug,
+        preview_url=request.preview_url,
+        image_reference=request.image_reference,
+        anchor_pr_number=request.anchor_pr_number,
+        anchor_pr_url=request.anchor_pr_url,
+        anchor_head_sha=request.anchor_head_sha,
+        source=request.source,
+        timeout_seconds=request.timeout_seconds,
+        no_cache=request.no_cache,
+    )
+
+
 class OdooPreviewApplyInputsResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
