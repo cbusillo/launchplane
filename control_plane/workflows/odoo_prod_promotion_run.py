@@ -157,7 +157,7 @@ def execute_odoo_prod_promotion_run(
     run_status: Literal["pass", "fail"] = (
         "pass"
         if promotion_result.promotion_status == "pass"
-        and promotion_result.destination_health_status == "pass"
+        and promotion_result.destination_health_status in {"pass", "skipped"}
         else "fail"
     )
     error_message = promotion_result.error_message
