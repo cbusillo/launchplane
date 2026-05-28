@@ -151,6 +151,14 @@ class OdooPreviewRefreshRequest(BaseModel):
             manifest=self.manifest,
             label="Odoo preview refresh",
         )
+        if self.manifest is not None:
+            manifest_source_commit = self.manifest.source_commit.strip()
+            if self.anchor_head_sha.strip() and self.anchor_head_sha.strip() != manifest_source_commit:
+                raise ValueError(
+                    "Odoo preview refresh anchor_head_sha does not match manifest source_commit. "
+                    f"Request={self.anchor_head_sha.strip()} manifest={manifest_source_commit}."
+                )
+            self.anchor_head_sha = manifest_source_commit
         self.source = _required_text(self.source, "Odoo preview refresh requires source.")
         return self
 
