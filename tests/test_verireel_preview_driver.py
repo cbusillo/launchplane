@@ -343,6 +343,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
 
     def test_preview_refresh_generates_preview_local_runtime_secrets(self) -> None:
         captured_env: dict[str, str] = {}
+        template_master_key = base64.b64encode(b"template-master-key").decode("ascii")
 
         def capture_environment(**kwargs: object) -> None:
             captured_env.update(
@@ -364,7 +365,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                         "env": (
                             "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n"
                             "BETTER_AUTH_SECRET=template-auth-secret\n"
-                            "VERIREEL_SECRETS_MASTER_KEY=dGVtcGxhdGUtbWFzdGVyLWtleQ==\n"
+                            f"VERIREEL_SECRETS_MASTER_KEY={template_master_key}\n"
                             "VERIREEL_CRON_SECRET=template-cron-secret\n"
                         ),
                     },
@@ -413,7 +414,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertNotEqual(captured_env["VERIREEL_CRON_SECRET"], "template-cron-secret")
         self.assertNotEqual(
             captured_env["VERIREEL_SECRETS_MASTER_KEY"],
-            "dGVtcGxhdGUtbWFzdGVyLWtleQ==",
+            template_master_key,
         )
         self.assertEqual(len(base64.b64decode(captured_env["VERIREEL_SECRETS_MASTER_KEY"])), 32)
         self.assertIn("/verireel_preview_pr_71?", captured_env["DATABASE_URL"])
