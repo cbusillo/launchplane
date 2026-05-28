@@ -92,9 +92,12 @@ title: Secrets
 - Product-specific preview drivers that derive runtime secrets from a template,
   such as VeriReel's preview database bootstrap, must run the same metadata-only
   gate before creating databases, rendering preview env, or starting preview
-  instances. Template secret-shaped keys and semantic secret keys such as
-  `DATABASE_URL` must resolve to managed template-lane bindings, and the active
-  policy must allow those bindings for the preview target.
+  instances. Template secret-shaped keys copied into the preview must resolve to
+  managed template-lane bindings, and the active policy must allow those
+  bindings for the preview target. Template values that the driver rewrites for
+  each preview, such as VeriReel's generated `DATABASE_URL`,
+  `BETTER_AUTH_SECRET`, `VERIREEL_SECRETS_MASTER_KEY`, and
+  `VERIREEL_CRON_SECRET`, are not copied template secrets.
 - Delegated worker workflows that overlay managed runtime secrets into
   subprocess environments, such as VeriReel prod backup and rollback workers,
   must evaluate the managed bindings for the worker target before the worker
