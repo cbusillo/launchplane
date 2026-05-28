@@ -487,7 +487,10 @@ writes a `launchplane_merge_train_batch_landing_plans` record, or `mode: land`
 with a landing-plan record id and merges the original pull requests in recorded
 queue order. Landing fails closed if the base branch head has moved from the
 candidate base SHA, and each PR merge uses the recorded head SHA guard so a
-changed PR head cannot be merged under stale validation.
+changed PR head cannot be merged under stale validation. Retried landing is
+idempotent across already-merged entries when GitHub shows the pull request was
+merged with the exact recorded head SHA; unrelated base movement or mismatched
+head evidence still stops the landing attempt.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run

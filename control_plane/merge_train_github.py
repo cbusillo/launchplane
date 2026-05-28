@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingEntry
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
@@ -139,15 +140,30 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         merged_entries = []
         for entry in landing_plan.entries:
+            if entry.status == "merged":
+                merged_entries.append(entry)
+                expected_base_sha = _required_value(
+                    entry.merge_commit_sha,
+                    "Merged batch landing entry requires merge_commit_sha.",
+                )
+                continue
             current_base_sha = _base_branch_sha(
                 transport=self.transport,
                 repository_path=repository_path,
                 base_branch=landing_plan.base_branch,
             )
             if current_base_sha != expected_base_sha:
-                raise MergeTrainGitHubStaleHeadError(
-                    "Base branch moved outside the batch landing plan.", status_code=409
+                already_merged_entry = self._already_merged_landing_entry(
+                    repository_path=repository_path,
+                    entry=entry,
                 )
+                if already_merged_entry is None:
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Base branch moved outside the batch landing plan.", status_code=409
+                    )
+                merged_entries.append(already_merged_entry)
+                expected_base_sha = already_merged_entry.merge_commit_sha
+                continue
             merge_commit_sha = self.merge_pull_request(
                 repository=landing_plan.repository,
                 pull_request_number=entry.pull_request_number,
@@ -161,6 +177,33 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
             expected_base_sha = merge_commit_sha
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
+
+    def _already_merged_landing_entry(
+        self, *, repository_path: str, entry: MergeTrainBatchLandingEntry
+    ) -> MergeTrainBatchLandingEntry | None:
+        pull_request = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/pulls/{entry.pull_request_number}",
+            ),
+            "GitHub pull request detail response",
+        )
+        if _pull_request_state(str(pull_request.get("state") or "")) != "closed":
+            return None
+        if pull_request.get("merged") is not True:
+            return None
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        if head_sha != entry.expected_head_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Pull request was merged with a different head SHA than the batch landing plan.",
+                status_code=409,
+            )
+        merge_commit_sha = _required_text(
+            pull_request.get("merge_commit_sha"),
+            "Merged GitHub pull request requires merge_commit_sha.",
+        )
+        return entry.model_copy(update={"status": "merged", "merge_commit_sha": merge_commit_sha})
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
