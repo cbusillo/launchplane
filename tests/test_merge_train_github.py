@@ -405,6 +405,107 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             ],
         )
 
+    def test_land_batch_candidate_skips_persisted_merged_entries_on_retry(self) -> None:
+        first_entry = _landing_plan().entries[0].model_copy(
+            update={"status": "merged", "merge_commit_sha": "merge-sha-1"}
+        )
+        landing_plan = _landing_plan().model_copy(
+            update={"entries": (first_entry, _landing_plan().entries[1])}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+            )
+        )
+
+        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual(
+            [entry.merge_commit_sha for entry in landed_plan.entries],
+            ["merge-sha-1", "merge-sha-2"],
+        )
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                (
+                    "PUT",
+                    "/repos/example/merge-train-repo/pulls/2/merge",
+                    {"sha": "head-2", "merge_method": "merge"},
+                ),
+            ],
+        )
+
+    def test_land_batch_candidate_recovers_already_merged_pr_after_partial_landing(
+        self,
+    ) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-1"),
+                _github_pull_request(
+                    1,
+                    state="closed",
+                    merged=True,
+                    merge_commit_sha="merge-sha-1",
+                ),
+                _github_branch(sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+            )
+        )
+
+        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual(
+            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
+        )
+        self.assertEqual(
+            [entry.merge_commit_sha for entry in landed_plan.entries],
+            ["merge-sha-1", "merge-sha-2"],
+        )
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("GET", "/repos/example/merge-train-repo/pulls/1", None),
+                ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                (
+                    "PUT",
+                    "/repos/example/merge-train-repo/pulls/2/merge",
+                    {"sha": "head-2", "merge_method": "merge"},
+                ),
+            ],
+        )
+
+    def test_land_batch_candidate_rejects_already_merged_pr_with_different_head(
+        self,
+    ) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="merge-sha-1"),
+                _github_pull_request(
+                    1,
+                    state="closed",
+                    merged=True,
+                    head_sha="unexpected-head",
+                    merge_commit_sha="merge-sha-1",
+                ),
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "different head SHA"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual([request.method for request in transport.requests], ["GET", "GET"])
+
     def test_land_batch_candidate_rejects_base_movement_between_prs(self) -> None:
         landing_plan = _landing_plan()
         transport = RecordingMergeTrainGitHubTransport(
@@ -412,6 +513,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="base-main"),
                 {"sha": "merge-sha-1"},
                 _github_branch(sha="unexpected-base"),
+                _github_pull_request(2),
             )
         )
 
@@ -421,13 +523,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [request.method for request in transport.requests], ["GET", "PUT", "GET"]
+            [request.method for request in transport.requests], ["GET", "PUT", "GET", "GET"]
         )
 
     def test_land_batch_candidate_rejects_moved_base_branch(self) -> None:
         landing_plan = _landing_plan()
         transport = RecordingMergeTrainGitHubTransport(
-            responses=(_github_branch(sha="new-base-main"),)
+            responses=(_github_branch(sha="new-base-main"), _github_pull_request(1))
         )
 
         with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "outside"):
@@ -435,7 +537,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 landing_plan=landing_plan
             )
 
-        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(len(transport.requests), 2)
 
     def test_repository_must_be_owner_name(self) -> None:
         client = GitHubMergeTrainClient(transport=RecordingMergeTrainGitHubTransport())
@@ -670,9 +772,13 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 def _github_pull_request(
     number: int,
     *,
+    state: str = "open",
+    merged: bool = False,
+    merge_commit_sha: str | None = None,
     mergeable: bool | None = True,
     mergeable_state: str = "clean",
     author_association: str = "COLLABORATOR",
+    head_sha: str | None = None,
     head_ref: str | None = None,
     base_ref: str = "main",
     repository: str = "cbusillo/sellyouroutboard",
@@ -685,14 +791,16 @@ def _github_pull_request(
         "number": number,
         "html_url": f"https://github.com/cbusillo/sellyouroutboard/pull/{number}",
         "title": f"Pull request {number}",
-        "state": "open",
+        "state": state,
+        "merged": merged,
+        "merge_commit_sha": merge_commit_sha,
         "draft": False,
         "created_at": f"2026-05-08T10:{number % 60:02d}:00Z",
         "labels": [{"name": "ready-to-merge"}],
         "user": {"login": "cbusillo"},
         "author_association": author_association,
         "head": {
-            "sha": f"head-{number}",
+            "sha": head_sha or f"head-{number}",
             "ref": head_ref or f"feature-{number}",
             "repo": {"full_name": normalized_head_repository},
         },
