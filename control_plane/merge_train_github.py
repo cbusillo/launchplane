@@ -138,20 +138,40 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def land_batch_candidate(self, *, landing_plan: MergeTrainBatchLandingPlan) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
+        recorded_landing_shas = _recorded_landing_shas(landing_plan)
         merged_entries = []
         for entry in landing_plan.entries:
-            if entry.status == "merged":
-                merged_entries.append(entry)
-                expected_base_sha = _required_value(
-                    entry.merge_commit_sha,
-                    "Merged batch landing entry requires merge_commit_sha.",
-                )
-                continue
             current_base_sha = _base_branch_sha(
                 transport=self.transport,
                 repository_path=repository_path,
                 base_branch=landing_plan.base_branch,
             )
+            if entry.status == "merged":
+                merge_commit_sha = _required_value(
+                    entry.merge_commit_sha,
+                    "Merged batch landing entry requires merge_commit_sha.",
+                )
+                if current_base_sha not in {expected_base_sha, merge_commit_sha}:
+                    if current_base_sha not in recorded_landing_shas:
+                        raise MergeTrainGitHubStaleHeadError(
+                            "Base branch moved outside the batch landing plan.", status_code=409
+                        )
+                    already_merged_entry = self._already_merged_landing_entry(
+                        repository_path=repository_path,
+                        entry=entry,
+                    )
+                    if already_merged_entry is None:
+                        raise MergeTrainGitHubStaleHeadError(
+                            "Base branch moved outside the batch landing plan.", status_code=409
+                        )
+                    if already_merged_entry.merge_commit_sha != merge_commit_sha:
+                        raise MergeTrainGitHubStaleHeadError(
+                            "Pull request merge commit does not match the batch landing plan.",
+                            status_code=409,
+                        )
+                merged_entries.append(entry)
+                expected_base_sha = merge_commit_sha
+                continue
             if current_base_sha != expected_base_sha:
                 already_merged_entry = self._already_merged_landing_entry(
                     repository_path=repository_path,
@@ -176,6 +196,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
             )
             expected_base_sha = merge_commit_sha
+        current_base_sha = _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=landing_plan.base_branch,
+        )
+        if current_base_sha != expected_base_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Base branch moved outside the batch landing plan.", status_code=409
+            )
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def _already_merged_landing_entry(
@@ -574,6 +603,19 @@ def _repository_path(repository: str) -> str:
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise ValueError("GitHub repository must be formatted as owner/name.")
     return "/".join(quote(part.strip(), safe="") for part in parts)
+
+
+def _recorded_landing_shas(landing_plan: MergeTrainBatchLandingPlan) -> set[str]:
+    shas = {_required_value(landing_plan.entries[0].expected_base_sha, "Landing plan base SHA is required.")}
+    for entry in landing_plan.entries:
+        if entry.status == "merged":
+            shas.add(
+                _required_value(
+                    entry.merge_commit_sha,
+                    "Merged batch landing entry requires merge_commit_sha.",
+                )
+            )
+    return shas
 
 
 def _branch_name_from_ref(reference: str) -> str:
