@@ -20,6 +20,13 @@ inputs:
       Path to a JSON request payload file. Used when payload is empty.
     required: false
     default: ""
+  payload-fields:
+    description: >-
+      Newline-separated JSON path assignments to overlay onto the payload after
+      reading payload or payload-file. Values are treated as strings unless they
+      are valid JSON literals or objects. Example: request.reason=manual.
+    required: false
+    default: ""
   method:
     description: HTTP method to use.
     required: false

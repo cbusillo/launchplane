@@ -175,8 +175,23 @@ The action requests a GitHub OIDC token, sends the JSON request with a stable
 to GitHub outputs. When a later product step needs a JSON file instead of a
 scalar output, set `response-output-file` and, optionally,
 `response-output-path` to write the full response or a nested response value.
-Product repos may still need small payload-builder scripts until Launchplane
-owns the next layer of product-specific request assembly.
+Use `payload-fields` for small workflow-input overlays instead of a repo-local
+JSON builder when the base request is already static:
+
+```yaml
+payload: >-
+  {"schema_version":1,"product":"odoo","rollback":{"schema_version":1}}
+payload-fields: |-
+  rollback.context=cm
+  rollback.instance=prod
+  rollback.reason=${{ github.event.inputs.reason }}
+```
+
+Each `payload-fields` line is `json.path=value`. Values are strings unless they
+parse as JSON literals or objects, so `false`, `300`, and `{}` keep their JSON
+types. Product repos may still need small payload-builder scripts for large
+manifest-derived payloads until Launchplane owns the next layer of
+product-specific request assembly.
 
 For asynchronous Launchplane routes that report a temporary status, configure
 polling instead of reimplementing OIDC and retry logic in the product repo:

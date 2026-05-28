@@ -141,6 +141,60 @@ function readPayload() {
   return null;
 }
 
+function parsePayloadFieldValue(value) {
+  const normalizedValue = String(value ?? "").trim();
+  if (!normalizedValue) {
+    return "";
+  }
+  try {
+    return JSON.parse(normalizedValue);
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function writeJsonPath(root, path, value) {
+  const segments = path.split(".").map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length === 0) {
+    throw new Error("Payload field path must not be empty.");
+  }
+  let cursor = root;
+  for (const segment of segments.slice(0, -1)) {
+    if (cursor[segment] === undefined) {
+      cursor[segment] = {};
+    }
+    if (cursor[segment] === null || typeof cursor[segment] !== "object" || Array.isArray(cursor[segment])) {
+      throw new Error(`Payload field '${path}' cannot descend through non-object segment '${segment}'.`);
+    }
+    cursor = cursor[segment];
+  }
+  cursor[segments.at(-1)] = value;
+}
+
+function applyPayloadFields(payload) {
+  const payloadFields = getInput("payload-fields");
+  if (!payloadFields) {
+    return payload;
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("payload-fields requires payload or payload-file to contain a JSON object.");
+  }
+  for (const line of payloadFields.split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith("#")) {
+      continue;
+    }
+    const separatorIndex = trimmedLine.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid payload field '${trimmedLine}'. Use json.path=value.`);
+    }
+    const path = trimmedLine.slice(0, separatorIndex).trim();
+    const value = line.slice(line.indexOf("=") + 1);
+    writeJsonPath(payload, path, parsePayloadFieldValue(value));
+  }
+  return payload;
+}
+
 function splitCommaSeparated(value) {
   return String(value ?? "")
     .split(",")
@@ -300,7 +354,7 @@ async function main() {
   const requestUrl = new URL(routePath, launchplaneUrl).toString();
   const audience = getInput("audience") || launchplaneUrl.host;
   const idempotencyKey = getInput("idempotency-key");
-  const payload = readPayload();
+  const payload = applyPayloadFields(readPayload());
   const options = getActionOptions();
   const token = await requestGitHubOidcToken(audience, options);
   const headers = {
