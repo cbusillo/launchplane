@@ -797,11 +797,17 @@ class OdooPreviewDokployApplyRequest(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewDokployApplyRequest":
-        self.image_reference = _resolve_manifest_image_reference(
-            image_reference=self.image_reference,
-            manifest=self.manifest,
-            label="Odoo preview apply",
-        )
+        self.image_reference = self.image_reference.strip()
+        if (
+            self.manifest is not None
+            or self.image_reference
+            or self.dry_run_plan.operation == "refresh"
+        ):
+            self.image_reference = _resolve_manifest_image_reference(
+                image_reference=self.image_reference,
+                manifest=self.manifest,
+                label="Odoo preview apply",
+            )
         self.compose_file = self.compose_file.strip()
         self.health_path = self.health_path.strip() or "/web/health"
         if not self.health_path.startswith("/"):

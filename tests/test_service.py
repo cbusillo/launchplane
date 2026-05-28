@@ -17546,6 +17546,98 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             apply_driver.assert_not_called()
 
+    def test_odoo_preview_destroy_apply_route_allows_missing_image_reference(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            state_dir = root / "fallback-state"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_preview_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-preview-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_preview_dokploy_apply",
+                return_value=OdooPreviewDokployApplyResult(
+                    status="pass",
+                    operation="destroy",
+                    product="odoo-tenant-cm",
+                    repository="cbusillo/odoo-tenant-cm",
+                    preview_slug="pr-42",
+                    preview_url="https://pr-42.cm-preview.example.test",
+                    domain_host="pr-42.cm-preview.example.test",
+                    compose_id="compose-cm-pr-42",
+                    compose_name="cm-odoo-preview-pr-42",
+                ),
+            ) as apply_driver:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/preview-apply",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "apply": {
+                            "dry_run_plan": {
+                                "status": "ready",
+                                "operation": "destroy",
+                                "product": "odoo-tenant-cm",
+                                "repository": "cbusillo/odoo-tenant-cm",
+                                "preview_slug": "pr-42",
+                                "preview_url": "https://pr-42.cm-preview.example.test",
+                                "domain_host": "pr-42.cm-preview.example.test",
+                                "compose_ref": "compose-cm-pr-42",
+                                "compose_name": "cm-odoo-preview-pr-42",
+                                "summary": "ready isolated Odoo preview destroy",
+                            },
+                            "wait_for_deploy": False,
+                            "smoke_check": False,
+                        },
+                    },
+                    headers={
+                        "Idempotency-Key": "odoo-preview-apply:odoo-tenant-cm:pr-42:destroy:abc123"
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["result"]["status"], "pass")
+            apply_driver.assert_called_once()
+            applied_request = apply_driver.call_args.kwargs["request"]
+            self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
+            self.assertEqual(applied_request.image_reference, "")
+
     def test_odoo_preview_apply_route_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
