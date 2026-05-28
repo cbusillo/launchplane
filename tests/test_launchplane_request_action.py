@@ -135,6 +135,44 @@ process.on('beforeExit', () => {{
                 },
             )
 
+    def test_overlays_payload_fields_before_request(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/prod-rollback",
+                "payload": '{"schema_version":1,"product":"odoo","rollback":{"schema_version":1}}',
+                "payload-fields": "\n".join(
+                    [
+                        "rollback.context=cm",
+                        "rollback.instance=prod",
+                        "rollback.reason=manual rollback requested",
+                        "rollback.wait_for_deploy=false",
+                        "rollback.timeout_seconds=300",
+                    ]
+                ),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        payload = json.loads(calls[1]["body"])
+        self.assertEqual(payload["rollback"]["context"], "cm")
+        self.assertEqual(payload["rollback"]["reason"], "manual rollback requested")
+        self.assertIs(payload["rollback"]["wait_for_deploy"], False)
+        self.assertEqual(payload["rollback"]["timeout_seconds"], 300)
+
+    def test_rejects_payload_fields_without_object_payload(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/prod-rollback",
+                "payload-fields": "rollback.context=cm",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("payload-fields requires payload or payload-file", result.stderr)
+
     def test_fails_when_driver_result_status_is_configured_as_failure(self) -> None:
         result = self.run_action(
             inputs={
