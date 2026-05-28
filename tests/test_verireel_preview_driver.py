@@ -399,6 +399,48 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     record_store=None,
                 )
 
+    def test_preview_refresh_maps_existing_preview_fetch_failure_to_transport(
+        self,
+    ) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": "DATABASE_URL=postgresql://template:template-pass@db.example/verireel_testing\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._find_application_by_name",
+                return_value={"applicationId": "app-preview"},
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._fetch_application",
+                side_effect=click.ClickException(
+                    "Dokploy API GET /api/application.one request failed: timed out"
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as run_command,
+        ):
+            with self.assertRaises(VeriReelPreviewRefreshTransportError):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path(temporary_directory_name),
+                    request=_refresh_request(),
+                    record_store=None,
+                )
+
+        run_command.assert_not_called()
+
     def test_preview_refresh_generates_preview_local_runtime_secrets(self) -> None:
         captured_env: dict[str, str] = {}
         template_master_key = base64.b64encode(b"template-master-key").decode("ascii")
