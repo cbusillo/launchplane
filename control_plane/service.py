@@ -426,6 +426,7 @@ from control_plane.workflows.verireel_prod_rollback import (
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
     VeriReelPreviewDestroyResult,
+    VeriReelPreviewRefreshConfigError,
     VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
     VeriReelPreviewRefreshResult,
@@ -7289,9 +7290,11 @@ def _apply_verireel_preview_refresh_records(
         driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
     )
     finished_at = driver_result.refresh_finished_at.strip() or requested_at
-    preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
     refresh_passed = driver_result.refresh_status == "pass"
     failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
+    preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
+    if not preview_url and not refresh_passed:
+        preview_url = _verireel_preview_url_for_failed_records(request=request)
     preview_request = PreviewMutationRequest(
         context=request.context,
         anchor_repo=request.anchor_repo,
@@ -7329,6 +7332,10 @@ def _apply_verireel_preview_refresh_records(
         preview_request=preview_request,
         generation_request=generation_request,
     )
+
+
+def _verireel_preview_url_for_failed_records(*, request: VeriReelPreviewRefreshRequest) -> str:
+    return f"https://{request.preview_slug}.preview-config-missing.launchplane.invalid"
 
 
 def _apply_verireel_preview_destroy_records(
@@ -13133,13 +13140,29 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                driver_result = execute_verireel_preview_refresh(
-                    control_plane_root=resolved_root,
-                    record_store=record_store
-                    if isinstance(record_store, PostgresRecordStore)
-                    else None,
-                    request=verireel_preview_refresh_request.refresh,
-                )
+                try:
+                    driver_result = execute_verireel_preview_refresh(
+                        control_plane_root=resolved_root,
+                        record_store=record_store
+                        if isinstance(record_store, PostgresRecordStore)
+                        else None,
+                        request=verireel_preview_refresh_request.refresh,
+                    )
+                except VeriReelPreviewRefreshConfigError as error:
+                    now = _utc_now_timestamp()
+                    error_message = (
+                        str(error).strip()
+                        or "VeriReel preview refresh configuration is incomplete."
+                    )
+                    driver_result = VeriReelPreviewRefreshResult(
+                        refresh_status="fail",
+                        refresh_started_at=now,
+                        refresh_finished_at=now,
+                        application_name="",
+                        application_id="",
+                        preview_url=verireel_preview_refresh_request.refresh.preview_url,
+                        error_message=error_message,
+                    )
                 result = _apply_verireel_preview_refresh_records(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
