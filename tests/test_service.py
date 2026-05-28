@@ -130,6 +130,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewInventoryResult,
     VeriReelPreviewRefreshConfigError,
     VeriReelPreviewRefreshResult,
+    VeriReelPreviewRefreshTransportError,
 )
 
 from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceResult
@@ -27630,12 +27631,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload["result"]["error_message"],
                 "Missing LAUNCHPLANE_PREVIEW_BASE_URL in Launchplane runtime-environment records for verireel-testing.",
             )
+            self.assertEqual(
+                payload["result"]["preview_url"],
+                "https://pr-189.preview-config-missing.launchplane.invalid",
+            )
             store = FilesystemRecordStore(state_dir=state_dir)
             preview = store.read_preview_record("preview-verireel-testing-verireel-pr-189")
             generation = store.read_preview_generation_record(
                 "preview-verireel-testing-verireel-pr-189-generation-0001"
             )
             self.assertEqual(preview.state, "failed")
+            self.assertEqual(
+                preview.canonical_url,
+                "https://pr-189.preview-config-missing.launchplane.invalid",
+            )
             self.assertEqual(generation.state, "failed")
             self.assertEqual(generation.deploy_status, "fail")
             self.assertEqual(generation.verify_status, "skipped")
@@ -27644,6 +27653,71 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 generation.failure_summary,
                 "Missing LAUNCHPLANE_PREVIEW_BASE_URL in Launchplane runtime-environment records for verireel-testing.",
             )
+
+    def test_verireel_preview_refresh_transport_error_rejects_without_records(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["verireel_preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_preview_refresh",
+                side_effect=VeriReelPreviewRefreshTransportError(
+                    "Dokploy API GET /api/application.one request failed: timed out"
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "verireel",
+                        "refresh": {
+                            "schema_version": 1,
+                            "context": "verireel-testing",
+                            "anchor_repo": "verireel",
+                            "anchor_pr_number": 189,
+                            "anchor_pr_url": "https://github.com/every/verireel/pull/189",
+                            "anchor_head_sha": "bd6ef6afb3c6c9cc3359cf98ac613eca414ac4fe",
+                            "preview_slug": "pr-189",
+                            "image_reference": "ghcr.io/every/verireel-app:pr-189-sha-bd6ef6a",
+                        },
+                    },
+                    headers={
+                        "Idempotency-Key": "verireel-preview-refresh:verireel:verireel-testing:verireel:189:bd6ef6a"
+                    },
+                )
+
+            self.assertEqual(status_code, 502)
+            self.assertEqual(payload["status"], "rejected")
+            self.assertEqual(payload["error"]["code"], "preview_refresh_backend_unavailable")
+            store = FilesystemRecordStore(state_dir=state_dir)
+            with self.assertRaises(FileNotFoundError):
+                store.read_preview_record("preview-verireel-testing-verireel-pr-189")
 
     def test_verireel_preview_refresh_payload_validation_still_rejects_bad_slug(
         self,

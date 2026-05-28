@@ -153,6 +153,10 @@ class VeriReelPreviewRefreshConfigError(click.ClickException):
     """Public-safe preflight/configuration failure for preview refresh."""
 
 
+class VeriReelPreviewRefreshTransportError(click.ClickException):
+    """Public-safe backend/provider failure for preview refresh."""
+
+
 class VeriReelPreviewDestroyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -449,6 +453,8 @@ def _template_application_payload(
             control_plane_root=control_plane_root,
         )
     except click.ClickException as exc:
+        if _is_source_of_truth_backend_failure(exc):
+            raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
         source_of_truth,
@@ -475,8 +481,27 @@ def _template_application_payload(
             target_id=target_definition.target_id,
         )
     except click.ClickException as exc:
+        if _is_dokploy_provider_failure(exc):
+            raise VeriReelPreviewRefreshTransportError(str(exc)) from exc
         raise VeriReelPreviewRefreshConfigError(str(exc)) from exc
     return target_definition, payload
+
+
+def _is_source_of_truth_backend_failure(error: click.ClickException) -> bool:
+    message = str(error).strip()
+    return message.startswith(
+        "Could not load tracked Dokploy targets from Launchplane Postgres storage:"
+    )
+
+
+def _is_dokploy_provider_failure(error: click.ClickException) -> bool:
+    cause = error.__cause__
+    if isinstance(cause, (HTTPError, URLError, TimeoutError)):
+        return True
+    message = str(error).strip()
+    return message.startswith("Dokploy API ") or message.endswith(
+        "returned an invalid response payload."
+    )
 
 
 def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:

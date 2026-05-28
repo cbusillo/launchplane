@@ -430,6 +430,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
     VeriReelPreviewRefreshResult,
+    VeriReelPreviewRefreshTransportError,
     execute_verireel_preview_destroy,
     execute_verireel_preview_inventory,
     execute_verireel_preview_refresh,
@@ -13148,6 +13149,22 @@ def create_launchplane_service_app(
                         else None,
                         request=verireel_preview_refresh_request.refresh,
                     )
+                except VeriReelPreviewRefreshTransportError as error:
+                    error_message = (
+                        str(error).strip() or "VeriReel preview refresh backend request failed."
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=502,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "preview_refresh_backend_unavailable",
+                                "message": error_message,
+                            },
+                        },
+                    )
                 except VeriReelPreviewRefreshConfigError as error:
                     now = _utc_now_timestamp()
                     error_message = (
@@ -13160,7 +13177,9 @@ def create_launchplane_service_app(
                         refresh_finished_at=now,
                         application_name="",
                         application_id="",
-                        preview_url=verireel_preview_refresh_request.refresh.preview_url,
+                        preview_url=_verireel_preview_url_for_failed_records(
+                            request=verireel_preview_refresh_request.refresh
+                        ),
                         error_message=error_message,
                     )
                 result = _apply_verireel_preview_refresh_records(
