@@ -28,7 +28,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
             )
 
     def test_run_executes_inputs_backup_gate_and_promotion(self) -> None:
-        record_store = cast(OdooProdPromotionRunStore, Mock())
+        record_store = cast(OdooProdPromotionRunStore, cast(object, Mock()))
         inputs_result = _inputs_result()
         backup_result = _backup_result()
         promotion_result = _promotion_result()
@@ -81,6 +81,46 @@ class OdooProdPromotionRunTests(unittest.TestCase):
         self.assertEqual(promotion_request.health_timeout_seconds, 180)
         self.assertTrue(promotion_request.no_cache)
 
+    def test_run_treats_skipped_health_as_success_when_verification_disabled(
+        self,
+    ) -> None:
+        promotion_result = _promotion_result().model_copy(
+            update={"destination_health_status": "skipped"}
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                return_value=_inputs_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
+                return_value=_backup_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_promotion",
+                return_value=promotion_result,
+            ) as promotion_mock,
+        ):
+            result = execute_odoo_prod_promotion_run(
+                control_plane_root=Path("/control-plane"),
+                state_dir=Path("/state"),
+                database_url=None,
+                record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
+                request=OdooProdPromotionRunRequest(
+                    context="cm",
+                    request_id="run-123",
+                    verify_health=False,
+                ),
+            )
+
+        self.assertEqual(result.run_status, "pass")
+        self.assertEqual(result.promotion_status, "pass")
+        self.assertEqual(result.destination_health_status, "skipped")
+        self.assertEqual(result.error_message, "")
+        promotion_request = promotion_mock.call_args.kwargs["request"]
+        self.assertFalse(promotion_request.verify_health)
+
     def test_run_blocks_without_ready_inputs(self) -> None:
         with patch(
             "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
@@ -100,7 +140,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                     control_plane_root=Path("/control-plane"),
                     state_dir=Path("/state"),
                     database_url=None,
-                    record_store=cast(OdooProdPromotionRunStore, Mock()),
+                    record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
                     request=OdooProdPromotionRunRequest(context="cm", request_id="run-123"),
                 )
 
@@ -135,7 +175,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                 control_plane_root=Path("/control-plane"),
                 state_dir=Path("/state"),
                 database_url=None,
-                record_store=cast(OdooProdPromotionRunStore, Mock()),
+                record_store=cast(OdooProdPromotionRunStore, cast(object, Mock())),
                 request=OdooProdPromotionRunRequest(context="cm", request_id="run-123"),
             )
 
