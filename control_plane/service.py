@@ -377,6 +377,11 @@ from control_plane.workflows.odoo_prod_promotion_inputs import (
     OdooProdPromotionInputsStore,
     resolve_odoo_prod_promotion_inputs,
 )
+from control_plane.workflows.odoo_prod_promotion_run import (
+    OdooProdPromotionRunRequest,
+    OdooProdPromotionRunStore,
+    execute_odoo_prod_promotion_run,
+)
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
@@ -1806,6 +1811,16 @@ class OdooProdPromotionInputsEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooProdPromotionRunEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    run: OdooProdPromotionRunRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdPromotionRunEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo prod promotion run")
+        return self
+
+
 _ODOO_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/prod-backup-gate",
     envelope_model=OdooProdBackupGateEnvelope,
@@ -1821,6 +1836,15 @@ _ODOO_PROD_PROMOTION_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooProdPromotionInputsEnvelope,
     denial_message=(
         "Workflow cannot read Odoo prod promotion inputs for the requested product/context."
+    ),
+)
+
+
+_ODOO_PROD_PROMOTION_RUN_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-promotion-run",
+    envelope_model=OdooProdPromotionRunEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo prod promotion run for the requested product/context."
     ),
 )
 
@@ -12457,6 +12481,41 @@ def create_launchplane_service_app(
                     "image_digest": driver_result.image_digest,
                     "input_status": driver_result.input_status,
                 }
+            elif path == _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path:
+                odoo_promotion_run_request = (
+                    _ODOO_PROD_PROMOTION_RUN_ROUTE.envelope_model.model_validate(payload)
+                )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_PROD_PROMOTION_RUN_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_promotion_run_request.product,
+                    authorization_context=odoo_promotion_run_request.run.context,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_prod_promotion_run(
+                    control_plane_root=resolved_root,
+                    state_dir=state_dir,
+                    database_url=database_url,
+                    record_store=cast(OdooProdPromotionRunStore, record_store),
+                    request=odoo_promotion_run_request.run,
+                )
+                result = driver_result.model_dump(mode="json")
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
                 odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
                     payload

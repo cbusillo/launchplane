@@ -147,6 +147,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
+        self.assertEqual(actions["prod_promotion_run"].safety, "mutation")
         self.assertEqual(actions["prod_promotion"].safety, "mutation")
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
@@ -482,6 +483,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE,
                     control_plane_service.OdooProdPromotionInputsEnvelope,
                     "prod promotion inputs",
+                ),
+                "prod_promotion_run": (
+                    control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE,
+                    control_plane_service.OdooProdPromotionRunEnvelope,
+                    "prod promotion run",
                 ),
                 "prod_promotion": (
                     control_plane_service._ODOO_PROD_PROMOTION_ROUTE,

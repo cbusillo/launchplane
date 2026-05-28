@@ -524,6 +524,7 @@ ODOO_DRIVER = DriverDescriptor(
             description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
             actions=(
                 "prod_promotion_inputs",
+                "prod_promotion_run",
                 "prod_backup_gate",
                 "prod_promotion",
                 "prod_rollback",
@@ -634,6 +635,16 @@ ODOO_DRIVER = DriverDescriptor(
             scope="instance",
             route_path="/v1/drivers/odoo/prod-promotion-inputs",
             authz_action="odoo_prod_promotion_inputs.read",
+        ),
+        _action(
+            "prod_promotion_run",
+            "Run prod promotion",
+            "Resolve promotion inputs, capture prod backup evidence, and promote testing to prod.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/odoo/prod-promotion-run",
+            authz_action="odoo_prod_promotion_run.execute",
+            writes_records=("backup_gate", "deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
             "prod_backup_gate",
