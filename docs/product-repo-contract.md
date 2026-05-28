@@ -189,9 +189,21 @@ payload-fields: |-
 
 Each `payload-fields` line is `json.path=value`. Values are strings unless they
 parse as JSON literals or objects, so `false`, `300`, and `{}` keep their JSON
-types. Product repos may still need small payload-builder scripts for large
-manifest-derived payloads until Launchplane owns the next layer of
-product-specific request assembly.
+types. Use `payload-json-files` when a workflow already has a JSON artifact file
+and only needs to splice it into a static Launchplane request:
+
+```yaml
+payload: >-
+  {"schema_version":1,"product":"odoo","publish":{"schema_version":1}}
+payload-fields: |-
+  publish.context=cm
+  publish.instance=${{ github.event.inputs.instance }}
+payload-json-files: |-
+  publish.manifest=${{ steps.publish.outputs.manifest_file }}
+```
+
+Each `payload-json-files` line is `json.path=file-path`; the action parses the
+file as JSON and writes that value into the request before sending it.
 
 For asynchronous Launchplane routes that report a temporary status, configure
 polling instead of reimplementing OIDC and retry logic in the product repo:

@@ -27,6 +27,14 @@ inputs:
       are valid JSON literals or objects. Example: request.reason=manual.
     required: false
     default: ""
+  payload-json-files:
+    description: >-
+      Newline-separated JSON path assignments to overlay onto the payload after
+      payload-fields. Assignment values are local file paths whose parsed JSON
+      contents are written at the target path. Example:
+      publish.manifest=artifact.json.
+    required: false
+    default: ""
   method:
     description: HTTP method to use.
     required: false
