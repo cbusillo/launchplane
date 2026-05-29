@@ -168,11 +168,14 @@ title: Secrets
   binding for the target runtime class.
 - Trusted local agents that need to call the deployed service instead of a
   browser session should source `~/.config/launchplane/local-operator.env` and
-  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`. Write requests sent with this token
-  must include a reason. Product-config apply also requires a previously
-  recorded matching dry-run. They must still send plaintext secret values only in
-  the request body over the Launchplane service API. Do not copy those request
-  bodies into logs, GitHub issues, PR bodies, or docs.
+  use `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` for routine owner-agent writes. Exact
+  authority is DB-backed by `local_operators` authz policy rules. Rare privileged
+  owner-agent writes can use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` only when matching
+  `local_admins` authz policy rules grant the action. Write requests sent with
+  either token must include a reason. Product-config apply also requires a
+  previously recorded matching dry-run. They must still send plaintext secret
+  values only in the request body over the Launchplane service API. Do not copy
+  those request bodies into logs, GitHub issues, PR bodies, or docs.
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.

@@ -16,6 +16,10 @@ def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
     payload = policy.model_dump(mode="json", exclude_none=True)
     if not policy.terminal_agents:
         payload.pop("terminal_agents", None)
+    if not policy.local_operators:
+        payload.pop("local_operators", None)
+    if not policy.local_admins:
+        payload.pop("local_admins", None)
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 

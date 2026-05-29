@@ -13,6 +13,7 @@ from control_plane.product_config import ProductConfigStore
 from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    LocalAdminIdentity,
     LocalOperatorIdentity,
 )
 
@@ -144,7 +145,7 @@ def validate_product_config_apply_request(
     start_response: StartResponse,
 ) -> tuple[ProductConfigApplyEnvelope | None, list[bytes] | None]:
     request = ProductConfigApplyEnvelope.model_validate(payload)
-    if isinstance(identity, LocalOperatorIdentity) and not request.reason:
+    if isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity)) and not request.reason:
         return None, json_response(
             start_response=start_response,
             status_code=400,
