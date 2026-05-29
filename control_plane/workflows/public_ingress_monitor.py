@@ -837,11 +837,13 @@ class PublicIngressNotificationDriverSet:
         | None = None,
         discord_sender: Callable[[str, dict[str, object]], object] | None = None,
         secret_resolver: Callable[[str], str] | None = None,
+        incident_secret_resolver: Callable[[str, PublicIngressIncidentRecord], str] | None = None,
     ) -> None:
         self.github_client = github_client or _gh_issue_client
         self.email_sender = email_sender or _send_email_message
         self.discord_sender = discord_sender or _post_discord_webhook
         self.secret_resolver = secret_resolver or (lambda _secret_name: "")
+        self.incident_secret_resolver = incident_secret_resolver
 
     def send(
         self,
@@ -869,7 +871,7 @@ class PublicIngressNotificationDriverSet:
                     incident=incident,
                     observation=observation,
                     email_sender=self.email_sender,
-                    secret_resolver=self.secret_resolver,
+                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
             if destination.kind == "discord":
                 return _deliver_discord_notification(
@@ -878,7 +880,7 @@ class PublicIngressNotificationDriverSet:
                     incident=incident,
                     observation=observation,
                     discord_sender=self.discord_sender,
-                    secret_resolver=self.secret_resolver,
+                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
             return PublicIngressNotificationDelivery(
@@ -891,6 +893,11 @@ class PublicIngressNotificationDriverSet:
             action="unsupported_destination",
             error_message=f"Unsupported public ingress notification destination: {destination.kind}",
         )
+
+    def _resolve_secret(self, secret_name: str, incident: PublicIngressIncidentRecord) -> str:
+        if self.incident_secret_resolver is not None:
+            return self.incident_secret_resolver(secret_name, incident)
+        return self.secret_resolver(secret_name)
 
 
 def _deliver_github_issue_notification(

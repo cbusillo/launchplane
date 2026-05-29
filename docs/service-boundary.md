@@ -699,6 +699,16 @@ Product profiles are Launchplane-owned product/driver bindings. They are written
 through authenticated service ingress and stored in Launchplane records; product
 repos do not carry repo-local Launchplane lifecycle manifests.
 
+Public ingress notification policy writes use
+`POST /v1/public-ingress/notification-policies/apply`. The request carries
+`mode: "dry-run"` or `mode: "apply"` and a complete
+`PublicIngressNotificationPolicyRecord`. Apply requires
+`public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
+an idempotency key when a caller wants retry-safe service semantics. Local
+operator calls must include a non-empty reason. Policies store routing intent and
+managed secret record ids only; Discord webhook URLs, SMTP credentials, and
+operator destination values must not be encoded in text-file defaults or source.
+
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the

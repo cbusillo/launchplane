@@ -174,6 +174,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentRecord,
+    PublicIngressNotificationPolicyRecord,
+)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.runtime_key_safety import (
@@ -322,6 +326,7 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressNotificationDriverSet,
     build_github_issue_notifier,
     run_public_ingress_monitor_once,
 )
@@ -860,6 +865,24 @@ class PublicIngressMonitorRunOnceEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("public ingress monitor run requires product 'launchplane'")
         self.product = "launchplane"
+        return self
+
+
+class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: PublicIngressNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
+        if self.policy.product and self.policy.product != "launchplane":
+            raise ValueError(
+                "public ingress notification policy apply requires product 'launchplane'"
+            )
         return self
 
 
@@ -2967,6 +2990,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "run-once",
     ]:
         return "public_ingress_monitor.run_once", {}
+    if len(segments) == 4 and segments == [
+        "v1",
+        "public-ingress",
+        "notification-policies",
+        "apply",
+    ]:
+        return "public_ingress_notification_policy.apply", {}
     if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
         return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
@@ -3064,6 +3094,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
         "/v1/products/public-ingress-monitor/run-once",
+        "/v1/public-ingress/notification-policies/apply",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/runner-host-hygiene/audits",
@@ -5083,6 +5114,7 @@ def _accepted_payload(
         "odoo_stable_target_replacement_operation_id",
         "runner_host_hygiene_audit_record_key",
         "generic_web_rollback_plan_id",
+        "public_ingress_notification_policy_id",
     }
     accepted_record_keys = record_keys | extra_record_keys
     records: dict[str, object] = {}
@@ -5601,6 +5633,64 @@ def _local_operator_product_config_dry_run_exists(
         return False
     return stored_record.request_fingerprint == _request_fingerprint(
         _local_operator_product_config_continuity_payload(payload=request_payload)
+    )
+
+
+def _public_ingress_notification_policy_summary(
+    policy: PublicIngressNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "product": policy.product,
+        "context": policy.context,
+        "instance": policy.instance,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
+
+
+def _public_ingress_managed_secret_resolver(
+    *,
+    record_store: control_plane_secrets.SecretReadStore,
+) -> Callable[[str, PublicIngressIncidentRecord], str]:
+    def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
+        normalized_secret_id = secret_id.strip()
+        if not normalized_secret_id:
+            return ""
+        try:
+            record = record_store.read_secret_record(normalized_secret_id)
+        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
+            return ""
+        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
+            return ""
+        if not control_plane_secrets._scope_matches_record(
+            record,
+            context_name=incident.context,
+            instance_name=incident.instance,
+        ):
+            return ""
+        try:
+            version = record_store.read_secret_version(record.current_version_id)
+            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
+        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
+            return ""
+
+    return resolve
+
+
+def _public_ingress_notification_drivers(
+    *,
+    record_store: object,
+) -> PublicIngressNotificationDriverSet:
+    secret_store = _secret_capable_store(record_store)
+    if secret_store is None:
+        return PublicIngressNotificationDriverSet()
+    return PublicIngressNotificationDriverSet(
+        incident_secret_resolver=_public_ingress_managed_secret_resolver(record_store=secret_store)
     )
 
 
@@ -10712,9 +10802,94 @@ def create_launchplane_service_app(
                     timeout_seconds=monitor_request.timeout_seconds,
                     notify=monitor_request.notify,
                     notifier=notifier,
+                    notification_drivers=(
+                        _public_ingress_notification_drivers(record_store=record_store)
+                        if monitor_request.notify
+                        else None
+                    ),
                 )
                 result = monitor_result.model_dump(mode="json")
                 driver_result = result
+            elif path == "/v1/public-ingress/notification-policies/apply":
+                policy_request = PublicIngressNotificationPolicyApplyEnvelope.model_validate(
+                    payload
+                )
+                if isinstance(identity, LocalOperatorIdentity) and not policy_request.reason:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "reason_required",
+                                "message": (
+                                    "Local operator public ingress notification policy apply"
+                                    " requires a reason."
+                                ),
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="public_ingress_notification_policy.apply",
+                    product=policy_request.policy.product or "launchplane",
+                    context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot apply public ingress notification policy."
+                                ),
+                            },
+                        },
+                    )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": (
+                                    "Public ingress notification policy apply requires"
+                                    " DB-backed Launchplane storage."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                if policy_request.mode == "apply":
+                    record_store.write_public_ingress_notification_policy_record(
+                        policy_request.policy
+                    )
+                summary = _public_ingress_notification_policy_summary(policy_request.policy)
+                result = {
+                    "public_ingress_notification_policy_id": policy_request.policy.policy_id,
+                }
+                driver_result = {
+                    "mode": policy_request.mode,
+                    "changed": policy_request.mode == "apply",
+                    "policy": summary,
+                }
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(
                     identity=identity,
