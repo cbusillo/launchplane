@@ -94,6 +94,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  public_ingress_monitor:
+    if: github.event_name == 'schedule'
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Request public ingress monitor
+        uses: ./.github/actions/launchplane-request
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/products/public-ingress-monitor/run-once
+          payload: >-
+            {
+              "schema_version": 1,
+              "product": "launchplane"
+            }
+          payload-fields: |-
+            timeout_seconds=10
+            notify=true
+          idempotency-key: >-
+            public-ingress-monitor:${{ github.run_id }}:${{
+            github.run_attempt }}
+          timeout-ms: "180000"
+
   run:
     if: >-
       github.event_name != 'schedule' ||
