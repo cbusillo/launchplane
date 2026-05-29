@@ -278,6 +278,22 @@ delivery are separate record families: observations say what was measured,
 incidents say whether there is active operator state, and delivery records say
 where Launchplane attempted to notify operators.
 
+## Public Ingress Notification Records
+
+Public ingress notification policy records are DB-backed Launchplane records
+under `launchplane_public_ingress_notification_policies`. They select enabled
+destinations for incident events by product, context, and instance. The initial
+destination drivers are GitHub issues, email, and Discord. Policies store
+routing intent and managed secret references only; they must not store Discord
+webhook URLs, SMTP passwords, or production destination values as code defaults.
+
+Public ingress notification attempt records are append-only evidence under
+`launchplane_public_ingress_notification_attempts`. Each attempt is keyed by the
+incident, event, policy, destination, and observation. Attempts record delivered,
+skipped, or failed status plus provider-safe external ids or URLs. Delivery
+attempts are the idempotency boundary for notifications, while incident records
+remain the source of truth for active public-ingress state.
+
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
 an issue-backed approval URL, the destructive confirmation phrase,

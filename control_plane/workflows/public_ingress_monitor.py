@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.message import EmailMessage
 from http.client import HTTPMessage
 from typing import IO, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
+from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener, urlopen
 import ipaddress
 import json
+import smtplib
 import socket
 import ssl
+import subprocess
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,12 +24,18 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressFailureCode,
+    PublicIngressIncidentEvent,
     PublicIngressIncidentRecord,
+    PublicIngressNotificationAttemptRecord,
+    PublicIngressNotificationDeliveryStatus,
+    PublicIngressNotificationDestination,
+    PublicIngressNotificationPolicyRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
     PublicIngressTargetKind,
     PublicIngressTargetObservation,
     build_public_ingress_incident_id,
+    build_public_ingress_notification_attempt_id,
     build_public_ingress_observation_id,
 )
 from control_plane.contracts.runtime_identity import (
@@ -74,6 +83,29 @@ class PublicIngressMonitorStore(Protocol):
         self, record: PublicIngressIncidentRecord
     ) -> object: ...
 
+    def list_public_ingress_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationPolicyRecord, ...]: ...
+
+    def list_public_ingress_notification_attempt_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationAttemptRecord, ...]: ...
+
+    def write_public_ingress_notification_attempt_record(
+        self, record: PublicIngressNotificationAttemptRecord
+    ) -> object: ...
+
 
 @dataclass(frozen=True)
 class PublicIngressMonitorTarget:
@@ -97,6 +129,27 @@ class HttpObservation:
     payload: object = None
 
 
+@dataclass(frozen=True)
+class PublicIngressNotificationDelivery:
+    delivery_status: PublicIngressNotificationDeliveryStatus
+    action: str = ""
+    external_url: str = ""
+    external_id: str = ""
+    error_message: str = ""
+
+
+class PublicIngressNotificationDrivers(Protocol):
+    def send(
+        self,
+        *,
+        destination: PublicIngressNotificationDestination,
+        event: PublicIngressIncidentEvent,
+        incident: PublicIngressIncidentRecord,
+        observation: PublicIngressObservationRecord,
+        previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
+    ) -> PublicIngressNotificationDelivery: ...
+
+
 class PublicIngressMonitorResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -108,8 +161,10 @@ class PublicIngressMonitorResult(BaseModel):
     notification_count: int = Field(default=0, ge=0)
     open_incident_count: int = Field(default=0, ge=0)
     resolved_incident_count: int = Field(default=0, ge=0)
+    delivery_attempt_count: int = Field(default=0, ge=0)
     records: tuple[PublicIngressObservationRecord, ...] = ()
     incidents: tuple[PublicIngressIncidentRecord, ...] = ()
+    delivery_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = ()
 
 
 HttpGet = Callable[[str, int], HttpObservation]
@@ -182,11 +237,13 @@ def run_public_ingress_monitor_once(
     notify: bool = True,
     http_get: HttpGet | None = None,
     notifier: Notifier | None = None,
+    notification_drivers: PublicIngressNotificationDrivers | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
     get = http_get or fetch_public_ingress_url
     records: list[PublicIngressObservationRecord] = []
     incidents: list[PublicIngressIncidentRecord] = []
+    delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     notification_count = 0
     for target in discover_public_ingress_monitor_targets(record_store):
         previous_record = _latest_observation(record_store=record_store, target=target)
@@ -210,6 +267,16 @@ def run_public_ingress_monitor_once(
         )
         if incident is not None:
             incidents.append(incident)
+            if notify and notification_drivers is not None:
+                delivery_attempts.extend(
+                    deliver_public_ingress_incident_notifications(
+                        record_store=record_store,
+                        event=_incident_event(incident=incident, previous_record=previous_record),
+                        incident=incident,
+                        observation=record,
+                        drivers=notification_drivers,
+                    )
+                )
     return PublicIngressMonitorResult(
         checked_at=observed_at,
         target_count=len(records),
@@ -218,12 +285,76 @@ def run_public_ingress_monitor_once(
         skipped_count=sum(1 for record in records if record.status == "skipped"),
         notification_count=notification_count,
         open_incident_count=sum(1 for incident in incidents if incident.status == "open"),
-        resolved_incident_count=sum(
-            1 for incident in incidents if incident.status == "resolved"
-        ),
+        resolved_incident_count=sum(1 for incident in incidents if incident.status == "resolved"),
+        delivery_attempt_count=len(delivery_attempts),
         records=tuple(records),
         incidents=tuple(incidents),
+        delivery_attempts=tuple(delivery_attempts),
     )
+
+
+def deliver_public_ingress_incident_notifications(
+    *,
+    record_store: PublicIngressMonitorStore,
+    event: PublicIngressIncidentEvent,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+    drivers: PublicIngressNotificationDrivers,
+) -> tuple[PublicIngressNotificationAttemptRecord, ...]:
+    attempts: list[PublicIngressNotificationAttemptRecord] = []
+    for policy in _matching_notification_policies(record_store=record_store, incident=incident):
+        for destination in policy.destinations:
+            attempt_id = build_public_ingress_notification_attempt_id(
+                incident_id=incident.incident_id,
+                event=event,
+                policy_id=policy.policy_id,
+                destination_id=destination.destination_id,
+                observation_id=observation.record_id,
+            )
+            existing_attempt = _notification_attempt(
+                record_store=record_store,
+                attempt_id=attempt_id,
+                incident_id=incident.incident_id,
+                event=event,
+            )
+            if existing_attempt is not None:
+                attempts.append(existing_attempt)
+                continue
+            if destination.status != "enabled":
+                delivery = PublicIngressNotificationDelivery(
+                    delivery_status="skipped",
+                    action="destination_disabled",
+                )
+            else:
+                previous_attempts = record_store.list_public_ingress_notification_attempt_records(
+                    incident_id=incident.incident_id,
+                    destination_kind=destination.kind,
+                )
+                delivery = drivers.send(
+                    destination=destination,
+                    event=event,
+                    incident=incident,
+                    observation=observation,
+                    previous_attempts=previous_attempts,
+                )
+            attempt = PublicIngressNotificationAttemptRecord(
+                attempt_id=attempt_id,
+                incident_id=incident.incident_id,
+                event=event,
+                policy_id=policy.policy_id,
+                destination_id=destination.destination_id,
+                destination_kind=destination.kind,
+                delivery_status=delivery.delivery_status,
+                attempted_at=observation.observed_at,
+                observation_id=observation.record_id,
+                external_url=delivery.external_url,
+                external_id=delivery.external_id,
+                action=delivery.action,
+                error_message=delivery.error_message,
+            )
+            record_store.write_public_ingress_notification_attempt_record(attempt)
+            attempts.append(attempt)
+    return tuple(attempts)
 
 
 def reconcile_public_ingress_incident(
@@ -280,6 +411,48 @@ def reconcile_public_ingress_incident(
         record_store.write_public_ingress_incident_record(incident)
         return incident
     return None
+
+
+def _incident_event(
+    *, incident: PublicIngressIncidentRecord, previous_record: PublicIngressObservationRecord | None
+) -> PublicIngressIncidentEvent:
+    if incident.status == "resolved":
+        return "resolved"
+    if previous_record is not None and previous_record.status == "fail":
+        return "updated"
+    return "opened"
+
+
+def _matching_notification_policies(
+    *, record_store: PublicIngressMonitorStore, incident: PublicIngressIncidentRecord
+) -> tuple[PublicIngressNotificationPolicyRecord, ...]:
+    policies = record_store.list_public_ingress_notification_policy_records(
+        product=incident.product,
+        context_name=incident.context,
+        instance_name=incident.instance,
+        status="enabled",
+    )
+    return tuple(policy for policy in policies if policy.matches(incident))
+
+
+def _notification_attempt(
+    *,
+    record_store: PublicIngressMonitorStore,
+    attempt_id: str,
+    incident_id: str,
+    event: PublicIngressIncidentEvent,
+) -> PublicIngressNotificationAttemptRecord | None:
+    return next(
+        (
+            attempt
+            for attempt in record_store.list_public_ingress_notification_attempt_records(
+                incident_id=incident_id,
+                event=event,
+            )
+            if attempt.attempt_id == attempt_id
+        ),
+        None,
+    )
 
 
 def check_public_ingress_target(
@@ -638,6 +811,315 @@ def _notification_key(target: PublicIngressMonitorTarget) -> str:
     return target.alert_issue_url or ""
 
 
+class PublicIngressNotificationDriverSet:
+    def __init__(
+        self,
+        *,
+        github_client: Callable[[str, dict[str, object]], dict[str, object]] | None = None,
+        email_sender: Callable[[PublicIngressNotificationDestination, EmailMessage], object]
+        | None = None,
+        discord_sender: Callable[[str, dict[str, object]], object] | None = None,
+        secret_resolver: Callable[[str], str] | None = None,
+    ) -> None:
+        self.github_client = github_client or _gh_issue_client
+        self.email_sender = email_sender or _send_email_message
+        self.discord_sender = discord_sender or _post_discord_webhook
+        self.secret_resolver = secret_resolver or (lambda _secret_name: "")
+
+    def send(
+        self,
+        *,
+        destination: PublicIngressNotificationDestination,
+        event: PublicIngressIncidentEvent,
+        incident: PublicIngressIncidentRecord,
+        observation: PublicIngressObservationRecord,
+        previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
+    ) -> PublicIngressNotificationDelivery:
+        try:
+            if destination.kind == "github_issue":
+                return _deliver_github_issue_notification(
+                    destination=destination,
+                    event=event,
+                    incident=incident,
+                    observation=observation,
+                    previous_attempts=previous_attempts,
+                    github_client=self.github_client,
+                )
+            if destination.kind == "email":
+                return _deliver_email_notification(
+                    destination=destination,
+                    event=event,
+                    incident=incident,
+                    observation=observation,
+                    email_sender=self.email_sender,
+                    secret_resolver=self.secret_resolver,
+                )
+            if destination.kind == "discord":
+                return _deliver_discord_notification(
+                    destination=destination,
+                    event=event,
+                    incident=incident,
+                    observation=observation,
+                    discord_sender=self.discord_sender,
+                    secret_resolver=self.secret_resolver,
+                )
+        except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
+            return PublicIngressNotificationDelivery(
+                delivery_status="failed",
+                action="provider_error",
+                error_message=str(error) or error.__class__.__name__,
+            )
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="unsupported_destination",
+            error_message=f"Unsupported public ingress notification destination: {destination.kind}",
+        )
+
+
+def _deliver_github_issue_notification(
+    *,
+    destination: PublicIngressNotificationDestination,
+    event: PublicIngressIncidentEvent,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+    previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...],
+    github_client: Callable[[str, dict[str, object]], dict[str, object]],
+) -> PublicIngressNotificationDelivery:
+    issue_url = _latest_external_url(previous_attempts)
+    body = public_ingress_incident_notification_body(
+        event=event, incident=incident, observation=observation
+    )
+    if event == "opened" or not issue_url:
+        payload: dict[str, object] = {
+            "repository": destination.github_repository,
+            "title": f"Public ingress incident: {incident.product}/{incident.instance}",
+            "body": body,
+        }
+        if destination.github_label:
+            payload["labels"] = [destination.github_label]
+        if destination.github_issue_number is not None:
+            payload["issue_number"] = destination.github_issue_number
+            response = github_client("comment", payload)
+            return PublicIngressNotificationDelivery(
+                delivery_status="delivered",
+                action="commented_issue",
+                external_url=str(response.get("url", "")).strip(),
+                external_id=str(response.get("id", "")).strip(),
+            )
+        response = github_client("create", payload)
+        return PublicIngressNotificationDelivery(
+            delivery_status="delivered",
+            action="created_issue",
+            external_url=str(response.get("url", "")).strip(),
+            external_id=str(response.get("id", "")).strip(),
+        )
+    payload = {
+        "repository": destination.github_repository,
+        "issue_url": issue_url,
+        "body": body,
+    }
+    if event == "resolved":
+        response = github_client("close", payload)
+        return PublicIngressNotificationDelivery(
+            delivery_status="delivered",
+            action="closed_issue",
+            external_url=str(response.get("url", issue_url)).strip(),
+            external_id=str(response.get("id", "")).strip(),
+        )
+    response = github_client("comment", payload)
+    return PublicIngressNotificationDelivery(
+        delivery_status="delivered",
+        action="commented_issue",
+        external_url=str(response.get("url", issue_url)).strip(),
+        external_id=str(response.get("id", "")).strip(),
+    )
+
+
+def _deliver_email_notification(
+    *,
+    destination: PublicIngressNotificationDestination,
+    event: PublicIngressIncidentEvent,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+    email_sender: Callable[[PublicIngressNotificationDestination, EmailMessage], object],
+    secret_resolver: Callable[[str], str],
+) -> PublicIngressNotificationDelivery:
+    smtp_username = secret_resolver(destination.smtp_username_secret).strip()
+    smtp_password = secret_resolver(destination.smtp_password_secret).strip()
+    if not smtp_username or not smtp_password:
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="missing_smtp_secret",
+            error_message="SMTP credential secrets could not be resolved.",
+        )
+    message = EmailMessage()
+    message["From"] = destination.email_from
+    message["To"] = ", ".join(destination.email_to)
+    message["X-Launchplane-SMTP-Username"] = smtp_username
+    message["X-Launchplane-SMTP-Password"] = smtp_password
+    message["Subject"] = (
+        f"[Launchplane] Public ingress {event}: {incident.product}/{incident.instance}"
+    )
+    message.set_content(
+        public_ingress_incident_notification_body(
+            event=event, incident=incident, observation=observation
+        )
+    )
+    email_sender(destination, message)
+    return PublicIngressNotificationDelivery(delivery_status="delivered", action="sent_email")
+
+
+def _deliver_discord_notification(
+    *,
+    destination: PublicIngressNotificationDestination,
+    event: PublicIngressIncidentEvent,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+    discord_sender: Callable[[str, dict[str, object]], object],
+    secret_resolver: Callable[[str], str],
+) -> PublicIngressNotificationDelivery:
+    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
+    if not webhook_url:
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="missing_discord_webhook",
+            error_message="Discord webhook secret could not be resolved.",
+        )
+    public_url_error = _public_url_error(webhook_url)
+    if public_url_error is not None:
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="invalid_discord_webhook",
+            error_message=f"Discord webhook URL is not public: {public_url_error}",
+        )
+    color = 0x2E7D32 if event == "resolved" else 0xC62828
+    discord_sender(
+        webhook_url,
+        {
+            "embeds": [
+                {
+                    "title": f"Public ingress {event}: {incident.product}/{incident.instance}",
+                    "description": public_ingress_incident_notification_body(
+                        event=event, incident=incident, observation=observation
+                    ),
+                    "color": color,
+                }
+            ]
+        },
+    )
+    return PublicIngressNotificationDelivery(delivery_status="delivered", action="posted_discord")
+
+
+def public_ingress_incident_notification_body(
+    *,
+    event: PublicIngressIncidentEvent,
+    incident: PublicIngressIncidentRecord,
+    observation: PublicIngressObservationRecord,
+) -> str:
+    lines = [
+        f"Launchplane public ingress incident {event}: {incident.product}/{incident.instance}",
+        "",
+        f"- status: {incident.status}",
+        f"- incident_id: {incident.incident_id}",
+        f"- context: {incident.context}",
+        f"- observed_at: {observation.observed_at}",
+        f"- observation_id: {observation.record_id}",
+        f"- failure_code: {incident.failure_code}",
+        f"- summary: {incident.summary}",
+    ]
+    for target in observation.targets:
+        lines.append(f"- {target.target}: {target.status} {target.summary}")
+    return "\n".join(lines)
+
+
+def _latest_external_url(attempts: tuple[PublicIngressNotificationAttemptRecord, ...]) -> str:
+    return next(
+        (
+            attempt.external_url
+            for attempt in attempts
+            if attempt.destination_kind == "github_issue" and attempt.external_url.strip()
+        ),
+        "",
+    )
+
+
+def _gh_issue_client(action: str, payload: dict[str, object]) -> dict[str, object]:
+    if action == "create":
+        command = [
+            "gh",
+            "issue",
+            "create",
+            "--repo",
+            str(payload["repository"]),
+            "--title",
+            str(payload["title"]),
+            "--body",
+            str(payload["body"]),
+        ]
+        labels = payload.get("labels", [])
+        if isinstance(labels, list):
+            for label in labels:
+                command.extend(["--label", str(label)])
+    elif action == "comment":
+        issue_target = str(payload.get("issue_url") or payload.get("issue_number"))
+        command = [
+            "gh",
+            "issue",
+            "comment",
+            issue_target,
+            "--repo",
+            str(payload["repository"]),
+            "--body",
+            str(payload["body"]),
+        ]
+    elif action == "close":
+        issue_target = str(payload["issue_url"])
+        command = [
+            "gh",
+            "issue",
+            "close",
+            issue_target,
+            "--repo",
+            str(payload["repository"]),
+            "--comment",
+            str(payload["body"]),
+        ]
+    else:
+        raise ValueError(f"unsupported GitHub notification action: {action}")
+    completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "gh failed")
+    output = completed.stdout.strip()
+    return {"url": output, "id": output}
+
+
+def _send_email_message(
+    destination: PublicIngressNotificationDestination, message: EmailMessage
+) -> None:
+    with smtplib.SMTP(destination.smtp_host, destination.smtp_port, timeout=15) as smtp:
+        smtp.starttls()
+        username = message["X-Launchplane-SMTP-Username"]
+        password = message["X-Launchplane-SMTP-Password"]
+        if not username or not password:
+            raise RuntimeError("SMTP credentials were not resolved.")
+        smtp.login(str(username), str(password))
+        del message["X-Launchplane-SMTP-Username"]
+        del message["X-Launchplane-SMTP-Password"]
+        smtp.send_message(message)
+
+
+def _post_discord_webhook(webhook_url: str, payload: dict[str, object]) -> None:
+    request = Request(
+        webhook_url,
+        method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        data=json.dumps(payload).encode("utf-8"),
+    )
+    with urlopen(request, timeout=15) as response:  # noqa: S310 - operator-configured webhook URL with SSRF guard.
+        if not 200 <= response.status < 300:
+            raise RuntimeError(f"Discord webhook returned HTTP {response.status}")
+
+
 def public_ingress_alert_body(
     record: PublicIngressObservationRecord,
     previous: PublicIngressObservationRecord | None,
@@ -662,8 +1144,6 @@ def public_ingress_alert_body(
 def build_github_issue_notifier(
     *, gh_binary: str = "gh", runner: Callable[..., object] | None = None
 ) -> Notifier:
-    import subprocess
-
     def notify(
         record: PublicIngressObservationRecord,
         previous: PublicIngressObservationRecord | None,

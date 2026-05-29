@@ -161,7 +161,9 @@ lanes with public `base_url` or `health_url`; disable it per lane only for
 non-public or intentionally unreachable endpoints. Observations are sensor
 evidence; public-ingress incident records are the active operator lifecycle when
 a lane fails and later recovers. Notification routing is a separate
-service-backed policy and delivery concern, not lane-owned text config.
+service-backed policy and delivery concern, not lane-owned text config. The
+initial notification destinations are GitHub issues, email, and Discord; each is
+selected by DB-backed policy and evidenced by delivery-attempt records.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. Run it first with

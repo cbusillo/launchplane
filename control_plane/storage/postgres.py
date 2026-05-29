@@ -68,6 +68,12 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationAttemptRecord,
+)
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationPolicyRecord,
+)
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -518,6 +524,53 @@ class LaunchplanePublicIngressIncidentRow(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     opened_at: Mapped[str] = mapped_column(String, nullable=False)
     latest_observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressNotificationPolicyRow(Base):
+    __tablename__ = "launchplane_public_ingress_notification_policies"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_notify_policies_scope_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    policy_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressNotificationAttemptRow(Base):
+    __tablename__ = "launchplane_public_ingress_notification_attempts"
+    __table_args__ = (
+        Index(
+            "launchplane_pi_notify_attempts_incident_idx",
+            "incident_id",
+            "event",
+            desc("attempted_at"),
+        ),
+        Index(
+            "launchplane_pi_notify_attempts_destination_idx",
+            "destination_kind",
+            desc("attempted_at"),
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    destination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    attempted_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2768,9 +2821,7 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def write_public_ingress_incident_record(
-        self, record: PublicIngressIncidentRecord
-    ) -> None:
+    def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
         self._write_row(
             LaunchplanePublicIngressIncidentRow(
                 incident_id=record.incident_id,
@@ -2809,6 +2860,99 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplanePublicIngressIncidentRow.opened_at.desc(),
                 LaunchplanePublicIngressIncidentRow.incident_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_public_ingress_notification_policy_record(
+        self, record: PublicIngressNotificationPolicyRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressNotificationPolicyRow(
+                policy_id=record.policy_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationPolicyRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplanePublicIngressNotificationPolicyRow.product.in_(("", product)))
+        if context_name:
+            filters.append(
+                LaunchplanePublicIngressNotificationPolicyRow.context.in_(("", context_name))
+            )
+        if instance_name:
+            filters.append(
+                LaunchplanePublicIngressNotificationPolicyRow.instance.in_(("", instance_name))
+            )
+        if status:
+            filters.append(LaunchplanePublicIngressNotificationPolicyRow.status == status)
+        return self._list_models(
+            model_type=PublicIngressNotificationPolicyRecord,
+            orm_model=LaunchplanePublicIngressNotificationPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressNotificationPolicyRow.updated_at.desc(),
+                LaunchplanePublicIngressNotificationPolicyRow.policy_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_public_ingress_notification_attempt_record(
+        self, record: PublicIngressNotificationAttemptRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressNotificationAttemptRow(
+                attempt_id=record.attempt_id,
+                incident_id=record.incident_id,
+                event=record.event,
+                destination_kind=record.destination_kind,
+                delivery_status=record.delivery_status,
+                attempted_at=record.attempted_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_notification_attempt_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationAttemptRecord, ...]:
+        filters: list[object] = []
+        if incident_id:
+            filters.append(
+                LaunchplanePublicIngressNotificationAttemptRow.incident_id == incident_id
+            )
+        if event:
+            filters.append(LaunchplanePublicIngressNotificationAttemptRow.event == event)
+        if destination_kind:
+            filters.append(
+                LaunchplanePublicIngressNotificationAttemptRow.destination_kind == destination_kind
+            )
+        return self._list_models(
+            model_type=PublicIngressNotificationAttemptRecord,
+            orm_model=LaunchplanePublicIngressNotificationAttemptRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressNotificationAttemptRow.attempted_at.desc(),
+                LaunchplanePublicIngressNotificationAttemptRow.attempt_id.desc(),
             ),
             limit=limit,
         )
