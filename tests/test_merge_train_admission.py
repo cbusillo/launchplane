@@ -306,6 +306,28 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_landing_plan_record_id, "")
         self.assertEqual(decision.controller_stack_collapse_plan_record_id, "")
 
+    def test_ignores_stale_landing_plan_for_admission(self) -> None:
+        candidate_record = _candidate_record(status="passed")
+        landing_plan_record = _landing_plan_record(candidate_record, entry_status="stale")
+        store = _RunHistoryStore(
+            None,
+            candidate_records=(candidate_record,),
+            landing_plan_records=(landing_plan_record,),
+        )
+
+        decision = evaluate_merge_train_admission_from_store(
+            store=store,
+            repository="cbusillo/sellyouroutboard",
+            base_branch="main",
+            requested_at="2026-05-09T02:10:00Z",
+            current_policy_key=candidate_record.candidate.policy_key,
+            current_policy_sha256=candidate_record.candidate.policy_sha256,
+        )
+
+        self.assertTrue(decision.admitted)
+        self.assertEqual(decision.controller_action, "idle")
+        self.assertEqual(decision.controller_landing_plan_record_id, "")
+
     def test_latest_idle_run_supersedes_older_controller_records_for_admission(self) -> None:
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)

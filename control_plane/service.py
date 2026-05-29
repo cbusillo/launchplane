@@ -3713,9 +3713,24 @@ def _latest_completed_merge_train_batch_landing_plan_record(
         return None
     if not latest_record.landing_plan.entries:
         return None
-    if any(entry.status != "merged" for entry in latest_record.landing_plan.entries):
+    if any(entry.status not in {"merged", "stale"} for entry in latest_record.landing_plan.entries):
         return None
     return latest_record
+
+
+def _stale_merge_train_landing_plan(
+    landing_plan: MergeTrainBatchLandingPlan,
+) -> MergeTrainBatchLandingPlan:
+    return landing_plan.model_copy(
+        update={
+            "entries": tuple(
+                entry.model_copy(update={"status": "stale"})
+                if entry.status in {"planned", "merging"}
+                else entry
+                for entry in landing_plan.entries
+            )
+        }
+    )
 
 
 def _latest_merge_train_stack_collapse_plan_record(
@@ -10071,61 +10086,97 @@ def create_launchplane_service_app(
                             )
                         driver_result = result
                     else:
-                        landed_plan = github_client.land_batch_candidate(
-                            landing_plan=active_landing_record.landing_plan
-                        )
-                        landed_record = build_merge_train_batch_landing_plan_record(
-                            landing_plan=landed_plan,
-                            source=f"service:controller:land:{request_trace_id}",
-                            updated_at=recorded_at,
-                        )
-                        landing_store.write_merge_train_batch_landing_plan_record(landed_record)
-                        result = {
-                            "merge_train_batch_landing_plan_record_id": landed_record.record_id,
-                            "repository": landed_plan.repository,
-                            "base_branch": landed_plan.base_branch,
-                            "mode": "land",
-                            "controller_action": "land_batch",
-                            "landing_plan": landed_plan.model_dump(mode="json"),
-                        }
-                        if collapse_record is not None:
-                            root_entry = next(
-                                (
-                                    entry
-                                    for entry in landed_plan.entries
-                                    if entry.pull_request_number
-                                    == collapse_record.plan.root_pull_request_number
-                                ),
-                                None,
+                        try:
+                            landed_plan = github_client.land_batch_candidate(
+                                landing_plan=active_landing_record.landing_plan
                             )
-                            if root_entry is None or root_entry.status != "merged":
-                                raise ValueError(
-                                    "merge train stack child disposition requires merged root PR"
-                                )
-                            reconciled_collapse_plan = (
-                                reconcile_merge_train_stack_children_after_root_landing(
-                                    plan=collapse_record.plan,
-                                    disposition_client=github_client,
-                                    root_merge_commit_sha=root_entry.merge_commit_sha,
-                                    label=repository_policy.stack_child_disposition_label,
-                                    updated_at=recorded_at,
-                                )
+                        except MergeTrainGitHubStaleHeadError as error:
+                            stale_plan = _stale_merge_train_landing_plan(
+                                active_landing_record.landing_plan
                             )
-                            reconciled_record = build_merge_train_stack_collapse_plan_record(
-                                plan=reconciled_collapse_plan,
-                                source=f"service:controller:child-disposition:{request_trace_id}",
+                            stale_record = build_merge_train_batch_landing_plan_record(
+                                landing_plan=stale_plan,
+                                source=f"service:controller:stale-landing:{request_trace_id}",
                                 updated_at=recorded_at,
                             )
-                            collapse_store.write_merge_train_stack_collapse_plan_record(
-                                reconciled_record
+                            landing_store.write_merge_train_batch_landing_plan_record(
+                                stale_record
                             )
-                            result["merge_train_stack_collapse_plan_record_id"] = (
-                                reconciled_record.record_id
+                            message = (
+                                str(error).strip()
+                                or "Merge train landing evidence no longer matches GitHub."
                             )
-                            result["stack_collapse_plan"] = reconciled_collapse_plan.model_dump(
-                                mode="json"
+                            result = {
+                                "merge_train_batch_landing_plan_record_id": stale_record.record_id,
+                                "repository": stale_plan.repository,
+                                "base_branch": stale_plan.base_branch,
+                                "mode": "stale_landing",
+                                "controller_action": "land_batch",
+                                "landing_plan": stale_plan.model_dump(mode="json"),
+                                "error": {
+                                    "code": "merge_train_github_stale_state",
+                                    "message": message,
+                                },
+                                "details": {
+                                    "github_status_code": error.status_code,
+                                },
+                            }
+                            driver_result = result
+                        else:
+                            landed_record = build_merge_train_batch_landing_plan_record(
+                                landing_plan=landed_plan,
+                                source=f"service:controller:land:{request_trace_id}",
+                                updated_at=recorded_at,
                             )
-                        driver_result = result
+                            landing_store.write_merge_train_batch_landing_plan_record(
+                                landed_record
+                            )
+                            result = {
+                                "merge_train_batch_landing_plan_record_id": landed_record.record_id,
+                                "repository": landed_plan.repository,
+                                "base_branch": landed_plan.base_branch,
+                                "mode": "land",
+                                "controller_action": "land_batch",
+                                "landing_plan": landed_plan.model_dump(mode="json"),
+                            }
+                            if collapse_record is not None:
+                                root_entry = next(
+                                    (
+                                        entry
+                                        for entry in landed_plan.entries
+                                        if entry.pull_request_number
+                                        == collapse_record.plan.root_pull_request_number
+                                    ),
+                                    None,
+                                )
+                                if root_entry is None or root_entry.status != "merged":
+                                    raise ValueError(
+                                        "merge train stack child disposition requires merged root PR"
+                                    )
+                                reconciled_collapse_plan = (
+                                    reconcile_merge_train_stack_children_after_root_landing(
+                                        plan=collapse_record.plan,
+                                        disposition_client=github_client,
+                                        root_merge_commit_sha=root_entry.merge_commit_sha,
+                                        label=repository_policy.stack_child_disposition_label,
+                                        updated_at=recorded_at,
+                                    )
+                                )
+                                reconciled_record = build_merge_train_stack_collapse_plan_record(
+                                    plan=reconciled_collapse_plan,
+                                    source=f"service:controller:child-disposition:{request_trace_id}",
+                                    updated_at=recorded_at,
+                                )
+                                collapse_store.write_merge_train_stack_collapse_plan_record(
+                                    reconciled_record
+                                )
+                                result["merge_train_stack_collapse_plan_record_id"] = (
+                                    reconciled_record.record_id
+                                )
+                                result["stack_collapse_plan"] = (
+                                    reconciled_collapse_plan.model_dump(mode="json")
+                                )
+                            driver_result = result
                 else:
                     active_candidate_record = _latest_merge_train_batch_candidate_record(
                         record_store=candidate_store,

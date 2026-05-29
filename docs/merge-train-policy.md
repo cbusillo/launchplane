@@ -498,7 +498,11 @@ conflict, while real GitHub transport/API failures include upstream status
 details for debugging. When every landing-plan entry is already merged with its
 recorded head SHA and the live base branch is at the recorded final merge
 commit, the retry writes terminal landing evidence instead of continuing to
-advertise the stale `land_batch` action.
+advertise the stale `land_batch` action. If GitHub proves a pull request merged
+with a different head SHA than the landing plan recorded, Launchplane writes
+terminal stale landing evidence for the plan. That stale evidence does not count
+as a successful Launchplane landing, but it does retire the stale plan so a fresh
+controller pass can read current GitHub state and admit later eligible work.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run

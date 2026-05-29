@@ -94,6 +94,28 @@ class MergeTrainControllerFeedbackTests(TestCase):
         self.assertEqual([7, 8], [payload["pull_request_number"] for payload in payloads])
         self.assertEqual({"completed"}, {payload["event"] for payload in payloads})
 
+    def test_build_feedback_payloads_marks_stale_landing_plan_terminal(self) -> None:
+        response: dict[str, Any] = {
+            "result": {
+                "repository": "cbusillo/example",
+                "base_branch": "main",
+                "controller_action": "land_batch",
+                "landing_plan": {
+                    "entries": [
+                        {"pull_request_number": 7, "status": "merged"},
+                        {"pull_request_number": 8, "status": "stale"},
+                    ],
+                },
+            },
+            "records": {"merge_train_batch_landing_plan_record_id": "landing-plan-123"},
+        }
+
+        payloads = feedback.build_feedback_payloads(response=response)
+
+        self.assertEqual([7, 8], [payload["pull_request_number"] for payload in payloads])
+        self.assertEqual({"stale_policy"}, {payload["event"] for payload in payloads})
+        self.assertIn("stale", payloads[0]["message"])
+
     def test_build_feedback_payloads_skips_actions_without_pr_numbers(self) -> None:
         response: dict[str, Any] = {
             "result": {

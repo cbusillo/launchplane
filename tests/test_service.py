@@ -2797,7 +2797,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             superseding_candidate.batch_id,
         )
 
-    def test_merge_train_controller_reports_stale_landing_state(self) -> None:
+    def test_merge_train_controller_terminalizes_stale_landing_state(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
@@ -2844,11 +2844,50 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "mutate": True,
                     },
                 )
+            landing_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                next_status_code, next_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
 
-        self.assertEqual(status_code, 409)
-        self.assertEqual(payload["error"]["code"], "merge_train_github_stale_state")
-        self.assertIn("outside", payload["error"]["message"])
-        self.assertEqual(payload["details"]["github_status_code"], 409)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "stale_landing")
+        self.assertEqual(payload["result"]["error"]["code"], "merge_train_github_stale_state")
+        self.assertIn("outside", payload["result"]["error"]["message"])
+        self.assertEqual(payload["result"]["details"]["github_status_code"], 409)
+        self.assertTrue(
+            all(
+                entry["status"] == "stale"
+                for entry in payload["result"]["landing_plan"]["entries"]
+            )
+        )
+        stale_record = next(
+            record
+            for record in landing_records
+            if record.record_id
+            == payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
+        self.assertEqual(next_status_code, 202)
+        self.assertNotEqual(next_payload["result"]["controller_action"], "land_batch")
 
     def test_merge_train_controller_reports_github_failure_details(self) -> None:
         with (
