@@ -68,6 +68,7 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -489,6 +490,34 @@ class LaunchplanePublicIngressObservationRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressIncidentRow(Base):
+    __tablename__ = "launchplane_public_ingress_incidents"
+    __table_args__ = (
+        Index(
+            "launchplane_public_ingress_incidents_lookup_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("opened_at"),
+        ),
+        Index(
+            "launchplane_public_ingress_incidents_status_idx",
+            "status",
+            desc("opened_at"),
+        ),
+    )
+
+    incident_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    opened_at: Mapped[str] = mapped_column(String, nullable=False)
+    latest_observed_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2735,6 +2764,51 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplanePublicIngressObservationRow.observed_at.desc(),
                 LaunchplanePublicIngressObservationRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_public_ingress_incident_record(
+        self, record: PublicIngressIncidentRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressIncidentRow(
+                incident_id=record.incident_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                status=record.status,
+                opened_at=record.opened_at,
+                latest_observed_at=record.latest_observed_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplanePublicIngressIncidentRow.product == product)
+        if context_name:
+            filters.append(LaunchplanePublicIngressIncidentRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplanePublicIngressIncidentRow.instance == instance_name)
+        if status:
+            filters.append(LaunchplanePublicIngressIncidentRow.status == status)
+        return self._list_models(
+            model_type=PublicIngressIncidentRecord,
+            orm_model=LaunchplanePublicIngressIncidentRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressIncidentRow.opened_at.desc(),
+                LaunchplanePublicIngressIncidentRow.incident_id.desc(),
             ),
             limit=limit,
         )

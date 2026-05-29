@@ -21,10 +21,12 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressFailureCode,
+    PublicIngressIncidentRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
     PublicIngressTargetKind,
     PublicIngressTargetObservation,
+    build_public_ingress_incident_id,
     build_public_ingress_observation_id,
 )
 from control_plane.contracts.runtime_identity import (
@@ -56,6 +58,20 @@ class PublicIngressMonitorStore(Protocol):
 
     def write_public_ingress_observation_record(
         self, record: PublicIngressObservationRecord
+    ) -> object: ...
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]: ...
+
+    def write_public_ingress_incident_record(
+        self, record: PublicIngressIncidentRecord
     ) -> object: ...
 
 
@@ -90,7 +106,10 @@ class PublicIngressMonitorResult(BaseModel):
     fail_count: int = Field(default=0, ge=0)
     skipped_count: int = Field(default=0, ge=0)
     notification_count: int = Field(default=0, ge=0)
+    open_incident_count: int = Field(default=0, ge=0)
+    resolved_incident_count: int = Field(default=0, ge=0)
     records: tuple[PublicIngressObservationRecord, ...] = ()
+    incidents: tuple[PublicIngressIncidentRecord, ...] = ()
 
 
 HttpGet = Callable[[str, int], HttpObservation]
@@ -167,6 +186,7 @@ def run_public_ingress_monitor_once(
     observed_at = checked_at.strip() or utc_now_timestamp()
     get = http_get or fetch_public_ingress_url
     records: list[PublicIngressObservationRecord] = []
+    incidents: list[PublicIngressIncidentRecord] = []
     notification_count = 0
     for target in discover_public_ingress_monitor_targets(record_store):
         previous_record = _latest_observation(record_store=record_store, target=target)
@@ -183,6 +203,13 @@ def run_public_ingress_monitor_once(
                 notification_count += 1
         record_store.write_public_ingress_observation_record(record)
         records.append(record)
+        incident = reconcile_public_ingress_incident(
+            record_store=record_store,
+            record=record,
+            previous_record=previous_record,
+        )
+        if incident is not None:
+            incidents.append(incident)
     return PublicIngressMonitorResult(
         checked_at=observed_at,
         target_count=len(records),
@@ -190,8 +217,69 @@ def run_public_ingress_monitor_once(
         fail_count=sum(1 for record in records if record.status == "fail"),
         skipped_count=sum(1 for record in records if record.status == "skipped"),
         notification_count=notification_count,
+        open_incident_count=sum(1 for incident in incidents if incident.status == "open"),
+        resolved_incident_count=sum(
+            1 for incident in incidents if incident.status == "resolved"
+        ),
         records=tuple(records),
+        incidents=tuple(incidents),
     )
+
+
+def reconcile_public_ingress_incident(
+    *,
+    record_store: PublicIngressMonitorStore,
+    record: PublicIngressObservationRecord,
+    previous_record: PublicIngressObservationRecord | None,
+) -> PublicIngressIncidentRecord | None:
+    open_incident = _open_incident(record_store=record_store, record=record)
+    if record.status == "fail":
+        if open_incident is not None:
+            incident = open_incident.model_copy(
+                update={
+                    "latest_observation_id": record.record_id,
+                    "latest_observed_at": record.observed_at,
+                    "failure_code": record.failure_code,
+                    "summary": record.summary,
+                }
+            )
+        else:
+            incident = PublicIngressIncidentRecord(
+                incident_id=build_public_ingress_incident_id(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    opened_at=record.observed_at,
+                ),
+                product=record.product,
+                repository=record.repository,
+                driver_id=record.driver_id,
+                context=record.context,
+                instance=record.instance,
+                status="open",
+                opened_at=record.observed_at,
+                opened_observation_id=record.record_id,
+                latest_observation_id=record.record_id,
+                latest_observed_at=record.observed_at,
+                failure_code=record.failure_code or "unknown_error",
+                summary=record.summary,
+            )
+        record_store.write_public_ingress_incident_record(incident)
+        return incident
+    if record.status == "pass" and open_incident is not None:
+        incident = open_incident.model_copy(
+            update={
+                "status": "resolved",
+                "latest_observation_id": record.record_id,
+                "latest_observed_at": record.observed_at,
+                "resolved_at": record.observed_at,
+                "resolved_observation_id": record.record_id,
+                "summary": record.summary,
+            }
+        )
+        record_store.write_public_ingress_incident_record(incident)
+        return incident
+    return None
 
 
 def check_public_ingress_target(
@@ -405,6 +493,19 @@ def _latest_observation(
         limit=1,
     )
     return next(iter(records), None)
+
+
+def _open_incident(
+    *, record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
+) -> PublicIngressIncidentRecord | None:
+    incidents = record_store.list_public_ingress_incident_records(
+        product=record.product,
+        context_name=record.context,
+        instance_name=record.instance,
+        status="open",
+        limit=1,
+    )
+    return next(iter(incidents), None)
 
 
 def _should_notify(

@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
@@ -26,6 +27,7 @@ class _Store:
     def __init__(self, profiles: tuple[LaunchplaneProductProfileRecord, ...]) -> None:
         self._profiles = profiles
         self.records: list[PublicIngressObservationRecord] = []
+        self.incidents: list[PublicIngressIncidentRecord] = []
         self.lane_summaries: dict[tuple[str, str], LaunchplaneLaneSummary] = {}
 
     def list_product_profile_records(
@@ -62,6 +64,36 @@ class _Store:
         self, record: PublicIngressObservationRecord
     ) -> None:
         self.records.append(record)
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        incidents = [
+            incident
+            for incident in self.incidents
+            if (not product or incident.product == product)
+            and (not context_name or incident.context == context_name)
+            and (not instance_name or incident.instance == instance_name)
+            and (not status or incident.status == status)
+        ]
+        incidents.sort(key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True)
+        if limit is not None:
+            incidents = incidents[:limit]
+        return tuple(incidents)
+
+    def write_public_ingress_incident_record(
+        self, record: PublicIngressIncidentRecord
+    ) -> None:
+        self.incidents = [
+            incident for incident in self.incidents if incident.incident_id != record.incident_id
+        ]
+        self.incidents.append(record)
 
 
 def _profile(
@@ -244,6 +276,47 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(notifications, [("fail", "pass"), ("pass", "fail")])
         self.assertTrue(store.records[1].notification_sent)
         self.assertTrue(store.records[2].notification_sent)
+
+    def test_opens_updates_and_resolves_public_ingress_incident(self) -> None:
+        store = _Store((_profile(),))
+
+        first_failure = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        second_failure = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=500,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+        recovery = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:30:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(first_failure.open_incident_count, 1)
+        self.assertEqual(second_failure.open_incident_count, 1)
+        self.assertEqual(recovery.resolved_incident_count, 1)
+        self.assertEqual(len(store.incidents), 1)
+        incident = store.incidents[0]
+        self.assertEqual(incident.status, "resolved")
+        self.assertEqual(incident.opened_observation_id, store.records[0].record_id)
+        self.assertEqual(incident.latest_observation_id, store.records[2].record_id)
+        self.assertEqual(incident.resolved_observation_id, store.records[2].record_id)
 
     def test_github_issue_notifier_comments_on_alert_issue(self) -> None:
         commands: list[list[str]] = []

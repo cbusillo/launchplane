@@ -158,9 +158,10 @@ and manual operator reruns, so its GitHub OIDC identity stays scoped only to
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
 authorized in the Launchplane service context. Monitoring is default-on for
 lanes with public `base_url` or `health_url`; disable it per lane only for
-non-public or intentionally unreachable endpoints. When a lane policy includes
-`public_ingress_monitoring.alert_issue_url`, Launchplane comments on that issue
-when the latest observation moves from pass to fail or from fail back to pass.
+non-public or intentionally unreachable endpoints. Observations are sensor
+evidence; public-ingress incident records are the active operator lifecycle when
+a lane fails and later recovers. Notification routing is a separate
+service-backed policy and delivery concern, not lane-owned text config.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. Run it first with

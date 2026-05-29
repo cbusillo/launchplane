@@ -48,6 +48,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -574,6 +575,34 @@ class FilesystemRecordStore:
             and (not instance_name or record.instance == instance_name)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
+        return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PublicIngressIncidentRecord,
+                "launchplane_public_ingress_incidents",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.opened_at, record.incident_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
