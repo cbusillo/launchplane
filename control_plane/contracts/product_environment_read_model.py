@@ -136,6 +136,10 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
     ) -> tuple[PublicIngressIncidentRecord, ...]: ...
 
 
+class ProductEnvironmentReadModelCapabilityError(RuntimeError):
+    pass
+
+
 def _build_action_authz_by_route() -> dict[str, str]:
     return {
         action.route_path: action.authz_action
@@ -664,6 +668,18 @@ def _optional_records(
     method = getattr(record_store, method_name, None)
     if not callable(method):
         return ()
+    return tuple(method(**kwargs))
+
+
+def _required_records(
+    record_store: object, method_name: str, **kwargs: object
+) -> tuple[object, ...]:
+    method = getattr(record_store, method_name, None)
+    if not callable(method):
+        raise ProductEnvironmentReadModelCapabilityError(
+            "Product environment reads require DB-backed Launchplane storage; "
+            f"missing store method(s): {method_name}."
+        )
     return tuple(method(**kwargs))
 
 
@@ -1312,7 +1328,7 @@ def _public_ingress_summary(
     latest = next(iter(records), None)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary()
-    incidents = _optional_records(
+    incidents = _required_records(
         record_store,
         "list_public_ingress_incident_records",
         product=profile.product,

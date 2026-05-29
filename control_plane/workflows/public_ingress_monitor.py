@@ -34,7 +34,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationStatus,
     PublicIngressTargetKind,
     PublicIngressTargetObservation,
-    build_public_ingress_incident_id,
+    build_public_ingress_lane_incident_id,
     build_public_ingress_notification_attempt_id,
     build_public_ingress_observation_id,
 )
@@ -244,6 +244,8 @@ def run_public_ingress_monitor_once(
     records: list[PublicIngressObservationRecord] = []
     incidents: list[PublicIngressIncidentRecord] = []
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
+    open_incident_count = 0
+    resolved_incident_count = 0
     notification_count = 0
     for target in discover_public_ingress_monitor_targets(record_store):
         previous_record = _latest_observation(record_store=record_store, target=target)
@@ -260,13 +262,17 @@ def run_public_ingress_monitor_once(
                 notification_count += 1
         record_store.write_public_ingress_observation_record(record)
         records.append(record)
-        incident = reconcile_public_ingress_incident(
+        incident_records = reconcile_public_ingress_incident(
             record_store=record_store,
             record=record,
             previous_record=previous_record,
         )
-        if incident is not None:
-            incidents.append(incident)
+        incidents.extend(incident_records)
+        open_incident_count += sum(1 for incident in incident_records if incident.status == "open")
+        resolved_incident_count += sum(
+            1 for incident in incident_records if incident.status == "resolved"
+        )
+        for incident in incident_records:
             if notify and notification_drivers is not None:
                 delivery_attempts.extend(
                     deliver_public_ingress_incident_notifications(
@@ -284,8 +290,8 @@ def run_public_ingress_monitor_once(
         fail_count=sum(1 for record in records if record.status == "fail"),
         skipped_count=sum(1 for record in records if record.status == "skipped"),
         notification_count=notification_count,
-        open_incident_count=sum(1 for incident in incidents if incident.status == "open"),
-        resolved_incident_count=sum(1 for incident in incidents if incident.status == "resolved"),
+        open_incident_count=open_incident_count,
+        resolved_incident_count=resolved_incident_count,
         delivery_attempt_count=len(delivery_attempts),
         records=tuple(records),
         incidents=tuple(incidents),
@@ -362,9 +368,17 @@ def reconcile_public_ingress_incident(
     record_store: PublicIngressMonitorStore,
     record: PublicIngressObservationRecord,
     previous_record: PublicIngressObservationRecord | None,
-) -> PublicIngressIncidentRecord | None:
-    open_incident = _open_incident(record_store=record_store, record=record)
+) -> tuple[PublicIngressIncidentRecord, ...]:
+    open_incidents = _open_incidents(record_store=record_store, record=record)
     if record.status == "fail":
+        incident_id = build_public_ingress_lane_incident_id(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+        )
+        open_incident = next(
+            (incident for incident in open_incidents if incident.incident_id == incident_id), None
+        )
         if open_incident is not None:
             incident = open_incident.model_copy(
                 update={
@@ -376,12 +390,7 @@ def reconcile_public_ingress_incident(
             )
         else:
             incident = PublicIngressIncidentRecord(
-                incident_id=build_public_ingress_incident_id(
-                    product=record.product,
-                    context=record.context,
-                    instance=record.instance,
-                    opened_at=record.observed_at,
-                ),
+                incident_id=incident_id,
                 product=record.product,
                 repository=record.repository,
                 driver_id=record.driver_id,
@@ -396,21 +405,24 @@ def reconcile_public_ingress_incident(
                 summary=record.summary,
             )
         record_store.write_public_ingress_incident_record(incident)
-        return incident
-    if record.status == "pass" and open_incident is not None:
-        incident = open_incident.model_copy(
-            update={
-                "status": "resolved",
-                "latest_observation_id": record.record_id,
-                "latest_observed_at": record.observed_at,
-                "resolved_at": record.observed_at,
-                "resolved_observation_id": record.record_id,
-                "summary": record.summary,
-            }
-        )
-        record_store.write_public_ingress_incident_record(incident)
-        return incident
-    return None
+        return (incident,)
+    if record.status == "pass" and open_incidents:
+        resolved_incidents: list[PublicIngressIncidentRecord] = []
+        for open_incident in open_incidents:
+            incident = open_incident.model_copy(
+                update={
+                    "status": "resolved",
+                    "latest_observation_id": record.record_id,
+                    "latest_observed_at": record.observed_at,
+                    "resolved_at": record.observed_at,
+                    "resolved_observation_id": record.record_id,
+                    "summary": record.summary,
+                }
+            )
+            record_store.write_public_ingress_incident_record(incident)
+            resolved_incidents.append(incident)
+        return tuple(resolved_incidents)
+    return ()
 
 
 def _incident_event(
@@ -668,17 +680,22 @@ def _latest_observation(
     return next(iter(records), None)
 
 
-def _open_incident(
+def _open_incidents(
     *, record_store: PublicIngressMonitorStore, record: PublicIngressObservationRecord
-) -> PublicIngressIncidentRecord | None:
+) -> tuple[PublicIngressIncidentRecord, ...]:
     incidents = record_store.list_public_ingress_incident_records(
         product=record.product,
         context_name=record.context,
         instance_name=record.instance,
         status="open",
-        limit=1,
     )
-    return next(iter(incidents), None)
+    return tuple(
+        incident
+        for incident in incidents
+        if incident.product == record.product
+        and incident.context == record.context
+        and incident.instance == record.instance
+    )
 
 
 def _should_notify(
