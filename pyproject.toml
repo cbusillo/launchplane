@@ -14,14 +14,14 @@ dependencies = [
     "psycopg[binary]>=3.3.4",
     "pyjwt[crypto]>=2.13.0",
     "requests>=2.34.2",
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.0.50",
     "alembic>=1.18.4",
 ]
 
 [project.optional-dependencies]
 dev = [
     "mypy>=2.1.0",
-    "ruff>=0.15.14",
+    "ruff>=0.15.15",
 ]
 
 [project.scripts]
