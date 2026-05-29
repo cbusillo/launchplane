@@ -192,22 +192,23 @@ Policy still scopes which redacted read actions and product/context pairs the
 agent can access, such as `product_environment.read` for product environment and
 config-status diagnostics.
 
-Trusted owner terminals that need to make Launchplane-owned product config
-changes can use a separate local-operator bearer credential instead of a
-browser OAuth session. Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the
-service and provide the same secret to trusted local agents through
+Trusted owner terminals that need to make Launchplane-owned operator mutations
+without a browser session can use a separate local-operator bearer credential.
+Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
+secret to trusted local agents through
 `~/.config/launchplane/local-operator.env`. Optional
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` values identify the actor in audit and
 idempotency records; the defaults are `local-owner-agent` and
-`local-owner-write`. Local-operator product-config requests must include a
-non-empty `reason`; apply is rejected until the service has recorded a matching
-local-operator dry-run for the same product config payload. These requests still
-use Launchplane records, redacted responses, runtime key-safety policy, and
-managed secret storage. The local-operator identity is scoped to product-config
-plan/apply and is not accepted for product-profile reads or authz policy
-administration, so the credential cannot enumerate product profiles or rewrite
-its own permission model.
+`local-owner-write`. Local-operator write requests must include a non-empty
+`reason`; product-config apply is also rejected until the service has recorded a
+matching local-operator dry-run for the same product config payload. These
+requests still use Launchplane records, redacted responses, runtime key-safety
+policy, and managed secret storage. The local-operator identity is scoped to a
+narrow allowlist, including product-config plan/apply and public-ingress
+notification-policy apply. It is not accepted for product-profile reads or authz
+policy administration, so the credential cannot enumerate product profiles or
+rewrite its own permission model.
 
 `GET /v1/every-code/summary` returns a compact agent-safe projection of Every
 Code work requests. It requires `every_code_work_request.read` for
