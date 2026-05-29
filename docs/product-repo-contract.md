@@ -179,6 +179,13 @@ For an existing repo, classify each workflow and script before deleting code:
   keep only dispatch inputs, confirmation text, and product-owned build or test
   facts locally.
 
+Odoo artifact publication now follows the reusable workflow shape: tenant repos
+own the manual dispatch confirmation and the source workspace, while
+`reusable-odoo-artifact-publish.yml` owns the Launchplane publish-input request,
+artifact-record request, idempotency keys, and response mapping. The tenant
+workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
+`/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow.
+
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
 runtime health, or cleanup safety gates until Launchplane owns the equivalent
