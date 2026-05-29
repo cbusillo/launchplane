@@ -54,6 +54,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductPreviewProfile,
 )
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.promotion_record import (
@@ -583,6 +584,53 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [newer_record.record_id, older_record.record_id],
         )
         self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
+
+    def test_write_and_list_public_ingress_incident_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            open_record = PublicIngressIncidentRecord(
+                incident_id="public-ingress-incident-example-site-prod-open",
+                product="example-site",
+                context="example-site-prod",
+                instance="prod",
+                status="open",
+                opened_at="2026-05-29T12:20:00Z",
+                opened_observation_id="obs-1",
+                latest_observation_id="obs-1",
+                latest_observed_at="2026-05-29T12:20:00Z",
+                failure_code="http_error",
+                summary="Public ingress failed.",
+            )
+            resolved_record = open_record.model_copy(
+                update={
+                    "incident_id": "public-ingress-incident-example-site-prod-resolved",
+                    "status": "resolved",
+                    "latest_observation_id": "obs-2",
+                    "latest_observed_at": "2026-05-29T12:25:00Z",
+                    "resolved_at": "2026-05-29T12:25:00Z",
+                    "resolved_observation_id": "obs-2",
+                    "summary": "Public ingress recovered.",
+                }
+            )
+
+            written_path = store.write_public_ingress_incident_record(open_record)
+            store.write_public_ingress_incident_record(resolved_record)
+            listed_records = store.list_public_ingress_incident_records(
+                product="example-site",
+                context_name="example-site-prod",
+                instance_name="prod",
+            )
+            open_records = store.list_public_ingress_incident_records(status="open")
+
+            self.assertTrue(written_path.exists())
+            self.assertEqual(
+                [record.incident_id for record in listed_records],
+                [resolved_record.incident_id, open_record.incident_id],
+            )
+            self.assertEqual(
+                [record.incident_id for record in open_records], [open_record.incident_id]
+            )
 
     def test_write_and_list_runtime_key_safety_policy_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

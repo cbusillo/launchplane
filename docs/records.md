@@ -263,6 +263,21 @@ These records are the source for the product environment read model's
 observation marks the lane stale/unhealthy, and a skipped private URL is treated
 as unsupported rather than silently healthy.
 
+## Public Ingress Incident Records
+
+Public ingress incidents are Launchplane-owned lifecycle records under
+`launchplane_public_ingress_incidents`. They are derived from public-ingress
+observations and keyed by product, context, instance, and incident open time. An
+open incident records the first failing observation and the latest failing
+observation for that lane. A recovery observation resolves the incident by
+recording the resolving observation and resolved timestamp.
+
+Incident records are the source of truth for whether Launchplane currently
+considers a lane to be in a public-ingress incident. Notification routing and
+delivery are separate record families: observations say what was measured,
+incidents say whether there is active operator state, and delivery records say
+where Launchplane attempted to notify operators.
+
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
 an issue-backed approval URL, the destructive confirmation phrase,

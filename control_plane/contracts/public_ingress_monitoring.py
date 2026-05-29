@@ -8,6 +8,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIde
 
 
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
+PublicIngressIncidentStatus = Literal["open", "resolved"]
 PublicIngressTargetKind = Literal["base_url", "health_url"]
 PublicIngressFailureCode = Literal[
     "connection_timeout",
@@ -112,12 +113,84 @@ class PublicIngressObservationRecord(BaseModel):
         return self
 
 
+class PublicIngressIncidentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    incident_id: str
+    product: str
+    repository: str = ""
+    driver_id: str = ""
+    context: str
+    instance: str
+    status: PublicIngressIncidentStatus
+    opened_at: str
+    opened_observation_id: str
+    latest_observation_id: str
+    latest_observed_at: str
+    failure_code: PublicIngressFailureCode
+    resolved_at: str = ""
+    resolved_observation_id: str = ""
+    summary: str
+
+    @model_validator(mode="after")
+    def _validate_incident(self) -> "PublicIngressIncidentRecord":
+        self.incident_id = _required_text(
+            self.incident_id, "public ingress incident requires incident_id"
+        )
+        self.product = _required_text(self.product, "public ingress incident requires product")
+        self.context = _required_text(self.context, "public ingress incident requires context")
+        self.instance = _required_text(
+            self.instance, "public ingress incident requires instance"
+        )
+        self.opened_at = _required_text(
+            self.opened_at, "public ingress incident requires opened_at"
+        )
+        self.opened_observation_id = _required_text(
+            self.opened_observation_id,
+            "public ingress incident requires opened_observation_id",
+        )
+        self.latest_observation_id = _required_text(
+            self.latest_observation_id,
+            "public ingress incident requires latest_observation_id",
+        )
+        self.latest_observed_at = _required_text(
+            self.latest_observed_at,
+            "public ingress incident requires latest_observed_at",
+        )
+        self.repository = self.repository.strip()
+        self.driver_id = self.driver_id.strip()
+        self.resolved_at = self.resolved_at.strip()
+        self.resolved_observation_id = self.resolved_observation_id.strip()
+        self.summary = _required_text(self.summary, "public ingress incident requires summary")
+        if self.status == "resolved":
+            if not self.resolved_at:
+                raise ValueError("resolved public ingress incident requires resolved_at")
+            if not self.resolved_observation_id:
+                raise ValueError(
+                    "resolved public ingress incident requires resolved_observation_id"
+                )
+        if self.status == "open" and (self.resolved_at or self.resolved_observation_id):
+            raise ValueError("open public ingress incident cannot include resolution fields")
+        return self
+
+
 def build_public_ingress_observation_id(
     *, product: str, context: str, instance: str, observed_at: str
 ) -> str:
     return "-".join(
         _record_token(value)
         for value in ("public-ingress", product, context, instance, observed_at)
+        if _record_token(value)
+    )
+
+
+def build_public_ingress_incident_id(
+    *, product: str, context: str, instance: str, opened_at: str
+) -> str:
+    return "-".join(
+        _record_token(value)
+        for value in ("public-ingress-incident", product, context, instance, opened_at)
         if _record_token(value)
     )
 

@@ -24,6 +24,7 @@ from control_plane.contracts.product_environment_read_model import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -230,9 +231,11 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         self,
         profile: LaunchplaneProductProfileRecord,
         observations: tuple[PublicIngressObservationRecord, ...],
+        incidents: tuple[PublicIngressIncidentRecord, ...] = (),
     ) -> None:
         super().__init__(profile, ())
         self._observations = observations
+        self._incidents = incidents
 
     def list_public_ingress_observation_records(
         self,
@@ -253,6 +256,28 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]:
+        incidents = [
+            incident
+            for incident in self._incidents
+            if (not product or incident.product == product)
+            and (not context_name or incident.context == context_name)
+            and (not instance_name or incident.instance == instance_name)
+            and (not status or incident.status == status)
+        ]
+        incidents.sort(key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True)
+        if limit is not None:
+            incidents = incidents[:limit]
+        return tuple(incidents)
 
 
 class _ActivityRecordStore(_PreviewRecordStore):
@@ -935,7 +960,20 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             notification_sent=True,
             summary="Public ingress failed for example-site/prod: HTTP 503",
         )
-        store = _PublicIngressReadModelStore(profile, (observation,))
+        incident = PublicIngressIncidentRecord(
+            incident_id="public-ingress-incident-example-site-prod-20260529t120000z",
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            status="open",
+            opened_at="2026-05-29T12:00:00Z",
+            opened_observation_id=observation.record_id,
+            latest_observation_id=observation.record_id,
+            latest_observed_at=observation.observed_at,
+            failure_code="http_error",
+            summary="Public ingress failed for example-site/prod: HTTP 503",
+        )
+        store = _PublicIngressReadModelStore(profile, (observation,), (incident,))
 
         overview = build_product_site_overview(
             record_store=store,
@@ -953,6 +991,8 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(prod_summary.public_ingress.status, "fail")
         self.assertEqual(prod_summary.public_ingress.trust_state, "stale")
         self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
+        self.assertEqual(prod_summary.public_ingress.incident_status, "open")
+        self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
         self.assertTrue(detail.public_ingress.notification_sent)
 
     def test_product_environment_detail_exposes_runtime_identity_evidence(self) -> None:

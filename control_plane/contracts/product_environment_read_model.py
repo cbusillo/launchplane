@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -124,6 +125,16 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]: ...
 
+    def list_public_ingress_incident_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressIncidentRecord, ...]: ...
+
 
 def _build_action_authz_by_route() -> dict[str, str]:
     return {
@@ -224,6 +235,9 @@ class ProductPublicIngressSummary(BaseModel):
     record_id: str = ""
     summary: str = ""
     notification_sent: bool = False
+    incident_status: str = ""
+    incident_id: str = ""
+    incident_opened_at: str = ""
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = DataProvenance(
         source_kind="record",
@@ -1298,6 +1312,19 @@ def _public_ingress_summary(
     latest = next(iter(records), None)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary()
+    incidents = _optional_records(
+        record_store,
+        "list_public_ingress_incident_records",
+        product=profile.product,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        status="open",
+        limit=1,
+    )
+    open_incident = next(
+        (incident for incident in incidents if isinstance(incident, PublicIngressIncidentRecord)),
+        None,
+    )
     provenance = DataProvenance(
         source_kind="record",
         source_record_id=latest.record_id,
@@ -1313,6 +1340,9 @@ def _public_ingress_summary(
         record_id=latest.record_id,
         summary=latest.summary,
         notification_sent=latest.notification_sent,
+        incident_status=open_incident.status if open_incident is not None else "",
+        incident_id=open_incident.incident_id if open_incident is not None else "",
+        incident_opened_at=open_incident.opened_at if open_incident is not None else "",
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
