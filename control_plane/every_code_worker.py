@@ -302,9 +302,7 @@ class EveryCodeWorkerApiStore:
             raise EveryCodeWorkerApiError("Launchplane preview gate list response is invalid")
         return tuple(EveryCodePreviewGateRecord.model_validate(item) for item in gates)
 
-    def write_every_code_preview_gate_record(
-        self, record: EveryCodePreviewGateRecord
-    ) -> object:
+    def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> object:
         payload = self._request(
             "POST",
             "/v1/every-code/preview-gates",
@@ -691,8 +689,11 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
         f"include `Closes #{record.issue_number}` or `Fixes #{record.issue_number}` "
         "in the PR body so GitHub closes the issue when the PR merges. Use "
         "`Refs` only when the PR is partial or still needs reporter validation. "
-        "When the PR is open and your checks are complete, let the session exit "
-        "so Launchplane can mark this request finished."
+        "Before the PR can be merged or the issue can close, run closeout hygiene "
+        "for this worktree: update the PR/issue status, record checks, clean safe "
+        "artifacts, and perform the Love Gate. When closeout is complete and your "
+        "checks are complete, let the session exit so Launchplane can mark this "
+        "request finished."
     )
     return "code " + shlex.quote(prompt)
 
@@ -717,6 +718,7 @@ def every_code_pr_feedback_prompt(feedback: EveryCodePrFeedbackRecord) -> str:
             "",
             "Read the PR context and existing discussion before changing files. "
             "Apply the requested correction on the same branch/worktree, update the PR, "
+            "run closeout hygiene including the Love Gate before merge or issue closure, "
             "and then let the session exit when checks are complete.",
         )
     )
@@ -1323,11 +1325,15 @@ def close_terminal_every_code_sessions(
             session_name=session_name,
             runner=run,
         )
-        worktree_processes_closed = _terminate_every_code_worktree_processes(
-            session_state=session_state,
-            runner=run,
-        ) > 0
+        worktree_processes_closed = (
+            _terminate_every_code_worktree_processes(
+                session_state=session_state,
+                runner=run,
+            )
+            > 0
+        )
         if existing_session is False:
+            _cleanup_every_code_worktree(session_state=session_state, runner=run)
             path.unlink(missing_ok=True)
             closed += 1 if worktree_processes_closed else 0
             continue
@@ -1339,6 +1345,7 @@ def close_terminal_every_code_sessions(
             session_name=session_name,
             runner=run,
         ):
+            _cleanup_every_code_worktree(session_state=session_state, runner=run)
             path.unlink(missing_ok=True)
             closed += 1
             continue
@@ -1418,6 +1425,85 @@ def _terminate_every_code_worktree_processes(
     return closed
 
 
+def _cleanup_every_code_worktree(
+    *,
+    session_state: Mapping[str, object],
+    runner: Runner,
+) -> bool:
+    source_checkout_root_value = session_state.get("source_checkout_root")
+    launch_root_value = session_state.get("launch_root")
+    worktree_branch_value = session_state.get("worktree_branch")
+    if (
+        not isinstance(source_checkout_root_value, str)
+        or not source_checkout_root_value.strip()
+        or not isinstance(launch_root_value, str)
+        or not launch_root_value.strip()
+        or not isinstance(worktree_branch_value, str)
+        or not worktree_branch_value.strip()
+    ):
+        return False
+
+    worktree_branch = worktree_branch_value.strip()
+    if not worktree_branch.startswith("every-code/"):
+        return False
+
+    source_checkout_root = Path(source_checkout_root_value).expanduser().resolve()
+    launch_root = Path(launch_root_value).expanduser().resolve()
+    if source_checkout_root == launch_root:
+        return False
+    if not source_checkout_root.is_dir() or not launch_root.is_dir():
+        return False
+    if not _is_git_checkout(source_checkout_root) or not _is_git_checkout(launch_root):
+        return False
+
+    try:
+        inside_source = launch_root.is_relative_to(source_checkout_root)
+    except ValueError:
+        inside_source = False
+    if inside_source:
+        return False
+
+    if _git_worktree_dirty(launch_root, runner=runner):
+        return False
+
+    try:
+        _git_checked(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "worktree",
+                "remove",
+                str(launch_root),
+            ),
+            runner=runner,
+            detail="remove Every Code worktree",
+        )
+        _git_checked(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "branch",
+                "-d",
+                worktree_branch,
+            ),
+            runner=runner,
+            detail="delete Every Code worktree branch",
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
+def _git_worktree_dirty(path: Path, *, runner: Runner) -> bool:
+    try:
+        result = runner(("git", "-C", str(path), "status", "--porcelain"))
+    except OSError:
+        return True
+    return result.returncode != 0 or bool(result.stdout.strip())
+
+
 def _apply_every_code_pr_feedback_record(
     *,
     record_store: EveryCodeWorkerStore,
@@ -1435,9 +1521,7 @@ def _apply_every_code_pr_feedback_record(
         record = record_store.read_every_code_work_request_record(feedback.request_id)
     except Exception:
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code work request for PR feedback was not found.",
@@ -1453,9 +1537,7 @@ def _apply_every_code_pr_feedback_record(
         )
     if _terminal_every_code_request_closed_by_linked_pr(record):
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code PR feedback belongs to a closed linked pull request.",
@@ -1466,9 +1548,7 @@ def _apply_every_code_pr_feedback_record(
     session_state = read_every_code_session_state(state_path)
     if session_state is None:
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code PR feedback has no local session state on this host.",
@@ -1526,9 +1606,7 @@ def _apply_every_code_pr_feedback_record(
     launch_root = Path(session_state.get("launch_root", "")).expanduser()
     if not launch_root.is_dir():
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         state_path.unlink(missing_ok=True)
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
@@ -1567,9 +1645,7 @@ def _apply_every_code_pr_feedback_record(
             )
         )
     except OSError:
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
             detail=f"Could not relaunch tmux session {session_name!r} for PR feedback.",
@@ -1578,9 +1654,7 @@ def _apply_every_code_pr_feedback_record(
             session_name=session_name,
         )
     if launch_result.returncode != 0:
-        _acknowledge_every_code_pr_feedback(
-            feedback=feedback, reaction="confused", runner=runner
-        )
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
             detail=f"tmux relaunch failed: {launch_result.stderr.strip()}",
@@ -1836,9 +1910,7 @@ def finish_every_code_work_request(
     )
     if succeeded and not resolved_pr_url:
         succeeded = False
-        summary = (
-            "Every Code session exited successfully but did not open a pull request."
-        )
+        summary = "Every Code session exited successfully but did not open a pull request."
     updated_record = apply_every_code_work_request_status(
         record,
         EveryCodeWorkRequestStatusUpdate(
@@ -2429,9 +2501,7 @@ def route_every_code_pr_check_failures(
             )
             continue
         app_failures = [
-            item
-            for item in failed_checks
-            if _every_code_pr_failure_kind(item) == "app"
+            item for item in failed_checks if _every_code_pr_failure_kind(item) == "app"
         ]
         if app_failures:
             feedback = _build_every_code_check_failure_feedback(

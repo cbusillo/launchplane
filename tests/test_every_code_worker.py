@@ -288,7 +288,9 @@ class _Process:
 
 
 class _MaintenanceFailingStore(FilesystemRecordStore):
-    def list_every_code_pr_feedback_records(self, **kwargs: object) -> tuple[EveryCodePrFeedbackRecord, ...]:
+    def list_every_code_pr_feedback_records(
+        self, **kwargs: object
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]:
         if kwargs.get("status") == "pending":
             raise EveryCodeWorkerApiError("Launchplane API request failed with HTTP 401")
         return super().list_every_code_pr_feedback_records(**kwargs)  # type: ignore[arg-type]
@@ -743,6 +745,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("isolated Every Code worktree", command)
         self.assertIn("Closes #123", command)
         self.assertIn("Use `Refs` only", command)
+        self.assertIn("run closeout hygiene", command)
+        self.assertIn("Love Gate", command)
         self.assertIn("let the session exit", command)
 
     def test_claim_comment_body_marks_issue_as_in_progress(self) -> None:
@@ -887,9 +891,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     repository="cbusillo/sellyouroutboard",
                     result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
                 ).model_copy(
-                    update={
-                        "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"
-                    }
+                    update={"issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"}
                 )
             )
             runner = _Runner(
@@ -1300,9 +1302,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "started_at": "2026-05-05T22:02:00Z",
                 }
             )
-            store.write_every_code_work_request_record(
-                running_record
-            )
+            store.write_every_code_work_request_record(running_record)
             runner = _Runner(
                 pr_list_payload=[{"url": "https://github.com/cbusillo/sellyouroutboard/pull/86"}],
                 pr_view_payload={
@@ -1452,7 +1452,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
             runner.calls,
         )
 
-    def test_check_failure_route_marks_previous_pending_failure_ignored_after_recovery(self) -> None:
+    def test_check_failure_route_marks_previous_pending_failure_ignored_after_recovery(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             store.write_every_code_work_request_record(
@@ -1671,9 +1673,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(send_calls[0][-1], send_calls[0][4])
         self.assertEqual(send_calls[1][-1], "C-m")
         reaction_calls = [
-            call
-            for call in runner.calls
-            if call[:4] == ("gh", "api", "--method", "POST")
+            call for call in runner.calls if call[:4] == ("gh", "api", "--method", "POST")
         ]
         self.assertEqual(
             [call[-1] for call in reaction_calls],
@@ -1709,9 +1709,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertEqual(feedback.status, "pending")
         reaction_calls = [
-            call
-            for call in runner.calls
-            if call[:4] == ("gh", "api", "--method", "POST")
+            call for call in runner.calls if call[:4] == ("gh", "api", "--method", "POST")
         ]
         self.assertEqual(
             [call[-1] for call in reaction_calls],
@@ -1854,6 +1852,96 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(runner.calls[1][0], "lsof")
         self.assertEqual(runner.calls[2][1], "display-message")
         self.assertEqual(runner.calls[3][1], "kill-session")
+
+    def test_terminal_request_removes_clean_worktree_after_session_close(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+            runner = _ExistingSessionRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg"):
+                close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertFalse(state_path.exists())
+        self.assertTrue(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_terminal_request_preserves_dirty_worktree(self) -> None:
+        class _DirtyWorktreeRunner(_ExistingSessionRunner):
+            def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                if args[0] == "git" and args[3:5] == ("status", "--porcelain"):
+                    self.calls.append(tuple(args))
+                    return subprocess.CompletedProcess(args, 0, " M README.md\n", "")
+                return super().__call__(args)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            runner = _DirtyWorktreeRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg"):
+                close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertFalse(any(call[3:5] == ("branch", "-d") for call in runner.calls))
 
     def test_terminal_request_kills_worktree_processes_when_tmux_is_gone(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2073,9 +2161,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 state_dir=temporary_root / "state",
                 runner=_Runner(),
             )
-            runner = _Runner(
-                pr_list_payload=[{"url": "https://github.com/cbusillo/code/pull/99"}]
-            )
+            runner = _Runner(pr_list_payload=[{"url": "https://github.com/cbusillo/code/pull/99"}])
 
             result = finish_every_code_work_request(
                 record_store=store,
@@ -2342,9 +2428,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 runner=_Runner(),
                 sleeper=lambda _seconds: None,
             )
-            record = store.read_every_code_work_request_record(
-                "every-code-cbusillo-code-123-test"
-            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
 
         self.assertEqual(result.handed_off, 1)
         self.assertEqual(result.blocked, 0)
@@ -2401,9 +2485,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     repository="cbusillo/sellyouroutboard",
                     result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
                 ).model_copy(
-                    update={
-                        "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"
-                    }
+                    update={"issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"}
                 )
             )
             runner = _Runner(
