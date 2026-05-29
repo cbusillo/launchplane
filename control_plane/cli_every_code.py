@@ -23,6 +23,7 @@ from control_plane.every_code_worker import (
     every_code_worker_daemon_status,
     finish_every_code_work_request,
     request_ready_every_code_pr_preview_labels,
+    reconcile_every_code_worker_cleanup_state,
     route_every_code_pr_check_failures,
     run_every_code_worker_loop,
     run_every_code_worker_once,
@@ -580,6 +581,57 @@ def every_code_reconcile_previews(
             record_store=record_store,
             repository=repository,
             limit=limit,
+        )
+    finally:
+        _close_store(record_store)
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("reconcile-cleanup")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory containing Every Code worker sessions and worktrees.",
+)
+@click.option("--host", default="", help="Worker host name recorded on the request.")
+@click.option("--tmux-binary", default="tmux", show_default=True)
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="Remove stale safe entries. Omit for dry-run/report mode.",
+)
+def every_code_reconcile_cleanup(
+    database_url: str,
+    state_dir: Path,
+    host: str,
+    tmux_binary: str,
+    apply_changes: bool,
+) -> None:
+    resolved_host = host.strip() or os.uname().nodename
+    record_store = _every_code_worker_store(
+        state_dir=state_dir,
+        database_url=database_url,
+        service_url="",
+        worker_token_env=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    )
+    try:
+        result = reconcile_every_code_worker_cleanup_state(
+            record_store=record_store,
+            host=resolved_host,
+            state_dir=state_dir,
+            apply=apply_changes,
+            tmux_binary=tmux_binary,
         )
     finally:
         _close_store(record_store)

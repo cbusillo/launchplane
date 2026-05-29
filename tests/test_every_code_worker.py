@@ -40,6 +40,7 @@ from control_plane.every_code_worker import (
     prepare_every_code_checkout,
     request_ready_every_code_pr_preview_labels,
     request_every_code_pr_preview_label,
+    reconcile_every_code_worker_cleanup_state,
     route_every_code_pr_check_failures,
     run_every_code_worker_loop,
     run_every_code_worker_once,
@@ -173,6 +174,50 @@ def _write_sellyouroutboard_preview_profile(store: FilesystemRecordStore) -> Non
     )
 
 
+def _terminal_record(*, state: str = "done") -> EveryCodeWorkRequestRecord:
+    return _queued_record().model_copy(
+        update={
+            "state": state,
+            "claimed_at": "2026-05-06T00:00:00Z",
+            "claimed_by_host": "Chris-Studio",
+            "started_at": "2026-05-06T00:01:00Z",
+            "finished_at": "2026-05-06T00:02:00Z" if state in {"done", "blocked"} else "",
+            "updated_at": "2026-05-06T00:02:00Z",
+            "result_summary": "Linked pull request merged.",
+        }
+    )
+
+
+def _write_cleanup_session_state(
+    *,
+    state_dir: Path,
+    request_id: str = "every-code-cbusillo-code-123-test",
+    host: str = "Chris-Studio",
+    source_checkout_root: Path,
+    launch_root: Path,
+    worktree_branch: str | None = None,
+    session_name: str | None = None,
+) -> Path:
+    path = every_code_session_state_path(state_dir=state_dir, request_id=request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "session_name": session_name or every_code_tmux_session_name(request_id),
+                "source_checkout_root": str(source_checkout_root),
+                "launch_root": str(launch_root),
+                "worktree_branch": worktree_branch or every_code_worktree_branch(_queued_record()),
+                "host": host,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 class _Runner:
     def __init__(
         self,
@@ -271,6 +316,56 @@ class _GoneSessionRunner(_Runner):
         if args[0] == "tmux" and args[1] == "new-session":
             return subprocess.CompletedProcess(args, 0, "", "")
         return super().__call__(args)
+
+
+class _CleanupReconciliationRunner(_ExistingSessionRunner):
+    def __init__(
+        self,
+        *,
+        worktree_root: Path,
+        branch_exists: bool = True,
+        branch_delete_fails: bool = False,
+        dirty: bool = False,
+        tmux_active: bool = False,
+        tmux_inspection_fails: bool = False,
+        registered: bool = True,
+    ) -> None:
+        super().__init__(existing_branch=branch_exists)
+        self.worktree_root = worktree_root
+        self.branch_delete_fails = branch_delete_fails
+        self.dirty = dirty
+        self.tmux_active = tmux_active
+        self.tmux_inspection_fails = tmux_inspection_fails
+        self.registered = registered
+
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(args))
+        if args[1:3] == ("has-session", "-t"):
+            if self.tmux_inspection_fails:
+                return subprocess.CompletedProcess(args, 2, "", "tmux failed")
+            return subprocess.CompletedProcess(args, 0 if self.tmux_active else 1, "", "")
+        if args[0] == "git" and args[3:5] == ("worktree", "list"):
+            output = f"worktree {self.worktree_root}\nHEAD abcdef\nbranch refs/heads/test\n"
+            return subprocess.CompletedProcess(args, 0, output if self.registered else "", "")
+        if args[0] == "git" and args[3:5] == ("status", "--porcelain"):
+            return subprocess.CompletedProcess(args, 0, " M README.md\n" if self.dirty else "", "")
+        if args[0] == "git" and args[3:5] == ("branch", "-d") and self.branch_delete_fails:
+            return subprocess.CompletedProcess(args, 1, "", "not merged")
+        if args[0] == "git" and args[3:5] == ("for-each-ref", "--format=%(refname:short)"):
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                "every-code/cbusillo-code-123-every-code-cbusillo-code-123-test\n"
+                "every-code/unlinked\n",
+                "",
+            )
+        self.calls.pop()
+        return _Runner.__call__(self, args)
+
+
+class _CleanupStoreMissingRequest(FilesystemRecordStore):
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
+        raise FileNotFoundError(request_id)
 
 
 class _GoneSessionWithWorktreeProcessRunner(_GoneSessionRunner):
@@ -1944,6 +2039,369 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
         self.assertFalse(any(call[3:5] == ("branch", "-d") for call in runner.calls))
 
+    def test_cleanup_reconciliation_dry_run_reports_safe_terminal_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root)
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.mode, "dry_run")
+        self.assertEqual(result.checked_sessions, 1)
+        self.assertEqual(result.would_remove, 1)
+        self.assertEqual(result.items[0].status, "would_remove")
+        self.assertEqual(result.items[0].reason, "safe_terminal_worker_state")
+        self.assertTrue(state_exists)
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(
+            any(
+                item.kind == "worker_worktree_directory" and item.status == "linked"
+                for item in result.inventory
+            )
+        )
+        self.assertTrue(
+            any(
+                item.kind == "local_branch"
+                and item.value == every_code_worktree_branch(_queued_record())
+                and item.status == "linked"
+                for item in result.inventory
+            )
+        )
+
+    def test_cleanup_reconciliation_apply_removes_safe_terminal_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root)
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.mode, "apply")
+        self.assertEqual(result.removed, 1)
+        self.assertEqual(result.items[0].status, "removed")
+        self.assertFalse(state_exists)
+        self.assertTrue(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_cleanup_reconciliation_skips_missing_worktree_path_but_deletes_branch(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root, registered=False)
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.removed, 1)
+        self.assertFalse(state_exists)
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_cleanup_reconciliation_skips_missing_request_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = _CleanupStoreMissingRequest(state_dir=state_dir)
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.items[0].reason, "request_record_missing")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_skips_non_terminal_request_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_queued_record())
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "request_record_not_terminal")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_skips_dirty_worktree(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root, dirty=True)
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "worktree_dirty_or_status_failed")
+        self.assertTrue(state_exists)
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+
+    def test_cleanup_reconciliation_skips_active_session(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root, tmux_active=True),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "tmux_session_active")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_skips_unknown_source_checkout(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "missing-code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            worktree_root.mkdir(parents=True)
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "source_checkout_missing")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_skips_worktree_outside_state_root(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = temporary_root / "other" / "worktree"
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "worktree_path_outside_worker_state_root")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_skips_non_worker_branch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+                worktree_branch="feature/not-worker-owned",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=_CleanupReconciliationRunner(worktree_root=worktree_root),
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "branch_not_worker_owned")
+        self.assertTrue(state_exists)
+
+    def test_cleanup_reconciliation_preserves_state_when_branch_delete_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            runner = _CleanupReconciliationRunner(
+                worktree_root=worktree_root,
+                branch_delete_fails=True,
+            )
+
+            result = reconcile_every_code_worker_cleanup_state(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=state_dir,
+                apply=True,
+                runner=runner,
+            )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.items[0].reason, "cleanup_failed")
+        self.assertTrue(state_exists)
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
     def test_terminal_request_preserves_session_state_when_worktree_cleanup_fails(
         self,
     ) -> None:
@@ -2957,6 +3415,83 @@ class EveryCodeWorkerTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["checked"], 1)
         self.assertEqual(payload["blocked"], 1)
+
+    def test_cli_reconcile_cleanup_defaults_to_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root)
+            with patch("control_plane.every_code_worker._run_subprocess", runner):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "every-code",
+                        "reconcile-cleanup",
+                        "--state-dir",
+                        str(state_dir),
+                        "--host",
+                        "Chris-Studio",
+                    ],
+                )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["would_remove"], 1)
+        self.assertTrue(state_exists)
+
+    def test_cli_reconcile_cleanup_apply_removes_safe_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            checkout_root = temporary_root / "Developer" / "code"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            checkout_root.mkdir(parents=True)
+            worktree_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            (worktree_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_work_request_record(_terminal_record())
+            state_path = _write_cleanup_session_state(
+                state_dir=state_dir,
+                source_checkout_root=checkout_root,
+                launch_root=worktree_root,
+            )
+            runner = _CleanupReconciliationRunner(worktree_root=worktree_root)
+            with patch("control_plane.every_code_worker._run_subprocess", runner):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "every-code",
+                        "reconcile-cleanup",
+                        "--state-dir",
+                        str(state_dir),
+                        "--host",
+                        "Chris-Studio",
+                        "--apply",
+                    ],
+                )
+            state_exists = state_path.exists()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "apply")
+        self.assertEqual(payload["removed"], 1)
+        self.assertFalse(state_exists)
 
 
 if __name__ == "__main__":
