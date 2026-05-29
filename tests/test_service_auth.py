@@ -259,6 +259,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "every_code_work_request.rerun": "safe_write",
             "product_config.apply": "mutation",
             "product_config.apply.secret": "secret_backed",
+            "public_ingress_notification_policy.apply": "mutation",
             "generic_web_prod_promotion.execute": "prod",
             "preview_destroy.execute": "destructive",
             "secret_binding.apply": "secret_backed",

@@ -78,6 +78,7 @@ LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset(
     {
         "merge_train.policy_targets",
         "public_ingress_monitor.run_once",
+        "public_ingress_notification_policy.apply",
         "product_config.plan",
         "product_config.apply",
         "work_graph.issue_inbox.reconcile",

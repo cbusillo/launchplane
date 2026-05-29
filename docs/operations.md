@@ -100,6 +100,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/github-humans/grants`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
+- `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
