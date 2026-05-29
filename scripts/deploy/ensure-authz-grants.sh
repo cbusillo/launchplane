@@ -755,6 +755,23 @@ post_launchplane_grant() {
     "$event_name"
 }
 
+post_launchplane_service_grant() {
+  local workflow_file="$1"
+  local action_name="$2"
+  local source_label="$3"
+  local idempotency_suffix="$4"
+  local event_name="${5:-workflow_dispatch}"
+  post_grant \
+    "$GITHUB_REPOSITORY" \
+    "$workflow_file" \
+    launchplane \
+    launchplane \
+    "$action_name" \
+    "$source_label" \
+    "$idempotency_suffix" \
+    "$event_name"
+}
+
 post_syo_grant() {
   local workflow_file="$1"
   local product_name="$2"
@@ -964,13 +981,13 @@ apply_product_onboarding \
 apply_verireel_onboarding
 apply_odoo_cm_onboarding
 apply_odoo_opw_onboarding
-post_launchplane_grant \
+post_launchplane_service_grant \
   public-ingress-monitor.yml \
   public_ingress_monitor.run_once \
   deploy:public-ingress-monitor-grant \
   public-ingress-monitor \
   schedule
-post_launchplane_grant \
+post_launchplane_service_grant \
   public-ingress-monitor.yml \
   public_ingress_monitor.run_once \
   deploy:public-ingress-monitor-manual-grant \
