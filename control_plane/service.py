@@ -12633,8 +12633,10 @@ def create_launchplane_service_app(
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
                     "deployment_record_id": driver_result.deployment_record_id,
+                    "release_tuple_id": driver_result.release_tuple_id,
                     "rollback_status": driver_result.rollback_status,
                     "rollback_health_status": driver_result.rollback_health_status,
+                    "post_deploy_status": driver_result.post_deploy_status,
                 }
             elif path == _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path:
                 odoo_replacement_plan_request = (

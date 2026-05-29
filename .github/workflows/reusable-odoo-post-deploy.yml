@@ -1,0 +1,71 @@
+---
+name: Reusable Odoo Post Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance to run post-deploy against.
+        required: true
+        type: string
+      phase:
+        description: Odoo override apply phase.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "600000"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  post-deploy:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    steps:
+      - name: Request Launchplane Odoo post-deploy driver
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: https://launchplane.shinycomputers.com
+          audience: launchplane.shinycomputers.com
+          route-path: /v1/drivers/odoo/post-deploy
+          payload: >-
+            {"schema_version":1,"product":"odoo","post_deploy":{"schema_version":1}}
+          payload-fields: |-
+            post_deploy.context=${{ inputs.context }}
+            post_deploy.instance=${{ inputs.instance }}
+            post_deploy.phase=${{ inputs.phase }}
+          idempotency-key: >-
+            odp:${{ inputs.context }}:${{ github.run_id }}:${{ github.run_attempt }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.post_deploy_status
+          output-paths: >-
+            post_deploy_status=result.post_deploy_status,
+            override_status=result.override_status,
+            override_record_found=result.override_record_found,
+            override_payload_rendered=result.override_payload_rendered,
+            applied_at=result.applied_at,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
+          OVERRIDE_STATUS: ${{ steps.lp.outputs.override_status }}
+          OVERRIDE_RECORD_FOUND: ${{ steps.lp.outputs.override_record_found }}
+          OVERRIDE_PAYLOAD_RENDERED: >-
+            ${{ steps.lp.outputs.override_payload_rendered }}
+        run: |
+          echo "post_deploy_status=$POST_DEPLOY_STATUS"
+          echo "override_status=$OVERRIDE_STATUS"
+          echo "override_record_found=$OVERRIDE_RECORD_FOUND"
+          echo "override_payload_rendered=$OVERRIDE_PAYLOAD_RENDERED"
