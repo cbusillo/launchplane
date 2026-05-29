@@ -188,7 +188,20 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("odoo-artifact-publish:odoo:", workflow_text)
         self.assertIn("fail-result-paths: result.input_status", workflow_text)
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
+        self.assertIn("token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}", workflow_text)
+        self.assertIn("inputs.source_git_ref=${{ github.sha }}", workflow_text)
+        self.assertIn(
+            "RESOLVED_IMAGE_REPOSITORY: >-\n"
+            "            ${{ steps.publish_inputs.outputs.image_repository }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}",
+            workflow_text,
+        )
         self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)
+        self.assertNotIn("short_sha=", workflow_text)
+        self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
 
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(
