@@ -157,6 +157,7 @@ class ProductOnboardingTests(unittest.TestCase):
         )
 
         expected_workflows = (
+            "reusable-odoo-artifact-publish.yml",
             "reusable-odoo-post-deploy.yml",
             "reusable-odoo-prod-promotion.yml",
             "reusable-odoo-prod-rollback.yml",
@@ -164,11 +165,30 @@ class ProductOnboardingTests(unittest.TestCase):
         for workflow_file in expected_workflows:
             self.assertIn(workflow_file, script_text)
         for context_name in ("cm", "opw"):
+            self.assertIn(
+                f"deploy:odoo-{context_name}-artifact-publish-inputs-grant",
+                script_text,
+            )
+            self.assertIn(f"deploy:odoo-{context_name}-artifact-publish-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
             self.assertIn(
                 f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text
             )
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
+
+    def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-odoo-artifact-publish.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("workflow_call", workflow_text)
+        self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
+        self.assertIn("/v1/drivers/odoo/artifact-publish", workflow_text)
+        self.assertIn("odoo-artifact-publish-inputs:odoo:", workflow_text)
+        self.assertIn("odoo-artifact-publish:odoo:", workflow_text)
+        self.assertIn("fail-result-paths: result.input_status", workflow_text)
+        self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
+        self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)
 
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(

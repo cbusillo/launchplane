@@ -1280,6 +1280,22 @@ post_odoo_cm_preview_grant \
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
   cm \
+  odoo-artifact-publish.yml \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-cm-artifact-publish-inputs-grant \
+  odoo-cm-artifact-publish-inputs \
+  reusable-odoo-artifact-publish.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
+  odoo-artifact-publish.yml \
+  odoo_artifact_publish.write \
+  deploy:odoo-cm-artifact-publish-grant \
+  odoo-cm-artifact-publish \
+  reusable-odoo-artifact-publish.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
   odoo-post-deploy.yml \
   odoo_post_deploy.execute \
   deploy:odoo-cm-post-deploy-grant \
@@ -1362,6 +1378,22 @@ post_odoo_opw_preview_grant \
   deploy:odoo-opw-preview-apply-manual-grant \
   odoo-opw-preview-apply-manual \
   workflow_dispatch
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
+  odoo-artifact-publish.yml \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-opw-artifact-publish-inputs-grant \
+  odoo-opw-artifact-publish-inputs \
+  reusable-odoo-artifact-publish.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
+  odoo-artifact-publish.yml \
+  odoo_artifact_publish.write \
+  deploy:odoo-opw-artifact-publish-grant \
+  odoo-opw-artifact-publish \
+  reusable-odoo-artifact-publish.yml
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-opw \
   opw \
