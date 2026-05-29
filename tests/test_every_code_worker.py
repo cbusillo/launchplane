@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
+import shutil
 import threading
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -1836,7 +1837,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 }
             )
             store.write_every_code_work_request_record(record)
-            runner = _ExistingSessionRunner()
+            runner = _ExistingSessionRunner(existing_branch=True)
 
             with patch("control_plane.every_code_worker.os.killpg") as killpg:
                 closed = close_terminal_every_code_sessions(
@@ -1942,6 +1943,114 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
         self.assertFalse(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_terminal_request_preserves_session_state_when_worktree_cleanup_fails(
+        self,
+    ) -> None:
+        class _BranchDeleteFailsRunner(_ExistingSessionRunner):
+            def __init__(self) -> None:
+                super().__init__(existing_branch=True)
+
+            def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                self.calls.append(tuple(args))
+                if args[0] == "git" and args[3:5] == ("branch", "-d"):
+                    return subprocess.CompletedProcess(args, 1, "", "not merged")
+                if args[0] == "git":
+                    self.calls.pop()
+                    return _Runner.__call__(self, args)
+                self.calls.pop()
+                return super().__call__(args)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+            runner = _BranchDeleteFailsRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg"):
+                close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+            self.assertTrue(state_path.exists())
+        self.assertTrue(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
+
+    def test_terminal_request_deletes_branch_when_worktree_path_is_gone(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            worktree_root = every_code_worktree_root(
+                _queued_record(), state_dir=temporary_root / "state"
+            )
+            shutil.rmtree(worktree_root)
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+            runner = _Runner(existing_branch=True)
+
+            with patch("control_plane.every_code_worker.os.killpg"):
+                close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertFalse(state_path.exists())
+        self.assertFalse(any(call[3:5] == ("worktree", "remove") for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("branch", "-d") for call in runner.calls))
 
     def test_terminal_request_kills_worktree_processes_when_tmux_is_gone(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
