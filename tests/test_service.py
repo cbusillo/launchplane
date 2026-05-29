@@ -173,6 +173,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewRefreshResult,
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
+from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
@@ -325,14 +326,18 @@ class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def land_batch_candidate(
         self, *, landing_plan: MergeTrainBatchLandingPlan
     ) -> MergeTrainBatchLandingPlan:
-        raise MergeTrainGitHubStaleHeadError("Base branch moved outside the batch landing plan.", status_code=409)
+        raise MergeTrainGitHubStaleHeadError(
+            "Base branch moved outside the batch landing plan.", status_code=409
+        )
 
 
 class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     def land_batch_candidate(
         self, *, landing_plan: MergeTrainBatchLandingPlan
     ) -> MergeTrainBatchLandingPlan:
-        raise MergeTrainGitHubError("GitHub API request failed for /repos/example/repo", status_code=503)
+        raise MergeTrainGitHubError(
+            "GitHub API request failed for /repos/example/repo", status_code=503
+        )
 
 
 class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
@@ -1866,6 +1871,61 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
+    def test_public_ingress_monitor_run_once_service_writes_observation(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
+                        ],
+                        "event_names": ["schedule"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["public_ingress_monitor.run_once"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main",
+            event_name="schedule",
+        )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                local_record_store_for_tests=store,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch("control_plane.service.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/products/public-ingress-monitor/run-once",
+                    payload={"schema_version": 1, "product": "launchplane", "notify": False},
+                    headers={"Idempotency-Key": "public-ingress-monitor-test"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        run_monitor.assert_called_once()
+
     def test_merge_train_run_once_service_returns_dry_run_from_policy(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -2874,15 +2934,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["details"]["github_status_code"], 409)
         self.assertTrue(
             all(
-                entry["status"] == "stale"
-                for entry in payload["result"]["landing_plan"]["entries"]
+                entry["status"] == "stale" for entry in payload["result"]["landing_plan"]["entries"]
             )
         )
         stale_record = next(
             record
             for record in landing_records
-            if record.record_id
-            == payload["records"]["merge_train_batch_landing_plan_record_id"]
+            if record.record_id == payload["records"]["merge_train_batch_landing_plan_record_id"]
         )
         self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
         self.assertEqual(next_status_code, 202)

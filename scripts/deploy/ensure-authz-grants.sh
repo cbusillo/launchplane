@@ -743,6 +743,7 @@ post_launchplane_grant() {
   local action_name="$2"
   local source_label="$3"
   local idempotency_suffix="$4"
+  local event_name="${5:-workflow_dispatch}"
   post_grant \
     "$GITHUB_REPOSITORY" \
     "$workflow_file" \
@@ -750,7 +751,8 @@ post_launchplane_grant() {
     launchplane \
     "$action_name" \
     "$source_label" \
-    "$idempotency_suffix"
+    "$idempotency_suffix" \
+    "$event_name"
 }
 
 post_syo_grant() {
@@ -962,6 +964,18 @@ apply_product_onboarding \
 apply_verireel_onboarding
 apply_odoo_cm_onboarding
 apply_odoo_opw_onboarding
+post_launchplane_grant \
+  public-ingress-monitor.yml \
+  public_ingress_monitor.run_once \
+  deploy:public-ingress-monitor-grant \
+  public-ingress-monitor \
+  schedule
+post_launchplane_grant \
+  public-ingress-monitor.yml \
+  public_ingress_monitor.run_once \
+  deploy:public-ingress-monitor-manual-grant \
+  public-ingress-monitor-manual \
+  workflow_dispatch
 post_grant \
   cbusillo/discord-blue \
   main.yml \

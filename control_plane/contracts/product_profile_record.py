@@ -56,9 +56,7 @@ class ProductOdooStableBootstrapPolicy(BaseModel):
         self.expected_domains = tuple(normalized_domains)
         if self.enabled:
             if not self.approval_issue_url:
-                raise ValueError(
-                    "enabled Odoo stable bootstrap policy requires approval_issue_url"
-                )
+                raise ValueError("enabled Odoo stable bootstrap policy requires approval_issue_url")
             if not self.confirmation:
                 raise ValueError("enabled Odoo stable bootstrap policy requires confirmation")
             if not self.expected_target_name:
@@ -113,9 +111,7 @@ class ProductOdooPrelaunchRebuildPolicy(BaseModel):
                     "enabled Odoo prelaunch rebuild policy requires expected_target_name"
                 )
             if not self.expected_domains:
-                raise ValueError(
-                    "enabled Odoo prelaunch rebuild policy requires expected_domains"
-                )
+                raise ValueError("enabled Odoo prelaunch rebuild policy requires expected_domains")
         return self
 
 
@@ -138,23 +134,30 @@ class ProductOdooLaneDataPolicy(BaseModel):
         self.allowed_rebuild_sources = tuple(normalized_sources)
         self.upstream_source = self.upstream_source.strip()
         if self.data_authority == "unknown" and self.allowed_rebuild_sources:
-            raise ValueError(
-                "unknown Odoo data authority cannot allow rebuild sources"
-            )
+            raise ValueError("unknown Odoo data authority cannot allow rebuild sources")
         if "upstream_restore" in self.allowed_rebuild_sources and not self.upstream_source:
-            raise ValueError(
-                "Odoo data policy allowing upstream_restore requires upstream_source"
-            )
+            raise ValueError("Odoo data policy allowing upstream_restore requires upstream_source")
         if self.data_authority == "authoritative" and not self.requires_backup_before_destroy:
-            raise ValueError(
-                "authoritative Odoo data policy requires backup before destroy"
-            )
+            raise ValueError("authoritative Odoo data policy requires backup before destroy")
         if self.data_authority == "authoritative" and not self.requires_restore_proof:
             raise ValueError("authoritative Odoo data policy requires restore proof")
         return self
 
     def allows_rebuild_source(self, source: str) -> bool:
         return source in self.allowed_rebuild_sources
+
+
+class ProductPublicIngressMonitoringPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    require_runtime_identity: bool = True
+    alert_issue_url: str = ""
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ProductPublicIngressMonitoringPolicy":
+        self.alert_issue_url = self.alert_issue_url.strip()
+        return self
 
 
 class ProductLaneProfile(BaseModel):
@@ -170,8 +173,9 @@ class ProductLaneProfile(BaseModel):
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy = Field(
         default_factory=ProductOdooPrelaunchRebuildPolicy
     )
-    odoo_data_policy: ProductOdooLaneDataPolicy = Field(
-        default_factory=ProductOdooLaneDataPolicy
+    odoo_data_policy: ProductOdooLaneDataPolicy = Field(default_factory=ProductOdooLaneDataPolicy)
+    public_ingress_monitoring: ProductPublicIngressMonitoringPolicy = Field(
+        default_factory=ProductPublicIngressMonitoringPolicy
     )
 
     @model_validator(mode="after")

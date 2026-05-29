@@ -10,6 +10,7 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooStableBootstrapPolicy,
     ProductExpectedConfigProfile,
     ProductPreviewProfile,
+    ProductPublicIngressMonitoringPolicy,
     ProductPromotionWorkflowProfile,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
@@ -29,8 +30,9 @@ class ProductOnboardingLaneManifest(BaseModel):
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy = Field(
         default_factory=ProductOdooPrelaunchRebuildPolicy
     )
-    odoo_data_policy: ProductOdooLaneDataPolicy = Field(
-        default_factory=ProductOdooLaneDataPolicy
+    odoo_data_policy: ProductOdooLaneDataPolicy = Field(default_factory=ProductOdooLaneDataPolicy)
+    public_ingress_monitoring: ProductPublicIngressMonitoringPolicy = Field(
+        default_factory=ProductPublicIngressMonitoringPolicy
     )
 
     @model_validator(mode="after")
@@ -267,9 +269,7 @@ class ProductOnboardingManifest(BaseModel):
         if context.strip() not in allowed_contexts:
             raise ValueError(f"{label} context is not owned by the product profile: {context}")
         if instance.strip() and (context.strip(), instance.strip()) not in lane_routes:
-            raise ValueError(
-                f"instance {label} must match a stable lane: {context}/{instance}"
-            )
+            raise ValueError(f"instance {label} must match a stable lane: {context}/{instance}")
 
     def product_expected_config_profile(self) -> ProductExpectedConfigProfile:
         return ProductExpectedConfigProfile.model_validate(

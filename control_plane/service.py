@@ -321,6 +321,10 @@ from control_plane.workflows.odoo_preview_runtime import (
     execute_odoo_preview_dokploy_apply,
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
+from control_plane.workflows.public_ingress_monitor import (
+    build_github_issue_notifier,
+    run_public_ingress_monitor_once,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -839,6 +843,22 @@ class RunnerHostHygieneAuditEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "RunnerHostHygieneAuditEvidenceEnvelope":
         if self.product.strip() != "launchplane":
             raise ValueError("runner host hygiene audit evidence requires product 'launchplane'")
+        self.product = "launchplane"
+        return self
+
+
+class PublicIngressMonitorRunOnceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str = "launchplane"
+    timeout_seconds: int = Field(default=10, ge=1, le=120)
+    notify: bool = True
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PublicIngressMonitorRunOnceEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("public ingress monitor run requires product 'launchplane'")
         self.product = "launchplane"
         return self
 
@@ -2940,6 +2960,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_profile.read", {"product": segments[2]}
     if len(segments) == 2 and segments == ["v1", "products"]:
         return "product_environment.read", {}
+    if len(segments) == 4 and segments == [
+        "v1",
+        "products",
+        "public-ingress-monitor",
+        "run-once",
+    ]:
+        return "public_ingress_monitor.run_once", {}
     if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
         return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
@@ -3036,6 +3063,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/preview-gates",
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
+        "/v1/products/public-ingress-monitor/run-once",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/runner-host-hygiene/audits",
@@ -10055,9 +10083,7 @@ def create_launchplane_service_app(
                                 source=f"service:controller:stale-landing:{request_trace_id}",
                                 updated_at=recorded_at,
                             )
-                            landing_store.write_merge_train_batch_landing_plan_record(
-                                stale_record
-                            )
+                            landing_store.write_merge_train_batch_landing_plan_record(stale_record)
                             message = (
                                 str(error).strip()
                                 or "Merge train landing evidence no longer matches GitHub."
@@ -10084,9 +10110,7 @@ def create_launchplane_service_app(
                                 source=f"service:controller:land:{request_trace_id}",
                                 updated_at=recorded_at,
                             )
-                            landing_store.write_merge_train_batch_landing_plan_record(
-                                landed_record
-                            )
+                            landing_store.write_merge_train_batch_landing_plan_record(landed_record)
                             result = {
                                 "merge_train_batch_landing_plan_record_id": landed_record.record_id,
                                 "repository": landed_plan.repository,
@@ -10129,8 +10153,8 @@ def create_launchplane_service_app(
                                 result["merge_train_stack_collapse_plan_record_id"] = (
                                     reconciled_record.record_id
                                 )
-                                result["stack_collapse_plan"] = (
-                                    reconciled_collapse_plan.model_dump(mode="json")
+                                result["stack_collapse_plan"] = reconciled_collapse_plan.model_dump(
+                                    mode="json"
                                 )
                             driver_result = result
                 else:
@@ -10648,6 +10672,48 @@ def create_launchplane_service_app(
                         "recorded_at": intent_record.recorded_at,
                     },
                 }
+                driver_result = result
+            elif path == "/v1/products/public-ingress-monitor/run-once":
+                monitor_request = PublicIngressMonitorRunOnceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="public_ingress_monitor.run_once",
+                    product=monitor_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot run public ingress monitoring.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                recorded_at = _utc_now_timestamp()
+                notifier = build_github_issue_notifier() if monitor_request.notify else None
+                monitor_result = run_public_ingress_monitor_once(
+                    record_store=record_store,
+                    checked_at=recorded_at,
+                    timeout_seconds=monitor_request.timeout_seconds,
+                    notify=monitor_request.notify,
+                    notifier=notifier,
+                )
+                result = monitor_result.model_dump(mode="json")
                 driver_result = result
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(
