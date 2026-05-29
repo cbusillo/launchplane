@@ -31,7 +31,8 @@
     },
     "lint": {
       "default": "uv run --extra dev ruff check .",
-      "changedFiles": "uv run --extra dev ruff check {files}"
+      "changedFiles": "uv run --extra dev ruff check {files}",
+      "odooOwnership": "uv run launchplane odoo-ownership check --workspace-root .."
     },
     "format": {
       "check": "uv run --extra dev ruff format --check ."
