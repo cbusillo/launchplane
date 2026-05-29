@@ -263,6 +263,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
+    MergeTrainGitHubStaleHeadError,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
 )
@@ -14230,7 +14231,25 @@ def create_launchplane_service_app(
                     },
                 },
             )
-        except MergeTrainGitHubError:
+        except MergeTrainGitHubStaleHeadError as error:
+            message = str(error).strip() or "Merge train landing evidence no longer matches GitHub."
+            return _json_response(
+                start_response=start_response,
+                status_code=409,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "merge_train_github_stale_state",
+                        "message": message,
+                    },
+                    "details": {
+                        "github_status_code": error.status_code,
+                    },
+                },
+            )
+        except MergeTrainGitHubError as error:
+            message = str(error).strip() or "GitHub merge train request failed."
             return _json_response(
                 start_response=start_response,
                 status_code=502,
@@ -14240,6 +14259,10 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "github_request_failed",
                         "message": "GitHub merge train request failed; retry after upstream recovers.",
+                    },
+                    "details": {
+                        "github_status_code": error.status_code,
+                        "message": message,
                     },
                 },
             )
