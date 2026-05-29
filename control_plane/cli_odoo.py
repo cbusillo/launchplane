@@ -11,6 +11,11 @@ from pydantic import ValidationError
 
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import secrets as control_plane_secrets
+from control_plane.odoo_ownership_checks import (
+    render_odoo_ownership_scan_json,
+    render_odoo_ownership_scan_text,
+    scan_odoo_ownership_boundaries,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -67,6 +72,7 @@ def register_odoo_commands(main: click.Group, *, callbacks: OdooCliCallbacks) ->
     main.add_command(odoo_rollbacks)
     main.add_command(odoo_overrides)
     main.add_command(odoo_targets)
+    main.add_command(odoo_ownership)
 
 
 def _odoo_callbacks() -> OdooCliCallbacks:
@@ -637,6 +643,36 @@ def odoo_overrides() -> None:
 @click.group("odoo-targets")
 def odoo_targets() -> None:
     """Odoo stable target planning commands."""
+
+
+@click.group("odoo-ownership")
+def odoo_ownership() -> None:
+    """Odoo ownership-boundary regression checks."""
+
+
+@odoo_ownership.command("check")
+@click.option(
+    "--workspace-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Directory containing launchplane and sibling Odoo repositories.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    show_default=True,
+)
+def odoo_ownership_check(workspace_root: Path | None, output_format: str) -> None:
+    resolved_workspace_root = workspace_root or _control_plane_root().parent
+    result = scan_odoo_ownership_boundaries(workspace_root=resolved_workspace_root)
+    if output_format == "json":
+        click.echo(render_odoo_ownership_scan_json(result))
+    else:
+        click.echo(render_odoo_ownership_scan_text(result))
+    if result.status != "pass":
+        raise click.ClickException("Odoo ownership boundary check failed.")
 
 
 @odoo_targets.command("replacement-plan")

@@ -120,6 +120,47 @@ A product repo is approved when all of these are true:
 - CI and security gates pass after cleanup.
 - At least one non-prod Launchplane path is exercised after the cleanup.
 
+## Odoo Ownership Regression Check
+
+Launchplane owns the Odoo ownership-boundary regression check. Run it from a
+workspace that contains `launchplane` and the Odoo sibling repos:
+
+```bash
+uv run launchplane odoo-ownership check --workspace-root ..
+```
+
+The check is intentionally narrow. It allows product-owned source, tests,
+artifact publishing, GHCR login, devkit local build/runtime behavior, and thin
+Launchplane connectors through either:
+
+- `cbusillo/launchplane/.github/actions/launchplane-request@main`
+- `cbusillo/launchplane/.github/workflows/reusable-odoo-*.yml@main`
+
+It blocks the patterns that previously caused ownership drift:
+
+- repo-local GitHub OIDC token clients instead of the shared request action or
+  reusable workflow
+- repo-local Launchplane HTTP clients that duplicate the shared connector
+- tenant workflows or scripts mutating Dokploy, SSH, compose, or other runtime
+  providers directly
+- devkit or retired repos exposing shared/prod mutation flows from arbitrary
+  checkouts
+- repo-local derivation of Launchplane-owned preview URLs, target IDs, release
+  tuple IDs, deployment IDs, promotion IDs, or backup-gate IDs outside approved
+  thin workflow response handling
+
+When a product repo genuinely needs new source-adjacent facts, add a typed
+Launchplane driver input or shared connector path before expanding the allowlist.
+Do not copy a request client, provider planner, or durable-record builder into a
+tenant, image, shared-addon, or local-DX repo.
+
+Retired `odoo-ai` archival authority is intentionally handled by the separate
+quarantine plan rather than this active-repo regression gate.
+Known `odoo-devkit` Dokploy-managed local/remote runtime helpers are still
+tracked by the local-DX separation plan; this check guards against new drift in
+tenant, image, shared-addon, and workflow/script surfaces while that cleanup
+continues.
+
 ## Cleanup Workflow
 
 For an existing repo, classify each workflow and script before deleting code:
