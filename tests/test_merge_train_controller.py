@@ -161,6 +161,24 @@ class MergeTrainControllerDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, "idle")
         self.assertEqual(decision.landing_plan_record_id, "")
 
+    def test_decision_treats_stale_landing_plan_as_terminal_for_candidate(self) -> None:
+        passed_record = _candidate_record(status="passed", candidate_sha="candidate-sha")
+        stale_landing_record = _landing_plan_record(
+            candidate=passed_record.candidate,
+            record_id="landing-stale",
+            entry_status="stale",
+            updated_at="2026-05-18T01:02:00Z",
+        )
+
+        decision = decide_merge_train_controller_record_action(
+            candidate_records=(passed_record,),
+            landing_plan_records=(stale_landing_record,),
+            stack_collapse_plan_records=(),
+        )
+
+        self.assertEqual(decision.action, "idle")
+        self.assertEqual(decision.landing_plan_record_id, "")
+
     def test_decision_supports_stack_collapse_records(self) -> None:
         planned_record = _stack_collapse_record(status="planned")
         waiting_record = _stack_collapse_record(

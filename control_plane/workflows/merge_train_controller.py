@@ -177,7 +177,7 @@ def latest_completed_merge_train_batch_landing_plan_record(
         return None
     if not latest_record.landing_plan.entries:
         return None
-    if any(entry.status != "merged" for entry in latest_record.landing_plan.entries):
+    if any(entry.status not in {"merged", "stale"} for entry in latest_record.landing_plan.entries):
         return None
     return latest_record
 

@@ -126,6 +126,8 @@ def _feedback_event(*, controller_action: str, result: dict[str, Any]) -> str:
 
     if controller_action in {"idle", "candidate_stopped"} and candidate_status == "stale":
         return "stale_policy"
+    if _landing_plan_stale(landing_plan):
+        return "stale_policy"
     if controller_action == "batch_landed" or _landing_plan_complete(landing_plan):
         return "completed"
     if candidate_status in {"blocked", "failed", "stale"}:
@@ -151,7 +153,7 @@ def _feedback_message(
     if event == "completed":
         return "Launchplane finished the merge-train step for this pull request."
     if event == "stale_policy":
-        return "Launchplane stopped using this train record because policy changed."
+        return "Launchplane stopped using this train record because its stored evidence is stale."
     if event == "blocked":
         detail = _blocking_detail(result)
         if detail:
@@ -211,6 +213,14 @@ def _landing_plan_complete(landing_plan: dict[str, Any]) -> bool:
     return bool(entries) and all(
         _string(_as_dict(entry).get("status")) == "merged" for entry in entries
     )
+
+
+def _landing_plan_stale(landing_plan: dict[str, Any]) -> bool:
+    entries = _as_list(landing_plan.get("entries"))
+    return bool(entries) and all(
+        _string(_as_dict(entry).get("status")) in {"merged", "stale"}
+        for entry in entries
+    ) and any(_string(_as_dict(entry).get("status")) == "stale" for entry in entries)
 
 
 def _required_string(value: object, field_name: str) -> str:
