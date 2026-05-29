@@ -37,9 +37,14 @@ jobs:
             run.context=${{ inputs.context }}
             run.request_id=${{ github.run_id }}-${{ github.run_attempt }}
           idempotency-key: >-
-            opp:${{ inputs.context }}:${{ github.run_id }}:${{ github.run_attempt }}
+            opp:${{ inputs.context }}:${{ github.run_id }}:${{
+              github.run_attempt
+            }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
-          fail-result-paths: result.run_status,result.destination_health_status
+          fail-result-paths: >-
+            result.run_status,result.promotion_status,
+            result.deployment_status,result.post_deploy_status,
+            result.destination_health_status
           output-paths: >-
             trace_id=trace_id,
             backup_record_id=result.backup_record_id,

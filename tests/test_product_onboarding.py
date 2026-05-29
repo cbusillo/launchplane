@@ -170,6 +170,22 @@ class ProductOnboardingTests(unittest.TestCase):
             )
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
 
+    def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
+        workflow_text = Path(
+            ".github/workflows/reusable-odoo-prod-promotion.yml"
+        ).read_text(encoding="utf-8")
+
+        for result_path in (
+            "result.run_status",
+            "result.promotion_status",
+            "result.deployment_status",
+            "result.post_deploy_status",
+            "result.destination_health_status",
+        ):
+            self.assertIn(result_path, workflow_text)
+
+        self.assertIn("fail-result-paths", workflow_text)
+
     def test_deploy_authz_grants_include_opw_manual_preview_workflow(
         self,
     ) -> None:
