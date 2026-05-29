@@ -1,6 +1,6 @@
-# AGENTS.md — Codex CLI Operating Guide (Read Me First)
+# AGENTS.md — Every Code Operating Guide (Read Me First)
 
-Treat this file as the launch checklist for every Codex session in
+Treat this file as the launch checklist for each Every Code session in
 `launchplane`.
 
 ## Start Here
