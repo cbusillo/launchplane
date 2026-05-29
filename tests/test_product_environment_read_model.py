@@ -17,6 +17,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
+    ProductEnvironmentReadModelCapabilityError,
     build_product_activity_read_model,
     build_product_environment_config_status,
     build_product_environment_detail,
@@ -274,10 +275,42 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
             and (not instance_name or incident.instance == instance_name)
             and (not status or incident.status == status)
         ]
-        incidents.sort(key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True)
+        incidents.sort(
+            key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True
+        )
         if limit is not None:
             incidents = incidents[:limit]
         return tuple(incidents)
+
+
+class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        observations: tuple[PublicIngressObservationRecord, ...],
+    ) -> None:
+        super().__init__(profile, ())
+        self._observations = observations
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        records = [
+            record
+            for record in self._observations
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
 
 class _ActivityRecordStore(_PreviewRecordStore):
@@ -994,6 +1027,48 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(prod_summary.public_ingress.incident_status, "open")
         self.assertEqual(prod_summary.public_ingress.incident_id, incident.incident_id)
         self.assertTrue(detail.public_ingress.notification_sent)
+
+    def test_product_environment_detail_fails_without_public_ingress_incident_support(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        observation = PublicIngressObservationRecord(
+            record_id="public-ingress-example-site-prod-20260529t120000z",
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            observed_at="2026-05-29T12:00:00Z",
+            status="fail",
+            failure_code="http_error",
+            base_url="https://example-site.example",
+            health_url="https://example-site.example/healthz",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="base_url",
+                    url="https://example-site.example",
+                    status="fail",
+                    failure_code="http_error",
+                    http_status=503,
+                    summary="HTTP 503",
+                ),
+            ),
+            notification_sent=True,
+            summary="Public ingress failed for example-site/prod: HTTP 503",
+        )
+        store = _PublicIngressObservationsOnlyStore(profile, (observation,))
+
+        with self.assertRaisesRegex(
+            ProductEnvironmentReadModelCapabilityError,
+            r"missing store method\(s\): list_public_ingress_incident_records",
+        ):
+            build_product_environment_detail(
+                record_store=store,
+                product="example-site",
+                environment="prod",
+                action_allowed=lambda *_: False,
+            )
 
     def test_product_environment_detail_exposes_runtime_identity_evidence(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

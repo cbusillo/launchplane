@@ -19,6 +19,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
+from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -403,6 +404,104 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(incident.opened_observation_id, store.records[0].record_id)
         self.assertEqual(incident.latest_observation_id, store.records[2].record_id)
         self.assertEqual(incident.resolved_observation_id, store.records[2].record_id)
+
+    def test_reuses_lane_scoped_public_ingress_incident_for_repeated_failures(self) -> None:
+        store = _Store((_profile(),))
+        incident_id = build_public_ingress_lane_incident_id(
+            product="example-site",
+            context="example-site",
+            instance="prod",
+        )
+        store.incidents.append(
+            PublicIngressIncidentRecord(
+                incident_id=incident_id,
+                product="example-site",
+                repository="cbusillo/example-site",
+                driver_id="generic-web",
+                context="example-site",
+                instance="prod",
+                status="open",
+                opened_at="2026-05-29T12:20:00Z",
+                opened_observation_id="public-ingress-example-site-prod-20260529t122000z",
+                latest_observation_id="public-ingress-example-site-prod-20260529t122000z",
+                latest_observed_at="2026-05-29T12:20:00Z",
+                failure_code="http_error",
+                summary="Public ingress failed.",
+            )
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=500,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.open_incident_count, 1)
+        self.assertEqual(len(store.incidents), 1)
+        self.assertEqual(store.incidents[0].incident_id, incident_id)
+        self.assertEqual(store.incidents[0].opened_at, "2026-05-29T12:20:00Z")
+        self.assertEqual(store.incidents[0].latest_observed_at, "2026-05-29T12:25:00Z")
+
+    def test_resolves_all_open_public_ingress_incidents_on_recovery(self) -> None:
+        store = _Store((_profile(),))
+        store.incidents.extend(
+            (
+                PublicIngressIncidentRecord(
+                    incident_id="public-ingress-incident-example-site-prod-1",
+                    product="example-site",
+                    repository="cbusillo/example-site",
+                    driver_id="generic-web",
+                    context="example-site",
+                    instance="prod",
+                    status="open",
+                    opened_at="2026-05-29T12:20:00Z",
+                    opened_observation_id="public-ingress-example-site-prod-20260529t122000z",
+                    latest_observation_id="public-ingress-example-site-prod-20260529t122000z",
+                    latest_observed_at="2026-05-29T12:20:00Z",
+                    failure_code="http_error",
+                    summary="Public ingress failed.",
+                ),
+                PublicIngressIncidentRecord(
+                    incident_id="public-ingress-incident-example-site-prod-2",
+                    product="example-site",
+                    repository="cbusillo/example-site",
+                    driver_id="generic-web",
+                    context="example-site",
+                    instance="prod",
+                    status="open",
+                    opened_at="2026-05-29T12:21:00Z",
+                    opened_observation_id="public-ingress-example-site-prod-20260529t122100z",
+                    latest_observation_id="public-ingress-example-site-prod-20260529t122100z",
+                    latest_observed_at="2026-05-29T12:21:00Z",
+                    failure_code="http_error",
+                    summary="Public ingress failed again.",
+                ),
+            )
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:30:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.resolved_incident_count, 2)
+        self.assertEqual(len(store.incidents), 2)
+        self.assertTrue(all(incident.status == "resolved" for incident in store.incidents))
+        self.assertTrue(
+            all(
+                incident.resolved_observation_id == store.records[-1].record_id
+                for incident in store.incidents
+            )
+        )
 
     def test_policy_driven_incident_notifications_record_attempts(self) -> None:
         store = _Store((_profile(),))
