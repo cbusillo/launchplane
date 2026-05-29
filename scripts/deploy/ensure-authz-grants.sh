@@ -1258,6 +1258,11 @@ post_odoo_cm_preview_grant \
 post_odoo_cm_preview_grant \
   odoo-tenant-cm \
   odoo_preview_apply.execute \
+  deploy:odoo-cm-preview-apply-grant \
+  odoo-cm-preview-apply
+post_odoo_cm_preview_grant \
+  odoo-tenant-cm \
+  odoo_preview_apply.execute \
   deploy:odoo-cm-preview-apply-manual-grant \
   odoo-cm-preview-apply-manual \
   workflow_dispatch
@@ -1318,6 +1323,11 @@ post_odoo_opw_preview_grant \
   deploy:odoo-opw-preview-apply-inputs-manual-grant \
   odoo-opw-preview-apply-inputs-manual \
   workflow_dispatch
+post_odoo_opw_preview_grant \
+  odoo-tenant-opw \
+  odoo_preview_apply.execute \
+  deploy:odoo-opw-preview-apply-grant \
+  odoo-opw-preview-apply
 post_odoo_opw_preview_grant \
   odoo-tenant-opw \
   odoo_preview_apply.execute \

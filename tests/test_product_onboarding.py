@@ -271,6 +271,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             (
                 "odoo-tenant-opw",
                 "odoo_preview_apply.execute",
+                "deploy:odoo-opw-preview-apply-grant",
+            ): ["pull_request"],
+            (
+                "odoo-tenant-opw",
+                "odoo_preview_apply.execute",
                 "deploy:odoo-opw-preview-apply-manual-grant",
             ): ["workflow_dispatch"],
         }
