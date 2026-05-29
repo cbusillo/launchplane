@@ -150,11 +150,13 @@ and generic-web preview refresh/destroy requests. The grant request returns only
 authz policy record metadata and rule counts; it does not echo workflow refs,
 human logins, or the full policy body.
 
-The `Public Ingress Monitor` workflow is a Launchplane-owned synthetic check for
-every public generic-web stable lane, including drivers that inherit generic-web
-behavior. It runs every ten minutes on staggered minute marks to avoid GitHub's
-high-load top-of-hour scheduler window. It calls
-`POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and is
+Public ingress monitoring is a Launchplane-owned synthetic check for every
+public generic-web stable lane, including drivers that inherit generic-web
+behavior. The recurring check runs from the already-scheduled `Merge Train
+Runner` workflow so it inherits the repo's proven scheduled Actions path. The
+manual `Public Ingress Monitor` workflow calls the same service route for
+operator reruns. Both paths call
+`POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
 authorized in the Launchplane service context. Monitoring is default-on for
 lanes with public `base_url` or `health_url`; disable it per lane only for
 non-public or intentionally unreachable endpoints. When a lane policy includes
