@@ -470,29 +470,34 @@ def _discover_odoo_preview_target(
     )
     matches: list[OdooPreviewRuntimeTargetEvidence] = []
     for compose in _iter_dokploy_composes(raw_projects):
-        discovered_name = str(compose.get("name") or "").strip()
-        if discovered_name != compose_name:
-            continue
-        compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
-        if not compose_id:
-            continue
-        if domain_host and not _compose_has_domain(
+        _append_preview_target_match(
+            matches=matches,
+            compose=compose,
+            compose_name=compose_name,
+            context_name=context_name,
+            preview_slug=preview_slug,
+            domain_host=domain_host,
             host=host,
             token=token,
-            compose_id=compose_id,
-            domain_host=domain_host,
-        ):
-            continue
-        matches.append(
-            OdooPreviewRuntimeTargetEvidence(
-                target_id=compose_id,
-                target_name=discovered_name,
-                context=context_name,
-                instance=preview_slug,
-                environment_kind="preview",
-                domain=domain_host,
-            )
         )
+    if not matches:
+        raw_search_matches = control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.search",
+            query={"q": compose_name, "limit": 25},
+        )
+        for compose in _iter_dokploy_search_composes(raw_search_matches):
+            _append_preview_target_match(
+                matches=matches,
+                compose=compose,
+                compose_name=compose_name,
+                context_name=context_name,
+                preview_slug=preview_slug,
+                domain_host=domain_host,
+                host=host,
+                token=token,
+            )
     if len(matches) > 1:
         raise click.ClickException(
             f"Discovered multiple Odoo preview composes named {compose_name!r}; refusing to plan mutation."
@@ -500,6 +505,44 @@ def _discover_odoo_preview_target(
     if matches:
         return matches[0]
     return None
+
+
+def _append_preview_target_match(
+    *,
+    matches: list[OdooPreviewRuntimeTargetEvidence],
+    compose: JsonObject,
+    compose_name: str,
+    context_name: str,
+    preview_slug: str,
+    domain_host: str,
+    host: str,
+    token: str,
+) -> None:
+    discovered_name = str(compose.get("name") or "").strip()
+    if discovered_name != compose_name:
+        return
+    compose_id = str(compose.get("composeId") or compose.get("id") or "").strip()
+    if not compose_id:
+        return
+    if domain_host and not _compose_has_domain(
+        host=host,
+        token=token,
+        compose_id=compose_id,
+        domain_host=domain_host,
+    ):
+        return
+    if any(match.target_id == compose_id for match in matches):
+        return
+    matches.append(
+        OdooPreviewRuntimeTargetEvidence(
+            target_id=compose_id,
+            target_name=discovered_name,
+            context=context_name,
+            instance=preview_slug,
+            environment_kind="preview",
+            domain=domain_host,
+        )
+    )
 
 
 def _with_runtime_blocker(
@@ -559,6 +602,28 @@ def _iter_dokploy_composes(raw_projects: object) -> tuple[JsonObject, ...]:
                 compose = control_plane_dokploy.as_json_object(raw_compose)
                 if compose is not None:
                     composes.append(compose)
+    return tuple(composes)
+
+
+def _iter_dokploy_search_composes(raw_search_matches: object) -> tuple[JsonObject, ...]:
+    if isinstance(raw_search_matches, list):
+        search_items = raw_search_matches
+    elif isinstance(raw_search_matches, dict):
+        search_items = []
+        for key in ("composes", "items", "results", "data"):
+            value = raw_search_matches.get(key)
+            if isinstance(value, list):
+                search_items.extend(value)
+    else:
+        raise click.ClickException(
+            "Dokploy compose search returned an invalid response payload."
+        )
+
+    composes: list[JsonObject] = []
+    for raw_compose in search_items:
+        compose = control_plane_dokploy.as_json_object(raw_compose)
+        if compose is not None:
+            composes.append(compose)
     return tuple(composes)
 
 
