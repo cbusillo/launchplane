@@ -152,12 +152,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
         self.assertNotIn("preview_refresh", actions)
+        self.assertNotIn("preview_refresh", route_aliases)
+        self.assertNotIn("preview_destroy", route_aliases)
         self.assertNotIn("preview_verification", actions)
-        self.assertEqual(
-            route_aliases["preview_refresh"].route_path,
-            "/v1/drivers/odoo/preview-refresh",
-        )
-        self.assertFalse(route_aliases["preview_refresh"].operator_visible)
         self.assertEqual(
             route_aliases["preview_verification"].route_path,
             "/v1/drivers/odoo/preview-verification",
@@ -503,11 +500,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:
-        self.assertEqual(
-            control_plane_service._driver_route_metadata_from_descriptors()[
-                "/v1/drivers/odoo/preview-refresh"
-            ].action_id,
-            "preview_refresh",
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-refresh",
+            control_plane_service._driver_route_metadata_from_descriptors(),
+        )
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-destroy",
+            control_plane_service._driver_route_metadata_from_descriptors(),
         )
         self.assertEqual(
             control_plane_service._driver_route_metadata_from_descriptors()[

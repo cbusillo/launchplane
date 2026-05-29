@@ -1120,14 +1120,10 @@ retries do not collide. The regular cleanup workflow uses
   `generic-web-preview-refresh:<product>:<anchor_pr_number>:<sha>`
 - generic-web preview destroy driver:
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
-- Odoo preview refresh driver:
-  `odoo-preview-refresh:<product>:<anchor_pr_number>:<sha>`
 - Odoo isolated preview apply-inputs driver:
   `odoo-preview-apply-inputs:<product>:<preview_slug>:<sha>`
 - Odoo isolated preview apply driver:
   `odoo-preview-apply:<product>:<preview_slug>:<operation>:<sha-or-destroy>`
-- Odoo preview destroy driver:
-  `odoo-preview-destroy:<product>:<anchor_pr_number>`
 
 Generic-web product workflow clients live in product repositories as thin
 Launchplane callers until Launchplane provides a shared distributable helper.
@@ -1140,15 +1136,13 @@ same product operation. Generic-web preview destroy keys intentionally omit the
 free-form destroy reason so the same preview cleanup is idempotent even when the
 caller wording changes between cleanup paths.
 
-Odoo preview routes intentionally reuse the generic-web preview request schema,
-profile resolver, URL derivation, and record writer. Product repos call the
-Odoo-shaped routes so authz and driver views remain product-specific, while
-Launchplane still derives the live preview URL from runtime-environment records
-and writes the shared preview and preview-generation records from DB-backed
-product profile preview configuration. The Odoo preview-refresh route also
-accepts an artifact manifest in `refresh.manifest`; Launchplane resolves it to
-the exact immutable image reference before entering the shared generic preview
-executor so tenant workflows do not parse artifact manifests locally.
+Odoo preview mutation routes intentionally use the isolated compose
+planner/apply pair instead of product-shaped generic preview refresh/destroy
+aliases. Product repos call `POST /v1/drivers/odoo/preview-apply-inputs` so
+Launchplane derives the live preview URL, runtime bindings, target evidence,
+and provider dry-run plan from DB-backed product profile preview configuration,
+runtime-environment records, managed secrets, and tracked target records. Tenant
+workflows then call `POST /v1/drivers/odoo/preview-apply` with the ready plan.
 
 `POST /v1/drivers/odoo/preview-apply-inputs` is the Launchplane-owned handoff
 between thin tenant preview workflows and isolated Odoo provider apply. The

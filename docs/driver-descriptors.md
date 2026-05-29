@@ -209,18 +209,13 @@ The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
 Odoo declares `base_driver_id="generic-web"` and inherits generic-web preview
-actions as its advertised lifecycle surface. Odoo-shaped preview routes remain
-registered as non-operator `route_aliases` for compatibility with existing
-workflows: `POST /v1/drivers/odoo/preview-desired-state`,
-`POST /v1/drivers/odoo/preview-refresh`,
-`POST /v1/drivers/odoo/preview-inventory`,
-`POST /v1/drivers/odoo/preview-readiness`, and
-`POST /v1/drivers/odoo/preview-destroy`. Odoo preview verification is also a
-non-operator route alias: it keeps the typed `odoo_preview_verification`
-response shape for existing workflows while the advertised action and durable
-record mutation belong to generic-web preview verification. New product
-workflows should use the generic-web routes for generic lifecycle evidence
-unless the product driver documents a narrower product-specific contract. The
+actions as its advertised lifecycle surface. The Odoo-specific preview mutation
+surface is the isolated compose planner/apply pair, not Odoo-shaped
+`preview-refresh` or `preview-destroy` compatibility aliases. Odoo preview
+desired-state, inventory, readiness, and verification remain non-operator route
+aliases where they preserve typed Odoo evidence without mutating provider state.
+New tenant workflows should call `POST /v1/drivers/odoo/preview-apply-inputs`
+and then `POST /v1/drivers/odoo/preview-apply` for refresh and destroy. The
 lower-level `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
 Dokploy plan to provider state after service authorization and idempotency
 checks. The route resolves runtime env values from Launchplane-owned
@@ -233,11 +228,10 @@ image, and source facts only; Launchplane derives the preview slug, public URL,
 runtime binding evidence, template compose id, Dokploy environment id, Odoo
 runtime plan, and redacted provider dry-run plan from product profiles,
 runtime-environment records, managed secrets, and tracked Dokploy target records.
-The route is read-only, returns no plaintext runtime or secret values, and is
-refresh-only until Launchplane has inventory-backed discovery for existing Odoo
-preview targets. Tenant workflows should call this route before
-`preview-apply` instead of assembling Odoo runtime or Dokploy plan payloads in
-the tenant repo.
+The route is read-only, returns no plaintext runtime or secret values, and
+supports both refresh and destroy planning. Tenant workflows should call this
+route before `preview-apply` instead of assembling Odoo runtime or Dokploy plan
+payloads in the tenant repo.
 Odoo stable promotion also exposes
 `POST /v1/drivers/odoo/prod-promotion-inputs` as a read-only action before the
 backup gate and promotion mutation routes. The route resolves the promotable

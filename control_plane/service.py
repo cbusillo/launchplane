@@ -317,10 +317,8 @@ from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
     OdooPreviewApplyInputsRequest,
     OdooPreviewDokployApplyRequest,
-    OdooPreviewRefreshRequest,
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
-    generic_preview_refresh_request_from_odoo,
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
@@ -1064,26 +1062,6 @@ class GenericWebPreviewInventoryEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooPreviewRefreshEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    refresh: GenericWebPreviewRefreshRequest
-
-    @field_validator("refresh", mode="before")
-    @classmethod
-    def _normalize_refresh(cls, value: object) -> GenericWebPreviewRefreshRequest:
-        return generic_preview_refresh_request_from_odoo(
-            OdooPreviewRefreshRequest.model_validate(value)
-        )
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooPreviewRefreshEnvelope":
-        if not self.product.strip():
-            raise ValueError("Odoo preview refresh requires product")
-        if self.product.strip() != self.refresh.product.strip():
-            raise ValueError("Odoo preview refresh requires matching product values")
-        return self
-
-
 _GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-refresh",
     envelope_model=GenericWebPreviewRefreshEnvelope,
@@ -1230,13 +1208,6 @@ _ODOO_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_ODOO_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-refresh",
-    envelope_model=OdooPreviewRefreshEnvelope,
-    denial_message="Workflow cannot refresh Odoo preview state for the requested product/context.",
-)
-
-
 _ODOO_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-inventory",
     envelope_model=GenericWebPreviewInventoryEnvelope,
@@ -1248,13 +1219,6 @@ _ODOO_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-readiness",
     envelope_model=GenericWebPreviewReadinessEnvelope,
     denial_message="Workflow cannot evaluate Odoo preview readiness for the requested product/context.",
-)
-
-
-_ODOO_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-destroy",
-    envelope_model=GenericWebPreviewDestroyEnvelope,
-    denial_message="Workflow cannot destroy Odoo preview state for the requested product/context.",
 )
 
 
@@ -1390,15 +1354,11 @@ _PREVIEW_DESIRED_STATE_ROUTE_PATHS = frozenset(
 _PREVIEW_INVENTORY_ROUTE_PATHS = frozenset(
     {_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path, _ODOO_PREVIEW_INVENTORY_ROUTE.route_path}
 )
-_PREVIEW_REFRESH_ROUTE_PATHS = frozenset(
-    {_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path, _ODOO_PREVIEW_REFRESH_ROUTE.route_path}
-)
+_PREVIEW_REFRESH_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path})
 _PREVIEW_READINESS_ROUTE_PATHS = frozenset(
     {_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path, _ODOO_PREVIEW_READINESS_ROUTE.route_path}
 )
-_PREVIEW_DESTROY_ROUTE_PATHS = frozenset(
-    {_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path, _ODOO_PREVIEW_DESTROY_ROUTE.route_path}
-)
+_PREVIEW_DESTROY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path})
 _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
     {
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
@@ -2812,9 +2772,7 @@ def _generic_web_preview_inventory_route_metadata(
 
 def _generic_web_preview_refresh_route_metadata(
     path: str,
-) -> _DriverRouteExecutionMetadata[Any]:
-    if path == _ODOO_PREVIEW_REFRESH_ROUTE.route_path:
-        return _ODOO_PREVIEW_REFRESH_ROUTE
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewRefreshEnvelope]:
     return _GENERIC_WEB_PREVIEW_REFRESH_ROUTE
 
 
@@ -2829,8 +2787,6 @@ def _generic_web_preview_readiness_route_metadata(
 def _generic_web_preview_destroy_route_metadata(
     path: str,
 ) -> _DriverRouteExecutionMetadata[GenericWebPreviewDestroyEnvelope]:
-    if path == _ODOO_PREVIEW_DESTROY_ROUTE.route_path:
-        return _ODOO_PREVIEW_DESTROY_ROUTE
     return _GENERIC_WEB_PREVIEW_DESTROY_ROUTE
 
 

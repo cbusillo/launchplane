@@ -715,14 +715,14 @@ Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
-Odoo PR previews use Odoo-shaped Launchplane driver routes over the same
-generic-web preview lifecycle. Product workflows call
-`POST /v1/drivers/odoo/preview-refresh` with a preview slug, preview URL, and
-immutable image reference; Launchplane resolves the Odoo product profile preview
-context, verifies the profile is preview-enabled, runs generic-web readiness, and
-writes shared preview and preview-generation records. Cleanup calls
-`POST /v1/drivers/odoo/preview-destroy` and leaves the same cleanup/read-model
-history as generic-web previews.
+Odoo PR previews use the Odoo isolated compose planner/apply routes over the
+same shared preview lifecycle records. Product workflows call
+`POST /v1/drivers/odoo/preview-apply-inputs` with product, PR, source, and
+manifest facts, then call `POST /v1/drivers/odoo/preview-apply` with the ready
+dry-run plan for both refresh and destroy. Launchplane resolves the Odoo product
+profile preview context, runtime bindings, template compose, public preview URL,
+and provider operations inside the service boundary. Odoo-specific
+`preview-refresh` and `preview-destroy` compatibility routes are retired.
 
 Stage-MVP Odoo previews may point at a Dokploy `compose` template lane only when
 the product profile uses `driver_id="odoo"` and `preview.data_transport_mode` is
