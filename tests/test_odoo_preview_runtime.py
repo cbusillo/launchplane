@@ -356,6 +356,88 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ["domain_lookup", "domain_delete", "compose_delete"],
         )
 
+    def test_apply_inputs_builds_destroy_plan_from_compose_search_match(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [{"environments": [{"composes": []}]}]
+            if path == "/api/compose.search":
+                return [
+                    {
+                        "composeId": "compose-cm-pr-45",
+                        "name": "cm-odoo-preview-pr-45",
+                        "appName": "cm-odoo-preview-pr-45-lu6502",
+                    }
+                ]
+            if path == "/api/domain.byComposeId":
+                return _preview_domain_payload()
+            raise AssertionError(path)
+
+        with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+
+        self.assertEqual(result.status, "ready")
+        self.assertIsNotNone(result.runtime_plan.target)
+        assert result.runtime_plan.target is not None
+        self.assertEqual(result.runtime_plan.target.target_id, "compose-cm-pr-45")
+        self.assertEqual(result.dry_run_plan.compose_ref, "compose-cm-pr-45")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            [
+                "/api/project.all",
+                "/api/compose.search",
+                "/api/domain.byComposeId",
+            ],
+        )
+        self.assertEqual(
+            requests[1]["query"], {"q": "cm-odoo-preview-pr-45", "limit": 25}
+        )
+
+    def test_apply_inputs_ignores_compose_search_name_mismatch(self) -> None:
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [{"environments": [{"composes": []}]}]
+            if path == "/api/compose.search":
+                return [
+                    {
+                        "composeId": "compose-cm-pr-450",
+                        "name": "cm-odoo-preview-pr-450",
+                    }
+                ]
+            raise AssertionError(path)
+
+        with _patched_apply_inputs_runtime(dokploy_side_effect=_fake_dokploy_request):
+            result = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=_OdooApplyInputsStore(),
+                profile=_profile(),
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn(
+            "destroy_target_missing", {blocker.code for blocker in result.runtime_plan.blockers}
+        )
+
     def test_apply_inputs_destroy_blocks_without_matching_preview_compose(self) -> None:
         with (
             patch(
