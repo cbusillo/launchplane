@@ -168,6 +168,16 @@ derived from runtime-environment records, managed secret binding records, driver
 support, and trust metadata; expected config requirements do not store runtime
 values, managed secret IDs, secret plaintext, or ciphertext.
 
+Stable lanes inherit public-ingress synthetic monitoring by default when their
+product uses `generic-web` or a driver based on it. A lane with a public
+`base_url` or `health_url` is eligible unless its
+`public_ingress_monitoring.enabled` policy is set false. The monitor records
+HTTP reachability, redirect failures, private/internal URL skips, and runtime
+identity comparison when current lane inventory or deployment evidence provides
+an expected identity. Lane policy may carry an `alert_issue_url`; Launchplane
+uses that issue for fail/recover transition comments, not as runtime
+configuration authority.
+
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
 and the preview inventory all appear under that workspace in the operator UI.
@@ -238,6 +248,20 @@ For initial seed or repair work, operators can write the same DB-backed record
 directly with `uv run launchplane product-profiles upsert --database-url ...`.
 That command is an operator tool for creating the Launchplane record; it is not
 a repo-local manifest and should not become product repo authority.
+
+## Public Ingress Observation Records
+
+Public ingress observations are append-only Launchplane records under
+`launchplane_public_ingress_observations`. Each record is keyed by product,
+context, instance, and observation time. It stores the checked base and health
+URLs, pass/fail/skipped status, failure code, redirect and HTTP evidence,
+runtime identity match detail when available, and whether Launchplane delivered
+a configured transition notification.
+
+These records are the source for the product environment read model's
+`public_ingress` summary. A passing observation is verified evidence, a failing
+observation marks the lane stale/unhealthy, and a skipped private URL is treated
+as unsupported rather than silently healthy.
 
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry

@@ -23,6 +23,8 @@ from control_plane.contracts.product_environment_read_model import (
     build_product_site_overview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -221,6 +223,36 @@ class _RuntimeIdentityReadModelStore(_PreviewRecordStore):
         if artifact_id == self._artifact_manifest.artifact_id:
             return self._artifact_manifest
         raise FileNotFoundError(artifact_id)
+
+
+class _PublicIngressReadModelStore(_PreviewRecordStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        observations: tuple[PublicIngressObservationRecord, ...],
+    ) -> None:
+        super().__init__(profile, ())
+        self._observations = observations
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        records = [
+            record
+            for record in self._observations
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
 
 class _ActivityRecordStore(_PreviewRecordStore):
@@ -875,6 +907,53 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(detail.odoo_requires_backup_before_destroy)
         self.assertTrue(detail.odoo_requires_restore_proof)
         self.assertTrue(detail.odoo_requires_runtime_identity)
+
+    def test_product_read_model_exposes_public_ingress_observation(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        observation = PublicIngressObservationRecord(
+            record_id="public-ingress-example-site-prod-20260529t120000z",
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            observed_at="2026-05-29T12:00:00Z",
+            status="fail",
+            failure_code="http_error",
+            base_url="https://example-site.example",
+            health_url="https://example-site.example/healthz",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="base_url",
+                    url="https://example-site.example",
+                    status="fail",
+                    failure_code="http_error",
+                    http_status=503,
+                    summary="HTTP 503",
+                ),
+            ),
+            notification_sent=True,
+            summary="Public ingress failed for example-site/prod: HTTP 503",
+        )
+        store = _PublicIngressReadModelStore(profile, (observation,))
+
+        overview = build_product_site_overview(
+            record_store=store,
+            product="example-site",
+            action_allowed=lambda *_: False,
+        )
+        detail = build_product_environment_detail(
+            record_store=store,
+            product="example-site",
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+
+        prod_summary = {summary.environment: summary for summary in overview.environments}["prod"]
+        self.assertEqual(prod_summary.public_ingress.status, "fail")
+        self.assertEqual(prod_summary.public_ingress.trust_state, "stale")
+        self.assertEqual(prod_summary.public_ingress.record_id, observation.record_id)
+        self.assertTrue(detail.public_ingress.notification_sent)
 
     def test_product_environment_detail_exposes_runtime_identity_evidence(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

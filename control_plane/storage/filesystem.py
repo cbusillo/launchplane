@@ -48,6 +48,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
@@ -546,6 +547,36 @@ class FilesystemRecordStore:
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
         return self._write_model("launchplane_product_profiles", record.product, record)
+
+    def write_public_ingress_observation_record(
+        self, record: PublicIngressObservationRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_public_ingress_observations", record.record_id, record
+        )
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PublicIngressObservationRecord,
+                "launchplane_public_ingress_observations",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        ]
+        records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(

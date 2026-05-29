@@ -13,6 +13,7 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.product_read_service import (
     ProductReadModelStoreCapabilityError,
@@ -77,9 +78,7 @@ class _ProductReadStore:
             raise FileNotFoundError(product)
         return self.profile
 
-    def read_lane_summary(
-        self, *, context_name: str, instance_name: str
-    ) -> LaunchplaneLaneSummary:
+    def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
         _ = self
         return LaunchplaneLaneSummary(context=context_name, instance=instance_name)
 
@@ -160,6 +159,17 @@ class _ProductReadStore:
         _ = (self, status, limit)
         return ()
 
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        _ = (self, product, context_name, instance_name, limit)
+        return ()
+
     def list_runtime_environment_records(
         self, *, context_name: str = "", scope: str = ""
     ) -> tuple[object, ...]:
@@ -193,9 +203,7 @@ class ProductReadServiceTests(unittest.TestCase):
             ) -> tuple[LaunchplaneProductProfileRecord, ...]:
                 return ()
 
-            def read_product_profile_record(
-                self, product: str
-            ) -> LaunchplaneProductProfileRecord:
+            def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
                 raise FileNotFoundError(product)
 
         with self.assertRaisesRegex(

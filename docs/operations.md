@@ -27,6 +27,8 @@ API path instead of running the local command from an arbitrary checkout.
 - `promotions`: write and inspect promotion records.
 - `product-config`: dry-run and apply trusted product runtime/secret config
   bundles from a live Launchplane context.
+- `public-ingress-monitor`: run shared synthetic public-ingress checks for
+  product lanes.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
@@ -97,6 +99,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/github-actions/grants`
 - `POST /v1/authz-policies/github-humans/grants`
 - `POST /v1/product-profiles/context-cutover/apply`
+- `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
@@ -146,6 +149,16 @@ workflows, including product profile cutover reads/writes, production promotion,
 and generic-web preview refresh/destroy requests. The grant request returns only
 authz policy record metadata and rule counts; it does not echo workflow refs,
 human logins, or the full policy body.
+
+The `Public Ingress Monitor` workflow is a scheduled Launchplane-owned synthetic
+check for every public generic-web stable lane, including drivers that inherit
+generic-web behavior. It calls
+`POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and is
+authorized in the Launchplane service context. Monitoring is default-on for
+lanes with public `base_url` or `health_url`; disable it per lane only for
+non-public or intentionally unreachable endpoints. When a lane policy includes
+`public_ingress_monitoring.alert_issue_url`, Launchplane comments on that issue
+when the latest observation moves from pass to fail or from fail back to pass.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. Run it first with

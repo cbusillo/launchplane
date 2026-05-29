@@ -1,0 +1,61 @@
+---
+name: Public Ingress Monitor
+
+"on":
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      timeout_seconds:
+        description: Timeout per public ingress request
+        required: false
+        default: "10"
+        type: string
+      notify:
+        description: Send transition notifications
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-public-ingress-monitor
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '10' }}
+      NOTIFY: >-
+        ${{ github.event_name == 'schedule' && 'true' ||
+        inputs.notify && 'true' || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run public ingress monitor
+        uses: ./.github/actions/launchplane-request
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          route-path: /v1/products/public-ingress-monitor/run-once
+          payload: >-
+            {
+              "schema_version": 1,
+              "product": "launchplane"
+            }
+          payload-fields: |-
+            timeout_seconds=${{ env.TIMEOUT_SECONDS }}
+            notify=${{ env.NOTIFY }}
+          idempotency-key: >-
+            public-ingress-monitor:${{ github.run_id }}:${{
+            github.run_attempt }}
+          timeout-ms: "180000"

@@ -36,6 +36,9 @@ def _manifest_payload() -> dict[str, object]:
                 "instance": "testing",
                 "context": "example-site-testing",
                 "base_url": "https://testing.example.invalid",
+                "public_ingress_monitoring": {
+                    "alert_issue_url": "https://github.com/cbusillo/launchplane/issues/929"
+                },
                 "odoo_stable_bootstrap": {
                     "enabled": True,
                     "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
@@ -139,9 +142,7 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_authz_grants_include_scheduled_merge_train_runner(
         self,
     ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
-            encoding="utf-8"
-        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("deploy:merge-train-runner-manual-grant", script_text)
         self.assertIn("merge-train-runner-manual", script_text)
@@ -152,9 +153,7 @@ class ProductOnboardingTests(unittest.TestCase):
     def test_deploy_authz_grants_include_reusable_odoo_stable_workflows(
         self,
     ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
-            encoding="utf-8"
-        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         expected_workflows = (
             "reusable-odoo-artifact-publish.yml",
@@ -171,15 +170,13 @@ class ProductOnboardingTests(unittest.TestCase):
             )
             self.assertIn(f"deploy:odoo-{context_name}-artifact-publish-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
-            self.assertIn(
-                f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text
-            )
+            self.assertIn(f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
-        workflow_text = Path(
-            ".github/workflows/reusable-odoo-artifact-publish.yml"
-        ).read_text(encoding="utf-8")
+        workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("workflow_call", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
@@ -204,9 +201,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
 
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
-        workflow_text = Path(
-            ".github/workflows/reusable-odoo-prod-promotion.yml"
-        ).read_text(encoding="utf-8")
+        workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
+            encoding="utf-8"
+        )
 
         for result_path in (
             "result.run_status",
@@ -233,31 +230,30 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_bin_directory.mkdir()
             (captured_bin_directory / "curl").write_text(
                 "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *)\n"
                 "    output_file=''\n"
                 "    request_payload=''\n"
-                "    while [ \"$#\" -gt 0 ]; do\n"
-                "      case \"$1\" in\n"
-                "        -o) shift; output_file=\"$1\" ;;\n"
-                "        --data) shift; request_payload=\"$1\" ;;\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                '        --data) shift; request_payload="$1" ;;\n'
                 "      esac\n"
                 "      shift || true\n"
                 "    done\n"
                 "    if printf '%s' \"$request_payload\" | grep -q 'odoo-tenant-opw/.github/workflows/odoo-preview.yml'; then\n"
                 "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
                 "    fi\n"
-                "    if [ -n \"$output_file\" ]; then\n"
-                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
                 "    fi\n"
                 "    printf '200'\n"
                 "    ;;\n"
                 "esac\n"
             )
             (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
             )
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
@@ -364,9 +360,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_deploy_authz_grants_include_terminal_agent_product_profile_read(
         self,
     ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
-            encoding="utf-8"
-        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("product_profile.read", script_text)
         self.assertIn("deploy:terminal-agent-product-profile-read-grant", script_text)
@@ -386,41 +380,40 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_bin_directory.mkdir()
             (captured_bin_directory / "curl").write_text(
                 "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *)\n"
                 "    idempotency_key=''\n"
                 "    output_file=''\n"
                 "    request_payload=''\n"
-                "    while [ \"$#\" -gt 0 ]; do\n"
-                "      case \"$1\" in\n"
-                "        -o) shift; output_file=\"$1\" ;;\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
                 "        -H)\n"
                 "          shift\n"
-                "          case \"$1\" in\n"
-                "            Idempotency-Key:*) idempotency_key=\"$1\" ;;\n"
+                '          case "$1" in\n'
+                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
                 "          esac\n"
                 "          ;;\n"
-                "        --data) shift; request_payload=\"$1\" ;;\n"
+                '        --data) shift; request_payload="$1" ;;\n'
                 "      esac\n"
                 "      shift || true\n"
                 "    done\n"
-                "    case \"$idempotency_key\" in\n"
+                '    case "$idempotency_key" in\n'
                 "      *launchplane-product-onboarding:verireel-preview-profile*)\n"
-                "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
-                "        printf '%s' \"${idempotency_key#Idempotency-Key: }\" > \"$CAPTURED_IDEMPOTENCY_KEY\"\n"
+                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
+                '        printf \'%s\' "${idempotency_key#Idempotency-Key: }" > "$CAPTURED_IDEMPOTENCY_KEY"\n'
                 "        ;;\n"
                 "    esac\n"
-                "    if [ -n \"$output_file\" ]; then\n"
-                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
                 "    fi\n"
                 "    printf '200'\n"
                 "    ;;\n"
                 "esac\n"
             )
             (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
             )
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
@@ -536,47 +529,46 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_bin_directory.mkdir()
             (captured_bin_directory / "curl").write_text(
                 "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *)\n"
                 "    idempotency_key=''\n"
                 "    output_file=''\n"
                 "    request_payload=''\n"
-                "    while [ \"$#\" -gt 0 ]; do\n"
-                "      case \"$1\" in\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
                 "        -o)\n"
                 "          shift\n"
-                "          output_file=\"$1\"\n"
+                '          output_file="$1"\n'
                 "          ;;\n"
                 "        -H)\n"
                 "          shift\n"
-                "          case \"$1\" in\n"
-                "            Idempotency-Key:*) idempotency_key=\"$1\" ;;\n"
+                '          case "$1" in\n'
+                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
                 "          esac\n"
                 "          ;;\n"
                 "        --data)\n"
                 "          shift\n"
-                "          request_payload=\"$1\"\n"
+                '          request_payload="$1"\n'
                 "          ;;\n"
                 "      esac\n"
                 "      shift || true\n"
                 "    done\n"
-                "    case \"$idempotency_key\" in\n"
+                '    case "$idempotency_key" in\n'
                 "      *launchplane-product-onboarding:odoo-cm-preview-profile*)\n"
-                "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
-                "        printf '%s' \"${idempotency_key#Idempotency-Key: }\" > \"$CAPTURED_IDEMPOTENCY_KEY\"\n"
+                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
+                '        printf \'%s\' "${idempotency_key#Idempotency-Key: }" > "$CAPTURED_IDEMPOTENCY_KEY"\n'
                 "        ;;\n"
                 "    esac\n"
-                "    if [ -n \"$output_file\" ]; then\n"
-                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
                 "    fi\n"
                 "    printf '200'\n"
                 "    ;;\n"
                 "esac\n"
             )
             (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
             )
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
@@ -667,27 +659,26 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_bin_directory.mkdir()
             (captured_bin_directory / "curl").write_text(
                 "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *) printf '200' ;;\n"
                 "esac\n"
                 "output_file=''\n"
-                "while [ \"$#\" -gt 0 ]; do\n"
-                "  case \"$1\" in\n"
+                'while [ "$#" -gt 0 ]; do\n'
+                '  case "$1" in\n'
                 "    -o)\n"
                 "      shift\n"
-                "      output_file=\"$1\"\n"
+                '      output_file="$1"\n'
                 "      ;;\n"
                 "  esac\n"
                 "  shift || true\n"
                 "done\n"
-                "if [ -n \"$output_file\" ]; then\n"
-                "  printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                'if [ -n "$output_file" ]; then\n'
+                '  printf \'{"status":"ok"}\' > "$output_file"\n'
                 "fi\n"
             )
             (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
             )
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
@@ -732,40 +723,39 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_bin_directory.mkdir()
             (captured_bin_directory / "curl").write_text(
                 "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *)\n"
                 "    idempotency_key=''\n"
                 "    output_file=''\n"
                 "    request_payload=''\n"
-                "    while [ \"$#\" -gt 0 ]; do\n"
-                "      case \"$1\" in\n"
-                "        -o) shift; output_file=\"$1\" ;;\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
                 "        -H)\n"
                 "          shift\n"
-                "          case \"$1\" in\n"
-                "            Idempotency-Key:*) idempotency_key=\"$1\" ;;\n"
+                '          case "$1" in\n'
+                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
                 "          esac\n"
                 "          ;;\n"
-                "        --data) shift; request_payload=\"$1\" ;;\n"
+                '        --data) shift; request_payload="$1" ;;\n'
                 "      esac\n"
                 "      shift || true\n"
                 "    done\n"
-                "    case \"$idempotency_key\" in\n"
+                '    case "$idempotency_key" in\n'
                 "      *launchplane-product-onboarding:odoo-opw-prelaunch-profile*)\n"
-                "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
+                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
                 "        ;;\n"
                 "    esac\n"
-                "    if [ -n \"$output_file\" ]; then\n"
-                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
                 "    fi\n"
                 "    printf '200'\n"
                 "    ;;\n"
                 "esac\n"
             )
             (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\n"
-                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
             )
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
@@ -856,6 +846,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(profile.driver_id, "generic-web")
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertTrue(profile.lanes[0].odoo_stable_bootstrap.enabled)
+        self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertTrue(profile.lanes[0].public_ingress_monitoring.require_runtime_identity)
+        self.assertEqual(
+            profile.lanes[0].public_ingress_monitoring.alert_issue_url,
+            "https://github.com/cbusillo/launchplane/issues/929",
+        )
         self.assertEqual(
             profile.lanes[0].odoo_stable_bootstrap.approval_issue_url,
             "https://github.com/cbusillo/launchplane/issues/573",
@@ -876,7 +872,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ("empty",),
         )
         self.assertEqual(profile.lanes[1].odoo_data_policy.data_authority, "restorable")
-        self.assertEqual(profile.lanes[1].odoo_data_policy.upstream_source, "example-site/prod/upstream")
+        self.assertEqual(
+            profile.lanes[1].odoo_data_policy.upstream_source, "example-site/prod/upstream"
+        )
         self.assertEqual(profile.preview.enable_label, "preview-requested")
         self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
         self.assertEqual(

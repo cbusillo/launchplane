@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     ProductRuntimeConfigRequirement,
     ProductSecretConfigRequirement,
 )
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
@@ -113,6 +114,15 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
     def list_authz_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]: ...
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]: ...
 
 
 def _build_action_authz_by_route() -> dict[str, str]:
@@ -205,6 +215,23 @@ class ProductTargetSummary(BaseModel):
     trust_state: FreshnessStatus = "missing"
 
 
+class ProductPublicIngressSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = "missing"
+    failure_code: str = ""
+    observed_at: str = ""
+    record_id: str = ""
+    summary: str = ""
+    notification_sent: bool = False
+    trust_state: FreshnessStatus = "missing"
+    provenance: DataProvenance = DataProvenance(
+        source_kind="record",
+        freshness_status="missing",
+        detail="Launchplane has not recorded public ingress observations for this lane.",
+    )
+
+
 class ProductEnvironmentSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -221,6 +248,7 @@ class ProductEnvironmentSummary(BaseModel):
     odoo_requires_backup_before_destroy: bool = True
     odoo_requires_restore_proof: bool = True
     odoo_requires_runtime_identity: bool = True
+    public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     trust_state: FreshnessStatus
     provenance: DataProvenance
     warnings: tuple[str, ...] = ()
@@ -283,6 +311,7 @@ class ProductEnvironmentDetail(BaseModel):
     odoo_requires_restore_proof: bool = True
     odoo_requires_runtime_identity: bool = True
     target: ProductTargetSummary
+    public_ingress: ProductPublicIngressSummary = Field(default_factory=ProductPublicIngressSummary)
     runtime_settings: tuple[ProductRuntimeSettingSummary, ...] = ()
     managed_secrets: tuple[ProductSecretBindingSummary, ...] = ()
     available_actions: tuple[ProductActionAvailability, ...] = ()
@@ -468,6 +497,11 @@ def build_product_environment_detail(
         odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
         odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
         target=_target_summary(lane_summary),
+        public_ingress=_public_ingress_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        ),
         runtime_settings=_runtime_setting_summaries(lane_summary),
         managed_secrets=_secret_binding_summaries(lane_summary),
         available_actions=_action_availability(
@@ -1132,6 +1166,11 @@ def _build_environment_summary(
         odoo_requires_backup_before_destroy=lane.odoo_data_policy.requires_backup_before_destroy,
         odoo_requires_restore_proof=lane.odoo_data_policy.requires_restore_proof,
         odoo_requires_runtime_identity=lane.odoo_data_policy.requires_runtime_identity,
+        public_ingress=_public_ingress_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        ),
         trust_state=provenance.freshness_status,
         provenance=provenance,
         available_actions=_action_availability(
@@ -1240,6 +1279,53 @@ def _build_preview_summary(
         trust_state=provenance.freshness_status,
         provenance=provenance,
     )
+
+
+def _public_ingress_summary(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+) -> ProductPublicIngressSummary:
+    records = _optional_records(
+        record_store,
+        "list_public_ingress_observation_records",
+        product=profile.product,
+        context_name=lane.context,
+        instance_name=lane.instance,
+        limit=1,
+    )
+    latest = next(iter(records), None)
+    if latest is None or not isinstance(latest, PublicIngressObservationRecord):
+        return ProductPublicIngressSummary()
+    provenance = DataProvenance(
+        source_kind="record",
+        source_record_id=latest.record_id,
+        recorded_at=latest.observed_at,
+        refreshed_at=latest.observed_at,
+        freshness_status=_public_ingress_freshness(latest.status),
+        detail="Launchplane public ingress synthetic observation.",
+    )
+    return ProductPublicIngressSummary(
+        status=latest.status,
+        failure_code=latest.failure_code or "",
+        observed_at=latest.observed_at,
+        record_id=latest.record_id,
+        summary=latest.summary,
+        notification_sent=latest.notification_sent,
+        trust_state=provenance.freshness_status,
+        provenance=provenance,
+    )
+
+
+def _public_ingress_freshness(status: str) -> FreshnessStatus:
+    if status == "pass":
+        return "verified"
+    if status == "fail":
+        return "stale"
+    if status == "skipped":
+        return "unsupported"
+    return "missing"
 
 
 def _action_availability(

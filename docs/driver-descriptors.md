@@ -121,6 +121,12 @@ profile preview transport keys. Product drivers that inherit `generic-web` reuse
 that setting metadata instead of redeclaring common preview routing and runtime
 transport fields.
 
+Generic web is also the default public-ingress monitoring family. Any stable
+lane on `generic-web` or a driver based on it is eligible for Launchplane's
+scheduled synthetic check when the lane has a public `base_url` or `health_url`.
+Based drivers inherit the same observation record and notification path; they do
+not need tenant-local monitor workflows.
+
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
 runtime target bindings from DB-backed Dokploy target records. Generic-web deploy
