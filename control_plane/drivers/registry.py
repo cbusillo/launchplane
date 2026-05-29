@@ -703,11 +703,6 @@ ODOO_DRIVER = DriverDescriptor(
             "preview_desired_state.discover",
         ),
         _route_alias(
-            "preview_refresh",
-            "/v1/drivers/odoo/preview-refresh",
-            "preview_refresh.execute",
-        ),
-        _route_alias(
             "preview_inventory",
             "/v1/drivers/odoo/preview-inventory",
             "preview_inventory.read",
@@ -716,11 +711,6 @@ ODOO_DRIVER = DriverDescriptor(
             "preview_readiness",
             "/v1/drivers/odoo/preview-readiness",
             "preview_readiness.evaluate",
-        ),
-        _route_alias(
-            "preview_destroy",
-            "/v1/drivers/odoo/preview-destroy",
-            "preview_destroy.execute",
         ),
         _route_alias(
             "preview_verification",
