@@ -43,6 +43,8 @@ from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRe
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
+from control_plane.merge_train_github import MergeTrainGitHubError
+from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan,
     build_merge_train_stack_collapse_plan_record,
@@ -319,6 +321,20 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         self, *, candidate: MergeTrainBatchCandidate
     ) -> MergeTrainBatchCandidate:
         return candidate.model_copy(update={"required_checks_status": "fail", "status": "failed"})
+
+
+class _StaleLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def land_batch_candidate(
+        self, *, landing_plan: MergeTrainBatchLandingPlan
+    ) -> MergeTrainBatchLandingPlan:
+        raise MergeTrainGitHubStaleHeadError("Base branch moved outside the batch landing plan.", status_code=409)
+
+
+class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    def land_batch_candidate(
+        self, *, landing_plan: MergeTrainBatchLandingPlan
+    ) -> MergeTrainBatchLandingPlan:
+        raise MergeTrainGitHubError("GitHub API request failed for /repos/example/repo", status_code=503)
 
 
 class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
@@ -2780,6 +2796,151 @@ class LaunchplaneServiceTests(unittest.TestCase):
             next_observe_payload["result"]["landing_plan"]["batch_id"],
             superseding_candidate.batch_id,
         )
+
+    def test_merge_train_controller_terminalizes_stale_landing_state(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                for _ in range(4):
+                    _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/work-graph/merge-train/controller/run-once",
+                        payload={
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _StaleLandingMergeTrainGitHubClient,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            landing_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                next_status_code, next_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": False,
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "stale_landing")
+        self.assertEqual(payload["result"]["error"]["code"], "merge_train_github_stale_state")
+        self.assertIn("outside", payload["result"]["error"]["message"])
+        self.assertEqual(payload["result"]["details"]["github_status_code"], 409)
+        self.assertTrue(
+            all(
+                entry["status"] == "stale"
+                for entry in payload["result"]["landing_plan"]["entries"]
+            )
+        )
+        stale_record = next(
+            record
+            for record in landing_records
+            if record.record_id
+            == payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
+        self.assertEqual(next_status_code, 202)
+        self.assertNotEqual(next_payload["result"]["controller_action"], "land_batch")
+
+    def test_merge_train_controller_reports_github_failure_details(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+            ):
+                for _ in range(4):
+                    _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/work-graph/merge-train/controller/run-once",
+                        payload={
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _UnavailableLandingMergeTrainGitHubClient,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+
+        self.assertEqual(status_code, 502)
+        self.assertEqual(payload["error"]["code"], "github_request_failed")
+        self.assertEqual(payload["details"]["github_status_code"], 503)
+        self.assertIn("GitHub API request failed", payload["details"]["message"])
 
     def test_merge_train_controller_ignores_stale_stack_record_when_landing_batch(
         self,
