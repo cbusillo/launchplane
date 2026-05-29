@@ -693,6 +693,14 @@ preflights.
   maintenance removes clean Every Code worktrees and their local `every-code/*`
   branches from the source checkout. Dirty or suspicious worktrees are left in
   place for operator inspection.
+- Operators can reconcile older local cleanup residue with
+  `uv run launchplane every-code reconcile-cleanup`. The command inventories
+  saved session JSON, worker worktree directories, registered Git worktrees, and
+  linked local `every-code/*` branches. It defaults to dry-run/report mode;
+  `--apply` is required before it removes terminal, worker-owned, clean state.
+  Missing records, active tmux sessions, dirty or uninspectable worktrees,
+  unknown source checkouts, unlinked branches, and paths outside the worker
+  state root are preserved and reported with skip reasons.
 - For a remote Launchplane database, run the Mac worker through the service API
   instead of sharing DB credentials with the local host. Configure the service
   and worker with the same `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`, then start the

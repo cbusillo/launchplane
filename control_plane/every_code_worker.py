@@ -566,6 +566,78 @@ class EveryCodePrFailureRouteResult:
         }
 
 
+@dataclass(frozen=True)
+class EveryCodeCleanupReconciliationItem:
+    request_id: str
+    session_state_path: str
+    status: Literal["would_remove", "removed", "skipped"]
+    reason: str
+    source_checkout_root: str = ""
+    worktree_root: str = ""
+    worktree_branch: str = ""
+    session_name: str = ""
+    request_state: str = ""
+    worktree_exists: bool = False
+    worktree_registered: bool = False
+    branch_exists: bool = False
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "session_state_path": self.session_state_path,
+            "status": self.status,
+            "reason": self.reason,
+            "source_checkout_root": self.source_checkout_root,
+            "worktree_root": self.worktree_root,
+            "worktree_branch": self.worktree_branch,
+            "session_name": self.session_name,
+            "request_state": self.request_state,
+            "worktree_exists": self.worktree_exists,
+            "worktree_registered": self.worktree_registered,
+            "branch_exists": self.branch_exists,
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodeCleanupInventoryItem:
+    kind: Literal["worker_worktree_directory", "local_branch"]
+    value: str
+    status: Literal["linked", "skipped"]
+    reason: str
+    source_checkout_root: str = ""
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "value": self.value,
+            "status": self.status,
+            "reason": self.reason,
+            "source_checkout_root": self.source_checkout_root,
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodeCleanupReconciliationResult:
+    mode: Literal["dry_run", "apply"]
+    checked_sessions: int
+    would_remove: int
+    removed: int
+    skipped: int
+    items: tuple[EveryCodeCleanupReconciliationItem, ...]
+    inventory: tuple[EveryCodeCleanupInventoryItem, ...] = ()
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "mode": self.mode,
+            "checked_sessions": self.checked_sessions,
+            "would_remove": self.would_remove,
+            "removed": self.removed,
+            "skipped": self.skipped,
+            "items": [item.as_payload() for item in self.items],
+            "inventory": [item.as_payload() for item in self.inventory],
+        }
+
+
 def every_code_tmux_session_name(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     return f"every-code-{normalized or 'request'}"[:80]
@@ -1352,6 +1424,475 @@ def close_terminal_every_code_sessions(
         if worktree_processes_closed:
             closed += 1
     return closed
+
+
+def reconcile_every_code_worker_cleanup_state(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    state_dir: Path,
+    apply: bool = False,
+    tmux_binary: str = "tmux",
+    runner: Runner | None = None,
+) -> EveryCodeCleanupReconciliationResult:
+    normalized_host = host.strip()
+    if not normalized_host:
+        raise ValueError("Every Code worker requires a host name")
+    resolved_state_dir = state_dir.expanduser().resolve()
+    sessions_dir = resolved_state_dir / "every-code-worker" / "sessions"
+    try:
+        session_state_paths = tuple(sorted(sessions_dir.glob("*.json")))
+    except OSError:
+        session_state_paths = ()
+
+    run = runner or _run_subprocess
+    items: list[EveryCodeCleanupReconciliationItem] = []
+    linked_worktree_roots: set[Path] = set()
+    linked_branches: dict[Path, set[str]] = {}
+    for path in session_state_paths:
+        item = _reconcile_every_code_cleanup_session_state(
+            record_store=record_store,
+            host=normalized_host,
+            state_dir=resolved_state_dir,
+            session_state_path=path,
+            apply=apply,
+            tmux_binary=tmux_binary,
+            runner=run,
+        )
+        items.append(item)
+        if item.worktree_root:
+            linked_worktree_roots.add(Path(item.worktree_root).expanduser().resolve())
+        if item.source_checkout_root and item.worktree_branch:
+            linked_source_root = Path(item.source_checkout_root).expanduser().resolve()
+            linked_branches.setdefault(linked_source_root, set()).add(item.worktree_branch)
+
+    inventory = _inventory_every_code_cleanup_residue(
+        state_dir=resolved_state_dir,
+        linked_worktree_roots=linked_worktree_roots,
+        linked_branches=linked_branches,
+        runner=run,
+    )
+    return EveryCodeCleanupReconciliationResult(
+        mode="apply" if apply else "dry_run",
+        checked_sessions=len(session_state_paths),
+        would_remove=sum(1 for item in items if item.status == "would_remove"),
+        removed=sum(1 for item in items if item.status == "removed"),
+        skipped=sum(1 for item in items if item.status == "skipped"),
+        items=tuple(items),
+        inventory=inventory,
+    )
+
+
+def _reconcile_every_code_cleanup_session_state(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    state_dir: Path,
+    session_state_path: Path,
+    apply: bool,
+    tmux_binary: str,
+    runner: Runner,
+) -> EveryCodeCleanupReconciliationItem:
+    session_state = read_every_code_session_state(session_state_path)
+    if session_state is None:
+        return _every_code_cleanup_skip(
+            session_state_path=session_state_path,
+            reason="session_state_invalid",
+        )
+    request_id = session_state.get("request_id", "").strip()
+    base_item = _every_code_cleanup_item(
+        session_state_path=session_state_path,
+        session_state=session_state,
+    )
+    if session_state.get("host", host).strip() != host:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason="session_state_host_mismatch",
+        )
+    try:
+        record = record_store.read_every_code_work_request_record(request_id)
+    except Exception:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason="request_record_missing",
+        )
+    base_item = _replace_every_code_cleanup_item(base_item, request_state=record.state)
+    if record.state not in TERMINAL_EVERY_CODE_STATES:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason="request_record_not_terminal",
+        )
+    if record.claimed_by_host.strip() != host:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason="request_claimed_by_different_host",
+        )
+    session_name = session_state.get("session_name", "").strip()
+    if session_name:
+        tmux_exists = _tmux_session_exists(
+            tmux_binary=tmux_binary,
+            session_name=session_name,
+            runner=runner,
+        )
+        if tmux_exists is True:
+            return _replace_every_code_cleanup_item(
+                base_item,
+                status="skipped",
+                reason="tmux_session_active",
+            )
+        if tmux_exists is None:
+            return _replace_every_code_cleanup_item(
+                base_item,
+                status="skipped",
+                reason="tmux_session_inspection_failed",
+            )
+
+    safety = _inspect_every_code_cleanup_safety(
+        session_state=session_state,
+        state_dir=state_dir,
+        runner=runner,
+    )
+    base_item = _replace_every_code_cleanup_item(
+        base_item,
+        worktree_exists=safety.worktree_exists,
+        worktree_registered=safety.worktree_registered,
+        branch_exists=safety.branch_exists,
+    )
+    if safety.reason:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="skipped",
+            reason=safety.reason,
+        )
+    if not apply:
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="would_remove",
+            reason="safe_terminal_worker_state",
+        )
+    if _cleanup_every_code_worktree(session_state=session_state, runner=runner):
+        try:
+            session_state_path.unlink(missing_ok=True)
+        except OSError:
+            return _replace_every_code_cleanup_item(
+                base_item,
+                status="skipped",
+                reason="session_state_unlink_failed",
+            )
+        _remove_empty_every_code_worktree_parents(safety.worktree_root, state_dir=state_dir)
+        return _replace_every_code_cleanup_item(
+            base_item,
+            status="removed",
+            reason="safe_terminal_worker_state_removed",
+        )
+    return _replace_every_code_cleanup_item(
+        base_item,
+        status="skipped",
+        reason="cleanup_failed",
+    )
+
+
+@dataclass(frozen=True)
+class _EveryCodeCleanupSafety:
+    reason: str = ""
+    worktree_root: Path | None = None
+    worktree_exists: bool = False
+    worktree_registered: bool = False
+    branch_exists: bool = False
+
+
+def _inspect_every_code_cleanup_safety(
+    *,
+    session_state: Mapping[str, object],
+    state_dir: Path,
+    runner: Runner,
+) -> _EveryCodeCleanupSafety:
+    source_checkout_root_value = session_state.get("source_checkout_root")
+    launch_root_value = session_state.get("launch_root")
+    worktree_branch_value = session_state.get("worktree_branch")
+    if (
+        not isinstance(source_checkout_root_value, str)
+        or not source_checkout_root_value.strip()
+        or not isinstance(launch_root_value, str)
+        or not launch_root_value.strip()
+        or not isinstance(worktree_branch_value, str)
+        or not worktree_branch_value.strip()
+    ):
+        return _EveryCodeCleanupSafety(reason="session_state_missing_cleanup_fields")
+
+    worktree_branch = worktree_branch_value.strip()
+    if not worktree_branch.startswith("every-code/"):
+        return _EveryCodeCleanupSafety(reason="branch_not_worker_owned")
+
+    source_checkout_root = Path(source_checkout_root_value).expanduser().resolve()
+    launch_root = Path(launch_root_value).expanduser().resolve()
+    if source_checkout_root == launch_root:
+        return _EveryCodeCleanupSafety(reason="worktree_path_is_source_checkout")
+    if not _path_is_relative_to(launch_root, state_dir / "every-code-worker" / "worktrees"):
+        return _EveryCodeCleanupSafety(reason="worktree_path_outside_worker_state_root")
+    if _path_is_relative_to(launch_root, source_checkout_root):
+        return _EveryCodeCleanupSafety(reason="worktree_path_inside_source_checkout")
+    if not source_checkout_root.is_dir():
+        return _EveryCodeCleanupSafety(reason="source_checkout_missing")
+    if not _is_git_checkout(source_checkout_root):
+        return _EveryCodeCleanupSafety(reason="source_checkout_not_git")
+
+    try:
+        branch_exists = _git_branch_exists(
+            source_checkout_root,
+            branch=worktree_branch,
+            runner=runner,
+        )
+    except RuntimeError:
+        return _EveryCodeCleanupSafety(reason="branch_inspection_failed")
+    registered = _git_worktree_registered(
+        source_checkout_root=source_checkout_root,
+        worktree_root=launch_root,
+        runner=runner,
+    )
+    if registered is None:
+        return _EveryCodeCleanupSafety(
+            reason="worktree_registration_inspection_failed",
+            worktree_root=launch_root,
+            worktree_exists=launch_root.exists(),
+            branch_exists=branch_exists,
+        )
+    if launch_root.exists():
+        if not launch_root.is_dir():
+            return _EveryCodeCleanupSafety(reason="worktree_path_not_directory")
+        if not _is_git_checkout(launch_root):
+            return _EveryCodeCleanupSafety(reason="worktree_path_not_git")
+        if not registered:
+            return _EveryCodeCleanupSafety(reason="worktree_not_registered")
+        if _git_worktree_dirty(launch_root, runner=runner):
+            return _EveryCodeCleanupSafety(
+                reason="worktree_dirty_or_status_failed",
+                worktree_root=launch_root,
+                worktree_exists=True,
+                worktree_registered=registered,
+                branch_exists=branch_exists,
+            )
+        return _EveryCodeCleanupSafety(
+            worktree_root=launch_root,
+            worktree_exists=True,
+            worktree_registered=registered,
+            branch_exists=branch_exists,
+        )
+    if registered:
+        return _EveryCodeCleanupSafety(reason="registered_worktree_path_missing")
+    return _EveryCodeCleanupSafety(
+        worktree_root=launch_root,
+        worktree_exists=False,
+        worktree_registered=False,
+        branch_exists=branch_exists,
+    )
+
+
+def _every_code_cleanup_item(
+    *,
+    session_state_path: Path,
+    session_state: Mapping[str, object],
+    status: Literal["would_remove", "removed", "skipped"] = "skipped",
+    reason: str = "",
+) -> EveryCodeCleanupReconciliationItem:
+    return EveryCodeCleanupReconciliationItem(
+        request_id=str(session_state.get("request_id", "")).strip(),
+        session_state_path=str(session_state_path),
+        status=status,
+        reason=reason,
+        source_checkout_root=str(session_state.get("source_checkout_root", "")).strip(),
+        worktree_root=str(session_state.get("launch_root", "")).strip(),
+        worktree_branch=str(session_state.get("worktree_branch", "")).strip(),
+        session_name=str(session_state.get("session_name", "")).strip(),
+    )
+
+
+def _every_code_cleanup_skip(
+    *,
+    session_state_path: Path,
+    reason: str,
+) -> EveryCodeCleanupReconciliationItem:
+    return EveryCodeCleanupReconciliationItem(
+        request_id="",
+        session_state_path=str(session_state_path),
+        status="skipped",
+        reason=reason,
+    )
+
+
+def _replace_every_code_cleanup_item(
+    item: EveryCodeCleanupReconciliationItem,
+    *,
+    status: Literal["would_remove", "removed", "skipped"] | None = None,
+    reason: str | None = None,
+    request_state: str | None = None,
+    worktree_exists: bool | None = None,
+    worktree_registered: bool | None = None,
+    branch_exists: bool | None = None,
+) -> EveryCodeCleanupReconciliationItem:
+    return EveryCodeCleanupReconciliationItem(
+        request_id=item.request_id,
+        session_state_path=item.session_state_path,
+        status=item.status if status is None else status,
+        reason=item.reason if reason is None else reason,
+        source_checkout_root=item.source_checkout_root,
+        worktree_root=item.worktree_root,
+        worktree_branch=item.worktree_branch,
+        session_name=item.session_name,
+        request_state=item.request_state if request_state is None else request_state,
+        worktree_exists=item.worktree_exists if worktree_exists is None else worktree_exists,
+        worktree_registered=(
+            item.worktree_registered if worktree_registered is None else worktree_registered
+        ),
+        branch_exists=item.branch_exists if branch_exists is None else branch_exists,
+    )
+
+
+def _inventory_every_code_cleanup_residue(
+    *,
+    state_dir: Path,
+    linked_worktree_roots: set[Path],
+    linked_branches: dict[Path, set[str]],
+    runner: Runner,
+) -> tuple[EveryCodeCleanupInventoryItem, ...]:
+    inventory: list[EveryCodeCleanupInventoryItem] = []
+    worktrees_root = state_dir / "every-code-worker" / "worktrees"
+    try:
+        worker_worktree_dirs = tuple(
+            sorted(path for path in worktrees_root.glob("*/*") if path.is_dir())
+        )
+    except OSError:
+        worker_worktree_dirs = ()
+    for worktree_dir in worker_worktree_dirs:
+        resolved_worktree_dir = worktree_dir.resolve()
+        inventory.append(
+            EveryCodeCleanupInventoryItem(
+                kind="worker_worktree_directory",
+                value=str(resolved_worktree_dir),
+                status="linked" if resolved_worktree_dir in linked_worktree_roots else "skipped",
+                reason=(
+                    "linked_to_saved_session_state"
+                    if resolved_worktree_dir in linked_worktree_roots
+                    else "not_linked_to_saved_session_state"
+                ),
+            )
+        )
+
+    for source_checkout_root, linked_source_branches in sorted(
+        linked_branches.items(), key=lambda item: str(item[0])
+    ):
+        local_branches = _git_every_code_branches(source_checkout_root, runner=runner)
+        if local_branches is None:
+            inventory.append(
+                EveryCodeCleanupInventoryItem(
+                    kind="local_branch",
+                    value="every-code/*",
+                    status="skipped",
+                    reason="branch_inventory_failed",
+                    source_checkout_root=str(source_checkout_root),
+                )
+            )
+            continue
+        for branch in local_branches:
+            linked = branch in linked_source_branches
+            inventory.append(
+                EveryCodeCleanupInventoryItem(
+                    kind="local_branch",
+                    value=branch,
+                    status="linked" if linked else "skipped",
+                    reason=(
+                        "linked_to_saved_session_state"
+                        if linked
+                        else "not_linked_to_saved_session_state"
+                    ),
+                    source_checkout_root=str(source_checkout_root),
+                )
+            )
+    return tuple(inventory)
+
+
+def _git_worktree_registered(
+    *,
+    source_checkout_root: Path,
+    worktree_root: Path,
+    runner: Runner,
+) -> bool | None:
+    try:
+        result = runner(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "worktree",
+                "list",
+                "--porcelain",
+            )
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    registered_paths = _parse_git_worktree_list_paths(result.stdout)
+    return worktree_root in registered_paths
+
+
+def _parse_git_worktree_list_paths(output: str) -> set[Path]:
+    paths: set[Path] = set()
+    for line in output.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        raw_path = line.removeprefix("worktree ").strip()
+        if raw_path:
+            paths.add(Path(raw_path).expanduser().resolve())
+    return paths
+
+
+def _git_every_code_branches(
+    source_checkout_root: Path, *, runner: Runner
+) -> tuple[str, ...] | None:
+    try:
+        result = runner(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/every-code/",
+            )
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return tuple(sorted(line.strip() for line in result.stdout.splitlines() if line.strip()))
+
+
+def _remove_empty_every_code_worktree_parents(
+    worktree_root: Path | None, *, state_dir: Path
+) -> None:
+    if worktree_root is None:
+        return
+    worktrees_root = state_dir / "every-code-worker" / "worktrees"
+    current = worktree_root.parent
+    while current != worktrees_root and _path_is_relative_to(current, worktrees_root):
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _path_is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _terminate_every_code_tmux_session(
