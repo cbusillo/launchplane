@@ -1333,8 +1333,8 @@ def close_terminal_every_code_sessions(
             > 0
         )
         if existing_session is False:
-            _cleanup_every_code_worktree(session_state=session_state, runner=run)
-            path.unlink(missing_ok=True)
+            if _cleanup_every_code_worktree(session_state=session_state, runner=run):
+                path.unlink(missing_ok=True)
             closed += 1 if worktree_processes_closed else 0
             continue
         if existing_session is None:
@@ -1345,8 +1345,8 @@ def close_terminal_every_code_sessions(
             session_name=session_name,
             runner=run,
         ):
-            _cleanup_every_code_worktree(session_state=session_state, runner=run)
-            path.unlink(missing_ok=True)
+            if _cleanup_every_code_worktree(session_state=session_state, runner=run):
+                path.unlink(missing_ok=True)
             closed += 1
             continue
         if worktree_processes_closed:
@@ -1451,46 +1451,52 @@ def _cleanup_every_code_worktree(
     launch_root = Path(launch_root_value).expanduser().resolve()
     if source_checkout_root == launch_root:
         return False
-    if not source_checkout_root.is_dir() or not launch_root.is_dir():
+    if not source_checkout_root.is_dir():
         return False
-    if not _is_git_checkout(source_checkout_root) or not _is_git_checkout(launch_root):
-        return False
-
-    try:
-        inside_source = launch_root.is_relative_to(source_checkout_root)
-    except ValueError:
-        inside_source = False
-    if inside_source:
-        return False
-
-    if _git_worktree_dirty(launch_root, runner=runner):
+    if not _is_git_checkout(source_checkout_root):
         return False
 
     try:
-        _git_checked(
-            (
-                "git",
-                "-C",
-                str(source_checkout_root),
-                "worktree",
-                "remove",
-                str(launch_root),
-            ),
+        if launch_root.exists():
+            if not launch_root.is_dir() or not _is_git_checkout(launch_root):
+                return False
+            try:
+                inside_source = launch_root.is_relative_to(source_checkout_root)
+            except ValueError:
+                inside_source = False
+            if inside_source:
+                return False
+            if _git_worktree_dirty(launch_root, runner=runner):
+                return False
+            _git_checked(
+                (
+                    "git",
+                    "-C",
+                    str(source_checkout_root),
+                    "worktree",
+                    "remove",
+                    str(launch_root),
+                ),
+                runner=runner,
+                detail="remove Every Code worktree",
+            )
+        if _git_branch_exists(
+            source_checkout_root,
+            branch=worktree_branch,
             runner=runner,
-            detail="remove Every Code worktree",
-        )
-        _git_checked(
-            (
-                "git",
-                "-C",
-                str(source_checkout_root),
-                "branch",
-                "-d",
-                worktree_branch,
-            ),
-            runner=runner,
-            detail="delete Every Code worktree branch",
-        )
+        ):
+            _git_checked(
+                (
+                    "git",
+                    "-C",
+                    str(source_checkout_root),
+                    "branch",
+                    "-d",
+                    worktree_branch,
+                ),
+                runner=runner,
+                detail="delete Every Code worktree branch",
+            )
     except RuntimeError:
         return False
     return True
