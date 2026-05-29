@@ -133,7 +133,10 @@ For an existing repo, classify each workflow and script before deleting code:
 - `adapter`: temporary OIDC trigger glue. Prefer the reusable
   `cbusillo/launchplane/.github/actions/launchplane-request` GitHub Action for
   raw Launchplane HTTP calls, then keep only the product-specific payload
-  assembly that cannot yet move into a driver route.
+  assembly that cannot yet move into a driver route. When Launchplane owns the
+  full handoff, product repos should call a Launchplane reusable workflow and
+  keep only dispatch inputs, confirmation text, and product-owned build or test
+  facts locally.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,

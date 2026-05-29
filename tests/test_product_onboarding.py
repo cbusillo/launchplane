@@ -149,6 +149,27 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("merge-train-runner-schedule", script_text)
         self.assertIn("schedule", script_text)
 
+    def test_deploy_authz_grants_include_reusable_odoo_stable_workflows(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
+            encoding="utf-8"
+        )
+
+        expected_workflows = (
+            "reusable-odoo-post-deploy.yml",
+            "reusable-odoo-prod-promotion.yml",
+            "reusable-odoo-prod-rollback.yml",
+        )
+        for workflow_file in expected_workflows:
+            self.assertIn(workflow_file, script_text)
+        for context_name in ("cm", "opw"):
+            self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
+            self.assertIn(
+                f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text
+            )
+            self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
+
     def test_deploy_authz_grants_include_opw_manual_preview_workflow(
         self,
     ) -> None:

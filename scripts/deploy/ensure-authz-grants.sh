@@ -25,6 +25,7 @@ post_grant() {
   local idempotency_suffix="$7"
   local event_name="${8:-workflow_dispatch}"
   local workflow_ref_suffix="${9:-refs/heads/main}"
+  local job_workflow_ref="${10:-}"
   local request_payload response_file status_code
 
   request_payload="$({
@@ -36,6 +37,7 @@ post_grant() {
       --arg context_name "$context_name" \
       --arg action_name "$action_name" \
       --arg source_label "$source_label" \
+      --arg job_workflow_ref "$job_workflow_ref" \
       '{
         schema_version: 1,
         product: "launchplane",
@@ -45,6 +47,7 @@ post_grant() {
         grant: {
           repository: $repository,
           workflow_refs: [$workflow_ref],
+          job_workflow_refs: (if $job_workflow_ref == "" then [] else [$job_workflow_ref] end),
           event_names: [$event_name],
           products: [$product_name],
           contexts: [$context_name],
@@ -936,6 +939,11 @@ post_odoo_stable_grant() {
   local action_name="$4"
   local source_label="$5"
   local idempotency_suffix="$6"
+  local job_workflow_file="${7:-}"
+  local job_workflow_ref=""
+  if [ -n "$job_workflow_file" ]; then
+    job_workflow_ref="cbusillo/launchplane/.github/workflows/${job_workflow_file}@refs/heads/main"
+  fi
   post_grant \
     "$repository" \
     "$workflow_file" \
@@ -943,7 +951,10 @@ post_odoo_stable_grant() {
     "$context_name" \
     "$action_name" \
     "$source_label" \
-    "$idempotency_suffix"
+    "$idempotency_suffix" \
+    workflow_dispatch \
+    refs/heads/main \
+    "$job_workflow_ref"
 }
 
 apply_product_onboarding \
@@ -1269,10 +1280,27 @@ post_odoo_cm_preview_grant \
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
   cm \
+  odoo-post-deploy.yml \
+  odoo_post_deploy.execute \
+  deploy:odoo-cm-post-deploy-grant \
+  odoo-cm-post-deploy \
+  reusable-odoo-post-deploy.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
   odoo-prod-promotion.yml \
-  odoo_prod_promotion_inputs.read \
-  deploy:odoo-cm-prod-promotion-inputs-grant \
-  odoo-cm-prod-promotion-inputs
+  odoo_prod_promotion_run.execute \
+  deploy:odoo-cm-prod-promotion-run-grant \
+  odoo-cm-prod-promotion-run \
+  reusable-odoo-prod-promotion.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
+  odoo-prod-rollback.yml \
+  odoo_prod_rollback.execute \
+  deploy:odoo-cm-prod-rollback-grant \
+  odoo-cm-prod-rollback \
+  reusable-odoo-prod-rollback.yml
 post_odoo_opw_preview_grant \
   odoo-tenant-opw \
   odoo_artifact_publish_inputs.read \
@@ -1337,7 +1365,24 @@ post_odoo_opw_preview_grant \
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-opw \
   opw \
+  odoo-post-deploy.yml \
+  odoo_post_deploy.execute \
+  deploy:odoo-opw-post-deploy-grant \
+  odoo-opw-post-deploy \
+  reusable-odoo-post-deploy.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
   odoo-prod-promotion.yml \
-  odoo_prod_promotion_inputs.read \
-  deploy:odoo-opw-prod-promotion-inputs-grant \
-  odoo-opw-prod-promotion-inputs
+  odoo_prod_promotion_run.execute \
+  deploy:odoo-opw-prod-promotion-run-grant \
+  odoo-opw-prod-promotion-run \
+  reusable-odoo-prod-promotion.yml
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
+  odoo-prod-rollback.yml \
+  odoo_prod_rollback.execute \
+  deploy:odoo-opw-prod-rollback-grant \
+  odoo-opw-prod-rollback \
+  reusable-odoo-prod-rollback.yml

@@ -22,13 +22,8 @@
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
     "publicReadiness": "docs/public-readiness.md",
-    "style": [
-      "docs/style/python.md",
-      "docs/style/testing.md"
-    ],
-    "policies": [
-      "docs/policies/coding-standards.md"
-    ]
+    "style": ["docs/style/python.md", "docs/style/testing.md"],
+    "policies": ["docs/policies/coding-standards.md"]
   },
   "qualityGate": {
     "test": {
@@ -55,11 +50,7 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": [
-        "changed_files",
-        "directory",
-        "whole_project"
-      ]
+      "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
       "behavior changes",
@@ -81,6 +72,9 @@
     "Odoo Config Parameter Override",
     "Odoo Website Bootstrap Override",
     "Odoo Stable Bootstrap",
+    "Reusable Odoo Post Deploy",
+    "Reusable Odoo Prod Promotion",
+    "Reusable Odoo Prod Rollback",
     "Odoo Target Replacement Plan",
     "Odoo Target Replacement Apply",
     "Preview Lifecycle",
@@ -92,9 +86,7 @@
   ],
   "qaLabels": [],
   "deployLabels": [],
-  "healthUrls": [
-    "https://launchplane.shinycomputers.com/v1/health"
-  ],
+  "healthUrls": ["https://launchplane.shinycomputers.com/v1/health"],
   "relatedRepos": [
     "cbusillo/sellyouroutboard",
     "cbusillo/verireel",

@@ -712,6 +712,7 @@ def _identity(
     *,
     repository: str = "every/verireel",
     workflow_ref: str = "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+    job_workflow_ref: str = "",
     event_name: str = "pull_request",
     ref: str = "refs/heads/main",
     environment: str = "",
@@ -720,7 +721,7 @@ def _identity(
         repository=repository,
         repository_owner="every",
         workflow_ref=workflow_ref,
-        job_workflow_ref="",
+        job_workflow_ref=job_workflow_ref,
         ref=ref,
         ref_type="branch",
         event_name=event_name,
@@ -26421,6 +26422,87 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             execute_mock.assert_called_once()
 
+    def test_odoo_prod_promotion_run_allows_reusable_launchplane_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                            ],
+                            "job_workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-promotion.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_promotion_run.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                        job_workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/reusable-odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_prod_promotion_run",
+                return_value=OdooProdPromotionRunResult(
+                    context="cm",
+                    from_instance="testing",
+                    to_instance="prod",
+                    request_id="run-123-attempt-1",
+                    run_status="pass",
+                    input_status="ready",
+                    backup_status="pass",
+                    promotion_status="pass",
+                    deployment_status="pass",
+                    post_deploy_status="pass",
+                    destination_health_status="pass",
+                    artifact_id="artifact-cm-new",
+                    source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+                    backup_record_id="backup-gate-cm-prod-run-123-attempt-1",
+                    promotion_record_id="promotion-cm-testing-to-prod",
+                    deployment_record_id="deployment-cm-prod",
+                    release_tuple_id="cm-prod-artifact-cm-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_digest="sha256:new",
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-promotion-run",
+                    payload={
+                        "product": "odoo",
+                        "run": {
+                            "context": "cm",
+                            "request_id": "run-123-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["run_status"], "pass")
+
     def test_odoo_prod_promotion_run_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -26675,11 +26757,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {
                     "promotion_record_id": "promotion-opw-testing-to-prod",
                     "deployment_record_id": "deployment-opw-prod-rollback",
+                    "release_tuple_id": "opw-prod-artifact-opw-847c71c1db61785c",
                 },
             )
             self.assertEqual(payload["result"]["rollback_status"], "pass")
             self.assertEqual(payload["result"]["rollback_health_status"], "pass")
             self.assertEqual(payload["result"]["post_deploy_status"], "pass")
+            self.assertEqual(
+                payload["result"]["release_tuple_id"],
+                "opw-prod-artifact-opw-847c71c1db61785c",
+            )
             execute_mock.assert_called_once()
 
     def test_odoo_prod_rollback_driver_rejects_unauthorized_workflow(self) -> None:

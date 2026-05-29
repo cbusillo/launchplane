@@ -1,0 +1,73 @@
+---
+name: Reusable Odoo Prod Promotion
+
+"on":
+  workflow_call:
+    inputs:
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prod-promotion:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    steps:
+      - name: Request Launchplane Odoo prod promotion
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: https://launchplane.shinycomputers.com
+          audience: launchplane.shinycomputers.com
+          route-path: /v1/drivers/odoo/prod-promotion-run
+          payload: >-
+            {"schema_version":1,"product":"odoo","run":{"schema_version":1}}
+          payload-fields: |-
+            run.context=${{ inputs.context }}
+            run.request_id=${{ github.run_id }}-${{ github.run_attempt }}
+          idempotency-key: >-
+            opp:${{ inputs.context }}:${{ github.run_id }}:${{ github.run_attempt }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: result.run_status,result.destination_health_status
+          output-paths: >-
+            trace_id=trace_id,
+            backup_record_id=result.backup_record_id,
+            backup_status=result.backup_status,
+            promotion_record_id=result.promotion_record_id,
+            deployment_record_id=result.deployment_record_id,
+            release_tuple_id=result.release_tuple_id,
+            promotion_status=result.promotion_status,
+            deployment_status=result.deployment_status,
+            post_deploy_status=result.post_deploy_status,
+            destination_health_status=result.destination_health_status,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          BACKUP_RECORD_ID: ${{ steps.lp.outputs.backup_record_id }}
+          BACKUP_STATUS: ${{ steps.lp.outputs.backup_status }}
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DESTINATION_HEALTH_STATUS: >-
+            ${{ steps.lp.outputs.destination_health_status }}
+          PROMOTION_RECORD_ID: ${{ steps.lp.outputs.promotion_record_id }}
+          PROMOTION_STATUS: ${{ steps.lp.outputs.promotion_status }}
+          RELEASE_TUPLE_ID: ${{ steps.lp.outputs.release_tuple_id }}
+        run: |
+          echo "backup_record_id=$BACKUP_RECORD_ID"
+          echo "backup_status=$BACKUP_STATUS"
+          echo "promotion_record_id=$PROMOTION_RECORD_ID"
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "release_tuple_id=$RELEASE_TUPLE_ID"
+          echo "promotion_status=$PROMOTION_STATUS"
+          echo "destination_health_status=$DESTINATION_HEALTH_STATUS"
