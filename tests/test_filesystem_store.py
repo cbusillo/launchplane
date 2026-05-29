@@ -55,6 +55,11 @@ from control_plane.contracts.product_profile_record import (
     ProductPreviewProfile,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationAttemptRecord,
+)
+from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
+from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.promotion_record import (
@@ -631,6 +636,57 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 [record.incident_id for record in open_records], [open_record.incident_id]
             )
+
+    def test_write_and_list_public_ingress_notification_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            policy = PublicIngressNotificationPolicyRecord(
+                policy_id="public-ingress-notification-policy-example-site",
+                product="example-site",
+                context="example-site-prod",
+                instance="prod",
+                status="enabled",
+                destinations=(
+                    PublicIngressNotificationDestination(
+                        destination_id="discord-ops",
+                        kind="discord",
+                        discord_webhook_secret="discord-webhook",
+                    ),
+                ),
+                created_at="2026-05-29T12:00:00Z",
+                updated_at="2026-05-29T12:00:00Z",
+                source="test",
+            )
+            attempt = PublicIngressNotificationAttemptRecord(
+                attempt_id="public-ingress-notification-attempt-1",
+                incident_id="incident-1",
+                event="opened",
+                policy_id=policy.policy_id,
+                destination_id="discord-ops",
+                destination_kind="discord",
+                delivery_status="delivered",
+                attempted_at="2026-05-29T12:20:00Z",
+                observation_id="obs-1",
+                action="posted_discord",
+            )
+
+            policy_path = store.write_public_ingress_notification_policy_record(policy)
+            attempt_path = store.write_public_ingress_notification_attempt_record(attempt)
+            policies = store.list_public_ingress_notification_policy_records(
+                product="example-site",
+                context_name="example-site-prod",
+                status="enabled",
+            )
+            attempts = store.list_public_ingress_notification_attempt_records(
+                incident_id="incident-1",
+                destination_kind="discord",
+            )
+
+            self.assertTrue(policy_path.exists())
+            self.assertTrue(attempt_path.exists())
+            self.assertEqual([record.policy_id for record in policies], [policy.policy_id])
+            self.assertEqual([record.attempt_id for record in attempts], [attempt.attempt_id])
 
     def test_write_and_list_runtime_key_safety_policy_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

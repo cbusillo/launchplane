@@ -13,10 +13,16 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationAttemptRecord,
+)
+from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
+from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
+    PublicIngressNotificationDriverSet,
     build_github_issue_notifier,
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
@@ -28,6 +34,8 @@ class _Store:
         self._profiles = profiles
         self.records: list[PublicIngressObservationRecord] = []
         self.incidents: list[PublicIngressIncidentRecord] = []
+        self.notification_policies: list[PublicIngressNotificationPolicyRecord] = []
+        self.notification_attempts: list[PublicIngressNotificationAttemptRecord] = []
         self.lane_summaries: dict[tuple[str, str], LaunchplaneLaneSummary] = {}
 
     def list_product_profile_records(
@@ -82,18 +90,70 @@ class _Store:
             and (not instance_name or incident.instance == instance_name)
             and (not status or incident.status == status)
         ]
-        incidents.sort(key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True)
+        incidents.sort(
+            key=lambda incident: (incident.opened_at, incident.incident_id), reverse=True
+        )
         if limit is not None:
             incidents = incidents[:limit]
         return tuple(incidents)
 
-    def write_public_ingress_incident_record(
-        self, record: PublicIngressIncidentRecord
-    ) -> None:
+    def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
         self.incidents = [
             incident for incident in self.incidents if incident.incident_id != record.incident_id
         ]
         self.incidents.append(record)
+
+    def list_public_ingress_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationPolicyRecord, ...]:
+        policies = [
+            policy
+            for policy in self.notification_policies
+            if (not product or policy.product in {"", product})
+            and (not context_name or policy.context in {"", context_name})
+            and (not instance_name or policy.instance in {"", instance_name})
+            and (not status or policy.status == status)
+        ]
+        policies.sort(key=lambda policy: (policy.updated_at, policy.policy_id), reverse=True)
+        if limit is not None:
+            policies = policies[:limit]
+        return tuple(policies)
+
+    def list_public_ingress_notification_attempt_records(
+        self,
+        *,
+        incident_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressNotificationAttemptRecord, ...]:
+        attempts = [
+            attempt
+            for attempt in self.notification_attempts
+            if (not incident_id or attempt.incident_id == incident_id)
+            and (not event or attempt.event == event)
+            and (not destination_kind or attempt.destination_kind == destination_kind)
+        ]
+        attempts.sort(key=lambda attempt: (attempt.attempted_at, attempt.attempt_id), reverse=True)
+        if limit is not None:
+            attempts = attempts[:limit]
+        return tuple(attempts)
+
+    def write_public_ingress_notification_attempt_record(
+        self, record: PublicIngressNotificationAttemptRecord
+    ) -> None:
+        self.notification_attempts = [
+            attempt
+            for attempt in self.notification_attempts
+            if attempt.attempt_id != record.attempt_id
+        ]
+        self.notification_attempts.append(record)
 
 
 def _profile(
@@ -134,6 +194,22 @@ def _identity() -> RuntimeIdentity:
     )
 
 
+def _notification_policy(
+    *destinations: PublicIngressNotificationDestination,
+) -> PublicIngressNotificationPolicyRecord:
+    return PublicIngressNotificationPolicyRecord(
+        policy_id="public-ingress-notifications-example-site",
+        product="example-site",
+        context="example-site",
+        instance="prod",
+        status="enabled",
+        destinations=destinations,
+        created_at="2026-05-29T12:00:00Z",
+        updated_at="2026-05-29T12:00:00Z",
+        source="test",
+    )
+
+
 def _record_notification(
     notifications: list[tuple[str, str]],
     record: PublicIngressObservationRecord,
@@ -146,6 +222,16 @@ def _record_notification(
 def _capture_command(commands: list[list[str]], command: list[str]) -> object:
     commands.append(command)
     return object()
+
+
+def _capture_github_call(
+    calls: list[tuple[str, dict[str, object]]], action: str, payload: dict[str, object]
+) -> dict[str, object]:
+    calls.append((action, payload))
+    return {
+        "url": "https://github.com/cbusillo/launchplane/issues/123",
+        "id": f"github-{action}",
+    }
 
 
 def _capture_request(requested_urls: list[str], url: str) -> HttpObservation:
@@ -317,6 +403,178 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(incident.opened_observation_id, store.records[0].record_id)
         self.assertEqual(incident.latest_observation_id, store.records[2].record_id)
         self.assertEqual(incident.resolved_observation_id, store.records[2].record_id)
+
+    def test_policy_driven_incident_notifications_record_attempts(self) -> None:
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="github-main",
+                    kind="github_issue",
+                    github_repository="cbusillo/launchplane",
+                    github_label="public-ingress",
+                ),
+                PublicIngressNotificationDestination(
+                    destination_id="email-ops",
+                    kind="email",
+                    email_to=("ops@example.test",),
+                    email_from="launchplane@example.test",
+                    smtp_host="smtp.example.test",
+                    smtp_username_secret="smtp-username",
+                    smtp_password_secret="smtp-password",
+                ),
+                PublicIngressNotificationDestination(
+                    destination_id="discord-ops",
+                    kind="discord",
+                    discord_webhook_secret="discord-webhook",
+                ),
+            )
+        )
+        github_calls: list[tuple[str, dict[str, object]]] = []
+        email_subjects: list[str] = []
+        discord_posts: list[tuple[str, dict[str, object]]] = []
+        drivers = PublicIngressNotificationDriverSet(
+            github_client=lambda action, payload: _capture_github_call(
+                github_calls, action, payload
+            ),
+            email_sender=lambda _destination, message: email_subjects.append(
+                str(message["Subject"])
+            ),
+            discord_sender=lambda webhook_url, payload: discord_posts.append(
+                (webhook_url, payload)
+            ),
+            secret_resolver=lambda secret_name: {
+                "discord-webhook": "https://discord.com/api/webhooks/test/webhook",
+                "smtp-username": "launchplane",
+                "smtp-password": "secret",
+            }.get(secret_name, ""),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda _url, _timeout: HttpObservation(
+                status_code=503,
+                final_url="https://example.test",
+                redirect_count=0,
+            ),
+            notification_drivers=drivers,
+        )
+
+        self.assertEqual(result.open_incident_count, 1)
+        self.assertEqual(result.delivery_attempt_count, 3)
+        self.assertEqual(
+            {attempt.destination_kind for attempt in store.notification_attempts},
+            {"github_issue", "email", "discord"},
+        )
+        self.assertTrue(
+            all(attempt.delivery_status == "delivered" for attempt in store.notification_attempts)
+        )
+        self.assertEqual(github_calls[0][0], "create")
+        self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
+        self.assertEqual(discord_posts[0][0], "https://discord.com/api/webhooks/test/webhook")
+
+    def test_policy_delivery_failures_are_recorded_per_destination(self) -> None:
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="email-ops",
+                    kind="email",
+                    email_to=("ops@example.test",),
+                    email_from="launchplane@example.test",
+                    smtp_host="smtp.example.test",
+                    smtp_username_secret="smtp-username",
+                    smtp_password_secret="smtp-password",
+                ),
+                PublicIngressNotificationDestination(
+                    destination_id="discord-ops",
+                    kind="discord",
+                    discord_webhook_secret="discord-webhook",
+                ),
+            )
+        )
+        drivers = PublicIngressNotificationDriverSet(
+            email_sender=lambda _destination, _message: (_ for _ in ()).throw(
+                RuntimeError("smtp unavailable")
+            ),
+            discord_sender=lambda _webhook_url, _payload: None,
+            secret_resolver=lambda secret_name: {
+                "discord-webhook": "https://discord.com/api/webhooks/test/webhook",
+                "smtp-username": "launchplane",
+                "smtp-password": "secret",
+            }.get(secret_name, ""),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda _url, _timeout: HttpObservation(
+                status_code=503,
+                final_url="https://example.test",
+                redirect_count=0,
+            ),
+            notification_drivers=drivers,
+        )
+
+        self.assertEqual(result.delivery_attempt_count, 2)
+        statuses = {
+            attempt.destination_kind: attempt.delivery_status
+            for attempt in store.notification_attempts
+        }
+        self.assertEqual(statuses, {"email": "failed", "discord": "delivered"})
+        failed = next(
+            attempt
+            for attempt in store.notification_attempts
+            if attempt.delivery_status == "failed"
+        )
+        self.assertIn("smtp unavailable", failed.error_message)
+
+    def test_github_incident_delivery_closes_created_issue_on_recovery(self) -> None:
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="github-main",
+                    kind="github_issue",
+                    github_repository="cbusillo/launchplane",
+                    github_label="public-ingress",
+                )
+            )
+        )
+        github_calls: list[tuple[str, dict[str, object]]] = []
+        drivers = PublicIngressNotificationDriverSet(
+            github_client=lambda action, payload: _capture_github_call(
+                github_calls, action, payload
+            )
+        )
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda _url, _timeout: HttpObservation(
+                status_code=503,
+                final_url="https://example.test",
+                redirect_count=0,
+            ),
+            notification_drivers=drivers,
+        )
+        recovery = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:30:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+            ),
+            notification_drivers=drivers,
+        )
+
+        self.assertEqual(recovery.resolved_incident_count, 1)
+        self.assertEqual([call[0] for call in github_calls], ["create", "close"])
+        self.assertEqual(
+            github_calls[1][1]["issue_url"],
+            "https://github.com/cbusillo/launchplane/issues/123",
+        )
 
     def test_github_issue_notifier_comments_on_alert_issue(self) -> None:
         commands: list[list[str]] = []
