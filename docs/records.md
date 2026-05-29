@@ -688,6 +688,11 @@ preflights.
   `uv run launchplane every-code stop`. The supervisor writes a pid file and log
   under `state/every-code-worker/` by default while the worker-created tmux
   sessions remain visible and independently attachable.
+- Worker prompts require closeout hygiene, including the Love Gate, before a PR
+  can be merged or an issue can close. After a terminal session is gone, worker
+  maintenance removes clean Every Code worktrees and their local `every-code/*`
+  branches from the source checkout. Dirty or suspicious worktrees are left in
+  place for operator inspection.
 - For a remote Launchplane database, run the Mac worker through the service API
   instead of sharing DB credentials with the local host. Configure the service
   and worker with the same `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`, then start the
