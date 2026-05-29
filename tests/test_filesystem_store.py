@@ -54,6 +54,8 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductPreviewProfile,
 )
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -519,6 +521,68 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(
             [listed_record.product for listed_record in listed_records], ["sellyouroutboard"]
         )
+
+    def test_write_and_list_public_ingress_observation_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = PublicIngressObservationRecord(
+                record_id="public-ingress-example-site-prod-older",
+                product="example-site",
+                context="example-site-prod",
+                instance="prod",
+                observed_at="2026-05-29T12:00:00Z",
+                status="pass",
+                base_url="https://example.test",
+                targets=(
+                    PublicIngressTargetObservation(
+                        target="base_url",
+                        url="https://example.test",
+                        status="pass",
+                        http_status=200,
+                        summary="Public ingress returned a successful response.",
+                    ),
+                ),
+                summary="Public ingress is reachable.",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "record_id": "public-ingress-example-site-prod-newer",
+                    "observed_at": "2026-05-29T12:05:00Z",
+                    "status": "fail",
+                    "failure_code": "http_error",
+                    "targets": (
+                        PublicIngressTargetObservation(
+                            target="base_url",
+                            url="https://example.test",
+                            status="fail",
+                            failure_code="http_error",
+                            http_status=503,
+                            summary="HTTP 503",
+                        ),
+                    ),
+                    "summary": "Public ingress failed.",
+                }
+            )
+
+            written_path = store.write_public_ingress_observation_record(older_record)
+            store.write_public_ingress_observation_record(newer_record)
+            listed_records = store.list_public_ingress_observation_records(
+                product="example-site",
+                context_name="example-site-prod",
+                instance_name="prod",
+            )
+            limited_records = store.list_public_ingress_observation_records(
+                product="example-site",
+                limit=1,
+            )
+            self.assertTrue(written_path.exists())
+
+        self.assertEqual(
+            [record.record_id for record in listed_records],
+            [newer_record.record_id, older_record.record_id],
+        )
+        self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
 
     def test_write_and_list_runtime_key_safety_policy_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

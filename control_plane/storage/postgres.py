@@ -68,6 +68,7 @@ from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedback
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
@@ -462,6 +463,32 @@ class LaunchplaneProductProfileRow(Base):
     repository: Mapped[str] = mapped_column(String, nullable=False)
     driver_id: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePublicIngressObservationRow(Base):
+    __tablename__ = "launchplane_public_ingress_observations"
+    __table_args__ = (
+        Index(
+            "launchplane_public_ingress_observations_lookup_idx",
+            "product",
+            "context",
+            "instance",
+            desc("observed_at"),
+        ),
+        Index(
+            "launchplane_public_ingress_observations_status_idx",
+            "status",
+            desc("observed_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    observed_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2669,6 +2696,47 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneProductProfileRow,
             filters=filters,
             order_by=(LaunchplaneProductProfileRow.product.asc(),),
+        )
+
+    def write_public_ingress_observation_record(
+        self, record: PublicIngressObservationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePublicIngressObservationRow(
+                record_id=record.record_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                status=record.status,
+                observed_at=record.observed_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_public_ingress_observation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PublicIngressObservationRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplanePublicIngressObservationRow.product == product)
+        if context_name:
+            filters.append(LaunchplanePublicIngressObservationRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplanePublicIngressObservationRow.instance == instance_name)
+        return self._list_models(
+            model_type=PublicIngressObservationRecord,
+            orm_model=LaunchplanePublicIngressObservationRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePublicIngressObservationRow.observed_at.desc(),
+                LaunchplanePublicIngressObservationRow.record_id.desc(),
+            ),
+            limit=limit,
         )
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:

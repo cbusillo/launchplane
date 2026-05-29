@@ -64,6 +64,7 @@ def build_product_profile_record(
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
                 odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
                 odoo_data_policy=lane.odoo_data_policy,
+                public_ingress_monitoring=lane.public_ingress_monitoring,
             )
             for lane in manifest.lanes
         ),
