@@ -60,6 +60,8 @@ VeriReel product paths:
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-humans/grants`
   - `POST /v1/authz-policies/terminal-agents/grants`
+  - `POST /v1/authz-policies/local-operators/grants`
+  - `POST /v1/authz-policies/local-admins/grants`
 - Every Code local automation work-request routes:
   - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/summary`
@@ -132,13 +134,14 @@ and preview mutations as authenticated Launchplane routes. The authz policy
 grant routes accept GitHub Actions OIDC callers and authenticated admin human
 sessions, require the `launchplane_service_deploy.execute` action, and remain
 the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
-human policy rules. The terminal-agent grant route uses the same boundary for
-DB-backed terminal-agent read rules. Grant requests support `dry_run` and
-`apply` modes. Apply requests must include an audit reason, write a new active
-policy record only when the grant is not already present, and immediately
-refresh the in-process policy used by the current service worker. Responses
-return record metadata, rule counts, a compact diff, and redacted audit metadata
-rather than echoing workflow refs, human logins, or the full policy body.
+human policy rules. Terminal-agent, local-operator, and local-admin grant routes
+use the same boundary for DB-backed owner-agent rules. Grant requests support
+`dry_run` and `apply` modes. Apply requests must include an audit reason and
+write a new active policy record only when the grant is not already present, and
+immediately refresh the in-process policy used by the current service worker.
+Responses return record metadata, rule counts, a compact diff, and redacted audit
+metadata rather than echoing workflow refs, human logins, owner-agent subjects,
+or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while
@@ -193,22 +196,25 @@ agent can access, such as `product_environment.read` for product environment and
 config-status diagnostics.
 
 Trusted owner terminals that need to make Launchplane-owned operator mutations
-without a browser session can use a separate local-operator bearer credential.
+without a browser session can use separate owner-agent bearer credentials.
 Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
 secret to trusted local agents through
 `~/.config/launchplane/local-operator.env`. Optional
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
 `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` values identify the actor in audit and
 idempotency records; the defaults are `local-owner-agent` and
-`local-owner-write`. Local-operator write requests must include a non-empty
-`reason`; product-config apply is also rejected until the service has recorded a
-matching local-operator dry-run for the same product config payload. These
+`local-owner-write`. Routine owner-operator authority is DB-backed by
+`local_operators` authz policy rules, scoped by subject, token label, product,
+context, and action.
+
+Rare owner-admin operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with optional
+`LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
+Those credentials are also DB-backed by exact `local_admins` authz policy rules;
+the token alone does not grant blanket access. Owner-agent write requests must
+include a non-empty `reason`; product-config apply is also rejected until the
+service has recorded a matching owner-agent dry-run for the same payload. These
 requests still use Launchplane records, redacted responses, runtime key-safety
-policy, and managed secret storage. The local-operator identity is scoped to a
-narrow allowlist, including product-config plan/apply and public-ingress
-notification-policy apply. It is not accepted for product-profile reads or authz
-policy administration, so the credential cannot enumerate product profiles or
-rewrite its own permission model.
+policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
 `GET /v1/every-code/summary` returns a compact agent-safe projection of Every
 Code work requests. It requires `every_code_work_request.read` for

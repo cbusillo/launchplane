@@ -116,6 +116,10 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
+    LocalAdminPolicyRule,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
     TerminalAgentIdentity,
 )
 from control_plane.service_human_auth import (
@@ -588,6 +592,46 @@ def _merge_train_service_policy() -> LaunchplaneAuthzPolicy:
                 }
             ]
         }
+    )
+
+
+def _local_operator_policy(
+    *,
+    actions: tuple[str, ...],
+    products: tuple[str, ...] = ("*",),
+    contexts: tuple[str, ...] = ("*",),
+    subject: str = "local-owner-agent",
+    token_label: str = "local-owner-write",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy(
+        local_operators=(
+            LocalOperatorPolicyRule(
+                subjects=(subject,),
+                token_labels=(token_label,),
+                products=products,
+                contexts=contexts,
+                actions=actions,
+            ),
+        )
+    )
+
+
+def _local_admin_policy(
+    *,
+    actions: tuple[str, ...],
+    products: tuple[str, ...] = ("launchplane",),
+    contexts: tuple[str, ...] = ("launchplane",),
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy(
+        local_admins=(
+            LocalAdminPolicyRule(
+                subjects=("local-owner-admin",),
+                token_labels=("local-owner-admin",),
+                products=products,
+                contexts=contexts,
+                actions=actions,
+            ),
+        )
     )
 
 
@@ -2205,6 +2249,76 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry-run")
         self.assertEqual(records, ())
+
+    def test_public_ingress_notification_policy_local_operator_requires_policy_and_reason(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_policy(
+                    actions=("public_ingress_notification_policy.apply",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PublicIngressNotificationPolicyRecord(
+                policy_id="public-ingress-notification-local-operator",
+                product="launchplane",
+                context="launchplane",
+                status="enabled",
+                created_at="2026-05-29T12:00:00Z",
+                updated_at="2026-05-29T12:00:00Z",
+                source="test",
+                destinations=(
+                    PublicIngressNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                clear=True,
+            ):
+                no_reason_status, no_reason_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/public-ingress/notification-policies/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "public-ingress-local-operator-no-reason"},
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/public-ingress/notification-policies/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "reason": "Enable local operator ingress notifications.",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "public-ingress-local-operator-apply"},
+                )
+
+        self.assertEqual(no_reason_status, 400)
+        self.assertEqual(no_reason_payload["error"]["code"], "reason_required")
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
 
     def test_merge_train_run_once_service_returns_dry_run_from_policy(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -5796,13 +5910,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {
                     "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-token",
                     "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-read",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
                 },
             ):
                 app = create_launchplane_service_app(
                     state_dir=state_dir,
                     verifier=_StubVerifier(_merge_train_service_identity()),
-                    authz_policy=LaunchplaneAuthzPolicy(),
+                    authz_policy=_local_operator_policy(
+                        actions=("merge_train.policy_targets",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                    ),
                     control_plane_root_path=Path(temporary_directory_name),
                 )
                 status_code, payload = _invoke_app(
@@ -13425,7 +13543,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.plan",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
                 control_plane_root_path=root,
                 database_url=database_url,
             )
@@ -13486,7 +13608,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
                 control_plane_root_path=root,
                 database_url=database_url,
             )
@@ -13515,7 +13641,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
                 control_plane_root_path=root,
                 database_url=database_url,
             )
@@ -13549,7 +13679,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.plan", "product_config.apply"),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
                 control_plane_root_path=root,
                 database_url=database_url,
             )
@@ -13627,7 +13761,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.plan",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                    subject="configured-local-owner",
+                    token_label="configured-write-token",
+                ),
                 control_plane_root_path=root,
                 database_url=database_url,
             )
@@ -20011,6 +20151,192 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIsNone(dry_run_idempotency_record)
         self.assertEqual(read_status_code, 403)
         self.assertEqual(read_payload["error"]["code"], "authorization_denied")
+
+    def test_local_operator_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/local-operators/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow local owner operator ingress notification config.",
+                    "related_issue": "cbusillo/launchplane#929",
+                    "grant": {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-write"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["public_ingress_notification_policy.apply"],
+                        "source_label": "test:local-operator-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-local-operator-grant:ingress",
+                },
+            )
+            repeat_status_code, repeat_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/local-operators/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow local owner operator ingress notification config.",
+                    "related_issue": "cbusillo/launchplane#929",
+                    "grant": {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-write"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["public_ingress_notification_policy.apply"],
+                        "source_label": "test:local-operator-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-local-operator-grant:ingress-repeat",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["diff"]["new_local_operators_rule_count"], 1)
+        self.assertEqual(
+            payload["result"]["audit"]["requested_grant_summary"]["principal_type"],
+            "local_operator",
+        )
+        self.assertNotIn(
+            "local-owner-agent",
+            json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
+        )
+        self.assertEqual(repeat_status_code, 202)
+        self.assertEqual(repeat_payload["result"]["changed"], False)
+        self.assertTrue(
+            active_policy.policy.allows(
+                identity=LocalOperatorIdentity(
+                    subject="local-owner-agent", token_label="local-owner-write"
+                ),
+                action="public_ingress_notification_policy.apply",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+
+    def test_local_admin_authz_policy_grant_endpoint_writes_separate_rule(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/local-admins/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow local owner admin authz grants.",
+                    "related_issue": "cbusillo/launchplane#929",
+                    "grant": {
+                        "subjects": ["local-owner-admin"],
+                        "token_labels": ["local-owner-admin"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                        "source_label": "test:local-admin-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-local-admin-grant:self-deploy",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["diff"]["new_local_admins_rule_count"], 1)
+        self.assertEqual(
+            payload["result"]["audit"]["requested_grant_summary"]["principal_type"],
+            "local_admin",
+        )
+        self.assertTrue(
+            active_policy.policy.allows(
+                identity=LocalAdminIdentity(
+                    subject="local-owner-admin", token_label="local-owner-admin"
+                ),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
 
     def test_authz_policy_grant_endpoint_apply_requires_reason(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

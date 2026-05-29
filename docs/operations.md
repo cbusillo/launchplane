@@ -98,6 +98,9 @@ Current implementation scope:
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/authz-policies/github-actions/grants`
 - `POST /v1/authz-policies/github-humans/grants`
+- `POST /v1/authz-policies/terminal-agents/grants`
+- `POST /v1/authz-policies/local-operators/grants`
+- `POST /v1/authz-policies/local-admins/grants`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/public-ingress/notification-policies/apply`
@@ -503,10 +506,11 @@ Current derived-state behavior:
   this route when their session has the exact product/context/action grant.
   Trusted owner terminals can also use the dedicated
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env`; local-operator requests must
-  include a non-empty `reason`, and local-operator apply is rejected until the
-  service has recorded a matching local-operator dry-run. Terminal-agent read
-  bearer credentials stay read-only and cannot apply product config. The service
+  `~/.config/launchplane/local-operator.env` when exact DB-backed
+  `local_operators` policy rules grant the product/context/action. Owner-agent
+  requests must include a non-empty `reason`, and owner-agent apply is rejected
+  until the service has recorded a matching dry-run. Terminal-agent read bearer
+  credentials stay read-only and cannot apply product config. The service
   response is redacted and the route rejects nested runtime or secret targets
   that differ from the authorized top-level context/instance. It fails closed
   when secret writes are requested without the Launchplane master encryption key

@@ -11,6 +11,7 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
 )
@@ -34,7 +35,11 @@ JsonResponse = Callable[..., list[bytes]]
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 UtcNow = Callable[[], str]
 ResolvedLaunchplaneIdentity: TypeAlias = (
-    GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity | LocalOperatorIdentity
+    GitHubActionsIdentity
+    | GitHubHumanIdentity
+    | TerminalAgentIdentity
+    | LocalOperatorIdentity
+    | LocalAdminIdentity
 )
 
 LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"

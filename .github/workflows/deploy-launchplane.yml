@@ -26,6 +26,11 @@ on:
         required: false
         default: true
         type: boolean
+      omit_owner_agent_env:
+        description: Temporarily omit owner-agent env for one compatibility deploy.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -79,6 +84,9 @@ jobs:
       LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: ${{ secrets.LAUNCHPLANE_LOCAL_OPERATOR_TOKEN }}
       LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT }}
       LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL }}
+      LAUNCHPLANE_LOCAL_ADMIN_TOKEN: ${{ secrets.LAUNCHPLANE_LOCAL_ADMIN_TOKEN }}
+      LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_SUBJECT }}
+      LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
@@ -266,8 +274,12 @@ jobs:
                 --arg local_operator_token "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN:-}" \
                 --arg local_operator_subject "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" \
                 --arg local_operator_token_label "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" \
+                --arg local_admin_token "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN:-}" \
+                --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
+                --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env != false }}' \
+                --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -282,10 +294,21 @@ jobs:
                       {
                         LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
                         LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
-                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label,
+                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
+                      }
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if ($omit_owner_agent_env | not) then
+                      {
                         LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: $local_operator_token,
                         LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: $local_operator_subject,
-                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: $local_operator_token_label
+                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: $local_operator_token_label,
+                        LAUNCHPLANE_LOCAL_ADMIN_TOKEN: $local_admin_token,
+                        LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: $local_admin_subject,
+                        LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: $local_admin_token_label
                       }
                     else
                       {}

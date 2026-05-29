@@ -52,11 +52,21 @@ class LocalOperatorIdentity:
     token_label: str
 
 
+@dataclass(frozen=True)
+class LocalAdminIdentity:
+    subject: str
+    token_label: str
+
+
 LaunchplaneIdentity = (
-    GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity | LocalOperatorIdentity
+    GitHubActionsIdentity
+    | GitHubHumanIdentity
+    | TerminalAgentIdentity
+    | LocalOperatorIdentity
+    | LocalAdminIdentity
 )
 AgentConsumerSubjectType = Literal[
-    "github_actions", "github_human", "terminal_agent", "local_operator"
+    "github_actions", "github_human", "terminal_agent", "local_operator", "local_admin"
 ]
 AgentConsumerAccessProfile = Literal[
     "automation_worker",
@@ -74,16 +84,6 @@ AgentConsumerActionSafety = Literal[
     "policy_admin",
 ]
 AgentAuthzDecision = Literal["allowed", "denied"]
-LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset(
-    {
-        "merge_train.policy_targets",
-        "public_ingress_monitor.run_once",
-        "public_ingress_notification_policy.apply",
-        "product_config.plan",
-        "product_config.apply",
-        "work_graph.issue_inbox.reconcile",
-    }
-)
 
 
 class TokenVerifier(Protocol):
@@ -282,6 +282,66 @@ class TerminalAgentPolicyRule(BaseModel):
         return True
 
 
+class LocalOperatorPolicyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subjects: tuple[str, ...] = ()
+    token_labels: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+
+    @staticmethod
+    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
+        normalized_value = value.strip()
+        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+
+    def allows(
+        self, *, identity: LocalOperatorIdentity, action: str, product: str, context: str
+    ) -> bool:
+        if self.subjects and not self._matches_any(identity.subject, self.subjects):
+            return False
+        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
+            return False
+        if self.products and product not in self.products:
+            return False
+        if self.contexts and context not in self.contexts:
+            return False
+        if self.actions and action not in self.actions:
+            return False
+        return True
+
+
+class LocalAdminPolicyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subjects: tuple[str, ...] = ()
+    token_labels: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+
+    @staticmethod
+    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
+        normalized_value = value.strip()
+        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+
+    def allows(
+        self, *, identity: LocalAdminIdentity, action: str, product: str, context: str
+    ) -> bool:
+        if self.subjects and not self._matches_any(identity.subject, self.subjects):
+            return False
+        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
+            return False
+        if self.products and product not in self.products:
+            return False
+        if self.contexts and context not in self.contexts:
+            return False
+        if self.actions and action not in self.actions:
+            return False
+        return True
+
+
 class AgentConsumerSubject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -340,11 +400,19 @@ def limited_remote_user_action_allowed(action: str) -> bool:
     return action_safety(action) in {"read", "safe_write"}
 
 
-def local_operator_action_allowed(*, identity: LocalOperatorIdentity, action: str) -> bool:
+def local_operator_identity_valid(*, identity: LocalOperatorIdentity, action: str) -> bool:
     return (
         bool(identity.subject.strip())
         and bool(identity.token_label.strip())
-        and action.strip() in LOCAL_OPERATOR_ALLOWED_ACTIONS
+        and bool(action.strip())
+    )
+
+
+def local_admin_identity_valid(*, identity: LocalAdminIdentity, action: str) -> bool:
+    return (
+        bool(identity.subject.strip())
+        and bool(identity.token_label.strip())
+        and bool(action.strip())
     )
 
 
@@ -393,6 +461,20 @@ def agent_consumer_subject(
             action_safety=safety,
             read_only_context=safety == "read",
             approval_capable=safety in {"mutation", "prod", "destructive", "secret_backed"},
+        )
+    if isinstance(identity, LocalAdminIdentity):
+        return AgentConsumerSubject(
+            subject_type="local_admin",
+            subject=identity.subject,
+            display_label=identity.token_label,
+            access_profile="owner_local_agent",
+            role="admin",
+            product=product,
+            context=context,
+            action=action,
+            action_safety=safety,
+            read_only_context=safety == "read",
+            approval_capable=True,
         )
     return AgentConsumerSubject(
         subject_type="github_actions",
@@ -445,6 +527,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
     github_humans: tuple[GitHubHumanPolicyRule, ...] = ()
     terminal_agents: tuple[TerminalAgentPolicyRule, ...] = ()
+    local_operators: tuple[LocalOperatorPolicyRule, ...] = ()
+    local_admins: tuple[LocalAdminPolicyRule, ...] = ()
 
     def allows(
         self, *, identity: LaunchplaneIdentity, action: str, product: str, context: str
@@ -462,7 +546,15 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 for rule in self.terminal_agents
             )
         if isinstance(identity, LocalOperatorIdentity):
-            return local_operator_action_allowed(identity=identity, action=action)
+            return local_operator_identity_valid(identity=identity, action=action) and any(
+                rule.allows(identity=identity, action=action, product=product, context=context)
+                for rule in self.local_operators
+            )
+        if isinstance(identity, LocalAdminIdentity):
+            return local_admin_identity_valid(identity=identity, action=action) and any(
+                rule.allows(identity=identity, action=action, product=product, context=context)
+                for rule in self.local_admins
+            )
         return any(
             rule.allows(identity=identity, action=action, product=product, context=context)
             for rule in self.github_actions

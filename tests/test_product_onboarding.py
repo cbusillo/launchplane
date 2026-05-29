@@ -459,6 +459,18 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("deploy:terminal-agent-product-profile-read-grant", script_text)
         self.assertIn("terminal-agent-product-profile-read", script_text)
 
+    def test_deploy_authz_grants_include_local_operator_notification_apply(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("/v1/authz-policies/local-operators/grants", script_text)
+        self.assertIn("public_ingress_notification_policy.apply", script_text)
+        self.assertIn(
+            "deploy:local-operator-public-ingress-notification-policy-grant",
+            script_text,
+        )
+
     def test_deploy_verireel_onboarding_manifest_enrolls_preview_lifecycle(
         self,
     ) -> None:

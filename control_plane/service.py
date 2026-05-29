@@ -208,6 +208,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    LocalAdminIdentity,
     LocalOperatorIdentity,
     TerminalAgentIdentity,
     TokenVerifier,
@@ -774,6 +775,9 @@ _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN",
         "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT",
         "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
+        "LAUNCHPLANE_LOCAL_ADMIN_TOKEN",
+        "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT",
+        "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT",
@@ -2440,6 +2444,8 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
+        "/v1/authz-policies/local-operators/grants",
+        "/v1/authz-policies/local-admins/grants",
         "/v1/merge-train/policies/import",
     }
 )
@@ -3103,6 +3109,8 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
+        "/v1/authz-policies/local-operators/grants",
+        "/v1/authz-policies/local-admins/grants",
         "/v1/merge-train/policies/import",
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
@@ -4993,6 +5001,8 @@ def _identity_actor(identity: LaunchplaneIdentity) -> str:
         return f"github:{identity.login}"
     if isinstance(identity, LocalOperatorIdentity):
         return f"local-operator:{identity.subject}"
+    if isinstance(identity, LocalAdminIdentity):
+        return f"local-admin:{identity.subject}"
     if isinstance(identity, TerminalAgentIdentity):
         return f"terminal-agent:{identity.subject}"
     return (
@@ -5005,6 +5015,8 @@ def _idempotency_scope(identity: LaunchplaneIdentity) -> str:
         return "|".join(("github-human", identity.login, str(identity.github_id)))
     if isinstance(identity, LocalOperatorIdentity):
         return "|".join(("local-operator", identity.subject, identity.token_label))
+    if isinstance(identity, LocalAdminIdentity):
+        return "|".join(("local-admin", identity.subject, identity.token_label))
     if isinstance(identity, TerminalAgentIdentity):
         return "|".join(("terminal-agent", identity.subject, identity.token_label))
     workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
@@ -5767,6 +5779,8 @@ def _should_store_idempotency_record(
             "/v1/authz-policies/github-actions/grants",
             "/v1/authz-policies/github-humans/grants",
             "/v1/authz-policies/terminal-agents/grants",
+            "/v1/authz-policies/local-operators/grants",
+            "/v1/authz-policies/local-admins/grants",
         }
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
@@ -5869,6 +5883,18 @@ def _local_operator_token_label_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "local-owner-write").strip()
 
 
+def _local_admin_token_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN", "").strip()
+
+
+def _local_admin_subject_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_SUBJECT", "local-owner-admin").strip()
+
+
+def _local_admin_token_label_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL", "local-owner-admin").strip()
+
+
 def _local_operator_identity_from_bearer(
     environ: dict[str, object],
 ) -> LocalOperatorIdentity | None:
@@ -5884,6 +5910,23 @@ def _local_operator_identity_from_bearer(
     subject = _local_operator_subject_from_env() or "local-owner-agent"
     token_label = _local_operator_token_label_from_env() or "local-owner-write"
     return LocalOperatorIdentity(subject=subject, token_label=token_label)
+
+
+def _local_admin_identity_from_bearer(
+    environ: dict[str, object],
+) -> LocalAdminIdentity | None:
+    expected_token = _local_admin_token_from_env()
+    if not expected_token:
+        return None
+    try:
+        provided_token = _bearer_token(environ)
+    except PermissionError:
+        return None
+    if not secrets.compare_digest(provided_token, expected_token):
+        return None
+    subject = _local_admin_subject_from_env() or "local-owner-admin"
+    token_label = _local_admin_token_label_from_env() or "local-owner-admin"
+    return LocalAdminIdentity(subject=subject, token_label=token_label)
 
 
 def _terminal_agent_identity_from_bearer(
@@ -6505,6 +6548,9 @@ def _read_identity(
     )
     if human_identity is not None:
         return human_identity
+    local_admin_identity = _local_admin_identity_from_bearer(environ)
+    if local_admin_identity is not None:
+        return local_admin_identity
     local_operator_identity = _local_operator_identity_from_bearer(environ)
     if local_operator_identity is not None:
         return local_operator_identity
@@ -6560,6 +6606,12 @@ def _authz_diagnostic_payload(
             "subject": identity.subject,
             "token_label": identity.token_label,
         }
+    elif isinstance(identity, LocalAdminIdentity):
+        identity_payload = {
+            "type": "local_admin",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
     else:
         identity_payload = {
             "type": "github_actions",
@@ -6597,6 +6649,61 @@ def _authz_diagnostic_payload(
             "context": context,
         }
     return payload
+
+
+def _authz_policy_grant_database_required_response(
+    *, trace_id: str, principal_label: str, start_response: _StartResponse
+) -> list[bytes]:
+    return _json_response(
+        start_response=start_response,
+        status_code=503,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "database_required",
+                "message": (
+                    f"Authz {principal_label} policy grant writes require Launchplane database storage."
+                ),
+            },
+        },
+    )
+
+
+def _authz_policy_grant_denied_response(
+    *, trace_id: str, principal_label: str, start_response: _StartResponse
+) -> list[bytes]:
+    return _json_response(
+        start_response=start_response,
+        status_code=403,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "authorization_denied",
+                "message": (
+                    f"Workflow cannot write Launchplane authz {principal_label} policy grants."
+                ),
+            },
+        },
+    )
+
+
+def _authz_policy_unavailable_response(
+    *, trace_id: str, start_response: _StartResponse
+) -> list[bytes]:
+    return _json_response(
+        start_response=start_response,
+        status_code=503,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "authz_policy_unavailable",
+                "message": "Launchplane active authz policy is unavailable.",
+            },
+        },
+    )
 
 
 def _product_profile_context_cutover_allowed_contexts(
@@ -8221,10 +8328,20 @@ def create_launchplane_service_app(
                         on_renewed_session=record_renewed_session,
                     )
                 else:
-                    token = _bearer_token(environ)
-                    identity = verifier.verify(token)
-                    if not isinstance(identity, GitHubActionsIdentity):
-                        raise PermissionError("Mutation routes require GitHub Actions OIDC.")
+                    local_admin_identity = _local_admin_identity_from_bearer(environ)
+                    if local_admin_identity is not None:
+                        identity = local_admin_identity
+                    else:
+                        local_operator_identity = _local_operator_identity_from_bearer(environ)
+                        if local_operator_identity is not None:
+                            identity = local_operator_identity
+                        else:
+                            token = _bearer_token(environ)
+                            identity = verifier.verify(token)
+                            if not isinstance(identity, GitHubActionsIdentity):
+                                raise PermissionError(
+                                    "Mutation routes require GitHub Actions OIDC."
+                                )
             if (
                 isinstance(identity, TerminalAgentIdentity)
                 and method != "GET"
@@ -10814,7 +10931,10 @@ def create_launchplane_service_app(
                 policy_request = PublicIngressNotificationPolicyApplyEnvelope.model_validate(
                     payload
                 )
-                if isinstance(identity, LocalOperatorIdentity) and not policy_request.reason:
+                if (
+                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
+                    and not policy_request.reason
+                ):
                     return _json_response(
                         start_response=start_response,
                         status_code=400,
@@ -11172,7 +11292,7 @@ def create_launchplane_service_app(
                     return product_config_response
                 assert product_config_request is not None
                 if (
-                    isinstance(identity, LocalOperatorIdentity)
+                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
                     and product_config_request.mode == "apply"
                     and not _local_operator_product_config_dry_run_exists(
                         record_store=record_store,
@@ -11223,7 +11343,7 @@ def create_launchplane_service_app(
                     return product_config_result
                 driver_result = product_config_result.driver_result
                 if (
-                    isinstance(identity, LocalOperatorIdentity)
+                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
                     and product_config_request.mode == "dry-run"
                 ):
                     _write_local_operator_product_config_dry_run_record(
@@ -11587,6 +11707,198 @@ def create_launchplane_service_app(
                         authz_policy_record=authz_policy_record,
                         changed=changed,
                         mode=terminal_authz_grant_request.mode,
+                        diff=diff,
+                        audit=audit,
+                    )
+                )
+            elif path == "/v1/authz-policies/local-operators/grants":
+                local_operator_grant_request = control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _authz_policy_grant_database_required_response(
+                        trace_id=request_trace_id,
+                        principal_label="local-operator",
+                        start_response=start_response,
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=local_operator_grant_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _authz_policy_grant_denied_response(
+                        trace_id=request_trace_id,
+                        principal_label="local-operator",
+                        start_response=start_response,
+                    )
+                if local_operator_grant_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    (
+                        current_policy,
+                        current_record,
+                        diff,
+                    ) = control_plane_authz_grant_service.plan_local_operator_authz_policy_grant(
+                        record_store=record_store,
+                        grant=local_operator_grant_request.grant,
+                    )
+                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
+                        request=local_operator_grant_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                        now_timestamp=_now_timestamp,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if local_operator_grant_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = control_plane_authz_grant_service.write_local_operator_authz_policy_grant(
+                            record_store=record_store,
+                            request=local_operator_grant_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            now_timestamp=_now_timestamp,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
+                except ValueError:
+                    return _authz_policy_unavailable_response(
+                        trace_id=request_trace_id,
+                        start_response=start_response,
+                    )
+                if local_operator_grant_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
+                result, driver_result = (
+                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
+                        authz_policy_record=authz_policy_record,
+                        changed=changed,
+                        mode=local_operator_grant_request.mode,
+                        diff=diff,
+                        audit=audit,
+                    )
+                )
+            elif path == "/v1/authz-policies/local-admins/grants":
+                local_admin_grant_request = control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _authz_policy_grant_database_required_response(
+                        trace_id=request_trace_id,
+                        principal_label="local-admin",
+                        start_response=start_response,
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=local_admin_grant_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _authz_policy_grant_denied_response(
+                        trace_id=request_trace_id,
+                        principal_label="local-admin",
+                        start_response=start_response,
+                    )
+                if local_admin_grant_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    (
+                        current_policy,
+                        current_record,
+                        diff,
+                    ) = control_plane_authz_grant_service.plan_local_admin_authz_policy_grant(
+                        record_store=record_store,
+                        grant=local_admin_grant_request.grant,
+                    )
+                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
+                        request=local_admin_grant_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                        now_timestamp=_now_timestamp,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if local_admin_grant_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = control_plane_authz_grant_service.write_local_admin_authz_policy_grant(
+                            record_store=record_store,
+                            request=local_admin_grant_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            now_timestamp=_now_timestamp,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
+                except ValueError:
+                    return _authz_policy_unavailable_response(
+                        trace_id=request_trace_id,
+                        start_response=start_response,
+                    )
+                if local_admin_grant_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
+                result, driver_result = (
+                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
+                        authz_policy_record=authz_policy_record,
+                        changed=changed,
+                        mode=local_admin_grant_request.mode,
                         diff=diff,
                         audit=audit,
                     )

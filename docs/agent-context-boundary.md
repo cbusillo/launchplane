@@ -37,11 +37,13 @@ Agent context callers are identified as compact agent consumers:
   on `GET` routes; policy still scopes products, contexts, and read actions.
 - `owner_local_agent`: trusted local operator using
   `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` from
-  `~/.config/launchplane/local-operator.env`. This identity is limited to
-  reason-bearing product-config dry-run/apply from a trusted shell; apply
-  requires a previously recorded matching dry-run, and all other mutation,
-  destructive, production, secret-backed non-product-config, and authz policy
-  actions remain out of scope.
+  `~/.config/launchplane/local-operator.env`. This identity is limited by exact
+  DB-backed `local_operators` authz policy rules and must include a reason for
+  write requests. Apply-shaped product-config mutations require a previously
+  recorded matching dry-run.
+- `owner_local_agent`: trusted local admin using `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`.
+  This identity is limited by exact DB-backed `local_admins` authz policy rules
+  and is reserved for deliberate escalation, not routine owner-agent writes.
 - `limited_remote_user`: authenticated GitHub human with read-only role. This
   profile fails closed to read and safe-write action families even if a policy
   rule is accidentally broad.

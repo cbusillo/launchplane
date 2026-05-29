@@ -126,6 +126,77 @@ post_terminal_agent_grant() {
   return 1
 }
 
+post_local_owner_grant() {
+  local principal="$1"
+  local product_name="$2"
+  local context_name="$3"
+  local action_name="$4"
+  local source_label="$5"
+  local idempotency_suffix="$6"
+  local subject_env_key token_label_env_key default_subject default_token_label route_path
+  local request_payload response_file status_code
+
+  if [ "$principal" = "local-admin" ]; then
+    subject_env_key="LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
+    token_label_env_key="LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
+    default_subject="local-owner-admin"
+    default_token_label="local-owner-admin"
+    route_path="/v1/authz-policies/local-admins/grants"
+  elif [ "$principal" = "local-operator" ]; then
+    subject_env_key="LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
+    token_label_env_key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL"
+    default_subject="local-owner-agent"
+    default_token_label="local-owner-write"
+    route_path="/v1/authz-policies/local-operators/grants"
+  else
+    echo "Unsupported local owner grant principal ${principal}." >&2
+    return 1
+  fi
+
+  request_payload="$({
+    jq -n \
+      --arg product_name "$product_name" \
+      --arg context_name "$context_name" \
+      --arg action_name "$action_name" \
+      --arg source_label "$source_label" \
+      --arg subject "${!subject_env_key:-$default_subject}" \
+      --arg token_label "${!token_label_env_key:-$default_token_label}" \
+      --arg principal "$principal" \
+      '{
+        schema_version: 1,
+        product: "launchplane",
+        mode: "apply",
+        reason: ("Deploy workflow ensuring " + $principal + " authz grant " + $source_label),
+        related_issue: "cbusillo/launchplane#929",
+        grant: {
+          subjects: [$subject],
+          token_labels: [$token_label],
+          products: [$product_name],
+          contexts: [$context_name],
+          actions: [$action_name],
+          source_label: $source_label
+        }
+      }'
+  })"
+  response_file="$(mktemp)"
+  status_code="$(curl -sS \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${oidc_token}" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: launchplane-${principal}-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
+    --data "$request_payload" \
+    "${LAUNCHPLANE_SERVICE_URL}${route_path}")"
+  if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+    cat "$response_file"
+    return 0
+  fi
+  cat "$response_file" >&2
+  echo "Launchplane ${principal} authz grant request failed with HTTP ${status_code}." >&2
+  return 1
+}
+
 post_product_config_human_grant() {
   local action_name="$1"
   local source_label="$2"
@@ -1121,6 +1192,48 @@ post_terminal_agent_grant \
   every_code_preview_gate.read \
   deploy:terminal-agent-agent-context-preview-grant \
   terminal-agent-agent-context-preview
+post_local_owner_grant \
+  local-operator \
+  launchplane \
+  launchplane \
+  merge_train.policy_targets \
+  deploy:local-operator-merge-train-policy-targets-grant \
+  local-operator-merge-train-policy-targets
+post_local_owner_grant \
+  local-operator \
+  launchplane \
+  launchplane \
+  work_graph.issue_inbox.reconcile \
+  deploy:local-operator-work-graph-issue-inbox-reconcile-grant \
+  local-operator-work-graph-issue-inbox-reconcile
+post_local_owner_grant \
+  local-operator \
+  launchplane \
+  launchplane \
+  public_ingress_monitor.run_once \
+  deploy:local-operator-public-ingress-monitor-run-once-grant \
+  local-operator-public-ingress-monitor-run-once
+post_local_owner_grant \
+  local-operator \
+  launchplane \
+  launchplane \
+  public_ingress_notification_policy.apply \
+  deploy:local-operator-public-ingress-notification-policy-grant \
+  local-operator-public-ingress-notification-policy
+post_local_owner_grant \
+  local-operator \
+  "*" \
+  "*" \
+  product_config.plan \
+  deploy:local-operator-product-config-plan-grant \
+  local-operator-product-config-plan
+post_local_owner_grant \
+  local-operator \
+  "*" \
+  "*" \
+  product_config.apply \
+  deploy:local-operator-product-config-apply-grant \
+  local-operator-product-config-apply
 post_product_config_human_grant \
   product_config.plan \
   deploy:product-config-human-plan-grant \

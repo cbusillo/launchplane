@@ -41,17 +41,18 @@ it can reach, trust, or decrypt DB-backed state.
 | Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
 | Every Code worker bearer token | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config. |
 | Terminal-agent read bearer token | `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`, optional `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT`, optional `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and a trusted local terminal agent for redacted `GET` context reads only. Store it outside repository config and keep it distinct from Every Code worker credentials. |
-| Local-operator write bearer token | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, optional `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, optional `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for narrow reason-bearing operator mutations such as product-config plan/apply and public-ingress notification-policy apply. Store it outside repository config and keep it distinct from read-only terminal-agent credentials. |
+| Local-operator write bearer token | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, optional `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, optional `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for routine reason-bearing operator mutations. Exact authority is DB-backed by `local_operators` authz policy rules. Store it outside repository config and keep it distinct from read-only terminal-agent credentials. |
+| Local-admin write bearer token | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, optional `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, optional `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation. |
 
 The Launchplane self-deploy workflow has a manual `omit_every_code_env`
 compatibility input for the one deploy that teaches an older running service to
 accept the Every Code env keys. Leave it unset for normal deploys so the service
 and worker keep the shared token/webhook secret in sync.
 
-The manual `omit_terminal_agent_env` compatibility input also omits local-operator
-write credentials because those keys were introduced in the same self-deploy env
-handoff path. Leave it unset for normal deploys after the service accepts both
-terminal-agent and local-operator keys.
+The manual `omit_terminal_agent_env` compatibility input omits terminal-agent
+read credentials. Owner-agent write credentials use the separate
+`omit_owner_agent_env` compatibility input. Leave both unset for normal deploys
+after the service accepts terminal-agent, local-operator, and local-admin keys.
 
 | Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields plus bounded dependency, subissue, and PR check signals. Deploy automation forwards these values only when the GitHub Project token secret is present. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
 | Work graph and merge-train GitHub token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and merge-train GitHub API calls. The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |

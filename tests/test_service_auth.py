@@ -14,14 +14,16 @@ from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
+    LocalAdminPolicyRule,
     LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     action_safety,
     agent_authz_audit,
     agent_consumer_subject,
     limited_remote_user_action_allowed,
-    local_operator_action_allowed,
     parse_authz_policy_toml,
 )
 from control_plane.contracts.authz_policy_record import authz_policy_sha256
@@ -103,6 +105,18 @@ def _local_operator_identity(**overrides: object) -> LocalOperatorIdentity:
     }
     values.update(overrides)
     return LocalOperatorIdentity(
+        subject=str(values["subject"]),
+        token_label=str(values["token_label"]),
+    )
+
+
+def _local_admin_identity(**overrides: object) -> LocalAdminIdentity:
+    values: dict[str, object] = {
+        "subject": "local-owner-admin",
+        "token_label": "local-owner-admin",
+    }
+    values.update(overrides)
+    return LocalAdminIdentity(
         subject=str(values["subject"]),
         token_label=str(values["token_label"]),
     )
@@ -586,8 +600,22 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
-    def test_local_operator_policy_allows_only_product_config_actions(self) -> None:
-        policy = LaunchplaneAuthzPolicy()
+    def test_local_operator_policy_uses_db_backed_rules(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-write",),
+                    products=("sellyouroutboard", "launchplane"),
+                    contexts=("sellyouroutboard", "launchplane"),
+                    actions=(
+                        "product_config.plan",
+                        "product_config.apply",
+                        "merge_train.policy_targets",
+                    ),
+                ),
+            )
+        )
         identity = _local_operator_identity()
 
         self.assertTrue(
@@ -647,26 +675,98 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
-    def test_local_operator_action_allows_configured_subject_and_label(self) -> None:
+    def test_local_operator_policy_fails_closed_without_rules(self) -> None:
+        policy = LaunchplaneAuthzPolicy()
+
+        self.assertFalse(
+            policy.allows(
+                identity=_local_operator_identity(),
+                action="product_config.apply",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+
+    def test_local_operator_rule_fails_closed_by_subject_label_and_scope(self) -> None:
+        rule = LocalOperatorPolicyRule(
+            subjects=("local-*-agent",),
+            token_labels=("local-owner-*",),
+            products=("launchplane",),
+            contexts=("launchplane",),
+            actions=("public_ingress_notification_policy.apply",),
+        )
+        identity = _local_operator_identity()
+
         self.assertTrue(
-            local_operator_action_allowed(
-                identity=_local_operator_identity(
-                    subject="configured-local-operator",
-                    token_label="configured-write-token",
+            rule.allows(
+                identity=identity,
+                action="public_ingress_notification_policy.apply",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+        denied_cases = (
+            (
+                "subject",
+                _local_operator_identity(subject="other-agent"),
+                "launchplane",
+                "launchplane",
+            ),
+            (
+                "token_label",
+                _local_operator_identity(token_label="read-token"),
+                "launchplane",
+                "launchplane",
+            ),
+            ("product", identity, "other-product", "launchplane"),
+            ("context", identity, "launchplane", "other-context"),
+        )
+        for name, case_identity, product, context in denied_cases:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    rule.allows(
+                        identity=case_identity,
+                        action="public_ingress_notification_policy.apply",
+                        product=product,
+                        context=context,
+                    )
+                )
+
+    def test_local_admin_policy_uses_separate_rules(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            local_admins=(
+                LocalAdminPolicyRule(
+                    subjects=("local-owner-admin",),
+                    token_labels=("local-owner-admin",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("launchplane_service_deploy.execute",),
                 ),
-                action="product_config.apply",
+            )
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=_local_admin_identity(),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
             )
         )
         self.assertFalse(
-            local_operator_action_allowed(
-                identity=_local_operator_identity(subject="  "),
-                action="product_config.apply",
+            policy.allows(
+                identity=_local_operator_identity(),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
             )
         )
         self.assertFalse(
-            local_operator_action_allowed(
-                identity=_local_operator_identity(token_label="  "),
-                action="product_config.apply",
+            policy.allows(
+                identity=_local_admin_identity(token_label="wrong"),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
             )
         )
 
@@ -774,15 +874,33 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             products = ["sellyouroutboard"]
             contexts = ["sellyouroutboard-testing"]
             actions = ["product_environment.read"]
+
+            [[local_operators]]
+            subjects = ["local-owner-agent"]
+            token_labels = ["local-owner-write"]
+            products = ["launchplane"]
+            contexts = ["launchplane"]
+            actions = ["public_ingress_notification_policy.apply"]
+
+            [[local_admins]]
+            subjects = ["local-owner-admin"]
+            token_labels = ["local-owner-admin"]
+            products = ["launchplane"]
+            contexts = ["launchplane"]
+            actions = ["launchplane_service_deploy.execute"]
             """
         )
 
         self.assertEqual(len(policy.github_actions), 1)
         self.assertEqual(len(policy.github_humans), 1)
         self.assertEqual(len(policy.terminal_agents), 1)
+        self.assertEqual(len(policy.local_operators), 1)
+        self.assertEqual(len(policy.local_admins), 1)
         self.assertEqual(policy.github_actions[0].repository, "cbusillo/verireel")
         self.assertEqual(policy.github_humans[0].roles, ("admin",))
         self.assertEqual(policy.terminal_agents[0].subjects, ("local-owner-agent",))
+        self.assertEqual(policy.local_operators[0].token_labels, ("local-owner-write",))
+        self.assertEqual(policy.local_admins[0].subjects, ("local-owner-admin",))
 
 
 class HumanSessionBoundaryTests(unittest.TestCase):
@@ -868,7 +986,7 @@ class GitHubOidcVerifierHardeningTests(unittest.TestCase):
 
 
 class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
-    def test_policy_sha256_omits_empty_terminal_agents_for_existing_records(self) -> None:
+    def test_policy_sha256_omits_empty_owner_agents_for_existing_records(self) -> None:
         policy = LaunchplaneAuthzPolicy(
             github_actions=(
                 GitHubActionsPolicyRule(
@@ -881,6 +999,8 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         )
         legacy_payload = policy.model_dump(mode="json", exclude_none=True)
         legacy_payload.pop("terminal_agents", None)
+        legacy_payload.pop("local_operators", None)
+        legacy_payload.pop("local_admins", None)
         legacy_sha256 = hashlib.sha256(
             json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -913,6 +1033,47 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
         )
 
         self.assertNotEqual(authz_policy_sha256(terminal_policy), authz_policy_sha256(base_policy))
+
+    def test_policy_sha256_includes_local_owner_rules_when_present(self) -> None:
+        base_policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("launchplane_service_deploy.execute",),
+                ),
+            )
+        )
+        operator_policy = base_policy.model_copy(
+            update={
+                "local_operators": (
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-write",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("public_ingress_notification_policy.apply",),
+                    ),
+                )
+            }
+        )
+        admin_policy = base_policy.model_copy(
+            update={
+                "local_admins": (
+                    LocalAdminPolicyRule(
+                        subjects=("local-owner-admin",),
+                        token_labels=("local-owner-admin",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        actions=("launchplane_service_deploy.execute",),
+                    ),
+                )
+            }
+        )
+
+        self.assertNotEqual(authz_policy_sha256(operator_policy), authz_policy_sha256(base_policy))
+        self.assertNotEqual(authz_policy_sha256(admin_policy), authz_policy_sha256(base_policy))
 
     def test_actions_policy_matches_patterns_and_scopes(self) -> None:
         rule = GitHubActionsPolicyRule(
