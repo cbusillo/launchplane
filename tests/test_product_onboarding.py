@@ -227,6 +227,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('"instance":"testing"', workflow_text)
         self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", workflow_text)
         self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
+        self.assertIn("outputs:", workflow_text)
+        self.assertIn("value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}", workflow_text)
+        self.assertIn("deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}", workflow_text)
         for result_path in (
             "result.deployment_status",
             "result.post_deploy_status",

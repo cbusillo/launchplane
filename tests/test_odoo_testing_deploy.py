@@ -142,11 +142,15 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
     def test_deploy_uses_profile_health_url_when_target_has_no_health_url(self) -> None:
         record_store = Mock()
         record_store.read_product_profile_record.return_value = _profile()
+        no_health_error = click.ClickException(
+            "Healthcheck verification requested but no target domain/URL was resolved. "
+            "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
+        )
 
         with (
             patch(
                 "control_plane.cli._resolve_native_ship_request",
-                return_value=_ship_request_without_health_url(),
+                side_effect=(no_health_error, _ship_request_without_health_url()),
             ) as resolve_ship,
             patch("control_plane.cli._read_artifact_manifest"),
             patch("control_plane.cli._execute_ship", return_value=(None, _deployment_record())) as ship,
@@ -164,7 +168,40 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
                 ),
             )
 
-        self.assertFalse(resolve_ship.call_args.kwargs["verify_health"])
+        self.assertEqual(resolve_ship.call_count, 2)
+        self.assertTrue(resolve_ship.call_args_list[0].kwargs["verify_health"])
+        self.assertFalse(resolve_ship.call_args_list[1].kwargs["verify_health"])
+        normalized_request = ship.call_args.kwargs["request"]
+        self.assertTrue(normalized_request.verify_health)
+        self.assertEqual(
+            normalized_request.destination_health.urls,
+            ("https://cm-testing.example/launchplane/health",),
+        )
+
+    def test_deploy_preserves_target_health_url_when_resolved(self) -> None:
+        record_store = Mock()
+        record_store.read_product_profile_record.return_value = _profile()
+
+        with (
+            patch("control_plane.cli._resolve_native_ship_request", return_value=_ship_request()) as resolve_ship,
+            patch("control_plane.cli._read_artifact_manifest"),
+            patch("control_plane.cli._execute_ship", return_value=(None, _deployment_record())) as ship,
+        ):
+            execute_odoo_testing_deploy(
+                control_plane_root=Path("/control-plane"),
+                state_dir=Path("/state"),
+                database_url="postgresql://launchplane.example/db",
+                record_store=record_store,
+                request=OdooTestingDeployRequest(
+                    context="cm",
+                    product="odoo-tenant-cm",
+                    artifact_id="artifact-cm-new",
+                    source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+                ),
+            )
+
+        resolve_ship.assert_called_once()
+        self.assertTrue(resolve_ship.call_args.kwargs["verify_health"])
         normalized_request = ship.call_args.kwargs["request"]
         self.assertTrue(normalized_request.verify_health)
         self.assertEqual(
