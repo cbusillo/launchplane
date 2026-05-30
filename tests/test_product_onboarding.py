@@ -157,6 +157,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         expected_workflows = (
             "reusable-odoo-artifact-publish.yml",
+            "reusable-odoo-testing-deploy.yml",
             "reusable-odoo-post-deploy.yml",
             "reusable-odoo-prod-promotion.yml",
             "reusable-odoo-prod-rollback.yml",
@@ -169,6 +170,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 script_text,
             )
             self.assertIn(f"deploy:odoo-{context_name}-artifact-publish-grant", script_text)
+            self.assertIn(f"deploy:odoo-{context_name}-testing-deploy-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
@@ -207,6 +209,24 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)
         self.assertNotIn("short_sha=", workflow_text)
         self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
+
+    def test_reusable_odoo_testing_deploy_uses_tenant_product_scope(self) -> None:
+        workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("/v1/drivers/odoo/testing-deploy", workflow_text)
+        self.assertIn("product=\"odoo-tenant-${CONTEXT_NAME}\"", workflow_text)
+        self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
+        self.assertIn('"instance":"testing"', workflow_text)
+        self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", workflow_text)
+        self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
+        for result_path in (
+            "result.deployment_status",
+            "result.post_deploy_status",
+            "result.destination_health_status",
+        ):
+            self.assertIn(result_path, workflow_text)
 
     def test_deploy_launchplane_keeps_terminal_agent_and_owner_agent_inputs_separate(
         self,

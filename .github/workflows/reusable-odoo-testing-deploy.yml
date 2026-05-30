@@ -1,0 +1,97 @@
+---
+name: Reusable Odoo Testing Deploy
+
+"on":
+  workflow_call:
+    inputs:
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      product:
+        description: >-
+          Optional Launchplane product key. Defaults to odoo-tenant-${context}.
+        required: false
+        default: ""
+        type: string
+      artifact_id:
+        description: Stored Launchplane artifact ID to deploy to testing.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source git ref attached to deployment evidence.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "2700000"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  testing-deploy:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    steps:
+      - name: Resolve Launchplane product
+        id: product
+        env:
+          CONTEXT_NAME: ${{ inputs.context }}
+          PRODUCT_INPUT: ${{ inputs.product }}
+        run: |
+          product="$PRODUCT_INPUT"
+          if [ -z "$product" ]; then
+            product="odoo-tenant-${CONTEXT_NAME}"
+          fi
+          echo "product=$product" >> "$GITHUB_OUTPUT"
+
+      - name: Request Launchplane Odoo testing deploy
+        id: lp
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: https://launchplane.shinycomputers.com
+          audience: launchplane.shinycomputers.com
+          route-path: /v1/drivers/odoo/testing-deploy
+          payload: >-
+            {"schema_version":1,"deploy":{"schema_version":1,"instance":"testing"}}
+          payload-fields: |-
+            product=${{ steps.product.outputs.product }}
+            deploy.context=${{ inputs.context }}
+            deploy.artifact_id=${{ inputs.artifact_id }}
+            deploy.source_git_ref=${{ inputs.source_git_ref }}
+          idempotency-key: >-
+            odoo-testing-deploy:${{ steps.product.outputs.product }}:${{
+              inputs.context
+            }}:testing:${{ inputs.artifact_id }}:${{ github.run_id }}:${{
+              github.run_attempt
+            }}
+          timeout-ms: ${{ inputs['timeout-ms'] }}
+          fail-result-paths: >-
+            result.deployment_status,result.post_deploy_status,
+            result.destination_health_status
+          output-paths: >-
+            trace_id=trace_id,
+            deployment_record_id=result.deployment_record_id,
+            release_tuple_id=result.release_tuple_id,
+            deployment_status=result.deployment_status,
+            post_deploy_status=result.post_deploy_status,
+            destination_health_status=result.destination_health_status,
+            error_message=result.error_message
+
+      - name: Report result
+        env:
+          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DESTINATION_HEALTH_STATUS: >-
+            ${{ steps.lp.outputs.destination_health_status }}
+          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
+          RELEASE_TUPLE_ID: ${{ steps.lp.outputs.release_tuple_id }}
+        run: |
+          echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
+          echo "release_tuple_id=$RELEASE_TUPLE_ID"
+          echo "post_deploy_status=$POST_DEPLOY_STATUS"
+          echo "destination_health_status=$DESTINATION_HEALTH_STATUS"
