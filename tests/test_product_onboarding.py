@@ -200,6 +200,37 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("short_sha=", workflow_text)
         self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
 
+    def test_deploy_launchplane_keeps_terminal_agent_and_owner_agent_inputs_separate(
+        self,
+    ) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("omit_terminal_agent_env", workflow_text)
+        self.assertIn("omit_owner_agent_env", workflow_text)
+        self.assertIn(
+            "omit_terminal_agent_env:\n"
+            "        description: Temporarily omit terminal-agent env for one compatibility deploy.\n"
+            "        required: false\n"
+            "        default: false",
+            workflow_text,
+        )
+        self.assertIn(
+            "omit_owner_agent_env:\n"
+            "        description: Temporarily omit owner-agent env for one compatibility deploy.\n"
+            "        required: false\n"
+            "        default: false",
+            workflow_text,
+        )
+        self.assertIn("if ($omit_terminal_agent_env | not) then", workflow_text)
+        self.assertIn("if ($omit_owner_agent_env | not) then", workflow_text)
+        self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", workflow_text)
+        self.assertIn("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", workflow_text)
+        self.assertIn("LAUNCHPLANE_LOCAL_ADMIN_TOKEN", workflow_text)
+        self.assertNotIn(
+            "--argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env != false }}'",
+            workflow_text,
+        )
+
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
             encoding="utf-8"
