@@ -991,7 +991,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertTrue(profile.lanes[0].odoo_stable_bootstrap.enabled)
         self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
-        self.assertTrue(profile.lanes[0].public_ingress_monitoring.require_runtime_identity)
+        self.assertFalse(profile.lanes[0].public_ingress_monitoring.require_runtime_identity)
         self.assertEqual(
             profile.lanes[0].public_ingress_monitoring.alert_issue_url,
             "https://github.com/cbusillo/launchplane/issues/929",

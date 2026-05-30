@@ -29,6 +29,8 @@ Every Launchplane-operated web product should expose a small runtime contract:
 - known runtime port
 - health endpoint path
 - non-secret build revision or image tag in the health response
+- Launchplane runtime identity echo from `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`
+  before the lane is marked strict for runtime identity verification
 - documented required runtime environment keys
 - product-specific smoke check command when generic health is not enough
 
