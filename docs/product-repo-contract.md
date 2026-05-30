@@ -184,7 +184,10 @@ own the manual dispatch confirmation and the source workspace, while
 `reusable-odoo-artifact-publish.yml` owns the Launchplane publish-input request,
 artifact-record request, idempotency keys, and response mapping. The tenant
 workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
-`/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow.
+`/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
+reusable workflow defaults the Launchplane product key to
+`odoo-tenant-${context}` so publish metadata resolves through the tenant product
+profile that owns the image repository and stable lanes.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,

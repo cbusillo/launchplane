@@ -1193,15 +1193,14 @@ and returns the phase statuses and written record IDs. The lower-level inputs,
 backup-gate, and promotion routes remain available for diagnostics and explicit
 operator workflows, but product repos should not own the chain.
 
-The CM tenant preview workflow uses two product scopes deliberately. Artifact
-publish input and publish evidence requests use product `odoo` for context `cm`,
-because the publish handoff is an Odoo driver contract. Preview refresh and
-destroy requests use product `odoo-tenant-cm`, because preview lifecycle records
-and product profile configuration are tenant-product scoped. Deploy-maintained
-GitHub Actions grants must include both scopes for
-`cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml`; granting only the
-tenant product lets preview mutation through but blocks the earlier build input
-resolution step.
+The CM tenant preview workflow uses tenant-product scope for both artifact
+publish input/evidence and preview lifecycle requests. Artifact publish still
+uses Odoo driver routes, but source-ref build metadata resolves through the
+`odoo-tenant-cm` product profile so Launchplane can return the tenant image
+repository, tag, and lane-owned runtime payload. Deploy-maintained GitHub Actions
+grants for `cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml` should
+therefore include `odoo-tenant-cm` and context `cm` for publish input, publish
+evidence, refresh, and destroy actions.
 
 The CM preview workflow also needs `preview_pr_feedback.write` for product
 `odoo-tenant-cm` and context `cm` before it can retire tenant-side preview

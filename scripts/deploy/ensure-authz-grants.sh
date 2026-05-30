@@ -1030,6 +1030,7 @@ post_odoo_stable_grant() {
   local source_label="$5"
   local idempotency_suffix="$6"
   local job_workflow_file="${7:-}"
+  local product_name="${8:-odoo}"
   local job_workflow_ref=""
   if [ -n "$job_workflow_file" ]; then
     job_workflow_ref="cbusillo/launchplane/.github/workflows/${job_workflow_file}@refs/heads/main"
@@ -1037,7 +1038,7 @@ post_odoo_stable_grant() {
   post_grant \
     "$repository" \
     "$workflow_file" \
-    odoo \
+    "$product_name" \
     "$context_name" \
     "$action_name" \
     "$source_label" \
@@ -1435,7 +1436,8 @@ post_odoo_stable_grant \
   odoo_artifact_publish_inputs.read \
   deploy:odoo-cm-artifact-publish-inputs-grant \
   odoo-cm-artifact-publish-inputs \
-  reusable-odoo-artifact-publish.yml
+  reusable-odoo-artifact-publish.yml \
+  odoo-tenant-cm
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
   cm \
@@ -1443,7 +1445,8 @@ post_odoo_stable_grant \
   odoo_artifact_publish.write \
   deploy:odoo-cm-artifact-publish-grant \
   odoo-cm-artifact-publish \
-  reusable-odoo-artifact-publish.yml
+  reusable-odoo-artifact-publish.yml \
+  odoo-tenant-cm
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
   cm \
@@ -1536,7 +1539,8 @@ post_odoo_stable_grant \
   odoo_artifact_publish_inputs.read \
   deploy:odoo-opw-artifact-publish-inputs-grant \
   odoo-opw-artifact-publish-inputs \
-  reusable-odoo-artifact-publish.yml
+  reusable-odoo-artifact-publish.yml \
+  odoo-tenant-opw
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-opw \
   opw \
@@ -1544,7 +1548,8 @@ post_odoo_stable_grant \
   odoo_artifact_publish.write \
   deploy:odoo-opw-artifact-publish-grant \
   odoo-opw-artifact-publish \
-  reusable-odoo-artifact-publish.yml
+  reusable-odoo-artifact-publish.yml \
+  odoo-tenant-opw
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-opw \
   opw \
