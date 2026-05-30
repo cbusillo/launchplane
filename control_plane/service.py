@@ -13054,7 +13054,9 @@ def create_launchplane_service_app(
                     state_dir=state_dir,
                     database_url=database_url,
                     record_store=cast(OdooTestingDeployStore, record_store),
-                    request=odoo_deploy_request.deploy,
+                    request=odoo_deploy_request.deploy.model_copy(
+                        update={"product": odoo_deploy_request.product}
+                    ),
                 )
                 result = {
                     "deployment_record_id": driver_result.deployment_record_id,

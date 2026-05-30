@@ -12,10 +12,15 @@ from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.ship_request import ShipRequest
 
 
 class OdooTestingDeployStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> Path | None: ...
@@ -31,6 +36,7 @@ class OdooTestingDeployRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     context: str
     instance: str = "testing"
+    product: str = ""
     artifact_id: str
     source_git_ref: str
     wait: bool = True
@@ -43,6 +49,7 @@ class OdooTestingDeployRequest(BaseModel):
     def _validate_request(self) -> "OdooTestingDeployRequest":
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
+        self.product = self.product.strip()
         self.artifact_id = self.artifact_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
         if not self.context:
@@ -72,6 +79,42 @@ class OdooTestingDeployResult(BaseModel):
     error_message: str = ""
 
 
+def _profile_health_url(
+    *,
+    record_store: OdooTestingDeployStore,
+    product: str,
+    context: str,
+    instance: str,
+) -> str:
+    profile = record_store.read_product_profile_record(product.strip())
+    for lane in profile.lanes:
+        if lane.context == context and lane.instance == instance:
+            return lane.health_url.strip()
+    return ""
+
+
+def _ship_request_with_profile_health_url(
+    *,
+    ship_request: ShipRequest,
+    health_url: str,
+) -> ShipRequest:
+    normalized_health_url = health_url.strip()
+    if not normalized_health_url:
+        return ship_request
+    destination_health = ship_request.destination_health
+    if destination_health.urls:
+        return ship_request
+    timeout_seconds = destination_health.timeout_seconds or ship_request.health_timeout_seconds
+    updated_health = HealthcheckEvidence(
+        urls=(normalized_health_url,),
+        timeout_seconds=timeout_seconds,
+        status="pending",
+    )
+    return ship_request.model_copy(
+        update={"verify_health": True, "destination_health": updated_health}
+    )
+
+
 def execute_odoo_testing_deploy(
     *,
     control_plane_root: Path,
@@ -84,6 +127,12 @@ def execute_odoo_testing_deploy(
     from control_plane import cli as control_plane_cli
 
     try:
+        health_url = _profile_health_url(
+            record_store=record_store,
+            product=request.product or f"odoo-tenant-{request.context}",
+            context=request.context,
+            instance=request.instance,
+        )
         ship_request = control_plane_cli._resolve_native_ship_request(
             context_name=request.context,
             instance_name=request.instance,
@@ -91,12 +140,17 @@ def execute_odoo_testing_deploy(
             source_git_ref=request.source_git_ref,
             wait=request.wait,
             timeout_override_seconds=request.timeout_seconds,
-            verify_health=request.verify_health,
+            verify_health=False if request.verify_health and health_url else request.verify_health,
             health_timeout_override_seconds=request.health_timeout_seconds,
             dry_run=False,
             no_cache=request.no_cache,
             allow_dirty=False,
         )
+        if request.verify_health:
+            ship_request = _ship_request_with_profile_health_url(
+                ship_request=ship_request,
+                health_url=health_url,
+            )
         resolved_artifact_id = control_plane_cli._require_artifact_id(
             requested_artifact_id=ship_request.artifact_id
         )
