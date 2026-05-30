@@ -157,13 +157,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          oidc_token="$({
+          launchplane_oidc_token() {
             token_url="${ACTIONS_ID_TOKEN_REQUEST_URL}"
             curl -fsSL \
               -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
               "${token_url}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
             | jq -r '.value'
-          })"
+          }
           payload="$({
             jq -n \
               --arg product "$PRODUCT" \
@@ -226,6 +226,7 @@ jobs:
               "${GITHUB_RUN_ATTEMPT}"
           })"
           route="${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo"
+          oidc_token="$(launchplane_oidc_token)"
           status_code="$({
             curl -sS \
               -o odoo-target-replacement-apply.json \
@@ -263,6 +264,7 @@ jobs:
           fi
           deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
           while true; do
+            oidc_token="$(launchplane_oidc_token)"
             status_code="$({
               curl -sS \
                 -o odoo-target-replacement-apply.json \
