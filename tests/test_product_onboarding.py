@@ -176,9 +176,10 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
         self.assertIn('base_url: "https://opw-testing.shinycomputers.com"', script_text)
         self.assertIn(
-            'health_url: "https://opw-testing.shinycomputers.com/web/health"',
+            'health_url: "https://opw-testing.shinycomputers.com/launchplane/health"',
             script_text,
         )
+        self.assertIn('health_path: "/launchplane/health"', script_text)
         self.assertIn('domains: ["opw-testing.shinycomputers.com"]', script_text)
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
