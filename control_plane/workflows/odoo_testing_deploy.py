@@ -115,6 +115,55 @@ def _ship_request_with_profile_health_url(
     )
 
 
+def _resolve_ship_request_with_health_fallback(
+    *,
+    request: OdooTestingDeployRequest,
+    health_url: str,
+) -> ShipRequest:
+    from control_plane import cli as control_plane_cli
+
+    try:
+        return control_plane_cli._resolve_native_ship_request(
+            context_name=request.context,
+            instance_name=request.instance,
+            artifact_id=request.artifact_id,
+            source_git_ref=request.source_git_ref,
+            wait=request.wait,
+            timeout_override_seconds=request.timeout_seconds,
+            verify_health=request.verify_health,
+            health_timeout_override_seconds=request.health_timeout_seconds,
+            dry_run=False,
+            no_cache=request.no_cache,
+            allow_dirty=False,
+        )
+    except click.ClickException as error:
+        if not _should_retry_with_profile_health_url(error=error, health_url=health_url):
+            raise
+        fallback_request = control_plane_cli._resolve_native_ship_request(
+            context_name=request.context,
+            instance_name=request.instance,
+            artifact_id=request.artifact_id,
+            source_git_ref=request.source_git_ref,
+            wait=request.wait,
+            timeout_override_seconds=request.timeout_seconds,
+            verify_health=False,
+            health_timeout_override_seconds=request.health_timeout_seconds,
+            dry_run=False,
+            no_cache=request.no_cache,
+            allow_dirty=False,
+        )
+        return _ship_request_with_profile_health_url(
+            ship_request=fallback_request,
+            health_url=health_url,
+        )
+
+
+def _should_retry_with_profile_health_url(*, error: click.ClickException, health_url: str) -> bool:
+    if not health_url.strip():
+        return False
+    return "no target domain/URL was resolved" in str(error)
+
+
 def execute_odoo_testing_deploy(
     *,
     control_plane_root: Path,
@@ -133,24 +182,10 @@ def execute_odoo_testing_deploy(
             context=request.context,
             instance=request.instance,
         )
-        ship_request = control_plane_cli._resolve_native_ship_request(
-            context_name=request.context,
-            instance_name=request.instance,
-            artifact_id=request.artifact_id,
-            source_git_ref=request.source_git_ref,
-            wait=request.wait,
-            timeout_override_seconds=request.timeout_seconds,
-            verify_health=False if request.verify_health and health_url else request.verify_health,
-            health_timeout_override_seconds=request.health_timeout_seconds,
-            dry_run=False,
-            no_cache=request.no_cache,
-            allow_dirty=False,
+        ship_request = _resolve_ship_request_with_health_fallback(
+            request=request,
+            health_url=health_url,
         )
-        if request.verify_health:
-            ship_request = _ship_request_with_profile_health_url(
-                ship_request=ship_request,
-                health_url=health_url,
-            )
         resolved_artifact_id = control_plane_cli._require_artifact_id(
             requested_artifact_id=ship_request.artifact_id
         )

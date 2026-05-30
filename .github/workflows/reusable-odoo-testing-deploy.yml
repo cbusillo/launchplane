@@ -27,6 +27,25 @@ name: Reusable Odoo Testing Deploy
         required: false
         default: "2700000"
         type: string
+    outputs:
+      deployment_record_id:
+        description: Launchplane deployment record ID.
+        value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}
+      release_tuple_id:
+        description: Minted testing release tuple ID.
+        value: ${{ jobs.testing-deploy.outputs.release_tuple_id }}
+      deployment_status:
+        description: Launchplane deployment status.
+        value: ${{ jobs.testing-deploy.outputs.deployment_status }}
+      post_deploy_status:
+        description: Odoo post-deploy status.
+        value: ${{ jobs.testing-deploy.outputs.post_deploy_status }}
+      destination_health_status:
+        description: Destination health status.
+        value: ${{ jobs.testing-deploy.outputs.destination_health_status }}
+      error_message:
+        description: Launchplane driver error message, when present.
+        value: ${{ jobs.testing-deploy.outputs.error_message }}
 
 permissions:
   contents: read
@@ -34,6 +53,14 @@ permissions:
 
 jobs:
   testing-deploy:
+    outputs:
+      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
+      release_tuple_id: ${{ steps.lp.outputs.release_tuple_id }}
+      deployment_status: ${{ steps.lp.outputs.deployment_status }}
+      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      destination_health_status: >-
+        ${{ steps.lp.outputs.destination_health_status }}
+      error_message: ${{ steps.lp.outputs.error_message }}
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
