@@ -38,6 +38,7 @@ from control_plane.workflows.generic_web_preview import (
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
+from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 
 
 OdooPreviewDokployDryRunStatus = OdooPreviewRuntimePlanStatus
@@ -855,7 +856,7 @@ class OdooPreviewDokployApplyRequest(BaseModel):
     manifest: ArtifactIdentityManifest | None = None
     environment_values: dict[str, str] = Field(default_factory=dict)
     compose_file: str = ""
-    health_path: str = "/web/health"
+    health_path: str = DEFAULT_ODOO_RUNTIME_HEALTH_PATH
     timeout_seconds: int = Field(default=300, ge=1)
     wait_for_deploy: bool = True
     smoke_check: bool = True
@@ -874,7 +875,7 @@ class OdooPreviewDokployApplyRequest(BaseModel):
                 label="Odoo preview apply",
             )
         self.compose_file = self.compose_file.strip()
-        self.health_path = self.health_path.strip() or "/web/health"
+        self.health_path = self.health_path.strip() or DEFAULT_ODOO_RUNTIME_HEALTH_PATH
         if not self.health_path.startswith("/"):
             self.health_path = f"/{self.health_path}"
         self.environment_values = {

@@ -2317,6 +2317,14 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn('- "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"', compose_file)
         self.assertIn("\n  database:", compose_file)
         self.assertIn("\n  script-runner:", compose_file)
+        self.assertIn(
+            "ODOO_ADDONS_PATH: ${ODOO_ADDONS_PATH:-/opt/project/addons,/opt/extra_addons,/opt/launchplane/addons,/opt/enterprise,/odoo/addons}",
+            compose_file,
+        )
+        self.assertIn(
+            "ODOO_SERVER_WIDE_MODULES: ${ODOO_SERVER_WIDE_MODULES:-base,web,launchplane_runtime_health}",
+            compose_file,
+        )
         self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
         self.assertIn("dokploy-network:", compose_file)
         self.assertIn("traefik.enable=true", compose_file)
