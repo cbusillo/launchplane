@@ -60,8 +60,10 @@ class OdooTestingDeployRequest(BaseModel):
             raise ValueError("Odoo testing deploy requires artifact_id.")
         if not self.source_git_ref:
             raise ValueError("Odoo testing deploy requires source_git_ref.")
-        if self.verify_health and not self.wait:
-            raise ValueError("Odoo testing deploy health verification requires wait=true.")
+        if not self.wait:
+            raise ValueError(
+                "Odoo testing deploy requires wait=true so Launchplane can mint a release tuple."
+            )
         return self
 
 
@@ -118,7 +120,7 @@ def _ship_request_with_profile_health_url(
 def _resolve_ship_request_with_health_fallback(
     *,
     request: OdooTestingDeployRequest,
-    health_url: str,
+    record_store: OdooTestingDeployStore,
 ) -> ShipRequest:
     from control_plane import cli as control_plane_cli
 
@@ -137,6 +139,14 @@ def _resolve_ship_request_with_health_fallback(
             allow_dirty=False,
         )
     except click.ClickException as error:
+        if not _is_missing_target_health_url_error(error):
+            raise
+        health_url = _profile_health_url(
+            record_store=record_store,
+            product=request.product or f"odoo-tenant-{request.context}",
+            context=request.context,
+            instance=request.instance,
+        )
         if not _should_retry_with_profile_health_url(error=error, health_url=health_url):
             raise
         fallback_request = control_plane_cli._resolve_native_ship_request(
@@ -161,6 +171,10 @@ def _resolve_ship_request_with_health_fallback(
 def _should_retry_with_profile_health_url(*, error: click.ClickException, health_url: str) -> bool:
     if not health_url.strip():
         return False
+    return _is_missing_target_health_url_error(error)
+
+
+def _is_missing_target_health_url_error(error: click.ClickException) -> bool:
     return "no target domain/URL was resolved" in str(error)
 
 
@@ -176,15 +190,9 @@ def execute_odoo_testing_deploy(
     from control_plane import cli as control_plane_cli
 
     try:
-        health_url = _profile_health_url(
-            record_store=record_store,
-            product=request.product or f"odoo-tenant-{request.context}",
-            context=request.context,
-            instance=request.instance,
-        )
         ship_request = _resolve_ship_request_with_health_fallback(
             request=request,
-            health_url=health_url,
+            record_store=record_store,
         )
         resolved_artifact_id = control_plane_cli._require_artifact_id(
             requested_artifact_id=ship_request.artifact_id
