@@ -189,6 +189,13 @@ reusable workflow defaults the Launchplane product key to
 `odoo-tenant-${context}` so publish metadata resolves through the tenant product
 profile that owns the image repository and stable lanes.
 
+Odoo testing deploys follow the same ownership shape. Tenant repos own the
+manual dispatch confirmation and pass an explicit stored `artifact_id` plus
+`source_git_ref` into `reusable-odoo-testing-deploy.yml`; the reusable workflow
+calls `/v1/drivers/odoo/testing-deploy` with product `odoo-tenant-${context}` by
+default. The Launchplane service owns the provider mutation, Odoo post-deploy
+extension, deployment and inventory records, and the testing release tuple.
+
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
 runtime health, or cleanup safety gates until Launchplane owns the equivalent

@@ -523,6 +523,7 @@ ODOO_DRIVER = DriverDescriptor(
             label="Stable promotion",
             description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
             actions=(
+                "testing_deploy",
                 "prod_promotion_inputs",
                 "prod_promotion_run",
                 "prod_backup_gate",
@@ -608,6 +609,16 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/stable-bootstrap",
             authz_action="odoo_stable_bootstrap.execute",
             writes_records=("deployment", "inventory"),
+        ),
+        _action(
+            "testing_deploy",
+            "Deploy testing",
+            "Deploy a stored Odoo artifact to testing and mint the testing release tuple.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/odoo/testing-deploy",
+            authz_action="odoo_testing_deploy.execute",
+            writes_records=("deployment", "inventory", "release_tuple"),
         ),
         _action(
             "preview_apply_inputs",

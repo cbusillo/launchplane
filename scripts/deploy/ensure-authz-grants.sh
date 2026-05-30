@@ -1450,6 +1450,15 @@ post_odoo_stable_grant \
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
   cm \
+  odoo-testing-deploy.yml \
+  odoo_testing_deploy.execute \
+  deploy:odoo-cm-testing-deploy-grant \
+  odoo-cm-testing-deploy \
+  reusable-odoo-testing-deploy.yml \
+  odoo-tenant-cm
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-cm \
+  cm \
   odoo-post-deploy.yml \
   odoo_post_deploy.execute \
   deploy:odoo-cm-post-deploy-grant \
@@ -1549,6 +1558,15 @@ post_odoo_stable_grant \
   deploy:odoo-opw-artifact-publish-grant \
   odoo-opw-artifact-publish \
   reusable-odoo-artifact-publish.yml \
+  odoo-tenant-opw
+post_odoo_stable_grant \
+  cbusillo/odoo-tenant-opw \
+  opw \
+  odoo-testing-deploy.yml \
+  odoo_testing_deploy.execute \
+  deploy:odoo-opw-testing-deploy-grant \
+  odoo-opw-testing-deploy \
+  reusable-odoo-testing-deploy.yml \
   odoo-tenant-opw
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-opw \
