@@ -732,6 +732,24 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
                     )
                 )
 
+    def test_local_operator_rule_matches_product_and_context_patterns(self) -> None:
+        rule = LocalOperatorPolicyRule(
+            subjects=("local-owner-agent",),
+            token_labels=("local-owner-write",),
+            products=("*",),
+            contexts=("*",),
+            actions=("product_config.apply",),
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=_local_operator_identity(),
+                action="product_config.apply",
+                product="sellyouroutboard",
+                context="sellyouroutboard-production",
+            )
+        )
+
     def test_local_admin_policy_uses_separate_rules(self) -> None:
         policy = LaunchplaneAuthzPolicy(
             local_admins=(
@@ -767,6 +785,32 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
                 action="launchplane_service_deploy.execute",
                 product="launchplane",
                 context="launchplane",
+            )
+        )
+
+    def test_local_admin_rule_matches_product_and_context_patterns(self) -> None:
+        rule = LocalAdminPolicyRule(
+            subjects=("local-owner-admin",),
+            token_labels=("local-owner-admin",),
+            products=("launch*",),
+            contexts=("*",),
+            actions=("launchplane_service_deploy.execute",),
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=_local_admin_identity(),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+        self.assertFalse(
+            rule.allows(
+                identity=_local_admin_identity(),
+                action="launchplane_service_deploy.execute",
+                product="sellyouroutboard",
+                context="sellyouroutboard-production",
             )
         )
 
