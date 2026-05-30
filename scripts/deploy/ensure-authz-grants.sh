@@ -630,6 +630,8 @@ apply_odoo_opw_onboarding() {
             {
               instance: "testing",
               context: "opw",
+              base_url: "https://opw-testing.shinycomputers.com",
+              health_url: "https://opw-testing.shinycomputers.com/web/health",
               odoo_prelaunch_rebuild: {
                 enabled: true,
                 approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
@@ -650,6 +652,8 @@ apply_odoo_opw_onboarding() {
             {
               instance: "prod",
               context: "opw",
+              base_url: "https://opw-prod.shinycomputers.com",
+              health_url: "https://opw-prod.shinycomputers.com/web/health",
               odoo_prelaunch_rebuild: {
                 enabled: true,
                 approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
@@ -690,6 +694,7 @@ apply_odoo_opw_onboarding() {
                   target_id: $testing_target_id,
                   target_type: "compose",
                   target_name: "opw-testing",
+                  domains: ["opw-testing.shinycomputers.com"],
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
@@ -704,6 +709,7 @@ apply_odoo_opw_onboarding() {
                   target_id: $prod_target_id,
                   target_type: "compose",
                   target_name: "opw-prod",
+                  domains: ["opw-prod.shinycomputers.com"],
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
