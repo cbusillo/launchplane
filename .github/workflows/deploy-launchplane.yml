@@ -24,7 +24,7 @@ on:
       omit_terminal_agent_env:
         description: Temporarily omit terminal-agent env for one compatibility deploy.
         required: false
-        default: true
+        default: false
         type: boolean
       omit_owner_agent_env:
         description: Temporarily omit owner-agent env for one compatibility deploy.
@@ -278,7 +278,7 @@ jobs:
                 --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
                 --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
-                --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env != false }}' \
+                --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
                 --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
                 '(
                   {
