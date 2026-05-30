@@ -1234,6 +1234,13 @@ post_local_owner_grant \
   product_config.apply \
   deploy:local-operator-product-config-apply-grant \
   local-operator-product-config-apply
+post_local_owner_grant \
+  local-admin \
+  launchplane \
+  launchplane \
+  launchplane_service_deploy.execute \
+  deploy:local-admin-self-deploy-grant \
+  local-admin-self-deploy
 post_product_config_human_grant \
   product_config.plan \
   deploy:product-config-human-plan-grant \
