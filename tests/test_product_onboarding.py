@@ -179,10 +179,18 @@ class ProductOnboardingTests(unittest.TestCase):
         )
 
         self.assertIn("workflow_call", workflow_text)
+        self.assertIn("product:", workflow_text)
+        self.assertIn("product=\"odoo-tenant-${CONTEXT_NAME}\"", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish", workflow_text)
-        self.assertIn("odoo-artifact-publish-inputs:odoo:", workflow_text)
-        self.assertIn("odoo-artifact-publish:odoo:", workflow_text)
+        self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
+        self.assertIn("odoo-artifact-publish-inputs", workflow_text)
+        self.assertIn("odoo-artifact-publish", workflow_text)
+        self.assertIn(
+            "${{ steps.product.outputs.publish_inputs_idempotency_key }}",
+            workflow_text,
+        )
+        self.assertIn("${{ steps.product.outputs.publish_idempotency_key }}", workflow_text)
         self.assertIn("fail-result-paths: result.input_status", workflow_text)
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
         self.assertIn("token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}", workflow_text)

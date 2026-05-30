@@ -12,6 +12,12 @@ name: Reusable Odoo Artifact Publish
         description: Odoo instance whose artifact should be published.
         required: true
         type: string
+      product:
+        description: >-
+          Launchplane product profile key. Defaults to odoo-tenant-${context}.
+        required: false
+        default: ""
+        type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
@@ -90,6 +96,34 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
 
+      - name: Resolve Launchplane product
+        id: product
+        env:
+          INPUT_PRODUCT: ${{ inputs.product }}
+          CONTEXT_NAME: ${{ inputs.context }}
+          INSTANCE_NAME: ${{ inputs.instance }}
+        run: |
+          set -euo pipefail
+          product="$INPUT_PRODUCT"
+          if [ -z "$product" ]; then
+            product="odoo-tenant-${CONTEXT_NAME}"
+          fi
+          publish_scope="${product}:${CONTEXT_NAME}:${INSTANCE_NAME}"
+          run_scope="run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          echo "product=$product" >>"$GITHUB_OUTPUT"
+          {
+            printf '%s=%s:%s:%s\n' \
+              publish_inputs_idempotency_key \
+              odoo-artifact-publish-inputs \
+              "$publish_scope" \
+              "$run_scope"
+            printf '%s=%s:%s:%s\n' \
+              publish_idempotency_key \
+              odoo-artifact-publish \
+              "$publish_scope" \
+              "$run_scope"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Resolve Launchplane publish inputs
         id: publish_inputs
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
@@ -98,15 +132,14 @@ jobs:
           audience: launchplane.shinycomputers.com
           route-path: /v1/drivers/odoo/artifact-publish-inputs
           payload: >-
-            {"schema_version":1,"product":"odoo","inputs":{"schema_version":1}}
+            {"schema_version":1,"inputs":{"schema_version":1}}
           payload-fields: |-
+            product=${{ steps.product.outputs.product }}
             inputs.context=${{ inputs.context }}
             inputs.instance=${{ inputs.instance }}
             inputs.source_git_ref=${{ github.sha }}
           idempotency-key: >-
-            odoo-artifact-publish-inputs:odoo:${{ inputs.context }}:${{
-              inputs.instance
-            }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+            ${{ steps.product.outputs.publish_inputs_idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: result.input_status
           response-output-file: >-
@@ -179,15 +212,15 @@ jobs:
           audience: launchplane.shinycomputers.com
           route-path: /v1/drivers/odoo/artifact-publish
           payload: >-
-            {"schema_version":1,"product":"odoo","publish":{"schema_version":1}}
+            {"schema_version":1,"publish":{"schema_version":1}}
           payload-fields: |-
+            product=${{ steps.product.outputs.product }}
             publish.context=${{ inputs.context }}
             publish.instance=${{ inputs.instance }}
           payload-json-files: |-
             publish.manifest=${{ steps.publish.outputs.manifest_file }}
           idempotency-key: >-
-            odoo-artifact-publish:odoo:${{ inputs.context }}:${{ inputs.instance
-            }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+            ${{ steps.product.outputs.publish_idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
           fail-result-paths: result.status,result.publish_status
           output-paths: >-
