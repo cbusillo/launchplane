@@ -95,6 +95,24 @@ def _profile_health_url(
     return ""
 
 
+def _optional_profile_health_url(
+    *,
+    record_store: OdooTestingDeployStore,
+    product: str,
+    context: str,
+    instance: str,
+) -> str:
+    try:
+        return _profile_health_url(
+            record_store=record_store,
+            product=product,
+            context=context,
+            instance=instance,
+        )
+    except FileNotFoundError:
+        return ""
+
+
 def _ship_request_with_profile_health_url(
     *,
     ship_request: ShipRequest,
@@ -104,8 +122,6 @@ def _ship_request_with_profile_health_url(
     if not normalized_health_url:
         return ship_request
     destination_health = ship_request.destination_health
-    if destination_health.urls:
-        return ship_request
     timeout_seconds = destination_health.timeout_seconds or ship_request.health_timeout_seconds
     updated_health = HealthcheckEvidence(
         urls=(normalized_health_url,),
@@ -124,8 +140,9 @@ def _resolve_ship_request_with_health_fallback(
 ) -> ShipRequest:
     from control_plane import cli as control_plane_cli
 
+    product = request.product or f"odoo-tenant-{request.context}"
     try:
-        return control_plane_cli._resolve_native_ship_request(
+        ship_request = control_plane_cli._resolve_native_ship_request(
             context_name=request.context,
             instance_name=request.instance,
             artifact_id=request.artifact_id,
@@ -138,12 +155,23 @@ def _resolve_ship_request_with_health_fallback(
             no_cache=request.no_cache,
             allow_dirty=False,
         )
+        if not request.verify_health:
+            return ship_request
+        return _ship_request_with_profile_health_url(
+            ship_request=ship_request,
+            health_url=_optional_profile_health_url(
+                record_store=record_store,
+                product=product,
+                context=request.context,
+                instance=request.instance,
+            ),
+        )
     except click.ClickException as error:
         if not _is_missing_target_health_url_error(error):
             raise
         health_url = _profile_health_url(
             record_store=record_store,
-            product=request.product or f"odoo-tenant-{request.context}",
+            product=product,
             context=request.context,
             instance=request.instance,
         )
