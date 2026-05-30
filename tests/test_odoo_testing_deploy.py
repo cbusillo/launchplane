@@ -148,7 +148,7 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
         self.assertEqual(result.release_tuple_id, "cm-testing-artifact-cm-new")
         ship.assert_called_once()
         self.assertTrue(ship.call_args.kwargs["mint_release_tuple"])
-        record_store.read_product_profile_record.assert_not_called()
+        record_store.read_product_profile_record.assert_called_once_with("odoo-tenant-cm")
 
     def test_deploy_does_not_require_profile_when_target_health_url_resolves(self) -> None:
         record_store = Mock()
@@ -175,7 +175,7 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.deployment_status, "pass")
         self.assertEqual(result.release_tuple_id, "cm-testing-artifact-cm-new")
-        record_store.read_product_profile_record.assert_not_called()
+        record_store.read_product_profile_record.assert_called_once_with("odoo-tenant-cm")
 
     def test_deploy_uses_profile_health_url_when_target_has_no_health_url(self) -> None:
         record_store = Mock()
@@ -217,12 +217,21 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
             ("https://cm-testing.example/launchplane/health",),
         )
 
-    def test_deploy_preserves_target_health_url_when_resolved(self) -> None:
+    def test_deploy_prefers_profile_health_url_when_target_health_url_resolves(self) -> None:
         record_store = Mock()
         record_store.read_product_profile_record.return_value = _profile()
+        target_request = _ship_request().model_copy(
+            update={
+                "destination_health": HealthcheckEvidence(
+                    urls=("https://cm-testing.example/web/health",),
+                    timeout_seconds=180,
+                    status="pending",
+                )
+            }
+        )
 
         with (
-            patch("control_plane.cli._resolve_native_ship_request", return_value=_ship_request()) as resolve_ship,
+            patch("control_plane.cli._resolve_native_ship_request", return_value=target_request) as resolve_ship,
             patch("control_plane.cli._read_artifact_manifest"),
             patch("control_plane.cli._execute_ship", return_value=(None, _deployment_record())) as ship,
         ):
@@ -246,6 +255,47 @@ class OdooTestingDeployWorkflowTests(unittest.TestCase):
         self.assertEqual(
             normalized_request.destination_health.urls,
             ("https://cm-testing.example/launchplane/health",),
+        )
+
+    def test_deploy_preserves_target_health_url_when_profile_is_missing(self) -> None:
+        record_store = Mock()
+        record_store.read_product_profile_record.side_effect = FileNotFoundError(
+            "odoo-tenant-cm"
+        )
+        target_request = _ship_request().model_copy(
+            update={
+                "destination_health": HealthcheckEvidence(
+                    urls=("https://cm-testing.example/web/health",),
+                    timeout_seconds=180,
+                    status="pending",
+                )
+            }
+        )
+
+        with (
+            patch("control_plane.cli._resolve_native_ship_request", return_value=target_request) as resolve_ship,
+            patch("control_plane.cli._read_artifact_manifest"),
+            patch("control_plane.cli._execute_ship", return_value=(None, _deployment_record())) as ship,
+        ):
+            execute_odoo_testing_deploy(
+                control_plane_root=Path("/control-plane"),
+                state_dir=Path("/state"),
+                database_url="postgresql://launchplane.example/db",
+                record_store=record_store,
+                request=OdooTestingDeployRequest(
+                    context="cm",
+                    product="odoo-tenant-cm",
+                    artifact_id="artifact-cm-new",
+                    source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+                ),
+            )
+
+        resolve_ship.assert_called_once()
+        record_store.read_product_profile_record.assert_called_once_with("odoo-tenant-cm")
+        normalized_request = ship.call_args.kwargs["request"]
+        self.assertEqual(
+            normalized_request.destination_health.urls,
+            ("https://cm-testing.example/web/health",),
         )
 
     def test_failed_ship_returns_failed_result(self) -> None:
