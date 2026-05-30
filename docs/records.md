@@ -321,11 +321,11 @@ authority by themselves.
 driver defaults. `resettable` lanes may explicitly allow `empty` rebuilds;
 `restorable` lanes may explicitly allow `upstream_restore` and must name an
 `upstream_source`; `authoritative` lanes require backup-before-destroy and
-restore-proof safeguards. Routine Odoo probe details such as the Launchplane
-runtime identity endpoint `/launchplane/health`, local liveness endpoint
-`/web/health`, and logo URL discovery belong in the Odoo driver, not in
-tenant-owned product config, unless a lane has a real exception that needs an
-explicit override.
+restore-proof safeguards. Routine Odoo probe details belong in the Odoo driver,
+not in tenant-owned product config, unless a lane has a real exception that
+needs an explicit override. Launchplane-managed Odoo lanes use the runtime
+identity endpoint `/launchplane/health` for lane verification; provider-local
+container liveness checks may continue to use Odoo's `/web/health` endpoint.
 
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should

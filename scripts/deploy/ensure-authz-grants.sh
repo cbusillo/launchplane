@@ -490,7 +490,7 @@ apply_odoo_cm_onboarding() {
           driver_id: "odoo",
           image_repository: "ghcr.io/cbusillo/odoo-tenant-cm",
           runtime_port: 8069,
-          health_path: "/web/health",
+          health_path: "/launchplane/health",
           lanes: [
             {
               instance: "testing",
@@ -625,13 +625,13 @@ apply_odoo_opw_onboarding() {
           driver_id: "odoo",
           image_repository: "ghcr.io/cbusillo/odoo-tenant-opw",
           runtime_port: 8069,
-          health_path: "/web/health",
+          health_path: "/launchplane/health",
           lanes: [
             {
               instance: "testing",
               context: "opw",
               base_url: "https://opw-testing.shinycomputers.com",
-              health_url: "https://opw-testing.shinycomputers.com/web/health",
+              health_url: "https://opw-testing.shinycomputers.com/launchplane/health",
               odoo_prelaunch_rebuild: {
                 enabled: true,
                 approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
@@ -653,7 +653,7 @@ apply_odoo_opw_onboarding() {
               instance: "prod",
               context: "opw",
               base_url: "https://opw-prod.shinycomputers.com",
-              health_url: "https://opw-prod.shinycomputers.com/web/health",
+              health_url: "https://opw-prod.shinycomputers.com/launchplane/health",
               odoo_prelaunch_rebuild: {
                 enabled: true,
                 approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
