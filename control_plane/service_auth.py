@@ -303,9 +303,9 @@ class LocalOperatorPolicyRule(BaseModel):
             return False
         if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
             return False
-        if self.products and product not in self.products:
+        if self.products and not self._matches_any(product, self.products):
             return False
-        if self.contexts and context not in self.contexts:
+        if self.contexts and not self._matches_any(context, self.contexts):
             return False
         if self.actions and action not in self.actions:
             return False
@@ -333,9 +333,9 @@ class LocalAdminPolicyRule(BaseModel):
             return False
         if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
             return False
-        if self.products and product not in self.products:
+        if self.products and not self._matches_any(product, self.products):
             return False
-        if self.contexts and context not in self.contexts:
+        if self.contexts and not self._matches_any(context, self.contexts):
             return False
         if self.actions and action not in self.actions:
             return False
