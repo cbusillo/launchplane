@@ -168,7 +168,8 @@ x-odoo-env: &odoo-env
   ODOO_DEV_MODE: ${{ODOO_DEV_MODE:-}}
   ODOO_INSTALL_MODULES: ${{ODOO_INSTALL_MODULES:-}}
   ODOO_UPDATE_MODULES: ${{ODOO_UPDATE_MODULES:-AUTO}}
-  ODOO_ADDONS_PATH: ${{ODOO_ADDONS_PATH:-/opt/project/addons,/opt/extra_addons,/opt/enterprise,/odoo/addons}}
+  ODOO_ADDONS_PATH: ${{ODOO_ADDONS_PATH:-/opt/project/addons,/opt/extra_addons,/opt/launchplane/addons,/opt/enterprise,/odoo/addons}}
+  ODOO_SERVER_WIDE_MODULES: ${{ODOO_SERVER_WIDE_MODULES:-base,web,launchplane_runtime_health}}
   ODOO_DATA_WORKFLOW_LOCK_FILE: ${{ODOO_DATA_WORKFLOW_LOCK_FILE:-/volumes/data/.data_workflow_in_progress}}
   ODOO_DATA_WORKFLOW_LOCK_TIMEOUT_SECONDS: ${{ODOO_DATA_WORKFLOW_LOCK_TIMEOUT_SECONDS:-7200}}
   IMAGE_ODOO_ENTERPRISE_LOCATION: /volumes/enterprise_disabled

@@ -1321,7 +1321,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_smoke_check_retries_transient_http_404() -> None:
         responses: list[HTTPError | _SmokeResponse] = [
             HTTPError(
-                "https://pr-45.cm-preview.example.test/web/health",
+                "https://pr-45.cm-preview.example.test/launchplane/health",
                 404,
                 "Not Found",
                 hdrs=Message(),
@@ -1344,7 +1344,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             _wait_for_smoke_check(
                 preview_url="https://pr-45.cm-preview.example.test/",
-                health_path="/web/health",
+                health_path="/launchplane/health",
                 timeout_seconds=10,
             )
 

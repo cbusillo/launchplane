@@ -23,7 +23,7 @@ class OdooVerificationTests(unittest.TestCase):
                     '<img src="/web/image/website/7/logo?unique=abc"></html>',
                     "text/html",
                 )
-            if url == "https://cm-testing.example.com/web/health":
+            if url == "https://cm-testing.example.com/launchplane/health":
                 return 200, '{"status":"ok"}', "application/json"
             if url == "https://cm-testing.example.com/web/image/website/7/logo?unique=abc":
                 return 200, "image-bytes", "image/png"
@@ -44,7 +44,7 @@ class OdooVerificationTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                "https://cm-testing.example.com/web/health",
+                "https://cm-testing.example.com/launchplane/health",
                 "https://cm-testing.example.com",
                 "https://cm-testing.example.com",
                 "https://cm-testing.example.com/web/image/website/7/logo?unique=abc",
@@ -317,7 +317,7 @@ class OdooVerificationTests(unittest.TestCase):
 
         def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
             nonlocal attempts
-            self.assertEqual(url, "https://cm-testing.example.com/web/health")
+            self.assertEqual(url, "https://cm-testing.example.com/launchplane/health")
             self.assertEqual(timeout_seconds, 30)
             attempts += 1
             if attempts == 1:
@@ -348,7 +348,7 @@ class OdooVerificationTests(unittest.TestCase):
 
         def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
             nonlocal attempts
-            self.assertEqual(url, "https://cm-testing.example.com/web/health")
+            self.assertEqual(url, "https://cm-testing.example.com/launchplane/health")
             self.assertEqual(timeout_seconds, 30)
             attempts += 1
             if attempts == 1:
@@ -379,7 +379,7 @@ class OdooVerificationTests(unittest.TestCase):
 
         def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
             nonlocal attempts
-            self.assertEqual(url, "https://cm-testing.example.com/web/health")
+            self.assertEqual(url, "https://cm-testing.example.com/launchplane/health")
             self.assertEqual(timeout_seconds, 30)
             attempts += 1
             if attempts == 1:

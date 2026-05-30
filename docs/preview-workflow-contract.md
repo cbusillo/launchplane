@@ -127,7 +127,7 @@ Dokploy environment ids, template compose ids, or Odoo database and volume names
 inside the tenant repo. The route discovers existing Odoo preview composes from
 provider inventory for refresh reuse and destroy planning, and it blocks destroy
 when the matching preview compose and hostname cannot be proven. After refresh,
-Launchplane owns `/web/health`, `/cm-website/health`, `/cell-mechanic`,
+Launchplane owns `/launchplane/health`, `/web/health`, `/cm-website/health`, `/cell-mechanic`,
 artifact/revision evidence, and module install/update evidence. Product
 workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
 ready-to-comment signal instead of independently deciding readiness from raw

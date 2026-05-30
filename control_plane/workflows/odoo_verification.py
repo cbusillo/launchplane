@@ -59,11 +59,16 @@ class _ProbeFailure(click.ClickException):
         self.evidence = evidence
 
 
-def default_odoo_health_url(*, base_url: str, health_path: str = "/web/health") -> str:
+DEFAULT_ODOO_RUNTIME_HEALTH_PATH = "/launchplane/health"
+
+
+def default_odoo_health_url(
+    *, base_url: str, health_path: str = DEFAULT_ODOO_RUNTIME_HEALTH_PATH
+) -> str:
     normalized_base_url = base_url.strip().rstrip("/")
     if not normalized_base_url:
         return ""
-    normalized_health_path = health_path.strip() or "/web/health"
+    normalized_health_path = health_path.strip() or DEFAULT_ODOO_RUNTIME_HEALTH_PATH
     if not normalized_health_path.startswith("/"):
         normalized_health_path = f"/{normalized_health_path}"
     return f"{normalized_base_url}{normalized_health_path}"
