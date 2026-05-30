@@ -151,7 +151,7 @@ class ProductPublicIngressMonitoringPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    require_runtime_identity: bool = True
+    require_runtime_identity: bool = False
     alert_issue_url: str = ""
 
     @model_validator(mode="after")

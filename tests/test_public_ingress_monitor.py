@@ -325,6 +325,134 @@ class PublicIngressMonitorTests(unittest.TestCase):
         health = store.records[0].targets[-1]
         self.assertEqual(health.runtime_identity_status, "match")
 
+    def test_missing_runtime_identity_is_advisory_until_lane_requires_it(self) -> None:
+        identity = _identity()
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = LaunchplaneLaneSummary(
+            context="example-site",
+            instance="prod",
+            inventory=EnvironmentInventory(
+                context="example-site",
+                instance="prod",
+                source_git_ref="abc123",
+                deploy=DeploymentEvidence(
+                    target_name="example-site-prod",
+                    target_type="application",
+                    deploy_mode="git",
+                    status="pass",
+                ),
+                runtime_identity=identity,
+                updated_at="2026-05-29T12:10:00Z",
+                deployment_record_id="deploy-1",
+            ),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"status": "ok", "revision": "abc123"},
+            ),
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        health = store.records[0].targets[-1]
+        self.assertEqual(health.runtime_identity_status, "missing")
+        self.assertEqual(health.status, "pass")
+        self.assertEqual(store.incidents, [])
+
+    def test_strict_lane_fails_when_runtime_identity_is_missing(self) -> None:
+        identity = _identity()
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(
+                require_runtime_identity=True
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        store.lane_summaries[("example-site", "prod")] = LaunchplaneLaneSummary(
+            context="example-site",
+            instance="prod",
+            inventory=EnvironmentInventory(
+                context="example-site",
+                instance="prod",
+                source_git_ref="abc123",
+                deploy=DeploymentEvidence(
+                    target_name="example-site-prod",
+                    target_type="application",
+                    deploy_mode="git",
+                    status="pass",
+                ),
+                runtime_identity=identity,
+                updated_at="2026-05-29T12:10:00Z",
+                deployment_record_id="deploy-1",
+            ),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"status": "ok", "revision": "abc123"},
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        health = store.records[0].targets[-1]
+        self.assertEqual(health.runtime_identity_status, "missing")
+        self.assertEqual(health.status, "fail")
+        self.assertEqual(store.incidents[0].status, "open")
+
+    def test_runtime_identity_mismatch_fails_even_when_advisory(self) -> None:
+        expected_identity = _identity()
+        observed_identity = expected_identity.model_copy(
+            update={"deployment_record_id": "deploy-other"}
+        )
+        store = _Store((_profile(),))
+        store.lane_summaries[("example-site", "prod")] = LaunchplaneLaneSummary(
+            context="example-site",
+            instance="prod",
+            inventory=EnvironmentInventory(
+                context="example-site",
+                instance="prod",
+                source_git_ref="abc123",
+                deploy=DeploymentEvidence(
+                    target_name="example-site-prod",
+                    target_type="application",
+                    deploy_mode="git",
+                    status="pass",
+                ),
+                runtime_identity=expected_identity,
+                updated_at="2026-05-29T12:10:00Z",
+                deployment_record_id="deploy-1",
+            ),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:10:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": observed_identity.model_dump(mode="json")},
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        health = store.records[0].targets[-1]
+        self.assertEqual(health.runtime_identity_status, "mismatch")
+        self.assertEqual(health.status, "fail")
+        self.assertIn("deployment_record_id", health.runtime_identity_detail)
+
     def test_notifies_on_failure_and_recovery_transitions(self) -> None:
         store = _Store((_profile(),))
         notifications: list[tuple[str, str]] = []

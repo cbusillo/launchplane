@@ -609,7 +609,10 @@ def _check_url(
                 json_parse_failed=False,
             )
         )
-        if target.require_runtime_identity and runtime_status != "match":
+        hard_runtime_identity_failure = runtime_status in {"malformed", "mismatch"} or (
+            target.require_runtime_identity and runtime_status != "match"
+        )
+        if hard_runtime_identity_failure:
             return PublicIngressTargetObservation(
                 target=target_kind,
                 url=url,

@@ -828,7 +828,11 @@ Dokploy targets. Product health endpoints may echo the JSON payload as
 or `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`; Launchplane records whether the observed
 payload matches, mismatches, is missing, or cannot be parsed. Missing observed
 identity is evidence for adoption work, not a reason to hardcode product-specific
-health or logo probe URLs.
+health or logo probe URLs. Runtime identity mismatches and malformed identity
+evidence remain hard public-ingress failures because they indicate the public
+route may be serving a different artifact than Launchplane expects. Missing or
+unverifiable identity is advisory unless the lane explicitly requires runtime
+identity after adopting the health echo contract.
 
 Target replacement only reconciles the provider target and runtime envelope. If
 an intentionally empty CM testing lane needs its Odoo database and filestore
