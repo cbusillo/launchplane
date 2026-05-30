@@ -238,13 +238,13 @@ jobs:
               --data "$payload" \
               "${route}/target-replacement-apply"
           })"
-          jq . odoo-target-replacement-apply.json
           if [ "$status_code" != "202" ]; then
             echo 'Odoo target replacement operation create failed:' \
               "${status_code}." >&2
             cat odoo-target-replacement-apply.json >&2
             exit 1
           fi
+          jq . odoo-target-replacement-apply.json
           poll_url="$(
             jq -r \
               '.result.poll_url // empty' \
@@ -263,6 +263,7 @@ jobs:
             exit 1
           fi
           deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
+          parsed_response="$(mktemp)"
           while true; do
             oidc_token="$(launchplane_oidc_token)"
             status_code="$({
@@ -278,15 +279,16 @@ jobs:
               cat odoo-target-replacement-apply.json >&2
               exit 1
             fi
+            jq . odoo-target-replacement-apply.json > "$parsed_response"
             operation_status="$(
               jq -r \
                 '.operation.status // empty' \
-                odoo-target-replacement-apply.json
+                "$parsed_response"
             )"
             operation_phase="$(
               jq -r \
                 '.operation.phase // empty' \
-                odoo-target-replacement-apply.json
+                "$parsed_response"
             )"
             echo 'Odoo target replacement operation:' \
               "status=${operation_status} phase=${operation_phase}"
@@ -302,6 +304,7 @@ jobs:
             fi
             sleep "$POLL_INTERVAL_SECONDS"
           done
+          mv "$parsed_response" odoo-target-replacement-apply.json
           jq . odoo-target-replacement-apply.json
           operation_status="$(
             jq -r '.operation.status // ""' odoo-target-replacement-apply.json
