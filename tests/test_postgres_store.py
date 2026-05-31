@@ -1367,6 +1367,49 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_record.deploy.provider_id, "fake-cloud")
         self.assertEqual(loaded_record.deploy.target_category, "service")
 
+    def test_write_and_read_resolved_target_uses_deploy_provider_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = DeploymentRecord(
+                record_id="deployment-20260420T153000Z-syo-prod",
+                artifact_identity=ArtifactIdentityReference(
+                    artifact_id="artifact-20260420-a1b2c3d4"
+                ),
+                context="syo",
+                instance="prod",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application",
+                    target_id="svc-123",
+                    target_name="syo-prod-service",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="syo-prod-service",
+                    target_type="application",
+                    deploy_mode="fake-cloud-service-api",
+                    provider_id="fake-cloud",
+                    target_category="service",
+                    deployment_id="deploy-123",
+                    status="pass",
+                    started_at="2026-04-20T15:30:00Z",
+                    finished_at="2026-04-20T15:32:00Z",
+                ),
+            )
+
+            store.write_deployment_record(record)
+            loaded_record = store.read_deployment_record(record.record_id)
+            store.close()
+
+        deployed_target = loaded_record.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.provider_id, "fake-cloud")
+        self.assertEqual(deployed_target.target_id, "svc-123")
+
     def test_write_and_list_generic_web_rollback_plan_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

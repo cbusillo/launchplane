@@ -30,9 +30,11 @@ class ResolvedTargetEvidence(BaseModel):
             raise ValueError("resolved target evidence requires target_name")
         return self
 
-    def to_deployed_target_reference(self) -> DeployedTargetReference:
+    def to_deployed_target_reference(
+        self, *, provider_id: str = "dokploy"
+    ) -> DeployedTargetReference:
         return DeployedTargetReference(
-            provider_id="dokploy",
+            provider_id=provider_id,
             target_category=self.target_type,
             target_id=self.target_id,
             display_name=self.target_name,
@@ -74,5 +76,8 @@ class DeploymentRecord(BaseModel):
         if not self.delegated_executor:
             raise ValueError("deployment record requires delegated_executor")
         if self.deployed_target is None and self.resolved_target is not None:
-            self.deployed_target = self.resolved_target.to_deployed_target_reference()
+            provider_id = self.deploy.provider_id.strip().lower() or "dokploy"
+            self.deployed_target = self.resolved_target.to_deployed_target_reference(
+                provider_id=provider_id
+            )
         return self
