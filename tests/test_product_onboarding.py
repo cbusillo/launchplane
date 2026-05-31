@@ -258,6 +258,28 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('($options | type) != "object"', workflow_text)
         self.assertIn('error("route_options_json must be a JSON object")', workflow_text)
 
+    def test_ingress_route_canary_apply_workflow_requires_apply_guards(self) -> None:
+        workflow_text = Path(".github/workflows/ingress-route-canary-apply.yml").read_text(
+            encoding="utf-8"
+        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("mode: \"apply\"", workflow_text)
+        self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
+        self.assertIn('CONFIRMATION: ${{ inputs.confirmation }}', workflow_text)
+        self.assertIn('apply ingress canary', workflow_text)
+        self.assertIn("CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}", workflow_text)
+        self.assertIn("CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}", workflow_text)
+        inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
+        self.assertNotIn("      domain:", inputs_section)
+        self.assertNotIn("      expected_host_id:", inputs_section)
+        self.assertIn('forward_scheme: "http"', workflow_text)
+        self.assertIn("npmplus_noindex: true", workflow_text)
+        self.assertNotIn("route_options_json", workflow_text)
+        self.assertIn("ingress-route-canary-apply.yml", script_text)
+        self.assertIn("deploy:ingress-route-canary-apply-grant", script_text)
+        self.assertIn("ingress_route.apply", script_text)
+
     def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
             encoding="utf-8"

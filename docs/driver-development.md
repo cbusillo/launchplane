@@ -185,6 +185,14 @@ provider host id, and route toggles as manual inputs, then calls the same route 
 `mode: dry-run`. Its authz grant is plan-only; an apply still requires the
 separate `ingress_route.apply` permission and an explicit mutation path.
 
+The `Ingress Route Canary Apply` workflow is the matching apply proof path. It
+uses the same canary-scoped product/context grant, reads the expected provider
+host id and canary route tuple from repository variables, and requires an explicit
+idempotency key plus the confirmation phrase `apply ingress canary`. It fixes the
+current canary route toggles instead of accepting arbitrary provider options.
+Keep this workflow canary-scoped until broader route ownership and approval UX are
+explicit.
+
 ## Product Repo Boundary
 
 Driver development should make product repos thinner, not larger. When a new
