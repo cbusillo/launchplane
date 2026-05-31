@@ -8,6 +8,7 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -37,6 +38,7 @@ from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
     verify_odoo_stable_readiness,
 )
+from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -44,7 +46,7 @@ from control_plane.workflows.ship import (
 )
 
 
-class OdooStableTargetReplacementStore(Protocol):
+class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -1065,6 +1067,23 @@ def execute_odoo_stable_target_replacement_apply(
                 context_name=plan.context,
                 instance_name=plan.instance,
             )
+        )
+        try:
+            runtime_key_safety = (
+                control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
+                    record_store=record_store,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                )
+            )
+        except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
+            raise click.ClickException(str(error)) from error
+        runtime_source.update(
+            {
+                f"runtime_key_safety_{key}": str(value)
+                for key, value in runtime_key_safety.items()
+                if key in {"required", "status", "policy_record_id", "policy_sha256"}
+            }
         )
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference=image_reference,

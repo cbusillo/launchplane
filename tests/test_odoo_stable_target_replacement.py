@@ -27,6 +27,11 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
@@ -66,6 +71,8 @@ class _Store:
         self.deployment_records: list[DeploymentRecord] = []
         self.environment_inventories: list[EnvironmentInventory] = []
         self.release_tuples: list[object] = []
+        self.secret_bindings: tuple[SecretBinding, ...] = ()
+        self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -106,6 +113,36 @@ class _Store:
 
     def write_release_tuple_record(self, record: object) -> None:
         self.release_tuples.append(record)
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        records = tuple(
+            binding
+            for binding in self.secret_bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        return records[:limit] if limit is not None else records
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = tuple(
+            record
+            for record in self.runtime_key_safety_policy_records
+            if not status or record.status == status
+        )
+        return records[:limit] if limit is not None else records
 
 
 def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
@@ -1136,6 +1173,210 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         self.assertEqual(result.deploy_status, "pass")
         self.assertTrue(post_deploy.call_args.kwargs["run_destructive_restore"])
+
+    def test_apply_blocks_managed_runtime_secret_without_safety_policy(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        store.secret_bindings = (
+            SecretBinding(
+                binding_id="secret-odoo-db-password-binding",
+                secret_id="secret-odoo-db-password",
+                integration="runtime_environment",
+                binding_key="ODOO_DB_PASSWORD",
+                context="cm",
+                instance="testing",
+                status="configured",
+                created_at="2026-05-05T22:45:00Z",
+                updated_at="2026-05-05T22:45:00Z",
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+            ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+            ) as update_env,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ) as trigger_deploy,
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm", instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("Runtime key-safety policy is unavailable", result.error_message)
+        sync_source.assert_not_called()
+        update_env.assert_not_called()
+        trigger_deploy.assert_not_called()
+
+    def test_apply_records_runtime_key_safety_pass_evidence(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        store.secret_bindings = (
+            SecretBinding(
+                binding_id="secret-odoo-db-password-binding",
+                secret_id="secret-odoo-db-password",
+                integration="runtime_environment",
+                binding_key="ODOO_DB_PASSWORD",
+                context="cm",
+                instance="testing",
+                status="configured",
+                created_at="2026-05-05T22:45:00Z",
+                updated_at="2026-05-05T22:45:00Z",
+            ),
+        )
+        store.runtime_key_safety_policy_records = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T22:45:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="ODOO_DB_PASSWORD",
+                        secret_class="testing",
+                        allowed_contexts=("cm",),
+                        allowed_instances=("testing",),
+                    ),
+                ),
+            ),
+        )
+        persisted_env = ""
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "cm-testing",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "services: {}",
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+                    domain_hosts=("cm-testing.shinycomputers.com",),
+                    runtime_port=8069,
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm", instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        final_deployment = store.deployment_records[-1]
+        self.assertEqual(final_deployment.runtime_source["runtime_key_safety_required"], "True")
+        self.assertEqual(final_deployment.runtime_source["runtime_key_safety_status"], "pass")
+        self.assertEqual(
+            final_deployment.runtime_source["runtime_key_safety_policy_record_id"],
+            "runtime-key-safety-policy-test",
+        )
 
     def test_apply_refuses_explicit_artifact_source_mismatch(self) -> None:
         store = _Store(

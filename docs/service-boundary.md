@@ -1083,10 +1083,13 @@ manifest, and writes it to Launchplane records. Post-deploy reads DB-backed Odoo
 instance override records, renders the typed override payload, invokes the
 Dokploy data-workflow runner, and writes `last_apply` evidence back to
 Launchplane. Prod rollback reads DB-backed release tuples, artifact manifests,
-target records, and current inventory, deploys the selected artifact-backed
-image, verifies health, and writes durable rollback/deployment/inventory/release
-tuple evidence. Local Odoo runtime commands remain in `odoo-devkit`; these
-drivers are for remote control-plane execution only.
+and current promotion/inventory records, then delegates the provider mutation to
+stable target replacement. That shared executor deploys the selected
+artifact-backed image, injects runtime identity, runs post-deploy maintenance,
+verifies health/canonical/logo evidence, and writes deployment/release-tuple
+evidence. The rollback wrapper only adds rollback provenance to inventory and
+the current prod promotion record. Local Odoo runtime commands remain in
+`odoo-devkit`; these drivers are for remote control-plane execution only.
 
 Privileged product rollback actions should use a narrow delegated-worker runtime
 contract when they require network reach or host authority that does not belong

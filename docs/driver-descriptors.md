@@ -169,15 +169,15 @@ validation, persists the plan record, and applies ready plans through the normal
 generic-web deploy path using the previous immutable artifact identity. Generic
 rollback also forwards the generic deploy post-deploy extension hook, so a
 based driver can keep product-only post-deploy checks while reusing the common
-rollback deployment path once its other invariants are represented. Odoo profiles
-therefore run Odoo post-deploy through generic rollback apply, but the canonical
-Odoo rollback apply route remains product-specific until its release and
-promotion bookkeeping is generic-contract represented or explicitly wrapped. Product
+rollback deployment path once its other invariants are represented. Product
 drivers keep their own `prod_rollback` action only when they need additional
 product-specific gates, such as Odoo backup, release tuple, manifest, migration,
 or post-deploy checks. Odoo keeps `POST /v1/drivers/odoo/prod-rollback` as its
-product-specific apply route until those Odoo-only invariants are represented in
-the generic workflow contract.
+product-specific apply route, but that route delegates provider mutation to
+Odoo stable target replacement so runtime identity, post-deploy maintenance,
+canonical/logo verification, deployment records, inventory, and release tuples
+stay on the canonical stable executor while the rollback wrapper owns promotion
+rollback provenance.
 
 The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
