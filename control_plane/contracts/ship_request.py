@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 
@@ -14,7 +15,10 @@ class ShipRequest(BaseModel):
     source_git_ref: str
     target_name: str
     target_type: DokployTargetType
+    provider_id: str = "dokploy"
+    target_category: DeployTargetCategory | None = None
     deploy_mode: str
+    provider_deploy_mode: str = ""
     wait: bool = True
     timeout_seconds: int | None = Field(default=None, ge=1)
     verify_health: bool = True
@@ -34,4 +38,12 @@ class ShipRequest(BaseModel):
             raise ValueError("ship request requires instance")
         if not self.source_git_ref.strip():
             raise ValueError("ship request requires source_git_ref")
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_deploy_mode = self.provider_deploy_mode.strip()
+        if not self.provider_id:
+            raise ValueError("ship request requires provider_id")
+        if self.target_category is None:
+            self.target_category = self.target_type
+        if not self.provider_deploy_mode:
+            self.provider_deploy_mode = self.deploy_mode
         return self

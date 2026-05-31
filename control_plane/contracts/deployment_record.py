@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BootstrapEvidence,
@@ -29,6 +30,15 @@ class ResolvedTargetEvidence(BaseModel):
             raise ValueError("resolved target evidence requires target_name")
         return self
 
+    def to_deployed_target_reference(self) -> DeployedTargetReference:
+        return DeployedTargetReference(
+            provider_id="dokploy",
+            target_category=self.target_type,
+            target_id=self.target_id,
+            display_name=self.target_name,
+            provider_target_type=self.target_type,
+        )
+
 
 class DeploymentRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -44,6 +54,7 @@ class DeploymentRecord(BaseModel):
     no_cache: bool = False
     delegated_executor: DelegatedExecutor = "control-plane.dokploy"
     resolved_target: ResolvedTargetEvidence | None = None
+    deployed_target: DeployedTargetReference | None = None
     runtime_source: dict[str, str] = Field(default_factory=dict)
     runtime_identity: RuntimeIdentity | None = None
     deploy: DeploymentEvidence
@@ -59,4 +70,6 @@ class DeploymentRecord(BaseModel):
             raise ValueError("deployment record requires instance")
         if not self.source_git_ref.strip():
             raise ValueError("deployment record requires source_git_ref")
+        if self.deployed_target is None and self.resolved_target is not None:
+            self.deployed_target = self.resolved_target.to_deployed_target_reference()
         return self

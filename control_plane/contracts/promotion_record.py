@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 ReleaseStatus = Literal["pending", "pass", "fail", "skipped"]
@@ -52,10 +53,25 @@ class DeploymentEvidence(BaseModel):
     target_name: str
     target_type: Literal["compose", "application"]
     deploy_mode: str
+    provider_id: str = "dokploy"
+    target_category: DeployTargetCategory | None = None
+    provider_deploy_mode: str = ""
     deployment_id: str = ""
     status: ReleaseStatus = "pending"
     started_at: str = ""
     finished_at: str = ""
+
+    @model_validator(mode="after")
+    def _validate_provider_evidence(self) -> "DeploymentEvidence":
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_deploy_mode = self.provider_deploy_mode.strip()
+        if not self.provider_id:
+            raise ValueError("deployment evidence requires provider_id")
+        if self.target_category is None:
+            self.target_category = self.target_type
+        if not self.provider_deploy_mode:
+            self.provider_deploy_mode = self.deploy_mode
+        return self
 
 
 class PostDeployUpdateEvidence(BaseModel):
