@@ -1,0 +1,218 @@
+---
+name: Ingress Route Audit Read
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product key authorized for audit reads.
+        required: true
+        type: string
+      context:
+        description: Launchplane context authorized for audit reads.
+        required: true
+        type: string
+      record_id:
+        description: Optional audit record id to read instead of listing records.
+        required: false
+        default: ""
+        type: string
+      status:
+        description: Optional list filter for audit status.
+        required: false
+        default: ""
+        type: string
+      mode:
+        description: Optional list filter for dry-run or apply.
+        required: false
+        default: ""
+        type: string
+      trace_id:
+        description: Optional list filter for Launchplane trace id.
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: Maximum records to list, between 1 and 100.
+        required: true
+        default: 25
+        type: number
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-ingress-route-audit-read-${{ inputs.product }}-${{
+    inputs.context }}
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      RECORD_ID: ${{ inputs.record_id }}
+      STATUS_FILTER: ${{ inputs.status }}
+      MODE_FILTER: ${{ inputs.mode }}
+      TRACE_ID: ${{ inputs.trace_id }}
+      LIMIT: ${{ inputs.limit }}
+    steps:
+      - name: Request redacted audit records
+        id: route
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${CONTEXT:?Missing context input}"
+          read_url="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlencode, quote, urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL")
+          origin = f"{parsed.scheme}://{parsed.netloc}"
+          product = os.environ["PRODUCT"].strip()
+          context = os.environ["CONTEXT"].strip()
+          record_id = os.environ["RECORD_ID"].strip()
+          if not product or not context:
+              raise SystemExit("product and context are required")
+
+          try:
+              limit = int(os.environ["LIMIT"])
+          except ValueError as exc:
+              raise SystemExit("limit must be an integer") from exc
+          if limit < 1 or limit > 100:
+              raise SystemExit("limit must be between 1 and 100")
+
+          query = {
+              "product": product,
+              "context": context,
+          }
+          if record_id:
+              route_path = (
+                  "/v1/ingress/route-audits/records/"
+                  f"{quote(record_id, safe='')}?{urlencode(query)}"
+              )
+          else:
+              query["limit"] = str(limit)
+              for env_name, query_name in (
+                  ("STATUS_FILTER", "status"),
+                  ("MODE_FILTER", "mode"),
+                  ("TRACE_ID", "trace_id"),
+              ):
+                  value = os.environ[env_name].strip()
+                  if value:
+                      query[query_name] = value
+              route_path = f"/v1/ingress/route-audits/records?{urlencode(query)}"
+          print(f"{origin}{route_path}")
+          PY
+          })"
+
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must include a hostname")
+          print(parsed.hostname)
+          PY
+          })"
+
+          oidc_response="$(curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
+          oidc_token="$(jq -r '.value // empty' <<< "$oidc_response")"
+          if [ -z "$oidc_token" ]; then
+            echo 'GitHub OIDC token response did not include a token value.' >&2
+            exit 1
+          fi
+
+          raw_response="$RUNNER_TEMP/ingress-route-audit-read-raw.json"
+          status_code="$(curl -sS \
+            -o "$raw_response" \
+            -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Accept: application/json' \
+            "$read_url")"
+          if [ "$status_code" != '200' ]; then
+            jq '{status, trace_id, error}' "$raw_response" >&2 || cat "$raw_response" >&2
+            echo "Launchplane ingress route audit read failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          jq '
+            def sanitize_record:
+              {
+                record_id,
+                trace_id,
+                product,
+                context,
+                mode,
+                status,
+                created_at,
+                operation_count: ((.operations // []) | length)
+              };
+            if .record then
+              {
+                status,
+                trace_id,
+                count: 1,
+                record: (.record | sanitize_record)
+              }
+            else
+              {
+                status,
+                trace_id,
+                product,
+                context,
+                limit,
+                count,
+                records: ((.records // []) | map(sanitize_record))
+              }
+            end
+          ' "$raw_response" >ingress-route-audit-read.json
+
+          jq . ingress-route-audit-read.json
+
+      - name: Summarize audit read
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="ingress-route-audit-read.json"
+          jq . "$result_file"
+          {
+            echo '## Ingress route audit read'
+            echo
+            echo "- Product: ${{ inputs.product }}"
+            echo "- Context: ${{ inputs.context }}"
+            echo "- Record id: ${{ inputs.record_id || 'list' }}"
+            echo "- Status: $(jq -r '.status' "$result_file")"
+            echo "- Count: $(jq -r '.count // 1' "$result_file")"
+            echo "- Response: redacted"
+            echo
+            echo '### Records'
+            jq -r '
+              def records: if .record then [.record] else (.records // []) end;
+              records[]?
+              | "- \(.record_id) mode=\(.mode) status=\(.status) trace=\(.trace_id) operations=\(.operation_count)"
+            ' "$result_file"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit read response
+        uses: actions/upload-artifact@v7
+        with:
+          name: ingress-route-audit-read
+          path: ingress-route-audit-read.json
+          if-no-files-found: error

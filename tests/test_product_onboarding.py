@@ -284,6 +284,33 @@ class ProductOnboardingTests(unittest.TestCase):
         for forward_scheme in ("http", "https", "path", "empty", "grpc", "grpcs"):
             self.assertIn(f"          - {forward_scheme}", workflow_text)
 
+    def test_ingress_route_audit_read_workflow_is_plan_scoped_get(self) -> None:
+        workflow_text = Path(".github/workflows/ingress-route-audit-read.yml").read_text(
+            encoding="utf-8"
+        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("curl -sS", workflow_text)
+        self.assertIn("-w '%{http_code}'", workflow_text)
+        self.assertIn('"$read_url"', workflow_text)
+        self.assertIn("/v1/ingress/route-audits/records", workflow_text)
+        self.assertIn("product", workflow_text)
+        self.assertIn("context", workflow_text)
+        self.assertIn("record_id", workflow_text)
+        self.assertIn("limit must be between 1 and 100", workflow_text)
+        self.assertIn(
+            'raw_response="$RUNNER_TEMP/ingress-route-audit-read-raw.json"', workflow_text
+        )
+        self.assertIn("redacted", workflow_text)
+        self.assertIn("operation_count", workflow_text)
+        self.assertIn("ingress-route-audit-read.yml", script_text)
+        self.assertIn("deploy:ingress-route-audit-read-plan-grant", script_text)
+        self.assertIn("ingress_route.plan", script_text)
+        self.assertNotIn("launchplane-request", workflow_text)
+        self.assertNotIn("ingress_route.apply", workflow_text)
+        self.assertNotIn("provider_host_id:", workflow_text)
+        self.assertNotIn("idempotency-key:", workflow_text)
+
     def test_ingress_route_canary_apply_workflow_requires_apply_guards(self) -> None:
         workflow_text = Path(".github/workflows/ingress-route-canary-apply.yml").read_text(
             encoding="utf-8"
@@ -357,9 +384,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", workflow_text)
 
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
-        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
         self.assertIn("service_env_removals_json=", workflow_text)
         self.assertIn("oauth_env_removals: $service_env_removals", workflow_text)

@@ -206,6 +206,17 @@ and optional `status`, `mode`, `provider_host_id`, `trace_id`,
 Both list and single-record endpoints require `product` and `context` so audit
 browsing stays scoped.
 
+The `Ingress Route Audit Read` GitHub workflow is the service-mediated OIDC
+reader for the same audit records. It accepts product/context plus optional list
+filters or a single record id, calls the service with `GET`, and receives only
+the canary-scoped `ingress_route.plan` grant. The workflow writes only a
+redacted response artifact and summary; raw audit records stay in runner-local
+temporary storage because records may include private route or provider details.
+Keep private provider identifiers and live topology in private infra docs;
+public Launchplane workflow inputs and artifacts should stay limited to
+sanitized record ids, trace ids, statuses, operation counts, and
+operator-selected filters.
+
 ## Product Repo Boundary
 
 Driver development should make product repos thinner, not larger. When a new

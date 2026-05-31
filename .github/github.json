@@ -69,6 +69,7 @@
     "CodeQL",
     "Deploy Launchplane",
     "Ingress Route Canary Apply",
+    "Ingress Route Audit Read",
     "Ingress Route Dry Run",
     "Live Target Runtime",
     "Merge Train Runner",

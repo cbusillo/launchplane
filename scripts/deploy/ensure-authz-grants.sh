@@ -1253,6 +1253,14 @@ post_grant \
   ingress-route-dry-run-plan
 post_grant \
   "$GITHUB_REPOSITORY" \
+  ingress-route-audit-read.yml \
+  launchplane \
+  reon-prod \
+  ingress_route.plan \
+  deploy:ingress-route-audit-read-plan-grant \
+  ingress-route-audit-read-plan
+post_grant \
+  "$GITHUB_REPOSITORY" \
   ingress-route-canary-apply.yml \
   launchplane \
   reon-prod \
