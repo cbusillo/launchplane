@@ -287,11 +287,17 @@ The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
 own live product/workflow grants; keep Dokploy host/token authority in
 Launchplane-managed secrets instead of duplicating those credentials in GitHub
-repository secrets for normal deploy execution. The deploy workflow also needs
-break-glass `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST` and
-`LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN` repository secrets for rollback fallback:
-they are used only when a failed rollout makes the Launchplane service route
-unable to accept its own rollback request.
+repository secrets for normal deploy execution. Automatic rollback also uses the
+Launchplane service route. If a failed rollout makes that route unable to accept
+its own rollback request, direct Dokploy rollback is available only through the
+manual break-glass inputs on the Deploy Launchplane workflow: provide the exact
+confirmation text, previous image reference, and operator reason.
+Keep the workflow configured with break-glass
+`LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST` and
+`LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN` repository secrets for that manual
+emergency path. When direct Dokploy break-glass rollback runs, the workflow
+writes a redacted `launchplane-break-glass-rollback` artifact and summary so the
+provider mutation remains reviewable after the emergency.
 Before rollback, the workflow uses those same break-glass credentials to capture
 redacted Dokploy target, container, and recent log diagnostics for the failed
 rollout. Diagnostics failures are non-blocking so rollback remains the priority.
