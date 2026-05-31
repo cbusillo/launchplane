@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 import runpy
+from types import SimpleNamespace
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -8,9 +10,9 @@ from unittest.mock import patch
 _SCRIPT_PATH = Path("scripts/deploy/emergency-dokploy-rollback.py")
 
 
-def _load_script() -> type:
+def _load_script() -> SimpleNamespace:
     module_globals = runpy.run_path(str(_SCRIPT_PATH), run_name="emergency_dokploy_rollback")
-    return type("EmergencyRollbackScript", (), module_globals)
+    return SimpleNamespace(**module_globals)
 
 
 class EmergencyDokployRollbackTests(unittest.TestCase):
@@ -18,7 +20,7 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
         script_module = _load_script()
 
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit) as context:
-            script_module.run_break_glass_rollback()
+            cast(Any, script_module.run_break_glass_rollback)()
 
         self.assertIn("LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK=true", str(context.exception))
 
@@ -63,7 +65,7 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
             "wait_for_target_deployment",
             return_value={"status": "done", "deploymentId": "deploy-after"},
         ) as wait_for_deployment:
-            evidence = script_module.run_break_glass_rollback()
+            evidence = cast(Any, script_module.run_break_glass_rollback)()
 
         self.assertEqual(evidence["schema_version"], 1)
         self.assertEqual(evidence["event"], "launchplane_break_glass_rollback")
