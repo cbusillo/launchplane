@@ -87,6 +87,9 @@ jobs:
       LAUNCHPLANE_LOCAL_ADMIN_TOKEN: ${{ secrets.LAUNCHPLANE_LOCAL_ADMIN_TOKEN }}
       LAUNCHPLANE_LOCAL_ADMIN_SUBJECT: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_SUBJECT }}
       LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL }}
+      LAUNCHPLANE_NPMPLUS_BASE_URL: ${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}
+      LAUNCHPLANE_NPMPLUS_IDENTITY: ${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}
+      LAUNCHPLANE_NPMPLUS_SECRET: ${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
@@ -277,6 +280,9 @@ jobs:
                 --arg local_admin_token "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN:-}" \
                 --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
                 --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
+                --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
+                --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
+                --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
                 --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
@@ -321,6 +327,27 @@ jobs:
                         LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
                         LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret
                       }
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if $npmplus_base_url != "" then
+                      {LAUNCHPLANE_NPMPLUS_BASE_URL: $npmplus_base_url}
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if $npmplus_identity != "" then
+                      {LAUNCHPLANE_NPMPLUS_IDENTITY: $npmplus_identity}
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if $npmplus_secret != "" then
+                      {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
                     else
                       {}
                     end
