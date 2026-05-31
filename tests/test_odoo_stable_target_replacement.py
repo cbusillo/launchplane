@@ -31,7 +31,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
 )
-from control_plane.dokploy import JsonValue
+from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
@@ -576,13 +576,21 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         persisted_env = ""
         persisted_compose_file = "services: {}"
+        domain_records: list[JsonValue] = []
+        deployment_records: list[JsonValue] = [
+            {"deploymentId": "deploy-123", "status": "success"}
+        ]
 
         def _fetch_target_payload(**_: object) -> JsonValue:
-            return {
+            return cast(JsonObject, {
                 "name": "cm-testing",
+                "appName": "cm-testing",
+                "composeStatus": "done",
+                "composeType": "docker-compose",
                 "sourceType": "raw",
                 "composePath": "docker-compose.yml",
                 "composeFile": persisted_compose_file,
+                "deployments": deployment_records,
                 "env": persisted_env
                 or "\n".join(
                     (
@@ -591,11 +599,37 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
                     )
                 ),
-            }
+            })
+
+        def _dokploy_request(path: str, query: object | None = None, **kwargs: object) -> JsonValue:
+            if path == "/api/domain.byComposeId" and domain_records:
+                return domain_records
+            return _request(path=path, query=query, **kwargs)
+
+        def _ensure_domain(**_: object) -> str:
+            domain_records[:] = [
+                {
+                    "domainId": "domain-cm-testing",
+                    "host": "cm-testing.shinycomputers.com",
+                    "serviceName": "web",
+                    "port": 8069,
+                    "https": True,
+                    "certificateType": "none",
+                    "domainType": "compose",
+                    "path": "/",
+                    "internalPath": "/",
+                    "stripPath": False,
+                    "uniqueConfigKey": 42,
+                }
+            ]
+            return "domain-cm-testing"
 
         def _update_env(*, env_text: str, **_: object) -> None:
             nonlocal persisted_env
             persisted_env = env_text
+
+        def _wait_for_deploy(**_: object) -> None:
+            deployment_records.insert(0, {"deploymentId": "deploy-456", "status": "done"})
 
         post_deploy_result = OdooPostDeployResult(
             context="cm",
@@ -665,13 +699,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value=_verification_result(),
             ) as verify_readiness,
         ):
+            ensure_domain.side_effect = _ensure_domain
+            wait_deploy.side_effect = _wait_for_deploy
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
                 record_store=store,
                 request=OdooStableTargetReplacementApplyRequest(
                     product="odoo-tenant-cm", instance="testing"
                 ),
-                dokploy_request=cast(DokployRequest, _request),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.deploy_status, "pass")
@@ -734,6 +770,31 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "live_domain_cm-testing.shinycomputers.com_https_rule_present"
             ],
             "true",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "domain_route_domain_cm-testing.shinycomputers.com_record_present"
+            ],
+            "true",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "domain_route_domain_cm-testing.shinycomputers.com_service_name"
+            ],
+            "web",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "domain_route_domain_cm-testing.shinycomputers.com_port_matches_runtime"
+            ],
+            "true",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["pre_deploy_compose_app_name"], "cm-testing"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_latest_deployment_key"],
+            "deploy-456",
         )
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None

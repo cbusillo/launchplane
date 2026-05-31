@@ -226,6 +226,118 @@ def _raw_compose_route_evidence(
     return evidence
 
 
+def _runtime_source_value(value: object) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _dokploy_domain_route_evidence(
+    *,
+    raw_domains: JsonValue,
+    expected_domain_hosts: tuple[str, ...],
+    runtime_port: int,
+) -> dict[str, str]:
+    domains = _collect_json_objects(raw_domains)
+    evidence: dict[str, str] = {
+        "domain_record_count": str(len(domains)),
+        "domain_hosts": ",".join(
+            sorted(str(domain.get("host") or "").strip() for domain in domains if domain.get("host"))
+        ),
+    }
+    for raw_domain_host in expected_domain_hosts:
+        domain_host = raw_domain_host.strip().lower()
+        if not domain_host:
+            continue
+        matching_domain = next(
+            (
+                domain
+                for domain in domains
+                if str(domain.get("host") or "").strip().lower() == domain_host
+            ),
+            None,
+        )
+        prefix = f"domain_{domain_host}"
+        evidence[f"{prefix}_record_present"] = "true" if matching_domain else "false"
+        if matching_domain is None:
+            continue
+        evidence[f"{prefix}_domain_id_present"] = (
+            "true" if str(matching_domain.get("domainId") or "").strip() else "false"
+        )
+        evidence[f"{prefix}_service_name"] = _runtime_source_value(
+            matching_domain.get("serviceName")
+        )
+        evidence[f"{prefix}_port"] = _runtime_source_value(matching_domain.get("port"))
+        evidence[f"{prefix}_port_matches_runtime"] = (
+            "true" if _runtime_source_value(matching_domain.get("port")) == str(runtime_port) else "false"
+        )
+        evidence[f"{prefix}_https"] = _runtime_source_value(matching_domain.get("https"))
+        evidence[f"{prefix}_certificate_type"] = _runtime_source_value(
+            matching_domain.get("certificateType")
+        )
+        evidence[f"{prefix}_domain_type"] = _runtime_source_value(
+            matching_domain.get("domainType")
+        )
+        evidence[f"{prefix}_path"] = _runtime_source_value(matching_domain.get("path"))
+        evidence[f"{prefix}_internal_path"] = _runtime_source_value(
+            matching_domain.get("internalPath")
+        )
+        evidence[f"{prefix}_strip_path"] = _runtime_source_value(
+            matching_domain.get("stripPath")
+        )
+        evidence[f"{prefix}_unique_config_key_present"] = (
+            "true" if _runtime_source_value(matching_domain.get("uniqueConfigKey")) else "false"
+        )
+    return evidence
+
+
+def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, str]:
+    deployments = _collect_json_objects(target_payload.get("deployments"))
+    latest_deployment = control_plane_dokploy._latest_deployment_from_list(deployments)
+    evidence: dict[str, str] = {
+        "compose_app_name": _runtime_source_value(target_payload.get("appName")),
+        "compose_status": _runtime_source_value(target_payload.get("composeStatus")),
+        "compose_type": _runtime_source_value(target_payload.get("composeType")),
+        "compose_source_type": _runtime_source_value(target_payload.get("sourceType")),
+        "compose_isolated_deployment": _runtime_source_value(
+            target_payload.get("isolatedDeployment")
+        ),
+        "compose_randomize": _runtime_source_value(target_payload.get("randomize")),
+        "deployment_record_count": str(len(deployments)),
+    }
+    if latest_deployment is not None:
+        evidence.update(
+            {
+                "latest_deployment_key": control_plane_dokploy.deployment_key(latest_deployment),
+                "latest_deployment_status": _runtime_source_value(
+                    latest_deployment.get("status")
+                ),
+                "latest_deployment_title": _runtime_source_value(latest_deployment.get("title")),
+                "latest_deployment_created_at": _runtime_source_value(
+                    latest_deployment.get("createdAt") or latest_deployment.get("created_at")
+                ),
+                "latest_deployment_finished_at": _runtime_source_value(
+                    latest_deployment.get("finishedAt") or latest_deployment.get("finished_at")
+                ),
+            }
+        )
+    return evidence
+
+
+def _collect_json_objects(raw_items: JsonValue | None) -> list[JsonObject]:
+    if not isinstance(raw_items, list):
+        return []
+    return [
+        item_as_object
+        for raw_item in raw_items
+        if (item_as_object := control_plane_dokploy.as_json_object(raw_item)) is not None
+    ]
+
+
 def _domain_hosts_from_payload(raw_domains: JsonValue) -> tuple[str, ...]:
     if not isinstance(raw_domains, list):
         return ()
@@ -848,6 +960,22 @@ def execute_odoo_stable_target_replacement_apply(
                 domain_host=domain_host,
                 runtime_port=profile.runtime_port,
             )
+        raw_domains = dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.byComposeId",
+            query={"composeId": target_id_record.target_id},
+        )
+        runtime_source.update(
+            {
+                f"domain_route_{key}": value
+                for key, value in _dokploy_domain_route_evidence(
+                    raw_domains=raw_domains,
+                    expected_domain_hosts=plan.expected_domain_hosts,
+                    runtime_port=profile.runtime_port,
+                ).items()
+            }
+        )
         current_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         )
@@ -881,6 +1009,12 @@ def execute_odoo_stable_target_replacement_apply(
         )
         runtime_source["live_source_type"] = str(refreshed_payload.get("sourceType") or "")
         runtime_source["live_compose_path"] = str(refreshed_payload.get("composePath") or "")
+        runtime_source.update(
+            {
+                f"pre_deploy_{key}": value
+                for key, value in _dokploy_compose_metadata_evidence(refreshed_payload).items()
+            }
+        )
         refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(refreshed_payload.get("env") or "")
         )
@@ -911,6 +1045,18 @@ def execute_odoo_stable_target_replacement_apply(
             target_id=target_id_record.target_id,
             before_key=control_plane_dokploy.deployment_key(latest_before),
             timeout_seconds=deploy_timeout_seconds,
+        )
+        deployed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+        )
+        runtime_source.update(
+            {
+                f"post_deploy_{key}": value
+                for key, value in _dokploy_compose_metadata_evidence(deployed_payload).items()
+            }
         )
     except click.ClickException as error:
         _write_failed_deployment(
