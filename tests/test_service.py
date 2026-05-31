@@ -406,6 +406,11 @@ class _StackCollapseWriteFailingFilesystemRecordStore(FilesystemRecordStore):
         raise RuntimeError("stack collapse persistence unavailable")
 
 
+class _IngressAuditWriteFailingFilesystemRecordStore(FilesystemRecordStore):
+    def write_ingress_route_audit_record(self, record: object) -> Path:
+        raise RuntimeError("ingress audit persistence unavailable")
+
+
 class _CandidateReflowWriteFailingFilesystemRecordStore(FilesystemRecordStore):
     def write_merge_train_batch_candidate_record(self, record: object) -> Path:
         candidate_record = cast(MergeTrainBatchCandidateRecord, record)
@@ -2042,12 +2047,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload=_npmplus_ingress_route_payload(),
                 headers={"Idempotency-Key": "npmplus-ingress-dry-run"},
             )
+            records = FilesystemRecordStore(root / "state").list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["status"], "planned")
         self.assertTrue(payload["result"]["dry_run"])
         self.assertEqual(payload["result"]["operations"][0]["action"], "create")
+        self.assertIn("ingress_route_audit_record_id", payload["records"])
         self.assertEqual(client.calls, ["list"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].mode, "dry-run")
+        self.assertEqual(records[0].status, "planned")
+        self.assertEqual(records[0].trace_id, payload["trace_id"])
 
     def test_npmplus_ingress_dry_run_idempotency_key_does_not_replay(self) -> None:
         client = _FakeNpmplusIngressClient()
@@ -2128,12 +2141,65 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload=_npmplus_ingress_route_payload(mode="apply"),
                 headers={"Idempotency-Key": "npmplus-ingress-apply"},
             )
+            records = FilesystemRecordStore(root / "state").list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["status"], "applied")
         self.assertFalse(payload["result"]["dry_run"])
         self.assertEqual(payload["result"]["proxy_host"]["id"], 100)
+        self.assertIn("ingress_route_audit_record_id", payload["records"])
         self.assertEqual(client.calls, ["list", "create"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].mode, "apply")
+        self.assertEqual(records[0].idempotency_key, "npmplus-ingress-apply")
+        self.assertEqual(records[0].provider_host_id, 100)
+
+    def test_npmplus_ingress_route_apply_fails_before_mutation_when_audit_unavailable(
+        self,
+    ) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=_IngressAuditWriteFailingFilesystemRecordStore(
+                    root / "state"
+                ),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(mode="apply"),
+                headers={"Idempotency-Key": "npmplus-ingress-apply"},
+            )
+
+        self.assertEqual(status_code, 500)
+        self.assertEqual(payload["error"]["code"], "internal_error")
+        self.assertEqual(client.calls, [])
 
     def test_npmplus_ingress_route_apply_requires_idempotency_key(self) -> None:
         client = _FakeNpmplusIngressClient()

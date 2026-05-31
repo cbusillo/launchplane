@@ -36,6 +36,10 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackDeployPlan,
     GenericWebRollbackPlanRecord,
 )
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.merge_train_batch import (
@@ -835,12 +839,42 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
             store = PostgresRecordStore(database_url=database_url)
             manifest = _artifact_manifest()
+            ingress_route_audit = IngressRouteAuditRecord(
+                record_id="ingress-route-audit-alembic",
+                product="launchplane",
+                context="reon-prod",
+                mode="apply",
+                status="unchanged",
+                dry_run=False,
+                requested_domains=("ingress-canary.example.test",),
+                expected_host_id=78,
+                provider_host_id=78,
+                operations=(
+                    IngressRouteAuditOperation(
+                        action="no-op",
+                        host_id=78,
+                        domain_names=("ingress-canary.example.test",),
+                        requires_apply=False,
+                    ),
+                ),
+                trace_id="launchplane_req_alembic",
+                idempotency_key="ingress-canary-apply",
+                reason="Apply unchanged canary route.",
+                recorded_at="2026-05-31T12:05:00Z",
+            )
             store.write_artifact_manifest(manifest)
+            store.write_ingress_route_audit_record(ingress_route_audit)
             loaded = store.read_artifact_manifest(manifest.artifact_id)
+            audit_records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
             store.close()
 
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
         self.assertEqual(loaded.image.digest, "sha256:image123")
+        self.assertEqual(
+            [record.record_id for record in audit_records], [ingress_route_audit.record_id]
+        )
 
     def test_verify_schema_rejects_empty_database_without_creating_tables(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

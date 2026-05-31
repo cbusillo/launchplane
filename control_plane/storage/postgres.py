@@ -38,6 +38,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
@@ -496,6 +497,32 @@ class LaunchplanePublicIngressObservationRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     observed_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneIngressRouteAuditRow(Base):
+    __tablename__ = "launchplane_ingress_route_audits"
+    __table_args__ = (
+        Index(
+            "launchplane_ingress_route_audits_lookup_idx",
+            "product",
+            "context",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_ingress_route_audits_status_idx",
+            "status",
+            desc("recorded_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    provider_host_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2793,6 +2820,43 @@ class PostgresRecordStore(HumanSessionStore):
                 observed_at=record.observed_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> None:
+        self._write_row(
+            LaunchplaneIngressRouteAuditRow(
+                record_id=record.record_id,
+                product=record.product,
+                context=record.context,
+                mode=record.mode,
+                status=record.status,
+                provider_host_id=record.provider_host_id,
+                recorded_at=record.recorded_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_ingress_route_audit_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressRouteAuditRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneIngressRouteAuditRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneIngressRouteAuditRow.context == context_name)
+        return self._list_models(
+            model_type=IngressRouteAuditRecord,
+            orm_model=LaunchplaneIngressRouteAuditRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneIngressRouteAuditRow.recorded_at.desc(),
+                LaunchplaneIngressRouteAuditRow.record_id.desc(),
+            ),
+            limit=limit,
         )
 
     def list_public_ingress_observation_records(

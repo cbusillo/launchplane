@@ -189,9 +189,13 @@ The `Ingress Route Canary Apply` workflow is the matching apply proof path. It
 uses the same canary-scoped product/context grant, reads the expected provider
 host id and canary route tuple from repository variables, and requires an explicit
 idempotency key plus the confirmation phrase `apply ingress canary`. It fixes the
-current canary route toggles instead of accepting arbitrary provider options.
-Keep this workflow canary-scoped until broader route ownership and approval UX are
-explicit.
+current canary route toggles instead of accepting arbitrary provider options, and
+asks the service to reject the request unless the expected provider host's domain
+set exactly matches the requested canary domain set. Dry-run and apply responses
+write Launchplane-owned ingress route audit records that preserve the trace id,
+mode, status, requested domains, expected/provider host ids, operations, reason,
+and idempotency key. Keep this workflow canary-scoped until broader route
+ownership and approval UX are explicit.
 
 ## Product Repo Boundary
 

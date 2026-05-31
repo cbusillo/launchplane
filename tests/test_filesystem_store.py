@@ -20,6 +20,10 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackDeployPlan,
     GenericWebRollbackPlanRecord,
 )
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -84,6 +88,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
 
@@ -589,6 +594,96 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [newer_record.record_id, older_record.record_id],
         )
         self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
+
+    def test_write_and_list_ingress_route_audit_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = IngressRouteAuditRecord(
+                record_id="ingress-route-audit-old",
+                product="launchplane",
+                context="reon-prod",
+                mode="dry-run",
+                status="planned",
+                dry_run=True,
+                requested_domains=("ingress-canary.example.test",),
+                expected_host_id=78,
+                provider_host_id=78,
+                operations=(
+                    IngressRouteAuditOperation(
+                        action="no-op",
+                        host_id=78,
+                        domain_names=("ingress-canary.example.test",),
+                        requires_apply=False,
+                    ),
+                ),
+                trace_id="launchplane_req_old",
+                reason="Plan canary route.",
+                recorded_at="2026-05-31T12:00:00Z",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "record_id": "ingress-route-audit-new",
+                    "mode": "apply",
+                    "status": "unchanged",
+                    "dry_run": False,
+                    "trace_id": "launchplane_req_new",
+                    "idempotency_key": "ingress-canary-apply",
+                    "recorded_at": "2026-05-31T12:05:00Z",
+                }
+            )
+
+            written_path = store.write_ingress_route_audit_record(older_record)
+            store.write_ingress_route_audit_record(newer_record)
+            listed_records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+            limited_records = store.list_ingress_route_audit_records(product="launchplane", limit=1)
+            self.assertTrue(written_path.exists())
+
+        self.assertEqual(
+            [record.record_id for record in listed_records],
+            [newer_record.record_id, older_record.record_id],
+        )
+        self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
+
+    def test_postgres_store_round_trips_ingress_route_audit_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            record = IngressRouteAuditRecord(
+                record_id="ingress-route-audit-postgres",
+                product="launchplane",
+                context="reon-prod",
+                mode="apply",
+                status="unchanged",
+                dry_run=False,
+                requested_domains=("ingress-canary.example.test",),
+                expected_host_id=78,
+                provider_host_id=78,
+                operations=(
+                    IngressRouteAuditOperation(
+                        action="no-op",
+                        host_id=78,
+                        domain_names=("ingress-canary.example.test",),
+                        requires_apply=False,
+                    ),
+                ),
+                trace_id="launchplane_req_postgres",
+                idempotency_key="ingress-canary-apply",
+                reason="Apply unchanged canary route.",
+                recorded_at="2026-05-31T12:05:00Z",
+            )
+
+            store.write_ingress_route_audit_record(record)
+
+            listed_records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual([stored.record_id for stored in listed_records], [record.record_id])
+        self.assertEqual(listed_records[0].provider_host_id, 78)
 
     def test_write_and_list_public_ingress_incident_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -91,6 +91,7 @@ jobs:
                 schema_version: 1,
                 mode: "apply",
                 expected_host_id: $expected_host_id,
+                require_exact_expected_host_domains: true,
                 reason: $reason,
                 route: {
                   domain_names: [$domain],
