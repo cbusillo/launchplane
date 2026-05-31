@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooAddonSettingOverride,
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
@@ -243,14 +244,14 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                     instance="testing",
                     apply_on=("deploy",),
                     addon_settings=(
-                        {
-                            "addon": "openai",
-                            "setting": "api_key",
-                            "value": {
-                                "source": "secret_binding",
-                                "secret_binding_id": "secret-opw-testing-openai",
-                            },
-                        },
+                        OdooAddonSettingOverride(
+                            addon="openai",
+                            setting="api_key",
+                            value=OdooOverrideValue(
+                                source="secret_binding",
+                                secret_binding_id="secret-opw-testing-openai",
+                            ),
+                        ),
                     ),
                     updated_at="2026-04-26T12:00:00Z",
                     source_label="test",
