@@ -1,0 +1,283 @@
+import json
+from dataclasses import dataclass
+from http.cookiejar import CookieJar
+from typing import Literal, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+import click
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+type JsonPrimitive = str | int | float | bool | None
+type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
+type JsonObject = dict[str, JsonValue]
+
+NpmplusForwardScheme = Literal["http", "https", "path", "empty", "grpc", "grpcs"]
+NpmplusAuthRequest = Literal[
+    "none",
+    "anubis",
+    "tinyauth",
+    "authelia",
+    "authentik",
+    "authentik-send-basic-auth",
+]
+
+
+class NpmplusLocationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    forward_scheme: NpmplusForwardScheme
+    forward_host: str
+    forward_port: int | None = Field(default=None, ge=1, le=65535)
+    id: int | None = None
+    npmplus_enabled: bool = True
+    location_type: str = ""
+    npmplus_noindex: bool = False
+    npmplus_crowdsec_appsec: bool = False
+    npmplus_proxy_request_buffering: bool = False
+    npmplus_proxy_response_buffering: bool = False
+    npmplus_upstream_compression: bool = False
+    npmplus_fancyindex: bool = False
+    npmplus_x_frame_options: Literal["DENY", "SAMEORIGIN", "upstream", "none"] = "SAMEORIGIN"
+    npmplus_auth_request: NpmplusAuthRequest = "none"
+    advanced_config: str = ""
+
+    @field_validator("path", "forward_host", mode="after")
+    @classmethod
+    def _validate_non_empty(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("NPMplus location fields must be non-empty")
+        return normalized_value
+
+
+class NpmplusLocation(NpmplusLocationPayload):
+    model_config = ConfigDict(extra="ignore")
+
+
+class NpmplusProxyHostPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    domain_names: tuple[str, ...]
+    forward_scheme: NpmplusForwardScheme
+    forward_host: str
+    forward_port: int | None = Field(default=None, ge=1, le=65535)
+    certificate_id: int | Literal["new"] = 0
+    ssl_forced: bool = True
+    hsts_enabled: bool = False
+    hsts_subdomains: bool = False
+    trust_forwarded_proto: bool = False
+    http2_support: bool = True
+    npmplus_http3_support: bool = True
+    access_list_id: int = Field(default=0, ge=0)
+    npmplus_noindex: bool = False
+    npmplus_crowdsec_appsec: bool = False
+    npmplus_proxy_request_buffering: bool = False
+    npmplus_proxy_response_buffering: bool = False
+    npmplus_upstream_compression: bool = False
+    npmplus_fancyindex: bool = False
+    npmplus_x_frame_options: Literal["DENY", "SAMEORIGIN", "upstream", "none"] = "SAMEORIGIN"
+    npmplus_auth_request: NpmplusAuthRequest = "none"
+    advanced_config: str = ""
+    enabled: bool = True
+    meta: JsonObject = Field(default_factory=dict)
+    locations: tuple[NpmplusLocationPayload, ...] = ()
+
+    @field_validator("forward_host", mode="after")
+    @classmethod
+    def _validate_forward_host(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("NPMplus proxy host requires a forward host")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_domain_names(self) -> "NpmplusProxyHostPayload":
+        normalized_domain_names: list[str] = []
+        for raw_domain_name in self.domain_names:
+            domain_name = raw_domain_name.strip().lower()
+            if not domain_name:
+                raise ValueError("NPMplus proxy host domain names must be non-empty")
+            if domain_name not in normalized_domain_names:
+                normalized_domain_names.append(domain_name)
+        if not normalized_domain_names:
+            raise ValueError("NPMplus proxy host requires at least one domain name")
+        self.domain_names = tuple(normalized_domain_names)
+        return self
+
+    def to_api_payload(self) -> JsonObject:
+        return self.model_dump(mode="json", exclude={"locations": {"__all__": {"id"}}})
+
+
+class NpmplusProxyHost(NpmplusProxyHostPayload):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(ge=1)
+    locations: tuple[NpmplusLocation, ...] = ()
+
+
+@dataclass(frozen=True)
+class NpmplusCredentials:
+    base_url: str
+    identity: str
+    secret: str
+
+    def __post_init__(self) -> None:
+        if not self.base_url.strip():
+            raise ValueError("NPMplus base URL is required")
+        if not self.identity.strip():
+            raise ValueError("NPMplus identity is required")
+        if not self.secret:
+            raise ValueError("NPMplus secret is required")
+
+    @property
+    def normalized_base_url(self) -> str:
+        return self.base_url.rstrip("/")
+
+
+class NpmplusHttpResponse(Protocol):
+    def __enter__(self) -> "NpmplusHttpResponse": ...
+
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None: ...
+
+    def read(self) -> bytes: ...
+
+
+class NpmplusHttpOpener(Protocol):
+    def open(self, request: Request, timeout: int | float) -> NpmplusHttpResponse: ...
+
+
+class NpmplusClient:
+    def __init__(
+        self,
+        *,
+        credentials: NpmplusCredentials,
+        timeout_seconds: int | float = 30,
+        opener: NpmplusHttpOpener | None = None,
+    ) -> None:
+        self._credentials = credentials
+        self._timeout_seconds = timeout_seconds
+        self._opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
+        self._authenticated = False
+
+    def authenticate(self) -> None:
+        self._request(
+            method="POST",
+            path="/api/tokens",
+            payload={
+                "identity": self._credentials.identity,
+                "secret": self._credentials.secret,
+            },
+            require_authentication=False,
+        )
+        self._authenticated = True
+
+    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+        payload = self._request(method="GET", path="/api/nginx/proxy-hosts")
+        if not isinstance(payload, list):
+            raise click.ClickException("NPMplus proxy-host list returned an invalid payload.")
+        return tuple(
+            NpmplusProxyHost.model_validate(host_payload)
+            for host_payload in payload
+            if isinstance(host_payload, dict)
+        )
+
+    def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        payload = self._request(method="GET", path=f"/api/nginx/proxy-hosts/{host_id}")
+        if not isinstance(payload, dict):
+            raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
+        return NpmplusProxyHost.model_validate(payload)
+
+    def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+        response = self._request(
+            method="POST",
+            path="/api/nginx/proxy-hosts",
+            payload=payload.to_api_payload(),
+        )
+        if not isinstance(response, dict):
+            raise click.ClickException("NPMplus proxy-host create returned an invalid payload.")
+        return NpmplusProxyHost.model_validate(response)
+
+    def update_proxy_host(
+        self, *, host_id: int, payload: NpmplusProxyHostPayload
+    ) -> NpmplusProxyHost:
+        response = self._request(
+            method="PUT",
+            path=f"/api/nginx/proxy-hosts/{host_id}",
+            payload=payload.to_api_payload(),
+        )
+        if not isinstance(response, dict):
+            raise click.ClickException("NPMplus proxy-host update returned an invalid payload.")
+        return NpmplusProxyHost.model_validate(response)
+
+    def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self._request(method="POST", path=f"/api/nginx/proxy-hosts/{host_id}/disable")
+        return self.get_proxy_host(host_id)
+
+    def enable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self._request(method="POST", path=f"/api/nginx/proxy-hosts/{host_id}/enable")
+        return self.get_proxy_host(host_id)
+
+    def delete_proxy_host(self, host_id: int) -> None:
+        self._request(method="DELETE", path=f"/api/nginx/proxy-hosts/{host_id}")
+
+    def _request(
+        self,
+        *,
+        method: str,
+        path: str,
+        payload: JsonObject | None = None,
+        query: dict[str, str | int] | None = None,
+        require_authentication: bool = True,
+    ) -> JsonValue:
+        if require_authentication and not self._authenticated:
+            self.authenticate()
+
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        request_url = f"{self._credentials.normalized_base_url}{normalized_path}"
+        if query:
+            request_url = f"{request_url}?{urlencode(query)}"
+
+        request_headers = {"Accept": "application/json"}
+        request_body: bytes | None = None
+        if payload is not None:
+            request_headers["Content-Type"] = "application/json"
+            request_body = json.dumps(payload).encode()
+
+        request = Request(request_url, data=request_body, headers=request_headers, method=method)
+        try:
+            with self._opener.open(request, timeout=self._timeout_seconds) as response:
+                raw_payload = response.read()
+        except HTTPError as error:
+            error_body = error.read().decode(errors="replace").strip()
+            raise click.ClickException(
+                f"NPMplus API {method} {normalized_path} failed ({error.code}): {error_body}"
+            ) from error
+        except URLError as error:
+            raise click.ClickException(
+                f"NPMplus API {method} {normalized_path} request failed: {error.reason}"
+            ) from error
+
+        if not raw_payload:
+            return {}
+        try:
+            return _normalize_json_value(json.loads(raw_payload))
+        except json.JSONDecodeError:
+            return {"raw": raw_payload.decode("utf-8", errors="replace")}
+
+
+def _normalize_json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_json_value(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+        }
+    return str(value)

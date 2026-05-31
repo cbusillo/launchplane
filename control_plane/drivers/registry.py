@@ -266,6 +266,7 @@ def _action(
     authz_action: str = "",
     operator_visible: bool = True,
     writes_records: tuple[str, ...] = (),
+    alternate_authz_actions: tuple[str, ...] = (),
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
         action_id=action_id,
@@ -276,6 +277,7 @@ def _action(
         method=method,
         route_path=route_path,
         authz_action=authz_action,
+        alternate_authz_actions=alternate_authz_actions,
         operator_visible=operator_visible,
         writes_records=writes_records,
     )
@@ -944,8 +946,39 @@ VERIREEL_DRIVER = DriverDescriptor(
     ),
 )
 
+INGRESS_DRIVER = DriverDescriptor(
+    driver_id="ingress",
+    label="Ingress",
+    product="ingress",
+    description="Manage public ingress routes through Launchplane-owned provider adapters.",
+    context_patterns=(),
+    provider_boundary=PROVIDER_BOUNDARY_NOTE,
+    capabilities=(
+        DriverCapabilityDescriptor(
+            capability_id="public_ingress_routes",
+            label="Public ingress routes",
+            description="Plan and apply public edge routes through a configured ingress adapter.",
+            actions=("route_apply",),
+            panels=("audit",),
+        ),
+    ),
+    actions=(
+        _action(
+            "route_apply",
+            "Apply ingress route",
+            "Plan or apply a public ingress route through the configured ingress adapter; dry-run requests require ingress_route.plan.",
+            safety="mutation",
+            scope="context",
+            route_path="/v1/drivers/ingress/route-apply",
+            authz_action="ingress_route.apply",
+            alternate_authz_actions=("ingress_route.plan",),
+        ),
+    ),
+)
+
 _DESCRIPTORS: tuple[DriverDescriptor, ...] = (
     GENERIC_WEB_DRIVER,
+    INGRESS_DRIVER,
     ODOO_DRIVER,
     VERIREEL_DRIVER,
 )

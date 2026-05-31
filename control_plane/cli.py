@@ -49,6 +49,7 @@ from control_plane.cli_dokploy_targets import (
     target_id_map,
 )
 from control_plane.cli_every_code import register_every_code_commands
+from control_plane.cli_ingress import IngressCliCallbacks, register_ingress_commands
 from control_plane.cli_runner_lanes import register_runner_lane_commands
 from control_plane.cli_launchplane_previews import (
     LaunchplanePreviewCliCallbacks,
@@ -3776,6 +3777,12 @@ register_every_code_commands(cast(click.Group, main), store_factory=_store)  # t
 register_public_ingress_monitor_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     store_factory=_store,
+)
+register_ingress_commands(
+    cast(click.Group, main),  # type: ignore[redundant-cast]
+    callbacks=IngressCliCallbacks(
+        post_launchplane_service_json=lambda **kwargs: _post_launchplane_service_json(**kwargs),
+    ),
 )
 register_storage_secret_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_product_config_commands(

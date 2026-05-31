@@ -67,8 +67,8 @@ Action safety levels are intentionally coarse:
 ## Registry
 
 The v1 registry is in code at `control_plane/drivers/registry.py`. It contains
-the reusable generic-web base descriptor plus Odoo and VeriReel descriptors, and
-composes driver views from existing storage repository methods:
+the reusable generic-web base descriptor plus ingress, Odoo, and VeriReel
+descriptors, and composes driver views from existing storage repository methods:
 
 - `LaunchplaneLaneSummary` for stable lane state.
 - `LaunchplanePreviewSummary` for preview lifecycle state.
@@ -77,6 +77,14 @@ The registry is deliberately not a database table yet. Driver descriptor shape
 should stabilize before Launchplane adds writable driver metadata. Product and
 lane configuration still belongs in DB-backed Launchplane records, not in
 repo-local Launchplane TOML manifests.
+
+The `ingress` descriptor is a global control driver. It exposes
+`POST /v1/drivers/ingress/route-apply` for planning and applying public edge
+routes through Launchplane-owned provider adapters. It intentionally has no
+context patterns, so it appears in driver discovery but not as a lane or preview
+driver for every product context. Dry-run requests require `ingress_route.plan`;
+apply requests require `ingress_route.apply`. Provider-specific adapter names
+and credentials stay behind the service boundary.
 
 For guidance on adding a new driver type or product-specific driver, see
 [driver-development.md](driver-development.md). For the expected shape of a
@@ -383,11 +391,15 @@ provider concepts, as the future GUI-facing action surface.
 
 Descriptor actions are also the source of truth for advertised driver route
 authorization metadata. `authz_action` must match the live service handler
-authorization string for that route. Some service callback routes, such as
-verification writeback routes, are declared with `operator_visible=false`; they
-remain in the driver route authorization map but are not surfaced as operator
-actions. Compatibility routes that should remain callable but not advertised as
-current driver actions belong in `route_aliases` with `operator_visible=false`.
+authorization string for the route's primary mutation or read behavior. If one
+route has multiple service modes with distinct authorization checks, declare the
+non-primary checks in `alternate_authz_actions` so policy tooling can discover
+them without parsing free-form descriptions. Some service callback routes, such
+as verification writeback routes, are declared with `operator_visible=false`;
+they remain in the driver route authorization map but are not surfaced as
+operator actions. Compatibility routes that should remain callable but not
+advertised as current driver actions belong in `route_aliases` with
+`operator_visible=false`.
 The HTTP service admits product-driver POST routes from descriptor action and
 route-alias paths and reads product-driver handler authorization actions from
 descriptor route metadata, so new drivers do not need a second hardcoded router

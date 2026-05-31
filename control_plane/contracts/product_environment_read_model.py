@@ -182,6 +182,7 @@ class ProductActionAvailability(BaseModel):
     method: str = ""
     route_path: str = ""
     authz_action: str = ""
+    alternate_authz_actions: tuple[str, ...] = ()
     enabled: bool
     disabled_reasons: tuple[str, ...] = ()
     trust_state: FreshnessStatus = "recorded"
@@ -1453,6 +1454,7 @@ def _availability_for_descriptor_action(
         method=action.method,
         route_path=action.route_path,
         authz_action=authz_action,
+        alternate_authz_actions=action.alternate_authz_actions,
         enabled=not disabled_reasons,
         disabled_reasons=tuple(disabled_reasons),
         trust_state="recorded",

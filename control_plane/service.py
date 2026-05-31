@@ -29,6 +29,7 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane.npmplus import NpmplusClient, NpmplusCredentials
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.agent_context_service import (
@@ -260,6 +261,11 @@ from control_plane.work_graph_http import (
     work_graph_issue_inbox_reconcile_denied_response,
     work_graph_rank_denied_response,
 )
+from control_plane.workflows.npmplus_ingress import (
+    NpmplusIngressApplyRequest,
+    NpmplusIngressClient,
+    apply_npmplus_ingress_route,
+)
 from control_plane.merge_train import MergeTrainDryRunResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -461,6 +467,7 @@ _MERGE_TRAIN_POLICY_TARGETS_ROUTE = "/v1/work-graph/merge-train/policy-targets"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
+_NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
@@ -698,6 +705,10 @@ class _TestLaunchplaneServiceRecordStore(Protocol):
     def close(self) -> None: ...
 
 
+class _NpmplusIngressClientFactory(Protocol):
+    def __call__(self) -> NpmplusIngressClient: ...
+
+
 class _OdooStableBootstrapOperationStore(Protocol):
     def write_odoo_stable_bootstrap_operation_record(
         self, record: OdooStableBootstrapOperationRecord
@@ -763,6 +774,9 @@ class _ResolvedProductDriverContext:
 
 
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+_NPMPLUS_BASE_URL_ENV_KEY = "LAUNCHPLANE_NPMPLUS_BASE_URL"
+_NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
+_NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
 _LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
     {
@@ -1608,6 +1622,28 @@ def _validate_driver_envelope_product(product: str, *, label: str) -> None:
 
 class ProductDriverMismatchError(ValueError):
     pass
+
+
+class NpmplusIngressApplyEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    ingress: NpmplusIngressApplyRequest
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "NpmplusIngressApplyEnvelope":
+        _validate_driver_envelope_product(self.product, label="NPMplus ingress apply")
+        if not self.context.strip():
+            raise ValueError("NPMplus ingress apply requires context.")
+        return self
+
+
+_NPMPLUS_INGRESS_APPLY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path=_NPMPLUS_INGRESS_APPLY_ROUTE_PATH,
+    envelope_model=NpmplusIngressApplyEnvelope,
+    denial_message=(
+        "Workflow cannot plan or apply the ingress route for the requested product/context."
+    ),
+)
 
 
 class MergeTrainPolicyImportEnvelope(BaseModel):
@@ -2467,6 +2503,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/product-config/apply",
+        _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
@@ -5801,6 +5838,13 @@ def _should_store_idempotency_record(
 ) -> bool:
     if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
         return False
+    if path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
+        if isinstance(driver_result, BaseModel):
+            ingress_result = driver_result.model_dump(mode="json")
+        else:
+            ingress_result = driver_result or {}
+        if ingress_result.get("dry_run") is True:
+            return False
     if (
         path
         in {
@@ -5938,6 +5982,27 @@ def _local_operator_identity_from_bearer(
     subject = _local_operator_subject_from_env() or "local-owner-agent"
     token_label = _local_operator_token_label_from_env() or "local-owner-write"
     return LocalOperatorIdentity(subject=subject, token_label=token_label)
+
+
+def _build_npmplus_ingress_client_from_env() -> NpmplusIngressClient:
+    required_env = (
+        _NPMPLUS_BASE_URL_ENV_KEY,
+        _NPMPLUS_IDENTITY_ENV_KEY,
+        _NPMPLUS_SECRET_ENV_KEY,
+    )
+    missing_env = tuple(key for key in required_env if not os.environ.get(key, "").strip())
+    if missing_env:
+        missing_list = ", ".join(missing_env)
+        raise click.ClickException(
+            f"NPMplus ingress client is not configured; missing {missing_list}."
+        )
+    return NpmplusClient(
+        credentials=NpmplusCredentials(
+            base_url=os.environ.get(_NPMPLUS_BASE_URL_ENV_KEY, ""),
+            identity=os.environ.get(_NPMPLUS_IDENTITY_ENV_KEY, ""),
+            secret=os.environ.get(_NPMPLUS_SECRET_ENV_KEY, ""),
+        )
+    )
 
 
 def _local_admin_identity_from_bearer(
@@ -7996,6 +8061,7 @@ def create_launchplane_service_app(
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
+    npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -8031,6 +8097,9 @@ def create_launchplane_service_app(
         )
     )
     write_routes = _build_write_routes()
+    resolved_npmplus_ingress_client_factory = (
+        npmplus_ingress_client_factory or _build_npmplus_ingress_client_from_env
+    )
 
     def app(
         environ: dict[str, object],
@@ -10908,6 +10977,66 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
+            elif path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
+                ingress_request = NpmplusIngressApplyEnvelope.model_validate(payload)
+                ingress_action = (
+                    "ingress_route.apply"
+                    if ingress_request.ingress.mode == "apply"
+                    else "ingress_route.plan"
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action=ingress_action,
+                    product=ingress_request.product,
+                    context=ingress_request.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": _NPMPLUS_INGRESS_APPLY_ROUTE.denial_message,
+                            },
+                        },
+                    )
+                if ingress_request.ingress.mode == "apply" and not request_idempotency_key:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "idempotency_key_required",
+                                "message": "NPMplus ingress apply requests require an Idempotency-Key header.",
+                            },
+                        },
+                    )
+                if ingress_request.ingress.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                ingress_result = apply_npmplus_ingress_route(
+                    client=resolved_npmplus_ingress_client_factory(),
+                    request=ingress_request.ingress,
+                )
+                result = {
+                    "ingress_provider": "npmplus",
+                    "ingress_status": ingress_result.status,
+                    "ingress_dry_run": ingress_result.dry_run,
+                }
+                driver_result = ingress_result
             elif path == "/v1/products/public-ingress-monitor/run-once":
                 monitor_request = PublicIngressMonitorRunOnceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

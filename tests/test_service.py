@@ -184,6 +184,7 @@ from control_plane.workflows.generic_web_preview import (
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
+from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
@@ -219,6 +220,49 @@ class _StubGitHubOAuthClient:
         if code != "github-code":
             raise ValueError("unexpected code")
         return self.identity
+
+
+class _FakeNpmplusIngressClient:
+    def __init__(self, proxy_hosts: tuple[NpmplusProxyHost, ...] = ()) -> None:
+        self.proxy_hosts = list(proxy_hosts)
+        self.calls: list[str] = []
+        self.next_id = 100
+
+    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+        self.calls.append("list")
+        return tuple(self.proxy_hosts)
+
+    def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+        self.calls.append("create")
+        created = NpmplusProxyHost.model_validate({"id": self.next_id, **payload.to_api_payload()})
+        self.proxy_hosts.append(created)
+        return created
+
+    def update_proxy_host(
+        self, *, host_id: int, payload: NpmplusProxyHostPayload
+    ) -> NpmplusProxyHost:
+        self.calls.append(f"update:{host_id}")
+        updated = NpmplusProxyHost.model_validate({"id": host_id, **payload.to_api_payload()})
+        self.proxy_hosts = [updated if host.id == host_id else host for host in self.proxy_hosts]
+        return updated
+
+    def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self.calls.append(f"disable:{host_id}")
+        return self._set_enabled(host_id=host_id, enabled=False)
+
+    def enable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self.calls.append(f"enable:{host_id}")
+        return self._set_enabled(host_id=host_id, enabled=True)
+
+    def _set_enabled(self, *, host_id: int, enabled: bool) -> NpmplusProxyHost:
+        for index, host in enumerate(self.proxy_hosts):
+            if host.id == host_id:
+                updated = NpmplusProxyHost.model_validate(
+                    {**host.model_dump(mode="json"), "enabled": enabled}
+                )
+                self.proxy_hosts[index] = updated
+                return updated
+        raise AssertionError(f"Unknown proxy host: {host_id}")
 
 
 class _FakeGitHubResponse:
@@ -1212,6 +1256,29 @@ def _product_config_payload() -> dict[str, object]:
     }
 
 
+def _npmplus_ingress_route_payload(
+    *, mode: str = "dry-run", context: str = "reon-prod", **overrides: object
+) -> dict[str, object]:
+    route: dict[str, object] = {
+        "domain_names": ["ingress-canary.example.test"],
+        "forward_scheme": "http",
+        "forward_host": "192.0.2.10",
+        "forward_port": 8123,
+        "certificate_id": 47,
+    }
+    route.update(overrides)
+    return {
+        "schema_version": 1,
+        "product": "launchplane",
+        "context": context,
+        "ingress": {
+            "mode": mode,
+            "route": route,
+            "reason": "test ingress route apply",
+        },
+    }
+
+
 def _meta_product_config_payload(
     *, mode: str = "dry-run", reason: str | None = None
 ) -> dict[str, object]:
@@ -1939,6 +2006,215 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
+    def test_npmplus_ingress_route_apply_dry_run_returns_plan_without_mutation(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(),
+                headers={"Idempotency-Key": "npmplus-ingress-dry-run"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "planned")
+        self.assertTrue(payload["result"]["dry_run"])
+        self.assertEqual(payload["result"]["operations"][0]["action"], "create")
+        self.assertEqual(client.calls, ["list"])
+
+    def test_npmplus_ingress_dry_run_idempotency_key_does_not_replay(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            for _ in range(2):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/ingress/route-apply",
+                    payload=_npmplus_ingress_route_payload(),
+                    headers={"Idempotency-Key": "npmplus-ingress-dry-run"},
+                )
+
+                self.assertEqual(status_code, 202)
+                self.assertEqual(payload["result"]["status"], "planned")
+
+        self.assertEqual(client.calls, ["list", "list"])
+
+    def test_npmplus_ingress_route_apply_mutates_when_authorized(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(mode="apply"),
+                headers={"Idempotency-Key": "npmplus-ingress-apply"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "applied")
+        self.assertFalse(payload["result"]["dry_run"])
+        self.assertEqual(payload["result"]["proxy_host"]["id"], 100)
+        self.assertEqual(client.calls, ["list", "create"])
+
+    def test_npmplus_ingress_route_apply_requires_idempotency_key(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(mode="apply"),
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "idempotency_key_required")
+        self.assertEqual(client.calls, [])
+
+    def test_npmplus_ingress_route_apply_rejects_unauthorized_context(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(mode="apply", context="cm-prod"),
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(client.calls, [])
+
     def test_public_ingress_monitor_run_once_service_writes_observation(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -10940,8 +11216,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(list_status_code, 200)
         self.assertEqual(
             [driver["driver_id"] for driver in list_payload["drivers"]],
-            ["generic-web", "odoo", "verireel"],
+            ["generic-web", "ingress", "odoo", "verireel"],
         )
+        ingress_driver = next(
+            driver for driver in list_payload["drivers"] if driver["driver_id"] == "ingress"
+        )
+        self.assertEqual(ingress_driver["context_patterns"], [])
         self.assertNotIn("Dokploy", json.dumps(list_payload["drivers"]))
         self.assertEqual(show_status_code, 200)
         self.assertEqual(show_payload["driver"]["driver_id"], "odoo")
