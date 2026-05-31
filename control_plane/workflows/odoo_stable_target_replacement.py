@@ -303,6 +303,9 @@ def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, 
         "compose_status": _runtime_source_value(target_payload.get("composeStatus")),
         "compose_type": _runtime_source_value(target_payload.get("composeType")),
         "compose_source_type": _runtime_source_value(target_payload.get("sourceType")),
+        "compose_server_id_present": "true"
+        if _runtime_source_value(target_payload.get("serverId"))
+        else "false",
         "compose_isolated_deployment": _runtime_source_value(
             target_payload.get("isolatedDeployment")
         ),
@@ -395,6 +398,7 @@ def _dokploy_container_route_evidence(
     containers_payload: JsonValue,
     config_payload: JsonValue | None,
     app_name: str,
+    server_id: str,
     expected_domain_hosts: tuple[str, ...],
 ) -> dict[str, str]:
     containers = _collect_json_objects(containers_payload)
@@ -409,6 +413,7 @@ def _dokploy_container_route_evidence(
     )
     evidence: dict[str, str] = {
         "container_app_name": app_name,
+        "container_server_id_present": "true" if server_id else "false",
         "container_match_count": str(len(app_containers)),
         "container_web_found": "true" if web_container is not None else "false",
         "container_web_id_present": "true" if web_container and _container_id(web_container) else "false",
@@ -1218,26 +1223,34 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
+        deployed_app_name = str(deployed_payload.get("appName") or "")
+        deployed_server_id = str(deployed_payload.get("serverId") or "").strip()
+        container_query: dict[str, str] = {
+            "appName": deployed_app_name,
+            "appType": "docker-compose",
+        }
+        if deployed_server_id:
+            container_query["serverId"] = deployed_server_id
         containers_payload = dokploy_request(
             host=host,
             token=token,
             path="/api/docker.getContainersByAppNameMatch",
-            query={
-                "appName": str(deployed_payload.get("appName") or ""),
-                "appType": "docker-compose",
-            },
+            query=container_query,
         )
         web_container = _web_container_for_app(
             containers_payload=containers_payload,
-            app_name=str(deployed_payload.get("appName") or ""),
+            app_name=deployed_app_name,
         )
         config_payload: JsonValue | None = None
         if web_container is not None and _container_id(web_container):
+            config_query = {"containerId": _container_id(web_container)}
+            if deployed_server_id:
+                config_query["serverId"] = deployed_server_id
             config_payload = dokploy_request(
                 host=host,
                 token=token,
                 path="/api/docker.getConfig",
-                query={"containerId": _container_id(web_container)},
+                query=config_query,
             )
         runtime_source.update(
             {
@@ -1245,7 +1258,8 @@ def execute_odoo_stable_target_replacement_apply(
                 for key, value in _dokploy_container_route_evidence(
                     containers_payload=containers_payload,
                     config_payload=config_payload,
-                    app_name=str(deployed_payload.get("appName") or ""),
+                    app_name=deployed_app_name,
+                    server_id=deployed_server_id,
                     expected_domain_hosts=plan.expected_domain_hosts,
                 ).items()
             }

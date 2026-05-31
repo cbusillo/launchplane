@@ -33,6 +33,7 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                 return {
                     "appName": "compose-launchplane-random",
                     "composeStatus": "done",
+                    "serverId": "server-1",
                     "env": (
                         "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new\n"
                         "LAUNCHPLANE_DATABASE_URL=postgresql://secret\n"
@@ -54,7 +55,15 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                         }
                     ],
                 }
-            if path == "/api/docker.getContainers":
+            if path == "/api/docker.getContainersByAppNameMatch":
+                self.assertEqual(
+                    kwargs["query"],
+                    {
+                        "appName": "compose-launchplane-random",
+                        "appType": "docker-compose",
+                        "serverId": "server-1",
+                    },
+                )
                 return [
                     {
                         "containerId": "container-1",
@@ -67,6 +76,10 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                     {"containerId": "other", "name": "postgres-1"},
                 ]
             if path == "/api/docker.getConfig":
+                self.assertEqual(
+                    kwargs["query"],
+                    {"containerId": "container-1", "serverId": "server-1"},
+                )
                 return {
                     "Config": {
                         "Labels": {

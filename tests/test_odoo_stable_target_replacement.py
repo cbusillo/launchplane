@@ -591,6 +591,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "composeStatus": "done",
                 "composeType": "docker-compose",
                 "sourceType": "raw",
+                "serverId": "server-1",
                 "composePath": "docker-compose.yml",
                 "composeFile": persisted_compose_file,
                 "deployments": deployment_records,
@@ -610,7 +611,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             if path == "/api/docker.getContainersByAppNameMatch":
                 self.assertEqual(
                     query,
-                    {"appName": "cm-testing", "appType": "docker-compose"},
+                    {
+                        "appName": "cm-testing",
+                        "appType": "docker-compose",
+                        "serverId": "server-1",
+                    },
                 )
                 return [
                     {
@@ -622,7 +627,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     {"containerId": "container-db", "name": "cm-testing-db-1"},
                 ]
             if path == "/api/docker.getConfig":
-                self.assertEqual(query, {"containerId": "container-web"})
+                self.assertEqual(
+                    query,
+                    {"containerId": "container-web", "serverId": "server-1"},
+                )
                 return {
                     "Config": {
                         "Labels": {
@@ -844,6 +852,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertEqual(
             final_deployment.runtime_source["post_deploy_container_web_found"], "true"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_server_id_present"],
+            "true",
         )
         self.assertEqual(
             final_deployment.runtime_source["post_deploy_container_traefik_enable"], "true"
