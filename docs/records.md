@@ -590,9 +590,12 @@ state/
 - This record is the target authority for the Odoo driver. Runtime-environment
   `ENV_OVERRIDE_*` keys remain a migration input to retire, not the final
   override model.
-- The compose post-deploy bridge renders one typed Odoo override payload for
-  the data-workflow runner; it does not make legacy `ENV_OVERRIDE_*` names the
-  deploy-time contract.
+- The compose post-deploy bridge renders one typed, workflow-intent-aware Odoo
+  post-deploy payload for the data-workflow runner, then serializes it to the
+  compatible v1 JSON/base64 wire shape. Launchplane evidence records the
+  redacted payload digest, counts, required container keys, and whether
+  website bootstrap was included; it does not make legacy `ENV_OVERRIDE_*`
+  names the deploy-time contract.
 - Secret-backed values still avoid Dokploy schedule plaintext. The payload
   points at the already-present neutral `ODOO_OVERRIDE_SECRET__*` container
   environment key for each managed secret binding, and the driver asserts those

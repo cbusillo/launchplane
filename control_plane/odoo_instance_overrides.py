@@ -1,12 +1,16 @@
 import base64
-import json
 from dataclasses import dataclass
-from typing import Literal
 
 import click
 
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployAddonSetting
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployConfigParameter
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployRenderedValue
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
+from control_plane.contracts.runtime_environment_record import ScalarValue
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
@@ -18,13 +22,14 @@ SHOPIFY_ALLOW_PRODUCTION_SETTING = "allow_production"
 SHOPIFY_PRODUCTION_INDICATORS_SETTING = "production_indicators"
 SHOPIFY_REQUIRED_SETTINGS = ("shop_url_key", "api_token", "webhook_key", "api_version")
 DEFAULT_SHOPIFY_PRODUCTION_INDICATORS = ("production", "live", "prod-")
-PostDeployWorkflowIntent = Literal["deploy", "restore", "bootstrap"]
+PostDeployWorkflowIntent = OdooPostDeployWorkflowIntent
 
 
 @dataclass(frozen=True)
 class PostDeployOverrideEnvironment:
     inline_environment: dict[str, str]
     required_container_environment_keys: tuple[str, ...]
+    payload: OdooPostDeployPayload
 
 
 def _normalize_boolean_literal(*, value: object, setting_name: str) -> bool:
@@ -56,18 +61,15 @@ def _shopify_override_value_text(*, override_value: OdooOverrideValue, setting_n
     return _normalize_text_literal(value=override_value.value)
 
 
-def _render_literal_payload_override(*, value: object) -> dict[str, object]:
-    return {
-        "source": "literal",
-        "value": value,
-    }
+def _render_literal_payload_override(*, value: ScalarValue) -> OdooPostDeployRenderedValue:
+    return OdooPostDeployRenderedValue(source="literal", value=value)
 
 
 def _resolve_shopify_payload_settings(
     *,
     record: OdooInstanceOverrideRecord,
     protected_shopify_store_keys: tuple[str, ...] = (),
-) -> list[dict[str, object]]:
+) -> list[OdooPostDeployAddonSetting]:
     shopify_overrides = [
         override for override in record.addon_settings if override.addon == SHOPIFY_ADDON_NAME
     ]
@@ -82,11 +84,11 @@ def _resolve_shopify_payload_settings(
     ]
     if len(configured_required_settings) != len(SHOPIFY_REQUIRED_SETTINGS):
         return [
-            {
-                "addon": SHOPIFY_ADDON_NAME,
-                "setting": SHOPIFY_ACTION_SETTING,
-                "value": _render_literal_payload_override(value=SHOPIFY_ACTION_CLEAR),
-            }
+            OdooPostDeployAddonSetting(
+                addon=SHOPIFY_ADDON_NAME,
+                setting=SHOPIFY_ACTION_SETTING,
+                value=_render_literal_payload_override(value=SHOPIFY_ACTION_CLEAR),
+            )
         ]
 
     shop_url_key = _shopify_override_value_text(
@@ -133,12 +135,12 @@ def _resolve_shopify_payload_settings(
             f"key={shop_url_key!r} indicator={matched_indicator!r}"
         )
 
-    payload_settings: list[dict[str, object]] = [
-        {
-            "addon": SHOPIFY_ADDON_NAME,
-            "setting": SHOPIFY_ACTION_SETTING,
-            "value": _render_literal_payload_override(value=SHOPIFY_ACTION_APPLY),
-        }
+    payload_settings: list[OdooPostDeployAddonSetting] = [
+        OdooPostDeployAddonSetting(
+            addon=SHOPIFY_ADDON_NAME,
+            setting=SHOPIFY_ACTION_SETTING,
+            value=_render_literal_payload_override(value=SHOPIFY_ACTION_APPLY),
+        )
     ]
     for override in shopify_overrides:
         if override.setting in {
@@ -150,33 +152,31 @@ def _resolve_shopify_payload_settings(
             addon_name=override.addon, setting_name=override.setting
         )
         payload_settings.append(
-            {
-                "addon": override.addon,
-                "setting": override.setting,
-                "value": _payload_override_value(
+            OdooPostDeployAddonSetting(
+                addon=override.addon,
+                setting=override.setting,
+                value=_payload_override_value(
                     value=override.value, environment_key=environment_key
                 ),
-            }
+            )
         )
     return payload_settings
 
 
 def _payload_override_value(
     *, value: OdooOverrideValue, environment_key: str | None = None
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "source": value.source,
-    }
+) -> OdooPostDeployRenderedValue:
     if value.source == "literal":
-        payload["value"] = value.value
-        return payload
-    payload["secret_binding_id"] = value.secret_binding_id
+        return OdooPostDeployRenderedValue(source=value.source, value=value.value)
     if not environment_key:
         raise click.ClickException(
             "Secret-backed Odoo overrides require a runtime environment key."
         )
-    payload["environment_variable"] = environment_key
-    return payload
+    return OdooPostDeployRenderedValue(
+        source=value.source,
+        secret_binding_id=value.secret_binding_id,
+        environment_variable=environment_key,
+    )
 
 
 def render_post_deploy_payload(
@@ -184,26 +184,19 @@ def render_post_deploy_payload(
     *,
     workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "schema_version": 1,
-        "context": record.context,
-        "instance": record.instance,
-        "config_parameters": [],
-        "addon_settings": [],
-    }
-    config_parameters: list[dict[str, object]] = []
+) -> OdooPostDeployPayload:
+    config_parameters: list[OdooPostDeployConfigParameter] = []
     for config_parameter_override in record.config_parameters:
         environment_key = config_parameter_secret_env_key(config_parameter_override.key)
         config_parameters.append(
-            {
-                "key": config_parameter_override.key,
-                "value": _payload_override_value(
+            OdooPostDeployConfigParameter(
+                key=config_parameter_override.key,
+                value=_payload_override_value(
                     value=config_parameter_override.value, environment_key=environment_key
                 ),
-            }
+            )
         )
-    addon_settings: list[dict[str, object]] = []
+    addon_settings: list[OdooPostDeployAddonSetting] = []
     addon_settings.extend(
         _resolve_shopify_payload_settings(
             record=record,
@@ -218,24 +211,28 @@ def render_post_deploy_payload(
             setting_name=addon_setting_override.setting,
         )
         addon_settings.append(
-            {
-                "addon": addon_setting_override.addon,
-                "setting": addon_setting_override.setting,
-                "value": _payload_override_value(
+            OdooPostDeployAddonSetting(
+                addon=addon_setting_override.addon,
+                setting=addon_setting_override.setting,
+                value=_payload_override_value(
                     value=addon_setting_override.value, environment_key=environment_key
                 ),
-            }
+            )
         )
-    payload["config_parameters"] = config_parameters
-    payload["addon_settings"] = addon_settings
-    if record.website_bootstrap is not None and workflow_intent != "restore":
-        payload["website_bootstrap"] = record.website_bootstrap.model_dump(mode="json")
-    return payload
+    website_bootstrap = record.website_bootstrap if workflow_intent != "restore" else None
+    return OdooPostDeployPayload(
+        schema_version=1,
+        context=record.context,
+        instance=record.instance,
+        workflow_intent=workflow_intent,
+        config_parameters=tuple(config_parameters),
+        addon_settings=tuple(addon_settings),
+        website_bootstrap=website_bootstrap,
+    )
 
 
-def _encode_post_deploy_payload(payload: dict[str, object]) -> str:
-    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return base64.b64encode(encoded).decode("ascii")
+def _encode_post_deploy_payload(payload: OdooPostDeployPayload) -> str:
+    return base64.b64encode(payload.to_wire_json_bytes()).decode("ascii")
 
 
 def _secret_env_suffix(raw_value: str) -> str:
@@ -277,30 +274,10 @@ def build_post_deploy_environment(
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
     }
-    required_container_environment_keys: list[str] = []
-    config_parameter_payloads = payload.get("config_parameters")
-    if not isinstance(config_parameter_payloads, list):
-        raise click.ClickException("Odoo override payload is missing config_parameters.")
-    for override in config_parameter_payloads:
-        value_payload = override.get("value") if isinstance(override, dict) else None
-        if not isinstance(value_payload, dict) or value_payload.get("source") != "secret_binding":
-            continue
-        environment_key = str(value_payload.get("environment_variable") or "").strip()
-        if environment_key:
-            required_container_environment_keys.append(environment_key)
-    addon_setting_payloads = payload.get("addon_settings")
-    if not isinstance(addon_setting_payloads, list):
-        raise click.ClickException("Odoo override payload is missing addon_settings.")
-    for override in addon_setting_payloads:
-        value_payload = override.get("value") if isinstance(override, dict) else None
-        if not isinstance(value_payload, dict) or value_payload.get("source") != "secret_binding":
-            continue
-        environment_key = str(value_payload.get("environment_variable") or "").strip()
-        if environment_key:
-            required_container_environment_keys.append(environment_key)
     return PostDeployOverrideEnvironment(
         inline_environment=inline_environment,
-        required_container_environment_keys=tuple(sorted(set(required_container_environment_keys))),
+        required_container_environment_keys=payload.required_container_environment_keys,
+        payload=payload,
     )
 
 

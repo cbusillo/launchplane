@@ -36,6 +36,16 @@ def post_deploy_evidence_from_odoo_result(
             result.error_message
             or "Odoo post-deploy completed through the generic-web extension hook."
         ),
+        evidence={
+            "driver_id": "odoo",
+            "context": result.context,
+            "instance": result.instance,
+            "phase": result.phase,
+            "override_status": result.override_status,
+            "override_record_found": str(result.override_record_found).lower(),
+            "override_payload_rendered": str(result.override_payload_rendered).lower(),
+            **result.override_evidence,
+        },
     )
 
 

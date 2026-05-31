@@ -44,6 +44,16 @@ class OdooGenericWebPostDeployTests(unittest.TestCase):
                     phase="deploy",
                     post_deploy_status="pass",
                     override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    override_payload_sha256="a" * 64,
+                    override_payload_schema_version=1,
+                    override_count=2,
+                    override_evidence={
+                        "payload_sha256": "a" * 64,
+                        "workflow_intent": "deploy",
+                        "config_parameter_count": "1",
+                    },
                 ),
             ) as post_deploy:
                 evidence = execute_odoo_generic_web_post_deploy(
@@ -55,6 +65,12 @@ class OdooGenericWebPostDeployTests(unittest.TestCase):
         self.assertTrue(evidence.attempted)
         self.assertEqual(evidence.status, "pass")
         self.assertIn("generic-web extension hook", evidence.detail)
+        self.assertEqual(evidence.evidence["driver_id"], "odoo")
+        self.assertEqual(evidence.evidence["override_status"], "pass")
+        self.assertEqual(evidence.evidence["override_record_found"], "true")
+        self.assertEqual(evidence.evidence["override_payload_rendered"], "true")
+        self.assertEqual(evidence.evidence["payload_sha256"], "a" * 64)
+        self.assertEqual(evidence.evidence["workflow_intent"], "deploy")
         post_deploy.assert_called_once()
         request = post_deploy.call_args.kwargs["request"]
         self.assertEqual(request.context, "cm")

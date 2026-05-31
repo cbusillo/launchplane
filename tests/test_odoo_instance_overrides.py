@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import click
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+from control_plane.odoo_instance_overrides import build_post_deploy_environment
+from control_plane.odoo_instance_overrides import render_post_deploy_payload
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -69,6 +71,100 @@ class OdooInstanceOverrideTests(unittest.TestCase):
     def test_apply_result_requires_completed_timestamp(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires applied_at"):
             OdooOverrideApplyResult(attempted=True, status="pass")
+
+    def test_render_post_deploy_payload_returns_typed_v1_wire_payload(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="OPW",
+            instance="Testing",
+            apply_on=("deploy",),
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="WEB.BASE.URL",
+                    value=OdooOverrideValue(
+                        source="literal", value="https://opw-testing.example.com"
+                    ),
+                ),
+            ),
+            addon_settings=(
+                OdooAddonSettingOverride(
+                    addon="openai",
+                    setting="api-key",
+                    value=OdooOverrideValue(
+                        source="secret_binding",
+                        secret_binding_id="secret-opw-openai",
+                    ),
+                ),
+            ),
+            updated_at="2026-04-21T18:30:00Z",
+        )
+
+        payload = render_post_deploy_payload(record)
+
+        self.assertEqual(payload.context, "opw")
+        self.assertEqual(payload.instance, "testing")
+        self.assertEqual(
+            payload.required_container_environment_keys,
+            ("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",),
+        )
+        self.assertEqual(payload.override_count, 2)
+        self.assertEqual(
+            payload.to_wire_dict(),
+            {
+                "schema_version": 1,
+                "context": "opw",
+                "instance": "testing",
+                "config_parameters": [
+                    {
+                        "key": "web.base.url",
+                        "value": {
+                            "source": "literal",
+                            "value": "https://opw-testing.example.com",
+                        },
+                    }
+                ],
+                "addon_settings": [
+                    {
+                        "addon": "openai",
+                        "setting": "api-key",
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "secret-opw-openai",
+                            "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
+                        },
+                    }
+                ],
+            },
+        )
+
+    def test_build_post_deploy_environment_reuses_typed_payload_required_keys(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="opw",
+            instance="testing",
+            addon_settings=(
+                OdooAddonSettingOverride(
+                    addon="openai",
+                    setting="api_key",
+                    value=OdooOverrideValue(
+                        source="secret_binding",
+                        secret_binding_id="secret-opw-openai",
+                    ),
+                ),
+            ),
+            updated_at="2026-04-21T18:30:00Z",
+        )
+
+        environment = build_post_deploy_environment(record)
+
+        self.assertEqual(
+            environment.required_container_environment_keys,
+            environment.payload.required_container_environment_keys,
+        )
+        decoded_payload = json.loads(
+            base64.b64decode(
+                environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+        self.assertEqual(decoded_payload, environment.payload.to_wire_dict())
 
     def test_cli_put_config_param_does_not_echo_plaintext_value(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

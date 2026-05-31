@@ -88,6 +88,17 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.post_deploy_status, "pass")
             self.assertEqual(result.override_status, "pass")
             self.assertTrue(result.override_payload_rendered)
+            self.assertEqual(result.workflow_intent, "deploy")
+            self.assertEqual(result.override_payload_schema_version, 1)
+            self.assertEqual(result.override_count, 1)
+            self.assertFalse(result.website_bootstrap_included)
+            self.assertRegex(result.override_payload_sha256, r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                result.override_evidence["payload_sha256"],
+                result.override_payload_sha256,
+            )
+            self.assertEqual(result.override_evidence["workflow_intent"], "deploy")
+            self.assertEqual(result.override_evidence["config_parameter_count"], "1")
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
@@ -226,6 +237,12 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.post_deploy_status, "pass")
             self.assertEqual(result.override_status, "pass")
             self.assertTrue(result.override_payload_rendered)
+            self.assertEqual(result.workflow_intent, "restore")
+            self.assertEqual(result.override_count, 1)
+            self.assertFalse(result.website_bootstrap_included)
+            self.assertEqual(
+                result.override_evidence["website_bootstrap_included"], "false"
+            )
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
@@ -297,6 +314,14 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.post_deploy_status, "pass")
             self.assertEqual(result.override_status, "pass")
+            self.assertEqual(
+                result.required_container_environment_keys,
+                ("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",),
+            )
+            self.assertEqual(
+                result.override_evidence["required_container_environment_keys"],
+                "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
+            )
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
             )
