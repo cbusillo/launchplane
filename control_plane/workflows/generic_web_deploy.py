@@ -6,9 +6,7 @@ from typing import Callable, Literal, Protocol
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
-from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -19,7 +17,9 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
+from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
+from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+from control_plane.workflows.generic_web_deploy_provider import default_generic_web_deploy_provider
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import (
     build_deployment_record,
@@ -143,12 +143,6 @@ def product_profile_uses_generic_web_base(profile: LaunchplaneProductProfileReco
         return False
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTargetType) -> str:
-    if configured_ship_mode == "auto":
-        return f"dokploy-{target_type}-api"
-    return f"dokploy-{configured_ship_mode}-api"
-
-
 def _fallback_target_name(
     *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> str:
@@ -202,7 +196,12 @@ def _fallback_ship_request(
     request: GenericWebDeployRequest,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
+    deploy_provider: GenericWebDeployProvider,
 ) -> ShipRequest:
+    provider_id = deploy_provider.provider_id.strip().lower()
+    if not provider_id:
+        raise click.ClickException("Generic web deploy provider requires provider_id.")
+    deploy_mode = f"{provider_id}-application-api"
     return ShipRequest(
         artifact_id=normalize_generic_web_artifact_id(
             profile=profile,
@@ -213,7 +212,10 @@ def _fallback_ship_request(
         source_git_ref=request.source_git_ref,
         target_name=_fallback_target_name(profile=profile, lane=lane),
         target_type="application",
-        deploy_mode="dokploy-application-api",
+        deploy_mode=deploy_mode,
+        provider_id=provider_id,
+        target_category="application",
+        provider_deploy_mode=deploy_mode,
         wait=True,
         timeout_seconds=request.timeout_seconds,
         verify_health=False,
@@ -222,69 +224,28 @@ def _fallback_ship_request(
     )
 
 
-def _resolve_ship_request(
+def _resolve_deploy_target(
     *,
     control_plane_root: Path,
     request: GenericWebDeployRequest,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
-) -> tuple[ShipRequest, ResolvedTargetEvidence, int]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    deploy_provider: GenericWebDeployProvider,
+) -> GenericWebResolvedDeployTarget:
+    return deploy_provider.resolve_deploy_target(
         control_plane_root=control_plane_root,
-    )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
-        source_of_truth,
-        context_name=lane.context,
-        instance_name=lane.instance,
-    )
-    if target_definition is None:
-        raise click.ClickException(
-            f"No Dokploy target definition found for {lane.context}/{lane.instance}."
-        )
-
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=lane.context,
-        instance_name=lane.instance,
-    )
-    deploy_mode = _resolve_deploy_mode(
-        configured_ship_mode=control_plane_dokploy.resolve_dokploy_ship_mode(
-            lane.context,
-            lane.instance,
-            environment_values,
-        ),
-        target_type=target_definition.target_type,
-    )
-    target_name = target_definition.target_name.strip() or _fallback_target_name(
-        profile=profile, lane=lane
-    )
-    ship_request = ShipRequest(
-        artifact_id=normalize_generic_web_artifact_id(
+        request_artifact_id=request.artifact_id,
+        request_source_git_ref=request.source_git_ref,
+        request_timeout_seconds=request.timeout_seconds,
+        request_no_cache=request.no_cache,
+        profile=profile,
+        lane=lane,
+        normalized_artifact_id=normalize_generic_web_artifact_id(
             profile=profile,
             artifact_id=request.artifact_id,
         ),
-        context=lane.context,
-        instance=lane.instance,
-        source_git_ref=request.source_git_ref,
-        target_name=target_name,
-        target_type=target_definition.target_type,
-        deploy_mode=deploy_mode,
-        wait=True,
-        timeout_seconds=request.timeout_seconds,
-        verify_health=False,
-        no_cache=request.no_cache,
-        destination_health=HealthcheckEvidence(status="skipped"),
+        fallback_target_name=_fallback_target_name(profile=profile, lane=lane),
     )
-    resolved_target = ResolvedTargetEvidence(
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-        target_name=target_name,
-    )
-    deploy_timeout_seconds = control_plane_dokploy.resolve_ship_timeout_seconds(
-        timeout_override_seconds=request.timeout_seconds,
-        target_definition=target_definition,
-    )
-    return ship_request, resolved_target, deploy_timeout_seconds
 
 
 def execute_generic_web_deploy(
@@ -295,7 +256,9 @@ def execute_generic_web_deploy(
     profile: LaunchplaneProductProfileRecord | None = None,
     lane: ProductLaneProfile | None = None,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
+    deploy_provider: GenericWebDeployProvider | None = None,
 ) -> GenericWebDeployResult:
+    resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider()
     resolved_profile = profile
     resolved_lane = lane
     if resolved_profile is None or resolved_lane is None:
@@ -313,15 +276,19 @@ def execute_generic_web_deploy(
         request=request,
         profile=resolved_profile,
         lane=resolved_lane,
+        deploy_provider=resolved_deploy_provider,
     )
 
     try:
-        ship_request, resolved_target, deploy_timeout_seconds = _resolve_ship_request(
+        resolved_deploy_target = _resolve_deploy_target(
             control_plane_root=control_plane_root,
             request=request,
             profile=resolved_profile,
             lane=resolved_lane,
+            deploy_provider=resolved_deploy_provider,
         )
+        ship_request = resolved_deploy_target.ship_request
+        resolved_target = resolved_deploy_target.resolved_target
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
         record_store.write_deployment_record(
@@ -332,6 +299,7 @@ def execute_generic_web_deploy(
                 deployment_status="fail",
                 started_at=started_at,
                 finished_at=finished_at,
+                delegated_executor=resolved_deploy_provider.delegated_executor,
             )
         )
         return GenericWebDeployResult(
@@ -348,15 +316,9 @@ def execute_generic_web_deploy(
     deploy_completed = False
     post_deploy_update = PostDeployUpdateEvidence()
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
-        execute_dokploy_artifact_deploy(
-            host=host,
-            token=token,
-            ship_request=ship_request,
-            resolved_target=resolved_target,
-            deploy_timeout_seconds=deploy_timeout_seconds,
+        resolved_deploy_provider.execute_artifact_deploy(
+            control_plane_root=control_plane_root,
+            resolved_deploy_target=resolved_deploy_target,
             runtime_identity=_build_runtime_identity(
                 profile=resolved_profile,
                 lane=resolved_lane,
@@ -414,6 +376,8 @@ def execute_generic_web_deploy(
             started_at=started_at,
             finished_at=finished_at,
             resolved_target=resolved_target,
+            deployed_target=resolved_deploy_target.deployed_target,
+            delegated_executor=resolved_deploy_provider.delegated_executor,
             post_deploy_update=post_deploy_update,
             runtime_identity=runtime_identity,
         )
@@ -449,6 +413,8 @@ def execute_generic_web_deploy(
         started_at=started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
+        deployed_target=resolved_deploy_target.deployed_target,
+        delegated_executor=resolved_deploy_provider.delegated_executor,
         post_deploy_update=post_deploy_update,
         runtime_identity=_build_runtime_identity(
             profile=resolved_profile,
