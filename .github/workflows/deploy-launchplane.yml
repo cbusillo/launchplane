@@ -376,13 +376,27 @@ jobs:
                   )
                 ) | with_entries(select(.value != ""))'
             })"
+            service_env_removals_json="$({
+              jq -n \
+                --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+                'if $omit_npmplus_env then
+                  [
+                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                    "LAUNCHPLANE_NPMPLUS_SECRET"
+                  ]
+                else
+                  []
+                end'
+            })"
             request_payload="$({
               jq -n \
                 --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
                 --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
                 --arg image_reference "${{ steps.image.outputs.image_reference }}" \
                 --argjson service_env "$service_env_json" \
-                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end))}'
+                --argjson service_env_removals "$service_env_removals_json" \
+                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end) + (if ($service_env_removals | length) > 0 then {oauth_env_removals: $service_env_removals} else {} end))}'
             })"
             idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}:db-authz"
 

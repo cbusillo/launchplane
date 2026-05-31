@@ -103,6 +103,31 @@ jobs:
             '($route_options_json | fromjson) as $options |
             if ($options | type) != "object" then
               error("route_options_json must be a JSON object")
+            elif ([
+              $options
+              | keys[]
+              | select(. as $key | [
+                "enabled",
+                "ssl_forced",
+                "hsts_enabled",
+                "hsts_subdomains",
+                "trust_forwarded_proto",
+                "http2_support",
+                "npmplus_http3_support",
+                "access_list_id",
+                "npmplus_noindex",
+                "npmplus_crowdsec_appsec",
+                "npmplus_proxy_request_buffering",
+                "npmplus_proxy_response_buffering",
+                "npmplus_upstream_compression",
+                "npmplus_fancyindex",
+                "npmplus_x_frame_options",
+                "npmplus_auth_request",
+                "advanced_config",
+                "locations"
+              ] | index($key) | not)
+            ] | length) > 0 then
+              error("route_options_json contains unsupported route option key(s)")
             else
             {
               schema_version: 1,
@@ -119,13 +144,13 @@ jobs:
                   forward_host: $forward_host,
                   forward_port: $forward_port,
                   certificate_id: $certificate_id,
-                  enabled: (if $options | has("enabled") then $options.enabled else true end),
-                  ssl_forced: (if $options | has("ssl_forced") then $options.ssl_forced else true end),
-                  http2_support: (if $options | has("http2_support") then $options.http2_support else true end),
-                  npmplus_http3_support: (if $options | has("npmplus_http3_support") then $options.npmplus_http3_support else true end),
-                  npmplus_noindex: (if $options | has("npmplus_noindex") then $options.npmplus_noindex else true end),
-                  access_list_id: (if $options | has("access_list_id") then $options.access_list_id else 0 end)
-                }
+                  enabled: true,
+                  ssl_forced: true,
+                  http2_support: true,
+                  npmplus_http3_support: true,
+                  npmplus_noindex: false,
+                  access_list_id: 0
+                } + $options
               }
             }
             end' >"$payload_file"

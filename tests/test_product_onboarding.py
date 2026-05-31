@@ -258,12 +258,29 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('($options | type) != "object"', workflow_text)
         self.assertIn('error("route_options_json must be a JSON object")', workflow_text)
         self.assertIn(
-            'if $options | has("enabled") then $options.enabled else true end', workflow_text
-        )
-        self.assertIn(
-            'if $options | has("npmplus_noindex") then $options.npmplus_noindex else true end',
+            'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
+        self.assertIn(
+            "npmplus_noindex: false",
+            workflow_text,
+        )
+        self.assertIn("} + $options", workflow_text)
+        for route_option in (
+            "hsts_enabled",
+            "hsts_subdomains",
+            "trust_forwarded_proto",
+            "npmplus_crowdsec_appsec",
+            "npmplus_proxy_request_buffering",
+            "npmplus_proxy_response_buffering",
+            "npmplus_upstream_compression",
+            "npmplus_fancyindex",
+            "npmplus_x_frame_options",
+            "npmplus_auth_request",
+            "advanced_config",
+            "locations",
+        ):
+            self.assertIn(f'"{route_option}"', workflow_text)
         for forward_scheme in ("http", "https", "path", "empty", "grpc", "grpcs"):
             self.assertIn(f"          - {forward_scheme}", workflow_text)
 
@@ -338,6 +355,20 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("if ($omit_terminal_agent_env | not) then", workflow_text)
         self.assertIn("if ($omit_owner_agent_env | not) then", workflow_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", workflow_text)
+
+    def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("service_env_removals_json=", workflow_text)
+        self.assertIn("oauth_env_removals: $service_env_removals", workflow_text)
+        for env_key in (
+            "LAUNCHPLANE_NPMPLUS_BASE_URL",
+            "LAUNCHPLANE_NPMPLUS_IDENTITY",
+            "LAUNCHPLANE_NPMPLUS_SECRET",
+        ):
+            self.assertIn(f'"{env_key}"', workflow_text)
         self.assertIn("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", workflow_text)
         self.assertIn("LAUNCHPLANE_LOCAL_ADMIN_TOKEN", workflow_text)
         self.assertNotIn(
