@@ -174,6 +174,10 @@ class ProductOnboardingTests(unittest.TestCase):
             self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
+        self.assertIn("deploy:odoo-cm-website-bootstrap-override-grant", script_text)
+        self.assertIn("deploy:odoo-opw-website-bootstrap-override-grant", script_text)
+        self.assertIn("odoo-cm-website-bootstrap-override", script_text)
+        self.assertIn("odoo-opw-website-bootstrap-override", script_text)
         self.assertIn('base_url: "https://opw-testing.shinycomputers.com"', script_text)
         self.assertIn(
             'health_url: "https://opw-testing.shinycomputers.com/launchplane/health"',
