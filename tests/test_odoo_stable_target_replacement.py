@@ -580,6 +580,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         deployment_records: list[JsonValue] = [
             {"deploymentId": "deploy-123", "status": "success"}
         ]
+        route_name = control_plane_dokploy._traefik_route_name(
+            domain_host="cm-testing.shinycomputers.com"
+        )
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return cast(JsonObject, {
@@ -588,6 +591,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "composeStatus": "done",
                 "composeType": "docker-compose",
                 "sourceType": "raw",
+                "serverId": "server-1",
                 "composePath": "docker-compose.yml",
                 "composeFile": persisted_compose_file,
                 "deployments": deployment_records,
@@ -604,6 +608,42 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         def _dokploy_request(path: str, query: object | None = None, **kwargs: object) -> JsonValue:
             if path == "/api/domain.byComposeId" and domain_records:
                 return domain_records
+            if path == "/api/docker.getContainersByAppNameMatch":
+                self.assertEqual(
+                    query,
+                    {
+                        "appName": "cm-testing",
+                        "appType": "docker-compose",
+                        "serverId": "server-1",
+                    },
+                )
+                return [
+                    {
+                        "containerId": "container-web",
+                        "name": "cm-testing-web-1",
+                        "state": "running",
+                        "status": "Up 1 minute",
+                    },
+                    {"containerId": "container-db", "name": "cm-testing-db-1"},
+                ]
+            if path == "/api/docker.getConfig":
+                self.assertEqual(
+                    query,
+                    {"containerId": "container-web", "serverId": "server-1"},
+                )
+                return {
+                    "Config": {
+                        "Labels": {
+                            "traefik.enable": "true",
+                            "traefik.docker.network": "dokploy-network",
+                            f"traefik.http.routers.{route_name}-web.rule": "Host(`cm-testing.shinycomputers.com`)",
+                            f"traefik.http.routers.{route_name}-websecure.rule": "Host(`cm-testing.shinycomputers.com`)",
+                        }
+                    },
+                    "NetworkSettings": {
+                        "Networks": {"cm-testing_default": {}, "dokploy-network": {}}
+                    },
+                }
             return _request(path=path, query=query, **kwargs)
 
         def _ensure_domain(**_: object) -> str:
@@ -810,6 +850,30 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ],
             "true",
         )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_web_found"], "true"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_server_id_present"],
+            "true",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_traefik_enable"], "true"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_traefik_network"],
+            "dokploy-network",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "post_deploy_container_domain_cm-testing.shinycomputers.com_https_rule_present"
+            ],
+            "true",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["post_deploy_container_has_dokploy_network"],
+            "true",
+        )
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.product, "odoo-tenant-cm")
@@ -935,6 +999,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(final_deployment.source_git_ref, "fresh-sha")
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
+        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "fresh-sha")
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
 
     def test_apply_refuses_explicit_artifact_source_mismatch(self) -> None:

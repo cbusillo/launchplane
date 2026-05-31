@@ -112,6 +112,30 @@ def _target_containers(*, containers_payload: Any, app_name: str) -> list[dict[s
     return target_containers
 
 
+def _container_id(container: Mapping[str, object]) -> str:
+    return str(container.get("containerId") or container.get("id") or container.get("Id") or "").strip()
+
+
+def _container_config_summary(config_payload: Any) -> dict[str, object]:
+    if not isinstance(config_payload, dict):
+        return {"config_present": False}
+    labels = ((config_payload.get("Config") or {}).get("Labels") or {})
+    networks = ((config_payload.get("NetworkSettings") or {}).get("Networks") or {})
+    label_map = labels if isinstance(labels, dict) else {}
+    network_map = networks if isinstance(networks, dict) else {}
+    return {
+        "config_present": True,
+        "label_count": len(label_map),
+        "traefik_label_count": len(
+            [key for key in label_map if str(key).startswith("traefik.")]
+        ),
+        "traefik_enable": label_map.get("traefik.enable"),
+        "traefik_docker_network": label_map.get("traefik.docker.network"),
+        "network_names": sorted(str(key) for key in network_map),
+        "has_dokploy_network": "dokploy-network" in network_map,
+    }
+
+
 def _print_json(payload: Mapping[str, object]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -175,10 +199,38 @@ def main() -> int:
     )
 
     app_name = str(target_payload.get("appName") or "")
-    containers_payload = _request_json(host=host, token=token, path="/api/docker.getContainers")
+    server_id = str(target_payload.get("serverId") or "").strip()
+    container_query = {"appName": app_name, "appType": "docker-compose"}
+    if server_id:
+        container_query["serverId"] = server_id
+    containers_payload = _request_json(
+        host=host,
+        token=token,
+        path="/api/docker.getContainersByAppNameMatch",
+        query=container_query,
+    )
     target_containers = _target_containers(containers_payload=containers_payload, app_name=app_name)
     _print_json({"diagnostic": "dokploy-containers", "containers": target_containers})
     for container in target_containers:
+        container_id = _container_id(container)
+        if container_id:
+            config_query = {"containerId": container_id}
+            if server_id:
+                config_query["serverId"] = server_id
+            config_payload = _request_json(
+                host=host,
+                token=token,
+                path="/api/docker.getConfig",
+                query=config_query,
+            )
+            _print_json(
+                {
+                    "diagnostic": "dokploy-container-config",
+                    "containerId": container_id,
+                    "name": container.get("name"),
+                    **_container_config_summary(config_payload),
+                }
+            )
         _print_container_logs(host=host, token=token, target_id=target_id, container=container)
     return 0
 
