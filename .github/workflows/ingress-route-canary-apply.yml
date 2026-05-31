@@ -1,0 +1,152 @@
+---
+name: Ingress Route Canary Apply
+
+"on":
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Operator reason recorded with the Launchplane request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key for this canary apply attempt.
+        required: true
+        type: string
+      confirmation:
+        description: Type apply ingress canary to confirm the mutation path.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-ingress-route-canary-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      CANARY_PRODUCT: launchplane
+      CANARY_CONTEXT: reon-prod
+      CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}
+      CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}
+      CANARY_FORWARD_HOST: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST }}
+      CANARY_FORWARD_PORT: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_FORWARD_PORT }}
+      CANARY_CERTIFICATE_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID }}
+    steps:
+      - name: Validate canary apply confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "apply ingress canary" ]; then
+            echo "confirmation must be exactly: apply ingress canary" >&2
+            exit 1
+          fi
+          if [ -z "${IDEMPOTENCY_KEY// }" ]; then
+            echo "idempotency_key is required." >&2
+            exit 1
+          fi
+
+      - name: Build ingress route canary apply payload
+        id: payload
+        shell: bash
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          : "${CANARY_PRODUCT:?Missing canary product}"
+          : "${CANARY_CONTEXT:?Missing canary context}"
+          : "${CANARY_DOMAIN:?Missing LAUNCHPLANE_INGRESS_CANARY_DOMAIN variable}"
+          : "${CANARY_EXPECTED_HOST_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_HOST_ID variable}"
+          : "${CANARY_FORWARD_HOST:?Missing LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST variable}"
+          : "${CANARY_FORWARD_PORT:?Missing LAUNCHPLANE_INGRESS_CANARY_FORWARD_PORT variable}"
+          : "${CANARY_CERTIFICATE_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID variable}"
+
+          payload_file="$RUNNER_TEMP/ingress-route-canary-apply-request.json"
+          jq -n \
+            --arg product "$CANARY_PRODUCT" \
+            --arg context "$CANARY_CONTEXT" \
+            --arg domain "$CANARY_DOMAIN" \
+            --arg reason "$REASON" \
+            --arg forward_host "$CANARY_FORWARD_HOST" \
+            --argjson expected_host_id "$CANARY_EXPECTED_HOST_ID" \
+            --argjson forward_port "$CANARY_FORWARD_PORT" \
+            --argjson certificate_id "$CANARY_CERTIFICATE_ID" \
+            '{
+              schema_version: 1,
+              product: $product,
+              context: $context,
+              ingress: {
+                schema_version: 1,
+                mode: "apply",
+                expected_host_id: $expected_host_id,
+                reason: $reason,
+                route: {
+                  domain_names: [$domain],
+                  forward_scheme: "http",
+                  forward_host: $forward_host,
+                  forward_port: $forward_port,
+                  certificate_id: $certificate_id,
+                  enabled: true,
+                  ssl_forced: true,
+                  http2_support: true,
+                  npmplus_http3_support: true,
+                  npmplus_noindex: true,
+                  access_list_id: 0
+                }
+              }
+            }' >"$payload_file"
+          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
+
+      - name: Request ingress route canary apply
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          method: POST
+          route-path: /v1/drivers/ingress/route-apply
+          payload-file: ${{ steps.payload.outputs.payload_file }}
+          idempotency-key: ${{ inputs.idempotency_key }}
+          timeout-ms: "30000"
+          fail-result-paths: result.status
+          response-output-file: ingress-route-canary-apply.json
+
+      - name: Summarize canary apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="ingress-route-canary-apply.json"
+          jq . "$result_file"
+          {
+            echo '## Ingress route canary apply'
+            echo
+            echo "- Product: $CANARY_PRODUCT"
+            echo "- Context: $CANARY_CONTEXT"
+            echo "- Domain: $CANARY_DOMAIN"
+            echo "- Status: $(jq -r '.result.status' "$result_file")"
+            echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
+            echo
+            echo '### Operations'
+            jq -r '
+              .result.operations[]?
+              | "- \(.action) host=\(.host_id // "new") requires_apply=\(.requires_apply)"
+            ' "$result_file"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload canary apply response
+        uses: actions/upload-artifact@v7
+        with:
+          name: ingress-route-canary-apply
+          path: ingress-route-canary-apply.json
+          if-no-files-found: error

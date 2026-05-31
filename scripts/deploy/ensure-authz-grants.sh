@@ -1251,6 +1251,14 @@ post_grant \
   ingress_route.plan \
   deploy:ingress-route-dry-run-plan-grant \
   ingress-route-dry-run-plan
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  ingress-route-canary-apply.yml \
+  launchplane \
+  reon-prod \
+  ingress_route.apply \
+  deploy:ingress-route-canary-apply-grant \
+  ingress-route-canary-apply
 post_local_owner_grant \
   local-operator \
   "*" \
