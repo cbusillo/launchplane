@@ -999,6 +999,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(final_deployment.source_git_ref, "fresh-sha")
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
+        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "fresh-sha")
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
 
     def test_apply_refuses_explicit_artifact_source_mismatch(self) -> None:

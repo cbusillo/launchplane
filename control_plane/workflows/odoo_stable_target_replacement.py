@@ -641,6 +641,7 @@ def _build_runtime_identity(
     plan: OdooStableTargetReplacementPlan,
     deployment_record_id: str,
     artifact_id: str,
+    source_git_ref: str,
     image_reference: str,
     deployed_at: str = "",
 ) -> RuntimeIdentity:
@@ -651,7 +652,7 @@ def _build_runtime_identity(
         environment_kind="stable",
         deployment_record_id=deployment_record_id,
         artifact_id=artifact_id,
-        source_git_ref=plan.expected_source_git_ref,
+        source_git_ref=source_git_ref,
         image_reference=image_reference,
         deployed_at=deployed_at,
     )
@@ -1014,6 +1015,7 @@ def execute_odoo_stable_target_replacement_apply(
         plan=plan,
         deployment_record_id=deployment_record_id,
         artifact_id=artifact_id,
+        source_git_ref=source_git_ref,
         image_reference=image_reference,
     )
 
