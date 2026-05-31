@@ -157,6 +157,11 @@ live authority across DB, files, and process env:
   target ids, base URLs, and health URLs, is served by Launchplane from
   DB-backed target/runtime records. Product-repo workflows should ask
   Launchplane for those values instead of hard-coding stable lane topology.
+- Product onboarding and runtime key-safety seed payloads are explicit import
+  material under `import-material/launchplane/seed-imports/`. They are applied
+  only through the manual `Launchplane Seed Import` workflow, which calls
+  service routes with OIDC and records evidence; normal deploy does not reapply
+  those mutable DB records.
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.

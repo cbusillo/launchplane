@@ -276,12 +276,9 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
-  - `DISCORD_BLUE_DOKPLOY_TARGET_ID` while this workflow seeds the Discord Blue
-    onboarding bundle
-  - optional Odoo onboarding target IDs while the deploy workflow seeds tracked
-    prelaunch lane records: `ODOO_CM_TESTING_DOKPLOY_TARGET_ID`,
-    `ODOO_CM_PROD_DOKPLOY_TARGET_ID`, `ODOO_OPW_TESTING_DOKPLOY_TARGET_ID`, and
-    `ODOO_OPW_PROD_DOKPLOY_TARGET_ID`
+  - product target ids are no longer consumed by normal deploy seed writes; use
+    the manual `Launchplane Seed Import` workflow when import material needs to
+    create or repair product onboarding records
 
 The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
@@ -301,6 +298,14 @@ provider mutation remains reviewable after the emergency.
 Before rollback, the workflow uses those same break-glass credentials to capture
 redacted Dokploy target, container, and recent log diagnostics for the failed
 rollout. Diagnostics failures are non-blocking so rollback remains the priority.
+
+Product onboarding manifests and runtime key-safety policies live under
+`import-material/launchplane/seed-imports/` as explicit import material. Normal
+deploy does not apply those records. Use the manual `Launchplane Seed Import`
+workflow for dry-run evidence first, then rerun with `apply`, exact confirmation,
+and an operator reason when the DB-backed records need to be created or repaired.
+The workflow calls Launchplane service routes with GitHub OIDC and uploads the
+payload/evidence artifact for review.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that

@@ -138,7 +138,118 @@ def _manifest_payload() -> dict[str, object]:
     }
 
 
+def _seed_import_manifest(
+    import_id: str, target_ids_by_env: dict[str, str] | None = None
+) -> dict[str, object]:
+    catalog = json.loads(
+        Path("import-material/launchplane/seed-imports/catalog.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    entry = next(
+        item for item in catalog["imports"] if item["import_id"] == import_id
+    )
+    manifest_payload = json.loads(json.dumps(entry["manifest"]))
+    target_ids = target_ids_by_env or {}
+    for mapping in entry.get("target_id_env", []):
+        for target in manifest_payload.get("dokploy_targets", []):
+            if target["context"] == mapping["context"] and target["instance"] == mapping["instance"]:
+                target["target_id"] = target_ids.get(mapping["env"], "")
+    return cast(dict[str, object], manifest_payload)
+
+
 class ProductOnboardingTests(unittest.TestCase):
+    def test_launchplane_seed_import_workflow_owns_seed_writes(self) -> None:
+        deploy_script = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
+            encoding="utf-8"
+        )
+        workflow_text = Path(".github/workflows/launchplane-seed-import.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("/v1/product-onboarding/apply", deploy_script)
+        self.assertNotIn("/v1/runtime-key-safety/policies/apply", deploy_script)
+        self.assertIn("launchplane-seed-import.yml", deploy_script)
+        self.assertIn("deploy:launchplane-seed-import-product-onboarding-grant", deploy_script)
+        self.assertIn("deploy:launchplane-seed-import-runtime-key-safety-grant", deploy_script)
+        self.assertIn("import-material/launchplane/seed-imports/catalog.json", workflow_text)
+        self.assertIn("APPLY LAUNCHPLANE SEED IMPORTS", workflow_text)
+        self.assertIn("--apply", workflow_text)
+        self.assertIn("launchplane-seed-import", workflow_text)
+
+    def test_launchplane_seed_import_catalog_validates_contracts(self) -> None:
+        catalog = json.loads(
+            Path("import-material/launchplane/seed-imports/catalog.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(catalog["schema_version"], 1)
+        import_ids = {entry["import_id"] for entry in catalog["imports"]}
+        self.assertEqual(
+            import_ids,
+            {
+                "discord-blue-product-onboarding",
+                "verireel-product-onboarding",
+                "odoo-cm-product-onboarding",
+                "odoo-opw-product-onboarding",
+                "launchplane-runtime-key-safety-policy",
+            },
+        )
+        for entry in catalog["imports"]:
+            if entry["kind"] == "product_onboarding":
+                manifest_payload = json.loads(json.dumps(entry["manifest"]))
+                for mapping in entry.get("target_id_env", []):
+                    for target in manifest_payload.get("dokploy_targets", []):
+                        if (
+                            target["context"] == mapping["context"]
+                            and target["instance"] == mapping["instance"]
+                        ):
+                            target["target_id"] = f"test-{mapping['env'].lower()}"
+                ProductOnboardingManifest.model_validate(manifest_payload)
+            elif entry["kind"] == "runtime_key_safety_policy":
+                self.assertEqual(
+                    [rule["binding_key"] for rule in entry["rules"]],
+                    [
+                        "DISCORD_TOKEN",
+                        "RESEND_API_KEY",
+                        "SMTP_PASSWORD",
+                        "META_CONVERSIONS_API_TOKEN",
+                        "ODOO_ADMIN_PASSWORD",
+                        "ODOO_DB_PASSWORD",
+                        "ODOO_MASTER_PASSWORD",
+                    ],
+                )
+            else:
+                self.fail(f"Unexpected seed import kind: {entry['kind']}")
+
+    def test_launchplane_seed_import_script_requires_target_id_env(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            output_dir = Path(temporary_directory_name) / "seed-import"
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/deploy/apply-launchplane-seed-imports.py",
+                    "--catalog",
+                    "import-material/launchplane/seed-imports/catalog.json",
+                    "--output-dir",
+                    str(output_dir),
+                    "--import-id",
+                    "odoo-cm-product-onboarding",
+                    "--reason",
+                    "test dry run",
+                ],
+                check=False,
+                capture_output=True,
+                env={"PATH": os.environ["PATH"]},
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ODOO_CM_TESTING_DOKPLOY_TARGET_ID is required", result.stderr)
+
     def test_deploy_authz_grants_include_scheduled_merge_train_runner(
         self,
     ) -> None:
@@ -181,13 +292,9 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("deploy:odoo-opw-website-bootstrap-override-grant", script_text)
         self.assertIn("odoo-cm-website-bootstrap-override", script_text)
         self.assertIn("odoo-opw-website-bootstrap-override", script_text)
-        self.assertIn('base_url: "https://opw-testing.shinycomputers.com"', script_text)
-        self.assertIn(
-            'health_url: "https://opw-testing.shinycomputers.com/launchplane/health"',
-            script_text,
-        )
-        self.assertIn('health_path: "/launchplane/health"', script_text)
-        self.assertIn('domains: ["opw-testing.shinycomputers.com"]', script_text)
+        self.assertNotIn('base_url: "https://opw-testing.shinycomputers.com"', script_text)
+        self.assertNotIn('health_path: "/launchplane/health"', script_text)
+        self.assertNotIn('domains: ["opw-testing.shinycomputers.com"]', script_text)
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
@@ -716,96 +823,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             script_text,
         )
 
-    def test_deploy_verireel_onboarding_manifest_enrolls_preview_lifecycle(
-        self,
-    ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    idempotency_key=''\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "        -H)\n"
-                "          shift\n"
-                '          case "$1" in\n'
-                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
-                "          esac\n"
-                "          ;;\n"
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    case "$idempotency_key" in\n'
-                "      *launchplane-product-onboarding:verireel-preview-profile*)\n"
-                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
-                '        printf \'%s\' "${idempotency_key#Idempotency-Key: }" > "$CAPTURED_IDEMPOTENCY_KEY"\n'
-                "        ;;\n"
-                "    esac\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_request_payload = temporary_directory / "request.json"
-            captured_idempotency_key = temporary_directory / "idempotency-key.txt"
-            captured_idempotency_key.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
-                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
-                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
-                "CAPTURED_REQUEST_PAYLOAD": str(captured_request_payload),
-                "CAPTURED_IDEMPOTENCY_KEY": str(captured_idempotency_key),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
+    def test_seed_import_verireel_onboarding_manifest_enrolls_preview_lifecycle(self) -> None:
+        manifest_payload = _seed_import_manifest("verireel-product-onboarding")
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
 
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            request_payload = json.loads(captured_request_payload.read_text())
-            idempotency_key = captured_idempotency_key.read_text().strip()
-
-        manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
-
-        self.assertEqual(request_payload["product"], "launchplane")
         self.assertEqual(manifest.product, "verireel")
         self.assertEqual(manifest.display_name, "VeriReel")
         self.assertEqual(manifest.repository, "cbusillo/verireel")
@@ -860,103 +881,19 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 ("verireel", "prod", "POSTGRES_PASSWORD"),
             ],
         )
-        self.assertEqual(
-            idempotency_key,
-            "launchplane-product-onboarding:verireel-preview-profile:test-sha",
-        )
+        self.assertEqual(manifest.source_label, "import-material:verireel-product-onboarding")
 
-    def test_deploy_odoo_cm_onboarding_manifest_encodes_issue_backed_bootstrap_policy(
+    def test_seed_import_odoo_cm_onboarding_manifest_encodes_issue_backed_bootstrap_policy(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    idempotency_key=''\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                "        -o)\n"
-                "          shift\n"
-                '          output_file="$1"\n'
-                "          ;;\n"
-                "        -H)\n"
-                "          shift\n"
-                '          case "$1" in\n'
-                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
-                "          esac\n"
-                "          ;;\n"
-                "        --data)\n"
-                "          shift\n"
-                '          request_payload="$1"\n'
-                "          ;;\n"
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    case "$idempotency_key" in\n'
-                "      *launchplane-product-onboarding:odoo-cm-preview-profile*)\n"
-                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
-                '        printf \'%s\' "${idempotency_key#Idempotency-Key: }" > "$CAPTURED_IDEMPOTENCY_KEY"\n'
-                "        ;;\n"
-                "    esac\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_curl_args = temporary_directory / "curl-args.txt"
-            captured_idempotency_key = temporary_directory / "idempotency-key.txt"
-            captured_idempotency_key.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+        manifest_payload = _seed_import_manifest(
+            "odoo-cm-product-onboarding",
+            {
                 "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
                 "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
-                "CAPTURED_REQUEST_PAYLOAD": str(captured_curl_args),
-                "CAPTURED_IDEMPOTENCY_KEY": str(captured_idempotency_key),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            request_payload = json.loads(captured_curl_args.read_text())
-            idempotency_key = captured_idempotency_key.read_text().strip()
-
-        manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
+            },
+        )
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
 
         self.assertEqual(manifest.product, "odoo-tenant-cm")
         self.assertEqual([lane.instance for lane in manifest.lanes], ["testing", "prod"])
@@ -992,156 +929,28 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 ("cm", "prod", "compose", "compose-cm-prod"),
             ],
         )
-        self.assertEqual(
-            idempotency_key,
-            "launchplane-product-onboarding:odoo-cm-preview-profile:compose-cm-testing:compose-cm-prod:test-sha",
-        )
+        self.assertEqual(manifest.source_label, "import-material:odoo-cm-product-onboarding")
 
-    def test_deploy_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *) printf '200' ;;\n"
-                "esac\n"
-                "output_file=''\n"
-                'while [ "$#" -gt 0 ]; do\n'
-                '  case "$1" in\n'
-                "    -o)\n"
-                "      shift\n"
-                '      output_file="$1"\n'
-                "      ;;\n"
-                "  esac\n"
-                "  shift || true\n"
-                "done\n"
-                'if [ -n "$output_file" ]; then\n'
-                '  printf \'{"status":"ok"}\' > "$output_file"\n'
-                "fi\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
+    def test_seed_import_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target requires target_id"):
+            ProductOnboardingManifest.model_validate(
+                _seed_import_manifest(
+                    "odoo-cm-product-onboarding",
+                    {"ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing"},
+                )
             )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("ODOO_CM_PROD_DOKPLOY_TARGET_ID is required", result.stderr)
-
-    def test_deploy_odoo_opw_onboarding_manifest_encodes_upstream_restore_policy(
+    def test_seed_import_odoo_opw_onboarding_manifest_encodes_upstream_restore_policy(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    idempotency_key=''\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                "        -H)\n"
-                "          shift\n"
-                '          case "$1" in\n'
-                '            Idempotency-Key:*) idempotency_key="$1" ;;\n'
-                "          esac\n"
-                "          ;;\n"
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                '    case "$idempotency_key" in\n'
-                "      *launchplane-product-onboarding:odoo-opw-prelaunch-profile*)\n"
-                '        printf \'%s\' "$request_payload" > "$CAPTURED_REQUEST_PAYLOAD"\n'
-                "        ;;\n"
-                "    esac\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_request_payload = temporary_directory / "request.json"
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
+        manifest_payload = _seed_import_manifest(
+            "odoo-opw-product-onboarding",
+            {
                 "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
                 "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
-                "CAPTURED_REQUEST_PAYLOAD": str(captured_request_payload),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            request_payload = json.loads(captured_request_payload.read_text())
-
-        manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
+            },
+        )
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
 
         self.assertEqual(manifest.product, "odoo-tenant-opw")
         self.assertTrue(manifest.preview.enabled)
