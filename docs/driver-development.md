@@ -197,6 +197,15 @@ mode, status, requested domains, expected/provider host ids, operations, reason,
 and idempotency key. Keep this workflow canary-scoped until broader route
 ownership and approval UX are explicit.
 
+Operators with `ingress_route.plan` for the target product/context can inspect
+those audit records through the service. List records with
+`GET /v1/ingress/route-audits/records?product=launchplane&context=example-prod`
+and optional `status`, `mode`, `provider_host_id`, `trace_id`,
+`idempotency_key`, and `limit` filters. Read one record with
+`GET /v1/ingress/route-audits/records/{record_id}?product=launchplane&context=example-prod`.
+Both list and single-record endpoints require `product` and `context` so audit
+browsing stays scoped.
+
 ## Product Repo Boundary
 
 Driver development should make product repos thinner, not larger. When a new

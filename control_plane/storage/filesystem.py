@@ -101,8 +101,8 @@ class FilesystemRecordStore:
         return True
 
     def _read_model(
-        self, model_type: type[BaseModel], record_type: str, record_id: str
-    ) -> BaseModel:
+        self, model_type: type[RecordModel], record_type: str, record_id: str
+    ) -> RecordModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         return model_type.model_validate(payload)
@@ -565,6 +565,13 @@ class FilesystemRecordStore:
 
     def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> Path:
         return self._write_model("launchplane_ingress_route_audits", record.record_id, record)
+
+    def read_ingress_route_audit_record(self, record_id: str) -> IngressRouteAuditRecord:
+        return self._read_model(
+            IngressRouteAuditRecord,
+            "launchplane_ingress_route_audits",
+            record_id,
+        )
 
     def list_ingress_route_audit_records(
         self,

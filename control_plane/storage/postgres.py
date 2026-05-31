@@ -2836,6 +2836,13 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def read_ingress_route_audit_record(self, record_id: str) -> IngressRouteAuditRecord:
+        return self._read_model(
+            model_type=IngressRouteAuditRecord,
+            orm_model=LaunchplaneIngressRouteAuditRow,
+            filters=(LaunchplaneIngressRouteAuditRow.record_id == record_id,),
+        )
+
     def list_ingress_route_audit_records(
         self,
         *,
