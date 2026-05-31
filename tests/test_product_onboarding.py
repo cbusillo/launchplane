@@ -243,6 +243,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("          - prod", workflow_text)
         self.assertNotIn("writes only cm/testing", workflow_text)
 
+    def test_ingress_route_dry_run_workflow_rejects_non_object_options(self) -> None:
+        workflow_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('($options | type) != "object"', workflow_text)
+        self.assertIn('error("route_options_json must be a JSON object")', workflow_text)
+
     def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
             encoding="utf-8"
