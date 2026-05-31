@@ -152,6 +152,58 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         self.assertEqual(routes[0]["url"], "/home")
         self.assertEqual(decoded_payload, payload)
 
+    def test_restore_intent_suppresses_website_bootstrap(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="example",
+            instance="testing",
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="web.base.url",
+                    value=OdooOverrideValue(
+                        source="literal",
+                        value="https://example-testing.example.com",
+                    ),
+                ),
+            ),
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="example",
+                name="Example Site",
+                canonical_url="https://example-testing.example.com",
+                routes=(
+                    OdooWebsiteBootstrapRoute(
+                        name="Home",
+                        url="/home",
+                        homepage=True,
+                    ),
+                ),
+            ),
+            updated_at="2026-05-16T00:00:00Z",
+        )
+
+        payload = render_post_deploy_payload(record, workflow_intent="restore")
+        environment = build_post_deploy_environment(record, workflow_intent="restore")
+        decoded_payload = json.loads(
+            base64.b64decode(
+                environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+
+        self.assertNotIn("website_bootstrap", payload)
+        self.assertNotIn("website_bootstrap", decoded_payload)
+        self.assertEqual(
+            payload["config_parameters"],
+            [
+                {
+                    "key": "web.base.url",
+                    "value": {
+                        "source": "literal",
+                        "value": "https://example-testing.example.com",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(decoded_payload, payload)
+
     def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(
         self,
     ) -> None:
