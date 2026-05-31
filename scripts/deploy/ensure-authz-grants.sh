@@ -1241,6 +1241,16 @@ post_local_owner_grant \
   ingress_route.apply \
   deploy:local-operator-ingress-route-apply-grant \
   local-operator-ingress-route-apply
+# Keep the manual OIDC dry-run workflow canary-scoped until broader route
+# ownership and operator review flows are explicit.
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  ingress-route-dry-run.yml \
+  launchplane \
+  reon-prod \
+  ingress_route.plan \
+  deploy:ingress-route-dry-run-plan-grant \
+  ingress-route-dry-run-plan
 post_local_owner_grant \
   local-operator \
   "*" \

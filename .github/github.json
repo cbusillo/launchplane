@@ -68,6 +68,7 @@
     "Security",
     "CodeQL",
     "Deploy Launchplane",
+    "Ingress Route Dry Run",
     "Live Target Runtime",
     "Merge Train Runner",
     "Odoo Config Parameter Override",
