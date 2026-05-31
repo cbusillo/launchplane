@@ -1,48 +1,31 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol, cast
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane import dokploy as control_plane_dokploy
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
-    PostDeployUpdateEvidence,
     PromotionRecord,
     ReleaseStatus,
     RollbackExecutionEvidence,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.contracts.ship_request import ShipRequest
-from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
-from control_plane.runtime_key_safety import (
-    RuntimeKeySafetyPolicyReadStore,
-    evaluate_runtime_key_safety_from_store,
-    latest_active_runtime_key_safety_policy,
-    runtime_key_safety_environment_class,
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyRequest,
 )
 from control_plane.workflows.inventory import build_environment_inventory
-from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
-from control_plane.workflows.ship import (
-    build_deployment_record,
-    generate_deployment_record_id,
-    utc_now_timestamp,
+from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementStore,
+    execute_odoo_stable_target_replacement_apply,
 )
-
-ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 @dataclass(frozen=True)
@@ -55,7 +38,7 @@ class _RollbackSource:
     detail: str
 
 
-class OdooProdRollbackStore(RuntimeKeySafetyPolicyReadStore, Protocol):
+class OdooProdRollbackStore(OdooStableTargetReplacementStore, Protocol):
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...
@@ -68,15 +51,9 @@ class OdooProdRollbackStore(RuntimeKeySafetyPolicyReadStore, Protocol):
 
     def read_promotion_record(self, promotion_record_id: str) -> PromotionRecord: ...
 
-    def read_dokploy_target_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetRecord: ...
-
-    def read_dokploy_target_id_record(
-        self, *, context_name: str, instance_name: str
-    ) -> DokployTargetIdRecord: ...
-
     def write_deployment_record(self, record: DeploymentRecord) -> None: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def write_environment_inventory(self, inventory: EnvironmentInventory) -> None: ...
 
@@ -91,9 +68,11 @@ def _require_record_store(record_store: object) -> OdooProdRollbackStore:
         "read_artifact_manifest",
         "read_environment_inventory",
         "read_promotion_record",
+        "read_product_profile_record",
         "read_dokploy_target_record",
         "read_dokploy_target_id_record",
         "write_deployment_record",
+        "read_deployment_record",
         "write_environment_inventory",
         "write_release_tuple_record",
         "write_promotion_record",
@@ -157,10 +136,6 @@ class OdooProdRollbackResult(BaseModel):
     rollback_health_status: Literal["pass", "fail", "skipped"] = "skipped"
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
-
-
-def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) -> str:
-    return f"{manifest.image.repository}@{manifest.image.digest}"
 
 
 def _read_source_release_tuple(
@@ -286,314 +261,11 @@ def _resolve_promotion_record(
     return promotion_record
 
 
-def _read_target_definition(
-    *,
-    record_store: OdooProdRollbackStore,
-    request: OdooProdRollbackRequest,
-) -> control_plane_dokploy.DokployTargetDefinition:
-    try:
-        target_record = record_store.read_dokploy_target_record(
-            context_name=request.context,
-            instance_name=request.instance,
-        )
-        target_id_record = record_store.read_dokploy_target_id_record(
-            context_name=request.context,
-            instance_name=request.instance,
-        )
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"Odoo prod rollback requires DB-backed Dokploy target records for {request.context}/{request.instance}."
-        ) from exc
-    return _build_dokploy_target_definition(
-        target_record=target_record,
-        target_id=target_id_record.target_id,
-    )
-
-
-def _build_dokploy_target_definition(
-    *,
-    target_record: DokployTargetRecord,
-    target_id: str,
-) -> control_plane_dokploy.DokployTargetDefinition:
-    payload = target_record.model_dump(
-        mode="json",
-        exclude={"schema_version", "updated_at", "source_label"},
-    )
-    payload["target_id"] = target_id
-    return control_plane_dokploy.DokployTargetDefinition.model_validate(payload)
-
-
-def _resolve_ship_request(
-    *,
-    request: OdooProdRollbackRequest,
-    rollback_source: _RollbackSource,
-    artifact_manifest: ArtifactIdentityManifest,
-    target_definition: control_plane_dokploy.DokployTargetDefinition,
-) -> ShipRequest:
-    health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
-        health_timeout_override_seconds=request.health_timeout_seconds,
-        target_definition=target_definition,
-    )
-    health_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
-        target_definition=target_definition,
-        environment_values=target_definition.env,
-    )
-    should_verify_health = request.verify_health and request.wait
-    if should_verify_health and not health_urls:
-        raise click.ClickException(
-            "Odoo prod rollback health verification requested but no target health URL was resolved."
-        )
-    configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
-        request.context,
-        request.instance,
-        target_definition.env,
-    )
-    deploy_mode = (
-        f"dokploy-{target_definition.target_type}-api"
-        if configured_ship_mode == "auto"
-        else f"dokploy-{configured_ship_mode}-api"
-    )
-    return ShipRequest(
-        artifact_id=rollback_source.artifact_id,
-        context=request.context,
-        instance=request.instance,
-        source_git_ref=rollback_source.source_git_ref,
-        target_name=target_definition.target_name.strip()
-        or f"{request.context}-{request.instance}",
-        target_type=target_definition.target_type,
-        deploy_mode=deploy_mode,
-        wait=request.wait,
-        timeout_seconds=request.timeout_seconds,
-        verify_health=should_verify_health,
-        health_timeout_seconds=health_timeout_seconds,
-        dry_run=False,
-        no_cache=request.no_cache,
-        allow_dirty=False,
-        destination_health=HealthcheckEvidence(
-            urls=health_urls,
-            timeout_seconds=health_timeout_seconds,
-            status="pending" if should_verify_health else "skipped",
-        ),
-    )
-
-
-def _sync_artifact_image_reference_for_target(
-    *,
-    control_plane_root: Path,
-    record_store: RuntimeKeySafetyPolicyReadStore,
-    target_definition: control_plane_dokploy.DokployTargetDefinition,
-    artifact_manifest: ArtifactIdentityManifest,
-) -> None:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-    )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    runtime_environment_values = (
-        control_plane_runtime_environments.resolve_runtime_environment_values(
-            control_plane_root=control_plane_root,
-            context_name=target_definition.context,
-            instance_name=target_definition.instance,
-        )
-    )
-    _enforce_runtime_key_safety_for_target_env_sync(
-        record_store=record_store,
-        context_name=target_definition.context,
-        instance_name=target_definition.instance,
-        runtime_environment_values=runtime_environment_values,
-    )
-    desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
-    if target_definition.target_type == "compose":
-        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference=desired_image_reference,
-            domain_hosts=target_definition.domains,
-        )
-        control_plane_dokploy.sync_dokploy_compose_raw_source(
-            host=host,
-            token=token,
-            compose_id=target_definition.target_id,
-            compose_name=target_definition.target_name,
-            target_payload=target_payload,
-            compose_file=compose_file,
-        )
-
-    desired_env_map = dict(env_map)
-    desired_env_map.update(runtime_environment_values)
-    desired_env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
-    if desired_env_map != env_map:
-        control_plane_dokploy.update_dokploy_target_env(
-            host=host,
-            token=token,
-            target_type=target_definition.target_type,
-            target_id=target_definition.target_id,
-            target_payload=target_payload,
-            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
-        )
-        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-            host=host,
-            token=token,
-            target_type=target_definition.target_type,
-            target_id=target_definition.target_id,
-        )
-    refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
-        str(target_payload.get("env") or "")
-    )
-    missing_or_mismatched_keys = sorted(
-        env_key
-        for env_key, env_value in desired_env_map.items()
-        if refreshed_env_map.get(env_key, "") != env_value
-    )
-    if missing_or_mismatched_keys:
-        raise click.ClickException(
-            "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
-            + ", ".join(missing_or_mismatched_keys)
-        )
-
-
-def _enforce_runtime_key_safety_for_target_env_sync(
-    *,
-    record_store: RuntimeKeySafetyPolicyReadStore,
-    context_name: str,
-    instance_name: str,
-    runtime_environment_values: dict[str, str],
-) -> None:
-    bindings = record_store.list_secret_bindings(
-        integration="runtime_environment",
-        context_name=context_name,
-        instance_name=instance_name,
-        limit=None,
-    )
-    binding_keys = tuple(
-        binding.binding_key
-        for binding in bindings
-        if binding.binding_key in runtime_environment_values
-    )
-    if not binding_keys:
-        return
-    try:
-        policy_record = latest_active_runtime_key_safety_policy(record_store)
-        evaluation = evaluate_runtime_key_safety_from_store(
-            record_store=record_store,
-            policy_record=policy_record,
-            target=RuntimeKeySafetyTarget(
-                context=context_name,
-                instance=instance_name,
-                environment_class=runtime_key_safety_environment_class(instance_name),
-            ),
-            required_binding_keys=binding_keys,
-        )
-    except ValueError as exc:
-        raise click.ClickException(
-            "Runtime key-safety policy is unavailable for Odoo prod rollback target env sync."
-        ) from exc
-    if evaluation.status == "pass":
-        return
-    finding_codes = sorted({finding.code for finding in evaluation.findings})
-    suffix = f": {', '.join(finding_codes)}" if finding_codes else ""
-    raise click.ClickException(
-        f"Runtime key-safety gate failed for Odoo prod rollback target env sync{suffix}."
-    )
-
-
-def _trigger_dokploy_deploy(
-    *,
-    control_plane_root: Path,
-    request: ShipRequest,
-    target_definition: control_plane_dokploy.DokployTargetDefinition,
-) -> None:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    latest_before = None
-    if request.wait:
-        latest_before = control_plane_dokploy.latest_deployment_for_target(
-            host=host,
-            token=token,
-            target_type=target_definition.target_type,
-            target_id=target_definition.target_id,
-        )
-    control_plane_dokploy.trigger_deployment(
-        host=host,
-        token=token,
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-        no_cache=request.no_cache,
-    )
-    if not request.wait:
-        return
-    deploy_timeout_seconds = control_plane_dokploy.resolve_ship_timeout_seconds(
-        timeout_override_seconds=request.timeout_seconds,
-        target_definition=target_definition,
-    )
-    control_plane_dokploy.wait_for_target_deployment(
-        host=host,
-        token=token,
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-        before_key=control_plane_dokploy.deployment_key(latest_before),
-        timeout_seconds=deploy_timeout_seconds,
-    )
-
-
-def _wait_for_healthcheck(*, url: str, timeout_seconds: int) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            request = Request(url, method="GET")
-            with urlopen(request, timeout=min(5, timeout_seconds)) as response:
-                if 200 <= response.status < 300:
-                    return
-                last_error = f"http {response.status}"
-        except HTTPError as error:
-            last_error = f"http {error.code}"
-        except URLError as error:
-            last_error = str(error.reason)
-        time.sleep(1)
-    raise click.ClickException(f"Healthcheck failed for {url}: {last_error or 'timeout'}")
-
-
-def _verify_healthchecks(*, request: ShipRequest) -> None:
-    if not request.wait or not request.verify_health:
-        return
-    if not request.destination_health.urls or request.destination_health.timeout_seconds is None:
-        raise click.ClickException(
-            "Odoo prod rollback health verification is missing URLs or timeout."
-        )
-    health_errors: list[str] = []
-    for health_url in request.destination_health.urls:
-        try:
-            _wait_for_healthcheck(
-                url=health_url,
-                timeout_seconds=request.destination_health.timeout_seconds,
-            )
-            return
-        except click.ClickException as error:
-            health_errors.append(str(error))
-    raise click.ClickException(
-        "Odoo prod rollback health verification failed for all resolved URLs:\n"
-        + "\n".join(health_errors)
-    )
-
-
-def _rollback_health_evidence(
-    *, request: ShipRequest, status: ReleaseStatus
-) -> HealthcheckEvidence:
-    return request.destination_health.model_copy(
-        update={
-            "verified": status in {"pass", "fail"} and bool(request.destination_health.urls),
-            "status": status,
-        }
-    )
-
-
 def _write_rollback_state(
     *,
     record_store: OdooProdRollbackStore,
     promotion_record: PromotionRecord,
     snapshot_name: str,
-    request: ShipRequest,
     status: ReleaseStatus,
     health_status: ReleaseStatus,
     started_at: str,
@@ -610,7 +282,10 @@ def _write_rollback_state(
                 started_at=started_at,
                 finished_at=finished_at,
             ),
-            "rollback_health": _rollback_health_evidence(request=request, status=health_status),
+            "rollback_health": HealthcheckEvidence(
+                verified=False,
+                status=health_status,
+            ),
         }
     )
     record_store.write_promotion_record(updated_record)
@@ -642,40 +317,11 @@ def execute_odoo_prod_rollback(
         source_tuple=source_tuple,
     )
     promotion_record = _resolve_promotion_record(record_store=typed_record_store, request=request)
-    target_definition = _read_target_definition(record_store=typed_record_store, request=request)
-    ship_request = _resolve_ship_request(
-        request=request,
-        rollback_source=rollback_source,
-        artifact_manifest=artifact_manifest,
-        target_definition=target_definition,
-    )
-    resolved_target = ResolvedTargetEvidence(
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-        target_name=target_definition.target_name.strip() or ship_request.target_name,
-    )
-    deployment_record_id = generate_deployment_record_id(
-        context_name=request.context,
-        instance_name=request.instance,
-    )
     started_at = utc_now_timestamp()
-    typed_record_store.write_deployment_record(
-        build_deployment_record(
-            request=ship_request,
-            record_id=deployment_record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pending",
-            started_at=started_at,
-            finished_at="",
-            resolved_target=resolved_target,
-            post_deploy_update=PostDeployUpdateEvidence(attempted=True, status="pending"),
-        )
-    )
     _write_rollback_state(
         record_store=typed_record_store,
         promotion_record=promotion_record,
         snapshot_name=rollback_source.snapshot_name,
-        request=ship_request,
         status="pending",
         health_status="skipped",
         started_at=started_at,
@@ -683,61 +329,57 @@ def execute_odoo_prod_rollback(
         detail="Odoo prod rollback deployment is pending.",
     )
 
-    deploy_completed = False
-    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
-    health_status: Literal["pass", "fail", "skipped"] = "skipped"
+    replacement_result = None
+    health_status: Literal["pass", "fail", "skipped"] = (
+        "fail" if request.verify_health else "skipped"
+    )
     try:
-        _sync_artifact_image_reference_for_target(
+        replacement_result = execute_odoo_stable_target_replacement_apply(
             control_plane_root=control_plane_root,
             record_store=typed_record_store,
-            target_definition=target_definition,
-            artifact_manifest=artifact_manifest,
+            request=OdooStableTargetReplacementApplyRequest(
+                product=f"odoo-tenant-{request.context}",
+                instance=request.instance,
+                artifact_id=rollback_source.artifact_id,
+                source_git_ref=rollback_source.source_git_ref,
+                allow_empty_data=True,
+                data_source_mode="existing",
+                verify_health=request.verify_health,
+                verify_canonical=request.verify_health,
+                verify_logo=request.verify_health,
+                timeout_seconds=request.timeout_seconds,
+                health_timeout_seconds=request.health_timeout_seconds,
+                no_cache=request.no_cache,
+            ),
         )
-        _trigger_dokploy_deploy(
-            control_plane_root=control_plane_root,
-            request=ship_request,
-            target_definition=target_definition,
+        deployment_record = typed_record_store.read_deployment_record(
+            replacement_result.deployment_record_id
         )
-        deploy_completed = True
-        post_deploy_result = execute_odoo_post_deploy(
-            control_plane_root=control_plane_root,
-            record_store=typed_record_store,
-            request=OdooPostDeployRequest(context=request.context, instance=request.instance),
-        )
-        post_deploy_status = post_deploy_result.post_deploy_status
-        if post_deploy_result.post_deploy_status != "pass":
+        health_status = replacement_result.health_status
+        if replacement_result.deploy_status != "pass":
             raise click.ClickException(
-                post_deploy_result.error_message or "Odoo post-deploy failed."
+                replacement_result.error_message or "Odoo prod rollback deploy failed."
             )
-        _verify_healthchecks(request=ship_request)
-        health_status = "pass" if ship_request.verify_health else "skipped"
+        if replacement_result.post_deploy_status != "pass":
+            raise click.ClickException(
+                replacement_result.error_message or "Odoo prod rollback post-deploy failed."
+            )
+        if request.verify_health and replacement_result.health_status != "pass":
+            raise click.ClickException(
+                replacement_result.error_message or "Odoo prod rollback health verification failed."
+            )
     except (click.ClickException, OSError) as error:
         finished_at = utc_now_timestamp()
-        if deploy_completed and health_status == "skipped" and ship_request.verify_health:
-            health_status = "fail"
-        final_deployment = build_deployment_record(
-            request=ship_request,
-            record_id=deployment_record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass" if deploy_completed else "fail",
-            started_at=started_at,
-            finished_at=finished_at,
-            resolved_target=resolved_target,
-            post_deploy_update=PostDeployUpdateEvidence(
-                attempted=post_deploy_status in {"pass", "fail"},
-                status=post_deploy_status if deploy_completed else "skipped",
-                detail=str(error),
-            ),
-            destination_health=_rollback_health_evidence(
-                request=ship_request, status=health_status
-            ),
-        )
-        typed_record_store.write_deployment_record(final_deployment)
+        deployment_record_id = ""
+        post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
+        if replacement_result is not None:
+            deployment_record_id = replacement_result.deployment_record_id
+            health_status = replacement_result.health_status
+            post_deploy_status = replacement_result.post_deploy_status
         _write_rollback_state(
             record_store=typed_record_store,
             promotion_record=promotion_record,
             snapshot_name=rollback_source.snapshot_name,
-            request=ship_request,
             status="fail",
             health_status=health_status,
             started_at=started_at,
@@ -758,42 +400,18 @@ def execute_odoo_prod_rollback(
         )
 
     finished_at = utc_now_timestamp()
-    final_deployment = build_deployment_record(
-        request=ship_request,
-        record_id=deployment_record_id,
-        deployment_id="control-plane-dokploy",
-        deployment_status="pass",
-        started_at=started_at,
-        finished_at=finished_at,
-        resolved_target=resolved_target,
-        post_deploy_update=PostDeployUpdateEvidence(
-            attempted=True,
-            status=post_deploy_status,
-            detail="Odoo post-deploy completed after prod rollback.",
-        ),
-        destination_health=_rollback_health_evidence(request=ship_request, status=health_status),
+    typed_record_store.write_environment_inventory(
+        build_environment_inventory(
+            deployment_record=deployment_record,
+            updated_at=finished_at,
+            promotion_record_id=promotion_record.record_id,
+            promoted_from_instance=rollback_source.promoted_from_instance,
+        )
     )
-    typed_record_store.write_deployment_record(final_deployment)
-    inventory_record = build_environment_inventory(
-        deployment_record=final_deployment,
-        updated_at=finished_at,
-        promotion_record_id=promotion_record.record_id,
-        promoted_from_instance=rollback_source.promoted_from_instance,
-    )
-    typed_record_store.write_environment_inventory(inventory_record)
-    release_tuple = build_release_tuple_record_from_artifact_manifest(
-        context_name=request.context,
-        channel_name=request.instance,
-        artifact_manifest=artifact_manifest,
-        deployment_record_id=deployment_record_id,
-        minted_at=finished_at,
-    )
-    typed_record_store.write_release_tuple_record(release_tuple)
     _write_rollback_state(
         record_store=typed_record_store,
         promotion_record=promotion_record,
         snapshot_name=rollback_source.snapshot_name,
-        request=ship_request,
         status="pass",
         health_status=health_status,
         started_at=started_at,
@@ -806,9 +424,9 @@ def execute_odoo_prod_rollback(
         source_channel=rollback_source.result_source_channel,
         artifact_id=rollback_source.artifact_id,
         promotion_record_id=promotion_record.record_id,
-        deployment_record_id=deployment_record_id,
-        release_tuple_id=release_tuple.tuple_id,
+        deployment_record_id=replacement_result.deployment_record_id,
+        release_tuple_id=replacement_result.release_tuple_id,
         rollback_status="pass",
         rollback_health_status=health_status,
-        post_deploy_status=post_deploy_status,
+        post_deploy_status=replacement_result.post_deploy_status,
     )
