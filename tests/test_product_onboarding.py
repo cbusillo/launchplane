@@ -257,6 +257,15 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn('($options | type) != "object"', workflow_text)
         self.assertIn('error("route_options_json must be a JSON object")', workflow_text)
+        self.assertIn(
+            'if $options | has("enabled") then $options.enabled else true end', workflow_text
+        )
+        self.assertIn(
+            'if $options | has("npmplus_noindex") then $options.npmplus_noindex else true end',
+            workflow_text,
+        )
+        for forward_scheme in ("http", "https", "path", "empty", "grpc", "grpcs"):
+            self.assertIn(f"          - {forward_scheme}", workflow_text)
 
     def test_ingress_route_canary_apply_workflow_requires_apply_guards(self) -> None:
         workflow_text = Path(".github/workflows/ingress-route-canary-apply.yml").read_text(
