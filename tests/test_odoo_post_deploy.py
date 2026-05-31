@@ -1,3 +1,5 @@
+import base64
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -159,6 +161,75 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.post_deploy_status, "pass")
             self.assertEqual(len(captured_runs), 1)
+            self.assertTrue(captured_runs[0]["run_destructive_restore"])
+
+    def test_execute_applies_deploy_phase_overrides_during_destructive_restore(self) -> None:
+        captured_runs: list[dict[str, object]] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
+                    apply_on=("deploy",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://opw-testing.example.com",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-04-26T12:00:00Z",
+                    source_label="test",
+                )
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=self._source_of_truth(),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                ),
+            ):
+                result = execute_odoo_post_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="opw", instance="testing"),
+                    run_destructive_restore=True,
+                )
+
+            self.assertEqual(result.post_deploy_status, "pass")
+            self.assertEqual(result.override_status, "pass")
+            self.assertTrue(result.override_payload_rendered)
+            self.assertEqual(len(captured_runs), 1)
+            workflow_environment = cast(
+                "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
+            )
+            encoded_payload = workflow_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]
+            decoded_payload = json.loads(base64.b64decode(encoded_payload).decode("utf-8"))
+            self.assertEqual(
+                decoded_payload["config_parameters"],
+                [
+                    {
+                        "key": "web.base.url",
+                        "value": {
+                            "source": "literal",
+                            "value": "https://opw-testing.example.com",
+                        },
+                    }
+                ],
+            )
+            self.assertNotIn("website_bootstrap", decoded_payload)
             self.assertTrue(captured_runs[0]["run_destructive_restore"])
 
 
