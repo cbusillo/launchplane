@@ -1229,6 +1229,20 @@ post_local_owner_grant \
   local-operator-public-ingress-notification-policy
 post_local_owner_grant \
   local-operator \
+  launchplane \
+  reon-prod \
+  ingress_route.plan \
+  deploy:local-operator-ingress-route-plan-grant \
+  local-operator-ingress-route-plan
+post_local_owner_grant \
+  local-operator \
+  launchplane \
+  reon-prod \
+  ingress_route.apply \
+  deploy:local-operator-ingress-route-apply-grant \
+  local-operator-ingress-route-apply
+post_local_owner_grant \
+  local-operator \
   "*" \
   "*" \
   product_config.plan \
