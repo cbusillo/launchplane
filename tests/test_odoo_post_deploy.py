@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooAddonSettingOverride,
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
@@ -231,6 +232,83 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             )
             self.assertNotIn("website_bootstrap", decoded_payload)
             self.assertTrue(captured_runs[0]["run_destructive_restore"])
+
+    def test_execute_applies_deploy_phase_addon_overrides_during_restore_phase(self) -> None:
+        captured_runs: list[dict[str, object]] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
+                    apply_on=("deploy",),
+                    addon_settings=(
+                        OdooAddonSettingOverride(
+                            addon="openai",
+                            setting="api_key",
+                            value=OdooOverrideValue(
+                                source="secret_binding",
+                                secret_binding_id="secret-opw-testing-openai",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-04-26T12:00:00Z",
+                    source_label="test",
+                )
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=self._source_of_truth(),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                ),
+            ):
+                result = execute_odoo_post_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=OdooPostDeployRequest(
+                        context="opw", instance="testing", phase="restore"
+                    ),
+                    run_destructive_restore=True,
+                )
+
+            self.assertEqual(result.post_deploy_status, "pass")
+            self.assertEqual(result.override_status, "pass")
+            workflow_environment = cast(
+                "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
+            )
+            decoded_payload = json.loads(
+                base64.b64decode(
+                    workflow_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]
+                ).decode("utf-8")
+            )
+            self.assertEqual(
+                decoded_payload["addon_settings"],
+                [
+                    {
+                        "addon": "openai",
+                        "setting": "api_key",
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "secret-opw-testing-openai",
+                            "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",
+                        },
+                    }
+                ],
+            )
+            self.assertEqual(
+                captured_runs[0]["required_workflow_environment_keys"],
+                ("ODOO_OVERRIDE_SECRET__ADDON__OPENAI__API_KEY",),
+            )
 
 
 if __name__ == "__main__":

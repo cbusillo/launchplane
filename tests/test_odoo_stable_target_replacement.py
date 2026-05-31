@@ -65,6 +65,7 @@ class _Store:
         }
         self.deployment_records: list[DeploymentRecord] = []
         self.environment_inventories: list[EnvironmentInventory] = []
+        self.release_tuples: list[object] = []
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -102,6 +103,9 @@ class _Store:
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
+
+    def write_release_tuple_record(self, record: object) -> None:
+        self.release_tuples.append(record)
 
 
 def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
@@ -228,7 +232,7 @@ def _inventory() -> EnvironmentInventory:
         context="cm",
         instance="testing",
         artifact_identity=ArtifactIdentityReference(artifact_id="artifact-cm-testing"),
-        source_git_ref="abc123",
+        source_git_ref="abc1234",
         deploy=DeploymentEvidence(
             status="pass",
             target_type="compose",
@@ -243,7 +247,7 @@ def _inventory() -> EnvironmentInventory:
 def _artifact_manifest(
     *,
     artifact_id: str = "artifact-cm-testing",
-    source_commit: str = "abc123",
+    source_commit: str = "abc1234",
     digest: str = "sha256:artifact",
 ) -> ArtifactIdentityManifest:
     return ArtifactIdentityManifest(
@@ -577,33 +581,34 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         persisted_env = ""
         persisted_compose_file = "services: {}"
         domain_records: list[JsonValue] = []
-        deployment_records: list[JsonValue] = [
-            {"deploymentId": "deploy-123", "status": "success"}
-        ]
+        deployment_records: list[JsonValue] = [{"deploymentId": "deploy-123", "status": "success"}]
         route_name = control_plane_dokploy._traefik_route_name(
             domain_host="cm-testing.shinycomputers.com"
         )
 
         def _fetch_target_payload(**_: object) -> JsonValue:
-            return cast(JsonObject, {
-                "name": "cm-testing",
-                "appName": "cm-testing",
-                "composeStatus": "done",
-                "composeType": "docker-compose",
-                "sourceType": "raw",
-                "serverId": "server-1",
-                "composePath": "docker-compose.yml",
-                "composeFile": persisted_compose_file,
-                "deployments": deployment_records,
-                "env": persisted_env
-                or "\n".join(
-                    (
-                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
-                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
-                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
-                    )
-                ),
-            })
+            return cast(
+                JsonObject,
+                {
+                    "name": "cm-testing",
+                    "appName": "cm-testing",
+                    "composeStatus": "done",
+                    "composeType": "docker-compose",
+                    "sourceType": "raw",
+                    "serverId": "server-1",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": persisted_compose_file,
+                    "deployments": deployment_records,
+                    "env": persisted_env
+                    or "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            )
 
         def _dokploy_request(path: str, query: object | None = None, **kwargs: object) -> JsonValue:
             if path == "/api/domain.byComposeId" and domain_records:
@@ -851,9 +856,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ],
             "true",
         )
-        self.assertEqual(
-            final_deployment.runtime_source["post_deploy_container_web_found"], "true"
-        )
+        self.assertEqual(final_deployment.runtime_source["post_deploy_container_web_found"], "true")
         self.assertEqual(
             final_deployment.runtime_source["post_deploy_container_server_id_present"],
             "true",
@@ -891,7 +894,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_apply_can_deploy_explicit_stored_artifact(self) -> None:
         fresh_manifest = _artifact_manifest(
             artifact_id="artifact-cm-fresh",
-            source_commit="fresh-sha",
+            source_commit="feed123",
             digest="sha256:fresh",
         )
         store = _Store(
@@ -984,7 +987,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     instance="testing",
                     artifact_id="artifact-cm-fresh",
-                    source_git_ref="fresh-sha",
+                    source_git_ref="feed123",
                 ),
                 dokploy_request=cast(DokployRequest, _request),
             )
@@ -997,20 +1000,24 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertIn("LAUNCHPLANE_ARTIFACT_ID=artifact-cm-fresh", persisted_env)
         final_deployment = store.deployment_records[-1]
-        self.assertEqual(final_deployment.source_git_ref, "fresh-sha")
+        self.assertEqual(final_deployment.source_git_ref, "feed123")
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
-        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "fresh-sha")
+        self.assertEqual(final_deployment.runtime_identity.source_git_ref, "feed123")
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
 
     def test_apply_requests_destructive_restore_for_upstream_restore_mode(self) -> None:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         manifest = _artifact_manifest(
             artifact_id="artifact-opw-testing",
-            source_commit="opw-sha",
+            source_commit="0f9a123",
             digest="sha256:opw",
         ).model_copy(
-            update={"image": ArtifactImageReference(repository="ghcr.io/cbusillo/odoo-tenant-opw", digest="sha256:opw")}
+            update={
+                "image": ArtifactImageReference(
+                    repository="ghcr.io/cbusillo/odoo-tenant-opw", digest="sha256:opw"
+                )
+            }
         )
         store = _Store(
             profile=profile,
@@ -1020,7 +1027,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 context="opw",
                 instance="prod",
                 artifact_identity=ArtifactIdentityReference(artifact_id="artifact-opw-testing"),
-                source_git_ref="opw-sha",
+                source_git_ref="0f9a123",
                 deploy=DeploymentEvidence(
                     status="pass",
                     target_type="compose",

@@ -103,7 +103,7 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
-  - `POST /v1/drivers/odoo/testing-deploy`
+  - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/post-deploy`
   - `POST /v1/drivers/odoo/config-parameter-override`
   - `POST /v1/drivers/odoo/website-bootstrap-override`
@@ -991,7 +991,7 @@ These use the same authn/authz boundary as evidence ingress:
 
 - `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/odoo/artifact-publish`
-- `POST /v1/drivers/odoo/testing-deploy`
+- `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
@@ -1005,7 +1005,7 @@ current handlers include:
 - `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/odoo/artifact-publish-inputs`
 - `POST /v1/drivers/odoo/artifact-publish`
-- `POST /v1/drivers/odoo/testing-deploy`
+- `POST /v1/drivers/odoo/target-replacement-apply`
 - `POST /v1/drivers/odoo/website-bootstrap-override`
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`

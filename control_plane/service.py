@@ -386,11 +386,6 @@ from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
     execute_odoo_stable_bootstrap,
 )
-from control_plane.workflows.odoo_testing_deploy import (
-    OdooTestingDeployRequest,
-    OdooTestingDeployStore,
-    execute_odoo_testing_deploy,
-)
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
@@ -1873,18 +1868,6 @@ class OdooProdRollbackEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class OdooTestingDeployEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    deploy: OdooTestingDeployRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooTestingDeployEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo testing deploy")
-        if self.deploy.instance != "testing":
-            raise ValueError("Odoo testing deploy requires instance 'testing'.")
-        return self
-
-
 class OdooProdBackupGateEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     backup_gate: OdooProdBackupGateRequest
@@ -1931,15 +1914,6 @@ _ODOO_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
     denial_message=(
         "Workflow cannot execute the Odoo prod backup-gate driver"
         " for the requested product/context."
-    ),
-)
-
-
-_ODOO_TESTING_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/testing-deploy",
-    envelope_model=OdooTestingDeployEnvelope,
-    denial_message=(
-        "Workflow cannot execute the Odoo testing deploy driver for the requested product/context."
     ),
 )
 
@@ -5233,8 +5207,8 @@ def _accepted_payload(
 
 
 def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
-    if route_path == _ODOO_TESTING_DEPLOY_ROUTE.route_path:
-        return frozenset({"deployment_status", "post_deploy_status", "destination_health_status"})
+    if route_path == _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path:
+        return frozenset({"deployment_record_id", "release_tuple_id"})
     if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
         return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
     return frozenset()
@@ -13273,51 +13247,6 @@ def create_launchplane_service_app(
                     product_profile=resolved_driver_context.profile,
                 )
                 driver_result = result
-            elif path == _ODOO_TESTING_DEPLOY_ROUTE.route_path:
-                odoo_deploy_request = _ODOO_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(
-                    payload
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_TESTING_DEPLOY_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_deploy_request.product,
-                    authorization_context=odoo_deploy_request.deploy.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    descriptor_context=odoo_deploy_request.deploy.context,
-                    descriptor_instance=odoo_deploy_request.deploy.instance,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_testing_deploy(
-                    control_plane_root=resolved_root,
-                    state_dir=state_dir,
-                    database_url=database_url,
-                    record_store=cast(OdooTestingDeployStore, record_store),
-                    request=odoo_deploy_request.deploy.model_copy(
-                        update={"product": odoo_deploy_request.product}
-                    ),
-                )
-                result = {
-                    "deployment_record_id": driver_result.deployment_record_id,
-                    "release_tuple_id": driver_result.release_tuple_id,
-                    "deployment_status": driver_result.deployment_status,
-                    "post_deploy_status": driver_result.post_deploy_status,
-                    "destination_health_status": driver_result.destination_health_status,
-                }
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
                 odoo_backup_gate_request = (
                     _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
@@ -13673,6 +13602,13 @@ def create_launchplane_service_app(
                     result = {
                         "odoo_stable_target_replacement_operation_id": replacement_operation.operation_id
                     }
+                    if replacement_operation.deployment_record_id:
+                        result["deployment_record_id"] = replacement_operation.deployment_record_id
+                    if (
+                        replacement_operation.result is not None
+                        and replacement_operation.result.release_tuple_id
+                    ):
+                        result["release_tuple_id"] = replacement_operation.result.release_tuple_id
             elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
                 verireel_testing_deploy_request = (
                     _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
