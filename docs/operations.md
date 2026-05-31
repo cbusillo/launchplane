@@ -613,7 +613,12 @@ context only, and `context_instance` has both context and instance.
 - `POST /v1/drivers/odoo/post-deploy` is the first Launchplane-owned Odoo
   driver route. It executes the remote compose post-deploy data-workflow runner
   for a stable Odoo target and applies DB-backed instance override records when
-  the requested phase matches `apply_on`.
+  the requested phase matches `apply_on`. Routine post-deploy runs use the
+  devkit post-deploy maintenance mode: update addons, apply typed Launchplane
+  settings and website bootstrap payloads, normalize the configured admin user,
+  and re-provision derived Odoo service-user API keys. Full database
+  sanitization such as disabling mail servers and cron remains tied to explicit
+  restore/bootstrap workflows, not ordinary prod image deploys.
 - `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
   the DB-backed `testing` release tuple for the same context. The driver updates
   the Dokploy `DOCKER_IMAGE_REFERENCE`, deploys the compose target, runs the
@@ -649,6 +654,11 @@ context only, and `context_instance` has both context and instance.
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to the Odoo data-workflow runner as one typed payload env var.
+- Target replacement requests with `data_source_mode="upstream_restore"` use the
+  guarded post-deploy schedule in destructive restore mode after image deploy so
+  the devkit restore path performs restore sanitization, website bootstrap,
+  admin normalization, and service-user API-key replacement before readiness
+  verification.
 - Launchplane passes one typed payload to the Odoo settings apply path; legacy
   `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
   settings contract.

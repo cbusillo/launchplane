@@ -148,6 +148,7 @@ def execute_odoo_post_deploy(
     record_store: object,
     request: OdooPostDeployRequest,
     env_file: Path | None = None,
+    run_destructive_restore: bool = False,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -212,6 +213,7 @@ def execute_odoo_post_deploy(
             workflow_environment_overrides=workflow_environment_overrides,
             required_workflow_environment_keys=required_workflow_environment_keys,
             protected_shopify_store_keys=protected_shopify_store_keys,
+            run_destructive_restore=run_destructive_restore,
         )
     except click.ClickException as error:
         if odoo_override_record is not None and override_phase_enabled:
