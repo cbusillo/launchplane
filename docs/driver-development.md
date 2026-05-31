@@ -161,10 +161,13 @@ The service-backed ingress route is `POST /v1/drivers/ingress/route-apply`.
 Callers send a product/context envelope plus a typed route request. `mode` is
 `dry-run` by default for CLI callers; `apply` must be explicit. The route uses
 `ingress_route.plan` for dry-run authorization and `ingress_route.apply` for
-provider mutation authorization. The service constructs the NPMplus client from
-environment keys named `LAUNCHPLANE_NPMPLUS_BASE_URL`,
+provider mutation authorization. The service resolves an ingress provider
+adapter for route execution; the default provider is NPMplus. The default
+provider constructs its client from environment keys named `LAUNCHPLANE_NPMPLUS_BASE_URL`,
 `LAUNCHPLANE_NPMPLUS_IDENTITY`, and `LAUNCHPLANE_NPMPLUS_SECRET`; do not commit
 real values or local operator overrides.
+Ingress audit records must persist the adapter's provider identity explicitly;
+do not rely on a provider-specific model default for operator evidence.
 
 The matching CLI entrypoint is service-mediated:
 
