@@ -47,6 +47,7 @@ def run_break_glass_rollback() -> dict[str, Any]:
     target_type = _required_env("LAUNCHPLANE_DOKPLOY_TARGET_TYPE")
     target_id = _required_env("LAUNCHPLANE_DOKPLOY_TARGET_ID")
     image_reference = _required_env("LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE")
+    rollback_reason = _required_env("LAUNCHPLANE_ROLLBACK_REASON")
     rollback_request_status = _required_env("LAUNCHPLANE_ROLLBACK_REQUEST_STATUS")
     deploy_timeout_seconds = _deploy_timeout_seconds()
 
@@ -98,7 +99,7 @@ def run_break_glass_rollback() -> dict[str, Any]:
         "schema_version": 1,
         "event": "launchplane_break_glass_rollback",
         "fallback_kind": "direct_dokploy",
-        "reason": "Launchplane self-deploy rollback service request failed.",
+        "reason": rollback_reason,
         "service_rollback_http_status": rollback_request_status,
         "target_type": target_type,
         "target_id": target_id,

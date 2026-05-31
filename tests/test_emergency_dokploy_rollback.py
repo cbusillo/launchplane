@@ -34,6 +34,7 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
             "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": "compose",
             "LAUNCHPLANE_DOKPLOY_TARGET_ID": "target-1",
             "LAUNCHPLANE_ROLLBACK_IMAGE_REFERENCE": "ghcr.io/example/launchplane@sha256:old",
+            "LAUNCHPLANE_ROLLBACK_REASON": "Restore the last known-good Launchplane image.",
             "LAUNCHPLANE_ROLLBACK_REQUEST_STATUS": "503",
             "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": "12",
         }
@@ -70,6 +71,7 @@ class EmergencyDokployRollbackTests(unittest.TestCase):
         self.assertEqual(evidence["schema_version"], 1)
         self.assertEqual(evidence["event"], "launchplane_break_glass_rollback")
         self.assertEqual(evidence["fallback_kind"], "direct_dokploy")
+        self.assertEqual(evidence["reason"], "Restore the last known-good Launchplane image.")
         self.assertEqual(evidence["service_rollback_http_status"], "503")
         self.assertEqual(evidence["target_type"], "compose")
         self.assertEqual(evidence["target_id"], "target-1")

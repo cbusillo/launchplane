@@ -559,7 +559,10 @@ class ProductOnboardingTests(unittest.TestCase):
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
         self.assertIn("LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK=true", workflow_text)
+        self.assertIn("break_glass_image_reference is required", workflow_text)
+        self.assertIn("break_glass_reason is required", workflow_text)
         self.assertIn("scripts/deploy/emergency-dokploy-rollback.py", workflow_text)
+        self.assertIn("LAUNCHPLANE_ROLLBACK_REASON", workflow_text)
         self.assertNotIn(
             "from control_plane import dokploy as control_plane_dokploy", workflow_text
         )
