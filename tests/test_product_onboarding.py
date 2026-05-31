@@ -420,6 +420,23 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
 
+    def test_deploy_launchplane_break_glass_rollback_uploads_evidence(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn("LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK=true", workflow_text)
+        self.assertIn("scripts/deploy/emergency-dokploy-rollback.py", workflow_text)
+        self.assertNotIn("from control_plane import dokploy as control_plane_dokploy", workflow_text)
+        self.assertIn("inputs.break_glass_confirm == ''", workflow_text)
+        self.assertIn(
+            "inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'",
+            workflow_text,
+        )
+        self.assertIn("launchplane-break-glass-rollback.json", workflow_text)
+        self.assertIn("name: launchplane-break-glass-rollback", workflow_text)
+        self.assertIn("uses: actions/upload-artifact@v7", workflow_text)
+        self.assertIn("Evidence artifact: launchplane-break-glass-rollback", workflow_text)
+        self.assertIn("manual break-glass only", workflow_text)
+
     def test_deploy_authz_grants_seed_local_admin_self_deploy_authority(self) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
