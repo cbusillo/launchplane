@@ -223,6 +223,30 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
                 request=_request(expected_host_id=79),
             )
 
+    def test_rejects_expected_host_id_when_exact_domains_are_required(self) -> None:
+        client = _FakeNpmplusClient(
+            (
+                _proxy_host(
+                    id=78, domain_names=["ingress-canary.example.test", "other.example.test"]
+                ),
+            )
+        )
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(
+                client=client,
+                request=_request(
+                    expected_host_id=78,
+                    require_exact_expected_host_domains=True,
+                ),
+            )
+
+        self.assertEqual(client.calls, ["list"])
+
+    def test_requires_expected_host_id_for_exact_domain_guard(self) -> None:
+        with self.assertRaises(ValueError):
+            _request(require_exact_expected_host_domains=True)
+
     def test_rejects_create_when_disallowed(self) -> None:
         client = _FakeNpmplusClient()
 

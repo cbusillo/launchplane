@@ -82,6 +82,11 @@ from control_plane.contracts.generic_web_rollback import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+    build_ingress_route_audit_record_id,
+)
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -264,6 +269,7 @@ from control_plane.work_graph_http import (
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressClient,
+    NpmplusIngressApplyResult,
     apply_npmplus_ingress_route,
 )
 from control_plane.merge_train import MergeTrainDryRunResult
@@ -749,6 +755,16 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
+
+    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
+
+    def list_ingress_route_audit_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressRouteAuditRecord, ...]: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -5167,6 +5183,7 @@ def _accepted_payload(
         "runner_host_hygiene_audit_record_key",
         "generic_web_rollback_plan_id",
         "public_ingress_notification_policy_id",
+        "ingress_route_audit_record_id",
     }
     accepted_record_keys = record_keys | extra_record_keys
     records: dict[str, object] = {}
@@ -5852,6 +5869,92 @@ def _should_store_idempotency_record(
     if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
         return not _driver_result_contains_status(driver_result, "pending")
     return True
+
+
+def _write_ingress_route_audit_record(
+    *,
+    record_store: object,
+    trace_id: str,
+    product: str,
+    context: str,
+    request: NpmplusIngressApplyRequest,
+    result: NpmplusIngressApplyResult,
+    idempotency_key: str,
+) -> IngressRouteAuditRecord:
+    write_record = getattr(record_store, "write_ingress_route_audit_record", None)
+    if not callable(write_record):
+        raise RuntimeError("Ingress route audit record storage is unavailable")
+    provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
+    record = IngressRouteAuditRecord(
+        record_id=build_ingress_route_audit_record_id(
+            trace_id=trace_id,
+            product=product,
+            context=context,
+            domains=request.route.domain_names,
+        ),
+        product=product,
+        context=context,
+        mode=request.mode,
+        status=result.status,
+        dry_run=result.dry_run,
+        requested_domains=request.route.domain_names,
+        expected_host_id=request.expected_host_id,
+        provider_host_id=provider_host_id,
+        operations=tuple(
+            IngressRouteAuditOperation.model_validate(operation.model_dump(mode="json"))
+            for operation in result.operations
+        ),
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        reason=request.reason,
+        recorded_at=_utc_now_timestamp(),
+    )
+    write_record(record)
+    return record
+
+
+def _write_ingress_route_pending_audit_record(
+    *,
+    record_store: object,
+    trace_id: str,
+    product: str,
+    context: str,
+    request: NpmplusIngressApplyRequest,
+    idempotency_key: str,
+) -> IngressRouteAuditRecord:
+    write_record = getattr(record_store, "write_ingress_route_audit_record", None)
+    if not callable(write_record):
+        raise RuntimeError("Ingress route audit record storage is unavailable")
+    record = IngressRouteAuditRecord(
+        record_id=build_ingress_route_audit_record_id(
+            trace_id=trace_id,
+            product=product,
+            context=context,
+            domains=request.route.domain_names,
+        ),
+        product=product,
+        context=context,
+        mode=request.mode,
+        status="pending",
+        dry_run=request.mode == "dry-run",
+        requested_domains=request.route.domain_names,
+        expected_host_id=request.expected_host_id,
+        provider_host_id=None,
+        operations=(
+            IngressRouteAuditOperation(
+                action="pending",
+                host_id=None,
+                domain_names=request.route.domain_names,
+                requires_apply=request.mode == "apply",
+            ),
+        ),
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        reason=request.reason,
+        recorded_at=_utc_now_timestamp(),
+    )
+    write_record(record)
+    return record
 
 
 def _driver_result_has_completed_deploy_with_post_deploy_failure(
@@ -11004,15 +11107,33 @@ def create_launchplane_service_app(
                     )
                     if idempotent_response is not None:
                         return idempotent_response
+                    _write_ingress_route_pending_audit_record(
+                        record_store=record_store,
+                        trace_id=request_trace_id,
+                        product=ingress_request.product,
+                        context=ingress_request.context,
+                        request=ingress_request.ingress,
+                        idempotency_key=request_idempotency_key,
+                    )
                 ingress_result = apply_npmplus_ingress_route(
                     client=resolved_npmplus_ingress_client_factory(),
                     request=ingress_request.ingress,
+                )
+                ingress_audit_record = _write_ingress_route_audit_record(
+                    record_store=record_store,
+                    trace_id=request_trace_id,
+                    product=ingress_request.product,
+                    context=ingress_request.context,
+                    request=ingress_request.ingress,
+                    result=ingress_result,
+                    idempotency_key=request_idempotency_key,
                 )
                 result = {
                     "ingress_provider": "npmplus",
                     "ingress_status": ingress_result.status,
                     "ingress_dry_run": ingress_result.dry_run,
                 }
+                result["ingress_route_audit_record_id"] = ingress_audit_record.record_id
                 driver_result = ingress_result
             elif path == "/v1/products/public-ingress-monitor/run-once":
                 monitor_request = PublicIngressMonitorRunOnceEnvelope.model_validate(payload)

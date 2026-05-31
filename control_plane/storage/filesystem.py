@@ -22,6 +22,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -561,6 +562,30 @@ class FilesystemRecordStore:
         return self._write_model(
             "launchplane_public_ingress_observations", record.record_id, record
         )
+
+    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> Path:
+        return self._write_model("launchplane_ingress_route_audits", record.record_id, record)
+
+    def list_ingress_route_audit_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressRouteAuditRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                IngressRouteAuditRecord,
+                "launchplane_ingress_route_audits",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_public_ingress_observation_records(
         self,

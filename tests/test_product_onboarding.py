@@ -264,12 +264,15 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
-        self.assertIn("mode: \"apply\"", workflow_text)
+        self.assertIn('mode: "apply"', workflow_text)
         self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
-        self.assertIn('CONFIRMATION: ${{ inputs.confirmation }}', workflow_text)
-        self.assertIn('apply ingress canary', workflow_text)
+        self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
+        self.assertIn("apply ingress canary", workflow_text)
         self.assertIn("CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}", workflow_text)
-        self.assertIn("CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}", workflow_text)
+        self.assertIn(
+            "CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}", workflow_text
+        )
+        self.assertIn("require_exact_expected_host_domains: true", workflow_text)
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertNotIn("      domain:", inputs_section)
         self.assertNotIn("      expected_host_id:", inputs_section)

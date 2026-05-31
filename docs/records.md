@@ -143,6 +143,14 @@ an ORM column/table or remains only in the evidence payload.
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
   operator message. Host-command output, Docker summaries, and rollout notes stay
   payload-only until they need queryable operational views.
+- Ingress route audit: modeled fields are `record_id`, `product`, `context`,
+  `mode`, `status`, `provider_host_id`, and `recorded_at`. The payload carries
+  the typed requested domains, expected provider host id, dry-run/apply mode,
+  plan operations, trace id, idempotency key, and operator reason. Provider
+  payload details and comparison evidence stay payload-only until route
+  ownership gets a broader operator UI. Apply requests first write a `pending`
+  audit intent before provider mutation and then replace it with the final
+  `applied` or `unchanged` outcome.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

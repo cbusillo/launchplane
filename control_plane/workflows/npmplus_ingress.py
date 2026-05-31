@@ -69,6 +69,7 @@ class NpmplusIngressApplyRequest(BaseModel):
     mode: NpmplusIngressMode = "dry-run"
     route: NpmplusIngressRouteDesiredState
     expected_host_id: int | None = Field(default=None, ge=1)
+    require_exact_expected_host_domains: bool = False
     allow_create: bool = True
     allow_update: bool = True
     allow_enable_disable: bool = True
@@ -80,6 +81,10 @@ class NpmplusIngressApplyRequest(BaseModel):
             raise ValueError("Unsupported NPMplus ingress apply schema version")
         if not self.reason.strip():
             raise ValueError("NPMplus ingress apply requests require a reason")
+        if self.require_exact_expected_host_domains and self.expected_host_id is None:
+            raise ValueError(
+                "NPMplus ingress exact expected-host domain checks require expected_host_id"
+            )
         return self
 
 
@@ -111,6 +116,7 @@ def apply_npmplus_ingress_route(
         client.list_proxy_hosts(),
         domain_names=desired_payload.domain_names,
         expected_host_id=request.expected_host_id,
+        require_exact_expected_host_domains=request.require_exact_expected_host_domains,
     )
     operations = _plan_operations(
         existing_host=existing_host,
@@ -163,11 +169,16 @@ def find_npmplus_proxy_host_by_domains(
     *,
     domain_names: tuple[str, ...],
     expected_host_id: int | None = None,
+    require_exact_expected_host_domains: bool = False,
 ) -> NpmplusProxyHost | None:
     desired_domains = set(_normalize_domains(domain_names))
     domain_matches = tuple(
         host for host in proxy_hosts if desired_domains.intersection(host.domain_names)
     )
+    if require_exact_expected_host_domains and expected_host_id is None:
+        raise click.ClickException(
+            "Exact NPMplus expected-host domain checks require expected_host_id."
+        )
     if expected_host_id is not None:
         expected_matches = tuple(host for host in proxy_hosts if host.id == expected_host_id)
         if not expected_matches:
@@ -181,6 +192,16 @@ def find_npmplus_proxy_host_by_domains(
             raise click.ClickException(
                 f"Expected NPMplus proxy host {expected_host_id} domains "
                 f"({expected_domains}) do not match requested domains ({desired_domain_list})."
+            )
+        if require_exact_expected_host_domains and desired_domains != set(
+            expected_host.domain_names
+        ):
+            expected_domains = ", ".join(expected_host.domain_names)
+            desired_domain_list = ", ".join(sorted(desired_domains))
+            raise click.ClickException(
+                f"Expected NPMplus proxy host {expected_host_id} domains "
+                f"({expected_domains}) must exactly match requested domains "
+                f"({desired_domain_list})."
             )
         mismatched_domain_matches = tuple(
             host for host in domain_matches if host.id != expected_host_id
