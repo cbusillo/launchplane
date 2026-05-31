@@ -20034,6 +20034,148 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_self_deploy_endpoint_removes_requested_oauth_env_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "env": "DOCKER_IMAGE_REFERENCE=old\n"
+                        "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
+                        "LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com\n"
+                        "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
+                    },
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch("control_plane.service.control_plane_dokploy.trigger_deployment"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/launchplane/self-deploy",
+                    payload={
+                        "product": "launchplane",
+                        "deploy": {
+                            "target_type": "compose",
+                            "target_id": "compose-123",
+                            "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                            "oauth_env_removals": [
+                                "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                                "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                                "LAUNCHPLANE_NPMPLUS_SECRET",
+                            ],
+                        },
+                    },
+                    headers={"Idempotency-Key": "launchplane-self-deploy:remove-oauth-env"},
+                )
+
+        self.assertEqual(status_code, 202)
+        removed_keys = str(payload["records"]["oauth_env_keys_removed"])
+        self.assertIn("LAUNCHPLANE_NPMPLUS_BASE_URL", removed_keys)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_IDENTITY", removed_keys)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_SECRET", removed_keys)
+        update_env_mock.assert_called_once()
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new",
+            updated_env_text,
+        )
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_BASE_URL=", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_IDENTITY=", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET=", updated_env_text)
+
+    def test_self_deploy_endpoint_rejects_remove_and_update_same_oauth_env_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/launchplane/self-deploy",
+                payload={
+                    "product": "launchplane",
+                    "deploy": {
+                        "target_type": "compose",
+                        "target_id": "compose-123",
+                        "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                        "oauth_env": {
+                            "LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example"
+                        },
+                        "oauth_env_removals": ["LAUNCHPLANE_NPMPLUS_BASE_URL"],
+                    },
+                },
+                headers={"Idempotency-Key": "launchplane-self-deploy:bad-removal"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
     def test_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
