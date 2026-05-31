@@ -238,7 +238,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
-            ),
+            ) as raw_compose_sync,
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
             ),
@@ -273,6 +273,10 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.rollback_health_status, "pass")
         self.assertEqual(result.post_deploy_status, "pass")
         self.assertEqual(result.artifact_id, "artifact-opw-847c71c1db61785c")
+        self.assertIn(
+            "Host(`opw-prod.shinycomputers.com`)",
+            raw_compose_sync.call_args.kwargs["compose_file"],
+        )
         record_store.write_deployment_record.assert_called()
         record_store.write_environment_inventory.assert_called_once()
         record_store.write_release_tuple_record.assert_called_once()

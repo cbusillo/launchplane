@@ -506,6 +506,22 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
                 ) as raw_compose_sync,
                 patch(
+                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=control_plane_dokploy.DokploySourceOfTruth(
+                        schema_version=1,
+                        targets=(
+                            control_plane_dokploy.DokployTargetDefinition(
+                                context="opw",
+                                instance="prod",
+                                target_type="compose",
+                                target_id="compose-123",
+                                target_name="opw-prod",
+                                domains=("opw-prod.shinycomputers.com",),
+                            ),
+                        )
+                    ),
+                ),
+                patch(
                     "control_plane.dokploy.update_dokploy_target_env",
                     side_effect=lambda **kwargs: captured_update.update(kwargs),
                 ),
@@ -519,6 +535,10 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 )
 
         raw_compose_sync.assert_called_once()
+        self.assertIn(
+            "Host(`opw-prod.shinycomputers.com`)",
+            raw_compose_sync.call_args.kwargs["compose_file"],
+        )
         self.assertEqual(captured_update["target_type"], "compose")
         self.assertEqual(captured_update["target_id"], "compose-123")
         self.assertIn(
@@ -628,6 +648,22 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 patch(
                     "control_plane.dokploy.sync_dokploy_compose_raw_source",
                     return_value={"source_type": "raw", "compose_sha256": "abc123"},
+                ),
+                patch(
+                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=control_plane_dokploy.DokploySourceOfTruth(
+                        schema_version=1,
+                        targets=(
+                            control_plane_dokploy.DokployTargetDefinition(
+                                context="cm",
+                                instance="testing",
+                                target_type="compose",
+                                target_id="compose-123",
+                                target_name="cm-testing",
+                                domains=("cm-testing.shinycomputers.com",),
+                            ),
+                        )
+                    ),
                 ),
                 patch(
                     "control_plane.dokploy.update_dokploy_target_env",

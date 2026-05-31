@@ -408,7 +408,8 @@ def _sync_artifact_image_reference_for_target(
     desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
     if target_definition.target_type == "compose":
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference=desired_image_reference
+            image_reference=desired_image_reference,
+            domain_hosts=target_definition.domains,
         )
         control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,

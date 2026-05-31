@@ -2329,8 +2329,38 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("dokploy-network:", compose_file)
         self.assertIn("traefik.enable=true", compose_file)
         self.assertIn("traefik.docker.network=dokploy-network", compose_file)
-        self.assertNotIn("traefik.http.routers", compose_file)
-        self.assertNotIn("traefik.http.services", compose_file)
+        self.assertIn(
+            'traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.rule=Host(`cm-testing.shinycomputers.com`)',
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.entrypoints=web",
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.services.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.loadbalancer.server.port=8069",
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.middlewares=redirect-to-https@file",
+            compose_file,
+        )
+        self.assertIn(
+            'traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.rule=Host(`cm-testing.shinycomputers.com`)',
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.entrypoints=websecure",
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.tls=true",
+            compose_file,
+        )
+        self.assertIn(
+            "traefik.http.services.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.loadbalancer.server.port=8069",
+            compose_file,
+        )
 
     def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
@@ -2338,7 +2368,28 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
 
         self.assertNotIn("traefik.http.routers", compose_file)
+        self.assertNotIn("traefik.http.services", compose_file)
+        self.assertNotIn("traefik.enable=true", compose_file)
         self.assertIn("dokploy-network:", compose_file)
+
+    def test_render_odoo_raw_compose_file_normalizes_and_dedupes_domain_labels(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            domain_hosts=(
+                " CM-Testing.shinycomputers.com ",
+                "cm-testing.shinycomputers.com",
+            ),
+            runtime_port=8069,
+        )
+
+        self.assertEqual(compose_file.count("Host(`cm-testing.shinycomputers.com`)"), 2)
+
+    def test_render_odoo_raw_compose_file_rejects_invalid_domain_label_host(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "invalid domain host"):
+            control_plane_dokploy.render_odoo_raw_compose_file(
+                image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                domain_hosts=("bad`host.example",),
+            )
 
     def test_render_odoo_raw_compose_file_can_avoid_host_port_publishing(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
@@ -2350,8 +2401,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertNotIn("ODOO_WEB_HOST_PORT", compose_file)
         self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", compose_file)
         self.assertIn("traefik.enable=true", compose_file)
-        self.assertNotIn("traefik.http.routers", compose_file)
-        self.assertNotIn("traefik.http.services", compose_file)
+        self.assertIn("traefik.http.routers", compose_file)
+        self.assertIn("traefik.http.services", compose_file)
 
     def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
