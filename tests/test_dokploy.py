@@ -2063,6 +2063,7 @@ domains = ["cm-testing.shinycomputers.com"]
             context="opw", instance="testing", target_id="compose-123", target_name="opw-testing"
         )
         schedule_payloads: list[dict[str, object]] = []
+        updated_env_payloads: list[str] = []
 
         def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
             schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
@@ -2072,10 +2073,22 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.fetch_dokploy_target_payload",
                 return_value={
-                    "env": "ODOO_DB_NAME=opw_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "env": (
+                        "ODOO_DB_NAME=opw_testing\n"
+                        "ODOO_FILESTORE_PATH=/volumes/data/filestore\n"
+                        "ODOO_UPSTREAM_HOST=source.example.com\n"
+                        "ODOO_UPSTREAM_USER=root\n"
+                        "ODOO_UPSTREAM_DB_NAME=upstream\n"
+                        "ODOO_UPSTREAM_DB_USER=odoo\n"
+                        "ODOO_UPSTREAM_FILESTORE_PATH=/volumes/data/filestore/upstream\n"
+                    ),
                     "appName": "opw-testing-app",
                     "serverId": "server-123",
                 },
+            ),
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: updated_env_payloads.append(str(kwargs["env_text"])),
             ),
             patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
             patch(
@@ -2104,10 +2117,45 @@ domains = ["cm-testing.shinycomputers.com"]
             )
 
         self.assertEqual(len(schedule_payloads), 1)
+        self.assertEqual(len(updated_env_payloads), 0)
         script = str(schedule_payloads[0]["script"])
         self.assertIn("workflow_arguments=()", script)
         self.assertIn("Running Odoo restore", script)
         self.assertNotIn("--post-deploy-maintenance", script)
+        self.assertIn("workflow_environment+=(-e ODOO_UPSTREAM_HOST=source.example.com)", script)
+        self.assertIn("workflow_environment+=(-e ODOO_UPSTREAM_DB_NAME=upstream)", script)
+        self.assertIn(
+            "required_workflow_environment_keys+=(ODOO_UPSTREAM_FILESTORE_PATH)",
+            script,
+        )
+
+    def test_run_compose_post_deploy_update_rejects_restore_without_upstream_source(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="testing", target_id="compose-123", target_name="opw-testing"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-testing-app",
+                    "serverId": "server-123",
+                },
+            ),
+            self.assertRaises(click.ClickException) as raised_error,
+        ):
+            control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+                run_destructive_restore=True,
+            )
+
+        self.assertIn("ODOO_UPSTREAM_HOST", str(raised_error.exception))
 
     def test_run_compose_post_deploy_update_requires_database_name(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(
@@ -2385,7 +2433,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("traefik.enable=true", compose_file)
         self.assertIn("traefik.docker.network=dokploy-network", compose_file)
         self.assertIn(
-            'traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.rule=Host(`cm-testing.shinycomputers.com`)',
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-web.rule=Host(`cm-testing.shinycomputers.com`)",
             compose_file,
         )
         self.assertIn(
@@ -2401,7 +2449,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             compose_file,
         )
         self.assertIn(
-            'traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.rule=Host(`cm-testing.shinycomputers.com`)',
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-c93dcbe8-websecure.rule=Host(`cm-testing.shinycomputers.com`)",
             compose_file,
         )
         self.assertIn(
