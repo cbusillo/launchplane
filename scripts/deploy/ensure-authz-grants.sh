@@ -197,6 +197,55 @@ post_local_owner_grant() {
   return 1
 }
 
+local_operator_product_config_scopes_json() {
+  if [ -n "${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON:-}" ]; then
+    jq -c \
+      'if type != "array" then error("LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON must be a JSON array") else . end
+       | map({product: (.product // ""), context: (.context // "")})
+       | map(select((.product | length) > 0 and (.context | length) > 0))
+       | unique_by(.product, .context)' \
+      <<<"${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON}"
+    return 0
+  fi
+
+  jq -c \
+    '[.imports[]
+      | .manifest as $manifest
+      | select(($manifest.product // "") != "")
+      | ($manifest.lanes // [])[]?
+      | select((.context // "") != "")
+      | {product: $manifest.product, context: .context}]
+     | unique_by(.product, .context)' \
+    import-material/launchplane/seed-imports/catalog.json
+}
+
+post_local_operator_product_config_grants() {
+  local action_name="$1"
+  local source_label_prefix="$2"
+  local idempotency_prefix="$3"
+  local scopes_json scope_count product_name context_name scope_suffix
+
+  scopes_json="$(local_operator_product_config_scopes_json)"
+  scope_count="$(jq 'length' <<<"$scopes_json")"
+  if [ "$scope_count" = "0" ]; then
+    echo "No local-operator product-config scopes configured; skipping ${action_name} grant."
+    return 0
+  fi
+
+  jq -c '.[]' <<<"$scopes_json" | while IFS= read -r scope_json; do
+    product_name="$(jq -r '.product' <<<"$scope_json")"
+    context_name="$(jq -r '.context' <<<"$scope_json")"
+    scope_suffix="$(printf '%s-%s' "$product_name" "$context_name" | tr -c '[:alnum:]_.-' '-')"
+    post_local_owner_grant \
+      local-operator \
+      "$product_name" \
+      "$context_name" \
+      "$action_name" \
+      "${source_label_prefix}-${scope_suffix}" \
+      "${idempotency_prefix}-${scope_suffix}"
+  done
+}
+
 post_product_config_human_grant() {
   local action_name="$1"
   local source_label="$2"
@@ -711,17 +760,11 @@ post_grant \
   ingress_route.apply \
   deploy:ingress-route-canary-apply-grant \
   ingress-route-canary-apply
-post_local_owner_grant \
-  local-operator \
-  "*" \
-  "*" \
+post_local_operator_product_config_grants \
   product_config.plan \
   deploy:local-operator-product-config-plan-grant \
   local-operator-product-config-plan
-post_local_owner_grant \
-  local-operator \
-  "*" \
-  "*" \
+post_local_operator_product_config_grants \
   product_config.apply \
   deploy:local-operator-product-config-apply-grant \
   local-operator-product-config-apply
