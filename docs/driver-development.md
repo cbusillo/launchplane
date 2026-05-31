@@ -178,6 +178,17 @@ an explicit `--idempotency-key`. The CLI accepts a bearer token from
 `LAUNCHPLANE_SERVICE_TOKEN` by default or a signed browser session via
 `--session-cookie`; it must not read NPMplus credentials locally.
 
+Ingress identity/access should be modeled separately from the edge data plane.
+Routes may carry a provider-neutral `identity_access` binding with
+`mode: "none"` or `mode: "forward-auth"`. The binding maps the existing NPMplus
+`anubis`, `tinyauth`, `authelia`, and `authentik` auth-request modes into a
+provider-neutral provider name. `send_basic_auth: true` is specific to
+Authentik and maps to NPMplus `authentik-send-basic-auth`, which forwards basic
+auth material through the Authentik integration for routes that intentionally
+need that mode. Keep Authentik instance placement, provider ids, app slugs, and
+private route evidence in private infra docs. Launchplane should consume only
+sanitized desired state and managed-secret references.
+
 Operators can also use the `Ingress Route Dry Run` GitHub workflow for a
 service-mediated canary plan through GitHub OIDC. The workflow accepts the
 product, context, domain, upstream target, existing certificate id, expected

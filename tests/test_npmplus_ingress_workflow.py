@@ -4,9 +4,11 @@ import click
 
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.workflows.npmplus_ingress import (
+    IngressIdentityAccessBinding,
     NpmplusIngressApplyRequest,
     NpmplusIngressRouteDesiredState,
     apply_npmplus_ingress_route,
+    identity_access_from_npmplus_auth_request,
 )
 
 
@@ -182,6 +184,71 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
         self.assertEqual(client.calls, ["list"])
+
+    def test_identity_access_binding_maps_authentik_forward_auth(self) -> None:
+        route = _desired_route(
+            identity_access={
+                "mode": "forward-auth",
+                "provider": "authentik",
+            }
+        )
+
+        payload = route.to_proxy_host_payload()
+
+        self.assertEqual(payload.npmplus_auth_request, "authentik")
+        self.assertEqual(
+            route.identity_access.provider if route.identity_access else "", "authentik"
+        )
+
+    def test_identity_access_binding_maps_authentik_basic_auth_forwarding(self) -> None:
+        route = _desired_route(
+            identity_access={
+                "mode": "forward-auth",
+                "provider": "authentik",
+                "send_basic_auth": True,
+            }
+        )
+
+        self.assertEqual(
+            route.to_proxy_host_payload().npmplus_auth_request,
+            "authentik-send-basic-auth",
+        )
+
+    def test_identity_access_binding_rejects_provider_without_forward_auth(self) -> None:
+        with self.assertRaises(ValueError):
+            IngressIdentityAccessBinding.model_validate({"mode": "none", "provider": "authentik"})
+
+    def test_identity_access_binding_rejects_npmplus_conflict(self) -> None:
+        with self.assertRaises(ValueError):
+            _desired_route(
+                npmplus_auth_request="authelia",
+                identity_access={"mode": "forward-auth", "provider": "authentik"},
+            )
+
+    def test_identity_access_binding_treats_legacy_none_as_unset(self) -> None:
+        route = _desired_route(
+            npmplus_auth_request="none",
+            identity_access={"mode": "forward-auth", "provider": "authentik"},
+        )
+
+        self.assertEqual(route.to_proxy_host_payload().npmplus_auth_request, "authentik")
+
+    def test_identity_access_can_be_derived_from_npmplus_authentik(self) -> None:
+        binding = identity_access_from_npmplus_auth_request("authentik-send-basic-auth")
+
+        self.assertEqual(binding.mode, "forward-auth")
+        self.assertEqual(binding.provider, "authentik")
+        self.assertTrue(binding.send_basic_auth)
+
+    def test_identity_access_round_trips_existing_npmplus_auth_request_modes(self) -> None:
+        for auth_request in ("anubis", "tinyauth", "authelia", "authentik"):
+            with self.subTest(auth_request=auth_request):
+                binding = identity_access_from_npmplus_auth_request(auth_request)
+
+                self.assertEqual(binding.mode, "forward-auth")
+                self.assertEqual(binding.provider, auth_request)
+                self.assertFalse(binding.send_basic_auth)
+                self.assertEqual(binding.to_npmplus_auth_request(), auth_request)
 
     def test_rejects_ambiguous_domain_matches(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(id=78), _proxy_host(id=79)))
