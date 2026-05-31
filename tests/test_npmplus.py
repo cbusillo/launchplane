@@ -3,6 +3,7 @@ import unittest
 from typing import cast
 from urllib.request import Request
 
+import click
 from pydantic import ValidationError
 
 from control_plane.npmplus import (
@@ -34,6 +35,8 @@ class _Response:
 class _Opener:
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, object | None]] = []
+        self.token_payload: object = {"expires": "2026-06-01T01:17:27.592Z"}
+        self.proxy_hosts_payload: object = [_proxy_host_payload(id=78)]
 
     def open(self, request: Request, timeout: int | float) -> _Response:
         body_bytes = cast(bytes | None, request.data)
@@ -44,14 +47,14 @@ class _Opener:
         method = request.get_method()
 
         if method == "POST" and path == "/api/tokens":
-            return _Response({"expires": "2026-06-01T01:17:27.592Z"})
+            return _Response(self.token_payload)
         if method == "POST" and path == "/api/nginx/proxy-hosts":
             assert isinstance(payload, dict)
             return _Response({"id": 78, **payload})
         if method == "GET" and path == "/api/nginx/proxy-hosts/78":
             return _Response(_proxy_host_payload(id=78, enabled=True, npmplus_noindex=True))
         if method == "GET" and path == "/api/nginx/proxy-hosts":
-            return _Response([_proxy_host_payload(id=78)])
+            return _Response(self.proxy_hosts_payload)
         if method == "PUT" and path == "/api/nginx/proxy-hosts/78":
             assert isinstance(payload, dict)
             return _Response({"id": 78, **payload})
@@ -245,9 +248,39 @@ class NpmplusClientTests(unittest.TestCase):
             opener.requests[-1][1], "https://npmplus.example.test/api/nginx/proxy-hosts/78"
         )
 
+    def test_authentication_rejects_2fa_challenge(self) -> None:
+        opener = _Opener()
+        opener.token_payload = {"requires_2fa": True, "message": "Enter OTP"}
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+
+        with self.assertRaises(click.ClickException):
+            client.list_proxy_hosts()
+
+        self.assertEqual([request[0] for request in opener.requests], ["POST"])
+
+    def test_list_proxy_hosts_rejects_malformed_entries(self) -> None:
+        opener = _Opener()
+        opener.proxy_hosts_payload = [_proxy_host_payload(id=78), "not-a-host"]
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+
+        with self.assertRaises(click.ClickException):
+            client.list_proxy_hosts()
+
     def test_credentials_fail_closed_for_missing_secret(self) -> None:
         with self.assertRaises(ValueError):
             NpmplusCredentials(base_url="https://npmplus.example.test", identity="user", secret="")
+
+    def test_credentials_strip_operator_whitespace(self) -> None:
+        credentials = NpmplusCredentials(
+            base_url=" https://npmplus.example.test/ ",
+            identity=" launchplane-ingress@example.test ",
+            secret=" secret ",
+        )
+
+        self.assertEqual(credentials.base_url, "https://npmplus.example.test")
+        self.assertEqual(credentials.normalized_base_url, "https://npmplus.example.test")
+        self.assertEqual(credentials.identity, "launchplane-ingress@example.test")
+        self.assertEqual(credentials.secret, "secret")
 
 
 if __name__ == "__main__":
