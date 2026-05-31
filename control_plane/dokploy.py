@@ -1445,6 +1445,7 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
+    run_destructive_restore: bool = False,
 ) -> None:
     compose_id = target_definition.target_id.strip()
     compose_name = (
@@ -1544,6 +1545,7 @@ def run_compose_post_deploy_update(
         filestore_path=filestore_path,
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
+        workflow_mode="restore" if run_destructive_restore else "maintenance",
         workflow_environment_overrides=workflow_environment_overrides or {},
         required_workflow_environment_keys=required_workflow_environment_keys,
         protected_shopify_store_keys=protected_shopify_store_keys,
@@ -2075,7 +2077,7 @@ def _build_dokploy_data_workflow_script(
     filestore_path: str,
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
-    workflow_mode: Literal["update", "bootstrap"] = "update",
+    workflow_mode: Literal["maintenance", "bootstrap", "restore"] = "maintenance",
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
@@ -2095,8 +2097,18 @@ def _build_dokploy_data_workflow_script(
         "protected_shopify_store_keys",
         protected_shopify_store_keys,
     )
-    workflow_arguments = "--bootstrap" if workflow_mode == "bootstrap" else "--update-only"
-    workflow_label = "bootstrap" if workflow_mode == "bootstrap" else "post-deploy update"
+    workflow_arguments_by_mode = {
+        "maintenance": "--post-deploy-maintenance",
+        "bootstrap": "--bootstrap",
+        "restore": "",
+    }
+    workflow_label_by_mode = {
+        "maintenance": "post-deploy maintenance",
+        "bootstrap": "bootstrap",
+        "restore": "restore",
+    }
+    workflow_arguments = workflow_arguments_by_mode[workflow_mode]
+    workflow_label = workflow_label_by_mode[workflow_mode]
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 

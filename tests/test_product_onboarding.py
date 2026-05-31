@@ -227,6 +227,23 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
         self.assertIn('"instance":"testing"', workflow_text)
         self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", workflow_text)
+
+    def test_odoo_website_bootstrap_override_workflow_allows_opw_targets(self) -> None:
+        workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("odoo-tenant-opw:opw:testing", workflow_text)
+        self.assertIn("odoo-tenant-opw:opw:prod", workflow_text)
+        self.assertIn("          - opw", workflow_text)
+        self.assertIn("          - prod", workflow_text)
+        self.assertNotIn("writes only cm/testing", workflow_text)
+
+    def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
+        workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
+            encoding="utf-8"
+        )
+
         self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
         self.assertIn("outputs:", workflow_text)
         self.assertIn("value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}", workflow_text)
