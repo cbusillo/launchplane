@@ -1,0 +1,165 @@
+---
+name: Ingress Route Dry Run
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product key authorized for the route plan.
+        required: true
+        type: string
+      context:
+        description: Launchplane context authorized for the route plan.
+        required: true
+        type: string
+      domain:
+        description: Public domain name to compare against the provider route.
+        required: true
+        type: string
+      forward_host:
+        description: Upstream host for the desired provider route.
+        required: true
+        type: string
+      forward_port:
+        description: Upstream port for the desired provider route.
+        required: true
+        type: number
+      certificate_id:
+        description: Existing provider certificate id.
+        required: true
+        type: number
+      expected_host_id:
+        description: Existing provider host id that must own the domain.
+        required: true
+        type: number
+      reason:
+        description: Operator reason recorded with the Launchplane request.
+        required: true
+        type: string
+      forward_scheme:
+        description: Upstream scheme.
+        required: true
+        default: http
+        type: choice
+        options:
+          - http
+          - https
+      route_options_json:
+        description: Optional JSON object for route toggles and provider options.
+        required: true
+        default: "{}"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-ingress-route-dry-run-${{ inputs.product }}-${{ inputs.context }}
+  cancel-in-progress: false
+
+jobs:
+  dry-run:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+    steps:
+      - name: Build ingress route dry run payload
+        id: payload
+        shell: bash
+        env:
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          DOMAIN: ${{ inputs.domain }}
+          REASON: ${{ inputs.reason }}
+          EXPECTED_HOST_ID: ${{ inputs.expected_host_id }}
+          FORWARD_SCHEME: ${{ inputs.forward_scheme }}
+          FORWARD_HOST: ${{ inputs.forward_host }}
+          FORWARD_PORT: ${{ inputs.forward_port }}
+          CERTIFICATE_ID: ${{ inputs.certificate_id }}
+          ROUTE_OPTIONS_JSON: ${{ inputs.route_options_json }}
+        run: |
+          set -euo pipefail
+          payload_file="$RUNNER_TEMP/ingress-route-dry-run-request.json"
+          jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg domain "$DOMAIN" \
+            --arg reason "$REASON" \
+            --arg forward_scheme "$FORWARD_SCHEME" \
+            --arg forward_host "$FORWARD_HOST" \
+            --arg route_options_json "$ROUTE_OPTIONS_JSON" \
+            --argjson expected_host_id "$EXPECTED_HOST_ID" \
+            --argjson forward_port "$FORWARD_PORT" \
+            --argjson certificate_id "$CERTIFICATE_ID" \
+            '($route_options_json | fromjson) as $options |
+            {
+              schema_version: 1,
+              product: $product,
+              context: $context,
+              ingress: {
+                schema_version: 1,
+                mode: "dry-run",
+                expected_host_id: $expected_host_id,
+                reason: $reason,
+                route: {
+                  domain_names: [$domain],
+                  forward_scheme: $forward_scheme,
+                  forward_host: $forward_host,
+                  forward_port: $forward_port,
+                  certificate_id: $certificate_id,
+                  enabled: ($options.enabled // true),
+                  ssl_forced: ($options.ssl_forced // true),
+                  http2_support: ($options.http2_support // true),
+                  npmplus_http3_support: ($options.npmplus_http3_support // true),
+                  npmplus_noindex: ($options.npmplus_noindex // true),
+                  access_list_id: ($options.access_list_id // 0)
+                }
+              }
+            }' >"$payload_file"
+          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
+
+      - name: Request ingress route dry run
+        id: launchplane
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          method: POST
+          route-path: /v1/drivers/ingress/route-apply
+          payload-file: ${{ steps.payload.outputs.payload_file }}
+          timeout-ms: "30000"
+          fail-result-paths: result.status
+          response-output-file: ingress-route-dry-run.json
+
+      - name: Summarize dry run
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="ingress-route-dry-run.json"
+          jq . "$result_file"
+          {
+            echo '## Ingress route dry run'
+            echo
+            echo "- Product: ${{ inputs.product }}"
+            echo "- Context: ${{ inputs.context }}"
+            echo "- Domain: ${{ inputs.domain }}"
+            echo "- Status: $(jq -r '.result.status' "$result_file")"
+            echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
+            echo
+            echo '### Operations'
+            jq -r '
+              .result.operations[]?
+              | "- \(.action) host=\(.host_id // "new") requires_apply=\(.requires_apply)"
+            ' "$result_file"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dry run response
+        uses: actions/upload-artifact@v7
+        with:
+          name: ingress-route-dry-run
+          path: ingress-route-dry-run.json
+          if-no-files-found: error
