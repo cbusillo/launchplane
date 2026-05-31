@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock, patch
 
 import click
@@ -14,24 +14,19 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
     DeploymentEvidence,
     HealthcheckEvidence,
+    PostDeployUpdateEvidence,
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeKeySafetyPolicyRecord,
-    RuntimeSecretClass,
-    RuntimeSecretSafetyRule,
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
 )
-from control_plane.contracts.secret_record import SecretBinding
-from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
@@ -132,27 +127,53 @@ def _inventory_record() -> EnvironmentInventory:
     )
 
 
-def _target_record() -> DokployTargetRecord:
-    return DokployTargetRecord(
+def _deployment_record() -> DeploymentRecord:
+    return DeploymentRecord(
+        record_id="deployment-opw-prod-rollback",
+        artifact_identity=ArtifactIdentityReference(artifact_id="artifact-opw-847c71c1db61785c"),
         context="opw",
         instance="prod",
-        target_type="compose",
-        target_name="opw-prod",
-        deploy_timeout_seconds=600,
-        healthcheck_path="/web/health",
-        healthcheck_timeout_seconds=180,
-        domains=("opw-prod.shinycomputers.com",),
-        env={"DOCKER_PULL_POLICY": "always"},
-        updated_at="2026-04-24T14:06:57Z",
+        source_git_ref="9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6",
+        deploy=DeploymentEvidence(
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            deployment_id="control-plane-dokploy",
+            status="pass",
+        ),
+        post_deploy_update=PostDeployUpdateEvidence(attempted=True, status="pass"),
+        destination_health=HealthcheckEvidence(
+            verified=True,
+            urls=("https://opw-prod.shinycomputers.com/web/health",),
+            timeout_seconds=180,
+            status="pass",
+        ),
     )
 
 
-def _target_id_record() -> DokployTargetIdRecord:
-    return DokployTargetIdRecord(
+def _replacement_result(
+    *,
+    deploy_status: Literal["pass", "fail"] = "pass",
+    post_deploy_status: Literal["pass", "fail", "skipped"] = "pass",
+    health_status: Literal["pass", "fail", "skipped"] = "pass",
+    release_tuple_id: str = "opw-prod-artifact-opw-847c71c1db61785c",
+    error_message: str = "",
+) -> OdooStableTargetReplacementApplyResult:
+    return OdooStableTargetReplacementApplyResult(
+        product="odoo-tenant-opw",
         context="opw",
         instance="prod",
-        target_id="opw-prod-compose-id",
-        updated_at="2026-04-24T14:06:57Z",
+        strategy="recreate-in-place",
+        deployment_record_id="deployment-opw-prod-rollback",
+        release_tuple_id=release_tuple_id,
+        deploy_status=deploy_status,
+        post_deploy_status=post_deploy_status,
+        health_status=health_status,
+        canonical_status="pass",
+        logo_status="pass",
+        artifact_id="artifact-opw-847c71c1db61785c",
+        image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100",
+        error_message=error_message,
     )
 
 
@@ -172,97 +193,16 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         record_store.read_artifact_manifest.return_value = _artifact_manifest()
         record_store.read_environment_inventory.return_value = _inventory_record()
         record_store.read_promotion_record.return_value = _promotion_record()
-        record_store.read_dokploy_target_record.return_value = _target_record()
-        record_store.read_dokploy_target_id_record.return_value = _target_id_record()
-        record_store.list_secret_bindings.return_value = ()
-        record_store.list_runtime_key_safety_policy_records.return_value = ()
+        record_store.read_deployment_record.return_value = _deployment_record()
         return record_store
 
-    def _write_prod_secret_binding(
-        self,
-        record_store: Mock,
-        *,
-        secret_class: RuntimeSecretClass = "prod_only",
-    ) -> None:
-        binding_key = "ODOO_DB_PASSWORD"
-        record_store.list_secret_bindings.return_value = (
-            SecretBinding(
-                binding_id="secret-odoo-db-password-binding",
-                secret_id="secret-odoo-db-password",
-                integration="runtime_environment",
-                binding_key=binding_key,
-                context="opw",
-                instance="prod",
-                status="configured",
-                created_at="2026-05-05T22:45:00Z",
-                updated_at="2026-05-05T22:45:00Z",
-            ),
-        )
-        record_store.list_runtime_key_safety_policy_records.return_value = (
-            RuntimeKeySafetyPolicyRecord(
-                record_id="runtime-key-safety-policy-test",
-                status="active",
-                source="test",
-                updated_at="2026-05-05T22:45:00Z",
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key=binding_key,
-                        secret_class=secret_class,
-                        allowed_contexts=("opw",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            ),
-        )
-
-    def test_rollback_to_testing_tuple_records_successful_evidence(self) -> None:
+    def test_rollback_to_testing_tuple_delegates_to_target_replacement(self) -> None:
         record_store = self._record_store()
 
-        with (
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example", "token"),
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                side_effect=[
-                    {"env": "DOCKER_IMAGE_REFERENCE=old\n"},
-                    {
-                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100"
-                    },
-                ],
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
-            ) as raw_compose_sync,
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.latest_deployment_for_target",
-                return_value={"deploymentId": "before"},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.trigger_deployment"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.wait_for_target_deployment"
-            ),
-            patch("control_plane.workflows.odoo_prod_rollback._verify_healthchecks"),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="opw",
-                    instance="prod",
-                    phase="deploy",
-                    post_deploy_status="pass",
-                ),
-            ),
-        ):
+        with patch(
+            "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+            return_value=_replacement_result(),
+        ) as replacement_apply:
             result = execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
@@ -272,70 +212,40 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.rollback_status, "pass")
         self.assertEqual(result.rollback_health_status, "pass")
         self.assertEqual(result.post_deploy_status, "pass")
-        self.assertEqual(result.artifact_id, "artifact-opw-847c71c1db61785c")
-        self.assertIn(
-            "Host(`opw-prod.shinycomputers.com`)",
-            raw_compose_sync.call_args.kwargs["compose_file"],
+        self.assertEqual(result.deployment_record_id, "deployment-opw-prod-rollback")
+        self.assertEqual(result.release_tuple_id, "opw-prod-artifact-opw-847c71c1db61785c")
+        replacement_apply.assert_called_once()
+        replacement_request = replacement_apply.call_args.kwargs["request"]
+        self.assertEqual(replacement_request.product, "odoo-tenant-opw")
+        self.assertEqual(replacement_request.instance, "prod")
+        self.assertEqual(replacement_request.artifact_id, "artifact-opw-847c71c1db61785c")
+        self.assertEqual(
+            replacement_request.source_git_ref,
+            "9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6",
         )
-        record_store.write_deployment_record.assert_called()
+        self.assertTrue(replacement_request.verify_canonical)
+        self.assertTrue(replacement_request.verify_logo)
+        record_store.write_deployment_record.assert_not_called()
+        record_store.write_release_tuple_record.assert_not_called()
         record_store.write_environment_inventory.assert_called_once()
-        record_store.write_release_tuple_record.assert_called_once()
+        inventory = record_store.write_environment_inventory.call_args.args[0]
+        self.assertEqual(inventory.deployment_record_id, "deployment-opw-prod-rollback")
+        self.assertEqual(inventory.promotion_record_id, _promotion_record().record_id)
+        self.assertEqual(inventory.promoted_from_instance, "testing")
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "pass")
         self.assertEqual(final_promotion.rollback_health.status, "pass")
-        written_deployment = record_store.write_deployment_record.call_args_list[-1].args[0]
-        self.assertIsInstance(written_deployment, DeploymentRecord)
-        self.assertEqual(written_deployment.deploy.status, "pass")
 
     def test_explicit_artifact_rolls_back_without_testing_tuple_match(self) -> None:
         record_store = self._record_store()
         record_store.read_artifact_manifest.return_value = _previous_prod_artifact_manifest()
 
-        with (
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example", "token"),
+        with patch(
+            "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+            return_value=_replacement_result(
+                release_tuple_id="opw-prod-artifact-opw-previous-prod"
             ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                side_effect=[
-                    {"env": "DOCKER_IMAGE_REFERENCE=old\n"},
-                    {
-                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    },
-                ],
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.latest_deployment_for_target",
-                return_value={"deploymentId": "before"},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.trigger_deployment"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.wait_for_target_deployment"
-            ),
-            patch("control_plane.workflows.odoo_prod_rollback._verify_healthchecks"),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.execute_odoo_post_deploy",
-                return_value=OdooPostDeployResult(
-                    context="opw",
-                    instance="prod",
-                    phase="deploy",
-                    post_deploy_status="pass",
-                ),
-            ),
-        ):
+        ) as replacement_apply:
             result = execute_odoo_prod_rollback(
                 control_plane_root=Path("/control-plane"),
                 record_store=record_store,
@@ -349,17 +259,15 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(result.source_channel, "artifact")
         self.assertEqual(result.artifact_id, "artifact-opw-previous-prod")
         record_store.read_release_tuple_record.assert_not_called()
+        replacement_request = replacement_apply.call_args.kwargs["request"]
+        self.assertEqual(replacement_request.artifact_id, "artifact-opw-previous-prod")
+        self.assertEqual(replacement_request.source_git_ref, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(
             final_promotion.rollback.snapshot_name, "artifact:artifact-opw-previous-prod"
         )
         inventory = record_store.write_environment_inventory.call_args.args[0]
         self.assertEqual(inventory.promoted_from_instance, "explicit-artifact")
-        written_deployment = record_store.write_deployment_record.call_args_list[-1].args[0]
-        self.assertEqual(
-            written_deployment.artifact_identity.artifact_id,
-            "artifact-opw-previous-prod",
-        )
 
     def test_missing_explicit_artifact_fails_before_deploy(self) -> None:
         record_store = self._record_store()
@@ -376,41 +284,19 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             )
 
         record_store.read_release_tuple_record.assert_not_called()
-        record_store.write_deployment_record.assert_not_called()
+        record_store.write_promotion_record.assert_not_called()
 
     def test_failed_deploy_records_failed_rollback(self) -> None:
         record_store = self._record_store()
 
-        with (
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example", "token"),
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                side_effect=[
-                    {"env": ""},
-                    {
-                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100"
-                    },
-                ],
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.latest_deployment_for_target"
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.trigger_deployment",
-                side_effect=click.ClickException("deploy failed"),
+        with patch(
+            "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply",
+            return_value=_replacement_result(
+                deploy_status="fail",
+                post_deploy_status="skipped",
+                health_status="skipped",
+                release_tuple_id="",
+                error_message="deploy failed",
             ),
         ):
             result = execute_odoo_prod_rollback(
@@ -420,48 +306,8 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(result.rollback_status, "fail")
+        self.assertEqual(result.deployment_record_id, "deployment-opw-prod-rollback")
         self.assertIn("deploy failed", result.error_message)
-        final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
-        self.assertEqual(final_promotion.rollback.status, "fail")
-
-    def test_runtime_key_safety_blocks_managed_secret_target_env_sync(self) -> None:
-        record_store = self._record_store()
-        self._write_prod_secret_binding(record_store, secret_class="testing")
-
-        with (
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example", "token"),
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"env": ""},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
-            ),
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
-            ) as sync_compose_mock,
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
-            ) as update_env_mock,
-            patch(
-                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.trigger_deployment"
-            ) as trigger_deployment_mock,
-        ):
-            result = execute_odoo_prod_rollback(
-                control_plane_root=Path("/control-plane"),
-                record_store=record_store,
-                request=OdooProdRollbackRequest(context="opw"),
-            )
-
-        self.assertEqual(result.rollback_status, "fail")
-        self.assertIn("Runtime key-safety gate failed", result.error_message)
-        sync_compose_mock.assert_not_called()
-        update_env_mock.assert_not_called()
-        trigger_deployment_mock.assert_not_called()
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "fail")
 

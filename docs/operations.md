@@ -620,11 +620,13 @@ context only, and `context_instance` has both context and instance.
   sanitization such as disabling mail servers and cron remains tied to explicit
   restore/bootstrap workflows, not ordinary prod image deploys.
 - `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
-  the DB-backed `testing` release tuple for the same context. The driver updates
-  the Dokploy `DOCKER_IMAGE_REFERENCE`, deploys the compose target, runs the
-  Odoo post-deploy workflow, verifies `/launchplane/health`, writes deployment,
-  inventory, release tuple, and rollback evidence, and annotates the current prod
-  promotion record.
+  the DB-backed `testing` release tuple for the same context. The driver owns
+  rollback intent and promotion-record annotation, but the provider mutation runs
+  through the stable target replacement executor so deploy, runtime identity,
+  Odoo post-deploy maintenance, canonical/logo verification, deployment, and
+  release-tuple evidence stay on the canonical stable path. After the delegated
+  replacement passes, rollback refreshes prod inventory with rollback provenance
+  and annotates the current prod promotion record.
 - `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
   evidence required before Odoo prod promotion. It resolves `ODOO_DB_NAME`,
   `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
@@ -687,8 +689,9 @@ context only, and `context_instance` has both context and instance.
   an explicit DB-backed artifact id for the previous known-good prod artifact.
   The driver reads the artifact manifest directly from Launchplane records and
   writes rollback evidence with an `artifact:<artifact_id>` source marker.
-- A passing rollback writes deployment, inventory, prod release tuple,
-  promotion rollback, and rollback-health evidence. Verify the target
+- A passing rollback delegates deployment and prod release-tuple writes to stable
+  target replacement, then writes inventory rollback provenance, promotion
+  rollback, and rollback-health evidence. Verify the target
   `/launchplane/health` endpoint and `inventory status` before taking another
   action.
 - A real destructive rollback drill requires a second known-good artifact

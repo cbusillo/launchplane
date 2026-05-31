@@ -479,12 +479,13 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
-- Odoo prod rollback writes a normal deployment record for the rollback deploy,
-  refreshes prod inventory, mints the prod release tuple from the selected
-  artifact manifest, and annotates the current prod promotion record's
-  `rollback` and `rollback_health` fields. The selected rollback source is the
-  DB-backed `testing` release tuple; operators must not supply unrecorded image
-  refs or source SHAs.
+- Odoo prod rollback delegates the rollback deploy to stable target replacement,
+  which writes the deployment record and prod release tuple. Rollback then
+  refreshes prod inventory with rollback provenance and annotates the current
+  prod promotion record's `rollback` and `rollback_health` fields. The selected
+  rollback source is the DB-backed `testing` release tuple unless the operator
+  supplies an explicit DB-backed artifact ID; operators must not supply
+  unrecorded image refs or source SHAs.
 - Generic-web rollback planning writes `GenericWebRollbackPlanRecord` entries
   under `generic_web_rollback_plans` in file-backed state and
   `launchplane_generic_web_rollback_plans` in DB-backed state. These records are
