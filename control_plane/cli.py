@@ -3320,8 +3320,20 @@ def _sync_artifact_image_reference_for_target(
 
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
+        target_domains: tuple[str, ...] = ()
+        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+            control_plane_root=control_plane_root,
+        )
+        target_definition = control_plane_dokploy.find_dokploy_target_definition(
+            source_of_truth,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        if target_definition is not None:
+            target_domains = target_definition.domains
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference=desired_image_reference
+            image_reference=desired_image_reference,
+            domain_hosts=target_domains,
         )
         runtime_source_evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,

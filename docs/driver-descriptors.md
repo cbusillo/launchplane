@@ -287,10 +287,10 @@ values, blocks before reading Dokploy credentials when required Odoo env keys ar
 missing, stamps per-preview `ODOO_PROJECT_NAME` and `ODOO_STACK_NAME` values so
 the raw compose does not inherit the template runtime identity, renders
 Launchplane-owned raw compose source without publishing shared host ports,
-keeps the raw compose limited to Dokploy network attachment labels so Dokploy's
-compose-domain records own the HTTP/HTTPS routers, reconciles the preview domain,
-and defaults preview domain certificate management to `none` so public TLS is
-owned by the external edge wildcard certificate rather than Dokploy ACME.
+renders explicit HTTP and HTTPS Traefik routers in the raw compose while also
+reconciling the preview domain record for Dokploy UI/provider state, and defaults
+preview domain certificate management to `none` so public TLS is owned by the
+external edge wildcard certificate rather than Dokploy ACME.
 Fresh-create dry-runs must carry the template compose id; apply creates new
 preview composes on that template compose's Dokploy server, deploys the compose,
 and returns redacted step evidence. Destroy looks up domains for the matching
