@@ -60,16 +60,11 @@ jobs:
           : "${INSTANCE:?Missing instance input}"
           : "${WEBSITE_BOOTSTRAP_PAYLOAD:?Missing website bootstrap payload input}"
           target_key="$PRODUCT:$CONTEXT_NAME:$INSTANCE"
-          case "$target_key" in
-            odoo-tenant-cm:cm:testing|
-            odoo-tenant-opw:opw:testing|
-            odoo-tenant-opw:opw:prod)
-              ;;
-            *)
-              echo 'Unsupported Odoo website bootstrap override target.' >&2
-              exit 1
-              ;;
-          esac
+          allowed_targets=" odoo-tenant-cm:cm:testing odoo-tenant-opw:opw:testing odoo-tenant-opw:opw:prod "
+          if [[ "$allowed_targets" != *" $target_key "* ]]; then
+            echo 'Unsupported Odoo website bootstrap override target.' >&2
+            exit 1
+          fi
           if [ "$PRODUCT" = "odoo-tenant-opw" ] && [ "$INSTANCE" = "prod" ]; then
             echo 'OPW prod bootstrap override allowed for canonical URL correction.' >&2
           fi
