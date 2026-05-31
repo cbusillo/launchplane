@@ -44,6 +44,10 @@ name: Ingress Route Dry Run
         options:
           - http
           - https
+          - path
+          - empty
+          - grpc
+          - grpcs
       route_options_json:
         description: Optional JSON object for route toggles and provider options.
         required: true
@@ -115,12 +119,12 @@ jobs:
                   forward_host: $forward_host,
                   forward_port: $forward_port,
                   certificate_id: $certificate_id,
-                  enabled: ($options.enabled // true),
-                  ssl_forced: ($options.ssl_forced // true),
-                  http2_support: ($options.http2_support // true),
-                  npmplus_http3_support: ($options.npmplus_http3_support // true),
-                  npmplus_noindex: ($options.npmplus_noindex // true),
-                  access_list_id: ($options.access_list_id // 0)
+                  enabled: (if $options | has("enabled") then $options.enabled else true end),
+                  ssl_forced: (if $options | has("ssl_forced") then $options.ssl_forced else true end),
+                  http2_support: (if $options | has("http2_support") then $options.http2_support else true end),
+                  npmplus_http3_support: (if $options | has("npmplus_http3_support") then $options.npmplus_http3_support else true end),
+                  npmplus_noindex: (if $options | has("npmplus_noindex") then $options.npmplus_noindex else true end),
+                  access_list_id: (if $options | has("access_list_id") then $options.access_list_id else 0 end)
                 }
               }
             }
