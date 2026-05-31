@@ -227,7 +227,8 @@ jobs:
             echo '### Operations'
             jq -r '
               .result.operations[]?
-              | "- \(.action) host=\(.host_id // "new") requires_apply=\(.requires_apply)"
+              | (.change_categories // [] | if length == 0 then "none" else join(",") end) as $categories
+              | "- \(.action) host=\(.host_id // "new") requires_apply=\(.requires_apply) categories=\($categories)"
             ' "$result_file"
           } >>"$GITHUB_STEP_SUMMARY"
 
