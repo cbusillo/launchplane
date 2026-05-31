@@ -199,17 +199,29 @@ def main() -> int:
     )
 
     app_name = str(target_payload.get("appName") or "")
-    containers_payload = _request_json(host=host, token=token, path="/api/docker.getContainers")
+    server_id = str(target_payload.get("serverId") or "").strip()
+    container_query = {"appName": app_name, "appType": "docker-compose"}
+    if server_id:
+        container_query["serverId"] = server_id
+    containers_payload = _request_json(
+        host=host,
+        token=token,
+        path="/api/docker.getContainersByAppNameMatch",
+        query=container_query,
+    )
     target_containers = _target_containers(containers_payload=containers_payload, app_name=app_name)
     _print_json({"diagnostic": "dokploy-containers", "containers": target_containers})
     for container in target_containers:
         container_id = _container_id(container)
         if container_id:
+            config_query = {"containerId": container_id}
+            if server_id:
+                config_query["serverId"] = server_id
             config_payload = _request_json(
                 host=host,
                 token=token,
                 path="/api/docker.getConfig",
-                query={"containerId": container_id},
+                query=config_query,
             )
             _print_json(
                 {
