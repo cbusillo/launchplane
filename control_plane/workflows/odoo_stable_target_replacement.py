@@ -145,6 +145,7 @@ class _ApplyResultBase(BaseModel):
         logo_urls: tuple[str, ...] = (),
         verification_evidence: OdooVerificationEvidence | None = None,
         runtime_identity_injected: bool = False,
+        runtime_source: dict[str, str] | None = None,
         error_message: str = "",
     ) -> OdooStableTargetReplacementApplyResult:
         return OdooStableTargetReplacementApplyResult(
@@ -167,6 +168,7 @@ class _ApplyResultBase(BaseModel):
             target_name=self.target_name,
             artifact_id=self.artifact_id,
             image_reference=self.image_reference,
+            runtime_source=runtime_source or {},
             error_message=error_message,
         )
 
@@ -185,6 +187,43 @@ def _read_optional(call: Callable[[], object]) -> object | None:
         return call()
     except FileNotFoundError:
         return None
+
+
+def _raw_compose_route_evidence(
+    *,
+    compose_file: str,
+    domain_hosts: tuple[str, ...],
+) -> dict[str, str]:
+    evidence: dict[str, str] = {
+        "compose_sha256": control_plane_dokploy.compose_file_sha256(compose_file),
+        "domain_hosts": ",".join(domain_hosts),
+        "traefik_router_label_count": str(compose_file.count("traefik.http.routers.")),
+        "traefik_service_label_count": str(compose_file.count("traefik.http.services.")),
+        "traefik_enable_label_present": "true"
+        if "traefik.enable=true" in compose_file
+        else "false",
+        "dokploy_network_label_present": "true"
+        if "traefik.docker.network=dokploy-network" in compose_file
+        else "false",
+    }
+    for raw_domain_host in domain_hosts:
+        domain_host = raw_domain_host.strip().lower()
+        if not domain_host:
+            continue
+        route_name = control_plane_dokploy._traefik_route_name(domain_host=domain_host)
+        evidence[f"domain_{domain_host}_http_rule_present"] = (
+            "true"
+            if f"traefik.http.routers.{route_name}-web.rule=Host(`{domain_host}`)"
+            in compose_file
+            else "false"
+        )
+        evidence[f"domain_{domain_host}_https_rule_present"] = (
+            "true"
+            if f"traefik.http.routers.{route_name}-websecure.rule=Host(`{domain_host}`)"
+            in compose_file
+            else "false"
+        )
+    return evidence
 
 
 def _domain_hosts_from_payload(raw_domains: JsonValue) -> tuple[str, ...]:
@@ -378,6 +417,7 @@ def _write_failed_deployment(
     deployment_record_id: str,
     started_at: str,
     resolved_target: ResolvedTargetEvidence | None = None,
+    runtime_source: dict[str, str] | None = None,
     runtime_identity: RuntimeIdentity | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
@@ -391,6 +431,7 @@ def _write_failed_deployment(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             post_deploy_update=post_deploy_update,
             destination_health=destination_health,
@@ -755,6 +796,7 @@ def execute_odoo_stable_target_replacement_apply(
         artifact_id=artifact_id,
         image_reference=image_reference,
     )
+    runtime_source: dict[str, str] = {}
 
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
@@ -778,13 +820,25 @@ def execute_odoo_stable_target_replacement_apply(
             domain_hosts=plan.expected_domain_hosts,
             runtime_port=profile.runtime_port,
         )
-        control_plane_dokploy.sync_dokploy_compose_raw_source(
+        runtime_source.update(
+            {
+                f"rendered_{key}": value
+                for key, value in _raw_compose_route_evidence(
+                    compose_file=compose_file,
+                    domain_hosts=plan.expected_domain_hosts,
+                ).items()
+            }
+        )
+        raw_compose_evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
             host=host,
             token=token,
             compose_id=target_id_record.target_id,
             compose_name=resolved_target.target_name,
             target_payload=target_payload,
             compose_file=compose_file,
+        )
+        runtime_source.update(
+            {f"raw_compose_{key}": value for key, value in raw_compose_evidence.items()}
         )
         for domain_host in plan.expected_domain_hosts:
             control_plane_dokploy.ensure_compose_web_domain_route(
@@ -815,6 +869,18 @@ def execute_odoo_stable_target_replacement_apply(
             target_type="compose",
             target_id=target_id_record.target_id,
         )
+        live_compose_file = str(refreshed_payload.get("composeFile") or "")
+        runtime_source.update(
+            {
+                f"live_{key}": value
+                for key, value in _raw_compose_route_evidence(
+                    compose_file=live_compose_file,
+                    domain_hosts=plan.expected_domain_hosts,
+                ).items()
+            }
+        )
+        runtime_source["live_source_type"] = str(refreshed_payload.get("sourceType") or "")
+        runtime_source["live_compose_path"] = str(refreshed_payload.get("composePath") or "")
         refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(refreshed_payload.get("env") or "")
         )
@@ -859,6 +925,7 @@ def execute_odoo_stable_target_replacement_apply(
         return base_result.result(
             deploy_status="fail",
             runtime_identity_injected=False,
+            runtime_source=runtime_source,
             error_message=str(error),
         )
 
@@ -888,6 +955,7 @@ def execute_odoo_stable_target_replacement_apply(
             deploy_status="fail",
             post_deploy_status=post_deploy_result.post_deploy_status,
             runtime_identity_injected=True,
+            runtime_source=runtime_source,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
@@ -918,6 +986,7 @@ def execute_odoo_stable_target_replacement_apply(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             post_deploy_update=post_deploy_evidence,
             destination_health=destination_health,
@@ -933,6 +1002,7 @@ def execute_odoo_stable_target_replacement_apply(
             logo_urls=verification.evidence.logo_urls,
             verification_evidence=verification.evidence,
             runtime_identity_injected=True,
+            runtime_source=runtime_source,
             error_message=verification.error_message,
         )
 
@@ -952,6 +1022,7 @@ def execute_odoo_stable_target_replacement_apply(
         started_at=started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
+        runtime_source=runtime_source,
         runtime_identity=final_runtime_identity,
         post_deploy_update=post_deploy_evidence,
         destination_health=destination_health,
@@ -971,4 +1042,5 @@ def execute_odoo_stable_target_replacement_apply(
         logo_urls=verification.evidence.logo_urls,
         verification_evidence=verification.evidence,
         runtime_identity_injected=True,
+        runtime_source=runtime_source,
     )

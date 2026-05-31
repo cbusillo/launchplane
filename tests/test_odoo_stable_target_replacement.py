@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import click
 
+from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
     ArtifactIdentityManifest,
@@ -574,13 +575,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             inventory=_inventory(),
         )
         persisted_env = ""
+        persisted_compose_file = "services: {}"
 
         def _fetch_target_payload(**_: object) -> JsonValue:
             return {
                 "name": "cm-testing",
                 "sourceType": "raw",
                 "composePath": "docker-compose.yml",
-                "composeFile": "services: {}",
+                "composeFile": persisted_compose_file,
                 "env": persisted_env
                 or "\n".join(
                     (
@@ -601,6 +603,20 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             phase="deploy",
             post_deploy_status="pass",
         )
+        rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
+        )
+
+        def _sync_source(*, compose_file: str, **_: object) -> dict[str, str]:
+            nonlocal persisted_compose_file
+            persisted_compose_file = compose_file
+            return {
+                "source_type": "raw",
+                "compose_sha256": control_plane_dokploy.compose_file_sha256(compose_file),
+                "changed": "true",
+            }
 
         with (
             patch(
@@ -620,11 +636,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value={"ODOO_WORKERS": "2"},
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                side_effect=_sync_source,
             ) as sync_source,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
-                return_value="services:\n  web:\n",
+                return_value=rendered_compose_file,
             ) as render_compose,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
@@ -709,6 +726,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertGreaterEqual(len(store.deployment_records), 2)
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.deploy.status, "pass")
+        self.assertEqual(
+            final_deployment.runtime_source["rendered_traefik_router_label_count"], "8"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "live_domain_cm-testing.shinycomputers.com_https_rule_present"
+            ],
+            "true",
+        )
+        self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None
         self.assertEqual(final_deployment.runtime_identity.product, "odoo-tenant-cm")
         self.assertEqual(

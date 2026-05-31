@@ -79,4 +79,5 @@ class OdooStableTargetReplacementApplyResult(BaseModel):
     target_name: str = ""
     artifact_id: str = ""
     image_reference: str = ""
+    runtime_source: dict[str, str] = Field(default_factory=dict)
     error_message: str = ""
