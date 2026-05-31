@@ -101,6 +101,19 @@ def ingress() -> None:
     default="none",
     show_default=True,
 )
+@click.option(
+    "--identity-access-provider",
+    type=click.Choice(["none", "anubis", "tinyauth", "authelia", "authentik"]),
+    default="none",
+    show_default=True,
+    help="Provider-neutral identity/access binding provider.",
+)
+@click.option(
+    "--identity-access-send-basic-auth",
+    is_flag=True,
+    default=False,
+    help="Use the Authentik basic-auth forwarding mode for the identity/access binding.",
+)
 @click.option("--advanced-config", default="")
 @click.option("--allow-create/--no-allow-create", default=True, show_default=True)
 @click.option("--allow-update/--no-allow-update", default=True, show_default=True)
@@ -128,6 +141,8 @@ def ingress_route_apply(
     http3_support: bool,
     npmplus_noindex: bool,
     auth_request: str,
+    identity_access_provider: str,
+    identity_access_send_basic_auth: bool,
     advanced_config: str,
     allow_create: bool,
     allow_update: bool,
@@ -162,6 +177,8 @@ def ingress_route_apply(
         http3_support=http3_support,
         npmplus_noindex=npmplus_noindex,
         auth_request=auth_request,
+        identity_access_provider=identity_access_provider,
+        identity_access_send_basic_auth=identity_access_send_basic_auth,
         advanced_config=advanced_config,
         allow_create=allow_create,
         allow_update=allow_update,
@@ -197,6 +214,8 @@ def _route_apply_payload(
     http3_support: bool,
     npmplus_noindex: bool,
     auth_request: str,
+    identity_access_provider: str,
+    identity_access_send_basic_auth: bool,
     advanced_config: str,
     allow_create: bool,
     allow_update: bool,
@@ -212,6 +231,18 @@ def _route_apply_payload(
             resolved_certificate_id = int(certificate_id)
         except ValueError as error:
             raise click.ClickException("--certificate-id must be an integer or 'new'.") from error
+    identity_access = _identity_access_binding(
+        provider=identity_access_provider,
+        send_basic_auth=identity_access_send_basic_auth,
+    )
+    if identity_access and auth_request not in {
+        "none",
+        _identity_access_auth_request(identity_access),
+    }:
+        raise click.ClickException(
+            "--identity-access-provider conflicts with --auth-request. "
+            "Use one provider mode or matching values."
+        )
     route: dict[str, object] = {
         "domain_names": list(domains),
         "forward_scheme": forward_scheme,
@@ -226,6 +257,8 @@ def _route_apply_payload(
         "advanced_config": advanced_config,
         "enabled": enabled,
     }
+    if identity_access:
+        route["identity_access"] = identity_access
     if forward_port is not None:
         route["forward_port"] = forward_port
     ingress_request: dict[str, object] = {
@@ -245,3 +278,31 @@ def _route_apply_payload(
         "context": context,
         "ingress": ingress_request,
     }
+
+
+def _identity_access_binding(*, provider: str, send_basic_auth: bool) -> dict[str, object] | None:
+    if provider == "none":
+        if send_basic_auth:
+            raise click.ClickException(
+                "--identity-access-send-basic-auth requires --identity-access-provider authentik."
+            )
+        return None
+    if send_basic_auth and provider != "authentik":
+        raise click.ClickException(
+            "--identity-access-send-basic-auth is only valid with --identity-access-provider authentik."
+        )
+    return {
+        "schema_version": 1,
+        "mode": "forward-auth",
+        "provider": provider,
+        "send_basic_auth": send_basic_auth,
+    }
+
+
+def _identity_access_auth_request(identity_access: dict[str, object]) -> str:
+    provider = identity_access["provider"]
+    if provider == "authentik" and identity_access["send_basic_auth"] is True:
+        return "authentik-send-basic-auth"
+    if isinstance(provider, str):
+        return provider
+    raise click.ClickException("Invalid identity/access provider.")
