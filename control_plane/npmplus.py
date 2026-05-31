@@ -126,16 +126,21 @@ class NpmplusCredentials:
     secret: str
 
     def __post_init__(self) -> None:
-        if not self.base_url.strip():
+        normalized_base_url = self.base_url.strip().rstrip("/")
+        normalized_identity = self.identity.strip()
+        if not normalized_base_url:
             raise ValueError("NPMplus base URL is required")
-        if not self.identity.strip():
+        if not normalized_identity:
             raise ValueError("NPMplus identity is required")
-        if not self.secret:
+        if not self.secret.strip():
             raise ValueError("NPMplus secret is required")
+        object.__setattr__(self, "base_url", normalized_base_url)
+        object.__setattr__(self, "identity", normalized_identity)
+        object.__setattr__(self, "secret", self.secret.strip())
 
     @property
     def normalized_base_url(self) -> str:
-        return self.base_url.rstrip("/")
+        return self.base_url
 
 
 class NpmplusHttpResponse(Protocol):
@@ -160,11 +165,12 @@ class NpmplusClient:
     ) -> None:
         self._credentials = credentials
         self._timeout_seconds = timeout_seconds
-        self._opener = opener or build_opener(HTTPCookieProcessor(CookieJar()))
+        self._cookie_jar = CookieJar()
+        self._opener = opener or build_opener(HTTPCookieProcessor(self._cookie_jar))
         self._authenticated = False
 
     def authenticate(self) -> None:
-        self._request(
+        payload = self._request(
             method="POST",
             path="/api/tokens",
             payload={
@@ -173,17 +179,25 @@ class NpmplusClient:
             },
             require_authentication=False,
         )
+        if _looks_like_authentication_challenge(payload):
+            raise click.ClickException(
+                "NPMplus authentication requires an interactive challenge; "
+                "use a non-2FA automation account for Launchplane ingress."
+            )
         self._authenticated = True
 
     def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
         payload = self._request(method="GET", path="/api/nginx/proxy-hosts")
         if not isinstance(payload, list):
             raise click.ClickException("NPMplus proxy-host list returned an invalid payload.")
-        return tuple(
-            NpmplusProxyHost.model_validate(host_payload)
-            for host_payload in payload
-            if isinstance(host_payload, dict)
-        )
+        proxy_hosts: list[NpmplusProxyHost] = []
+        for index, host_payload in enumerate(payload):
+            if not isinstance(host_payload, dict):
+                raise click.ClickException(
+                    f"NPMplus proxy-host list entry {index} returned an invalid payload."
+                )
+            proxy_hosts.append(NpmplusProxyHost.model_validate(host_payload))
+        return tuple(proxy_hosts)
 
     def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
         payload = self._request(method="GET", path=f"/api/nginx/proxy-hosts/{host_id}")
@@ -281,3 +295,24 @@ def _normalize_json_value(value: object) -> JsonValue:
             if isinstance(key, str)
         }
     return str(value)
+
+
+def _looks_like_authentication_challenge(payload: JsonValue) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    challenge_markers = {
+        "challenge",
+        "mfa",
+        "needs_2fa",
+        "otp",
+        "requires_2fa",
+        "requires_mfa",
+        "requires_otp",
+        "two_factor",
+        "two_factor_required",
+    }
+    payload_keys = {key.lower().replace("-", "_") for key in payload}
+    if payload_keys.intersection(challenge_markers):
+        return True
+    message = str(payload.get("message") or payload.get("error") or "").lower()
+    return "2fa" in message or "mfa" in message or "two-factor" in message
