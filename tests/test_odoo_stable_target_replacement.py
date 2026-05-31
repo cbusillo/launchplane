@@ -784,6 +784,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         trigger_deploy.assert_called_once()
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
+        self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
             health_url="https://cm-testing.shinycomputers.com/web/health",
@@ -1001,6 +1002,133 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
         self.assertEqual(final_deployment.runtime_identity.source_git_ref, "fresh-sha")
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
+
+    def test_apply_requests_destructive_restore_for_upstream_restore_mode(self) -> None:
+        profile = _opw_profile_with_prelaunch_policy(enabled=True)
+        manifest = _artifact_manifest(
+            artifact_id="artifact-opw-testing",
+            source_commit="opw-sha",
+            digest="sha256:opw",
+        ).model_copy(
+            update={"image": ArtifactImageReference(repository="ghcr.io/cbusillo/odoo-tenant-opw", digest="sha256:opw")}
+        )
+        store = _Store(
+            profile=profile,
+            target_record=_opw_target_record(),
+            target_id_record=_opw_target_id_record(),
+            inventory=EnvironmentInventory(
+                context="opw",
+                instance="prod",
+                artifact_identity=ArtifactIdentityReference(artifact_id="artifact-opw-testing"),
+                source_git_ref="opw-sha",
+                deploy=DeploymentEvidence(
+                    status="pass",
+                    target_type="compose",
+                    target_name="opw-prod",
+                    deploy_mode="dokploy-compose-api",
+                ),
+                updated_at="2026-05-10T00:00:00Z",
+                deployment_record_id="deployment-opw-prod",
+            ),
+            artifact_manifest=manifest,
+        )
+        persisted_env = ""
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "opw-prod",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "services: {}",
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        "ODOO_DATA_VOLUME=opw_prod_odoo_data",
+                        "ODOO_LOG_VOLUME=opw_prod_odoo_logs",
+                        "ODOO_DB_VOLUME=opw_prod_odoo_db",
+                    )
+                ),
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-opw@sha256:opw",
+                    domain_hosts=("opw-prod.shinycomputers.com",),
+                    runtime_port=8069,
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="opw",
+                    instance="prod",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ) as post_deploy,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=OdooVerificationResult(
+                    health_status="pass",
+                    canonical_status="pass",
+                    logo_status="pass",
+                    evidence=OdooVerificationEvidence(),
+                ),
+            ),
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertTrue(post_deploy.call_args.kwargs["run_destructive_restore"])
 
     def test_apply_refuses_explicit_artifact_source_mismatch(self) -> None:
         store = _Store(

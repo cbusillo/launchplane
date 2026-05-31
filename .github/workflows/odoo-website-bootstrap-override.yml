@@ -16,6 +16,7 @@ name: Odoo Website Bootstrap Override
         type: choice
         options:
           - cm
+          - opw
       instance:
         description: Stable Odoo instance to update.
         required: true
@@ -23,6 +24,7 @@ name: Odoo Website Bootstrap Override
         type: choice
         options:
           - testing
+          - prod
       website_bootstrap_payload:
         description: Website bootstrap JSON object rendered from the tenant bootstrap settings.
         required: true
@@ -57,9 +59,14 @@ jobs:
           : "${CONTEXT_NAME:?Missing context input}"
           : "${INSTANCE:?Missing instance input}"
           : "${WEBSITE_BOOTSTRAP_PAYLOAD:?Missing website bootstrap payload input}"
-          if [ "$CONTEXT_NAME" != "cm" ] || [ "$INSTANCE" != "testing" ]; then
-            echo 'This workflow currently writes only cm/testing Odoo website bootstrap overrides.' >&2
+          target_key="$PRODUCT:$CONTEXT_NAME:$INSTANCE"
+          allowed_targets=" odoo-tenant-cm:cm:testing odoo-tenant-opw:opw:testing odoo-tenant-opw:opw:prod "
+          if [[ "$allowed_targets" != *" $target_key "* ]]; then
+            echo 'Unsupported Odoo website bootstrap override target.' >&2
             exit 1
+          fi
+          if [ "$PRODUCT" = "odoo-tenant-opw" ] && [ "$INSTANCE" = "prod" ]; then
+            echo 'OPW prod bootstrap override allowed for canonical URL correction.' >&2
           fi
           if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
             echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2

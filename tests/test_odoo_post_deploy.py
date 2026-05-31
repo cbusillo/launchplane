@@ -89,6 +89,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             )
             self.assertIn("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", workflow_environment)
             self.assertNotIn("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", workflow_environment)
+            self.assertFalse(captured_runs[0]["run_destructive_restore"])
             updated_record = store.read_odoo_instance_override_record(
                 context_name="opw",
                 instance_name="testing",
@@ -128,6 +129,37 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertFalse(result.override_record_found)
             self.assertEqual(len(captured_runs), 1)
             self.assertEqual(captured_runs[0]["workflow_environment_overrides"], {})
+
+    def test_execute_can_request_destructive_restore_for_prelaunch_rebuild(self) -> None:
+        captured_runs: list[dict[str, object]] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=self._source_of_truth(),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                ),
+            ):
+                result = execute_odoo_post_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="opw", instance="testing"),
+                    run_destructive_restore=True,
+                )
+
+            self.assertEqual(result.post_deploy_status, "pass")
+            self.assertEqual(len(captured_runs), 1)
+            self.assertTrue(captured_runs[0]["run_destructive_restore"])
 
 
 if __name__ == "__main__":

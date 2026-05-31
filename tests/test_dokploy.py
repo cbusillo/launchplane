@@ -2051,8 +2051,63 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertNotIn("DOKPLOY_TOKEN=should-not-sync", updated_env_payloads[0])
         self.assertEqual(len(schedule_payloads), 1)
         self.assertEqual(schedule_payloads[0]["command"], "control-plane post-deploy update")
+        self.assertIn("--post-deploy-maintenance", str(schedule_payloads[0]["script"]))
+        self.assertNotIn("--update-only", str(schedule_payloads[0]["script"]))
         self.assertIn("/api/compose.deploy", request_paths)
         self.assertIn("/api/schedule.runManually", request_paths)
+
+    def test_run_compose_post_deploy_update_can_run_destructive_restore_workflow(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="testing", target_id="compose-123", target_name="opw-testing"
+        )
+        schedule_payloads: list[dict[str, object]] = []
+
+        def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+            schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+            return {"scheduleId": "schedule-123"}
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-testing-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                side_effect=capture_schedule_payload,
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+                run_destructive_restore=True,
+            )
+
+        self.assertEqual(len(schedule_payloads), 1)
+        script = str(schedule_payloads[0]["script"])
+        self.assertIn("workflow_arguments=()", script)
+        self.assertIn("Running Odoo restore", script)
+        self.assertNotIn("--post-deploy-maintenance", script)
 
     def test_run_compose_post_deploy_update_requires_database_name(self) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(

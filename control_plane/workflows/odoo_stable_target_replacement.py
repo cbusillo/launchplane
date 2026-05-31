@@ -1287,6 +1287,7 @@ def execute_odoo_stable_target_replacement_apply(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=OdooPostDeployRequest(context=plan.context, instance=plan.instance, phase="deploy"),
+        run_destructive_restore=plan.data_source_mode == "upstream_restore",
     )
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
