@@ -11,6 +11,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
+    OdooWebsiteBootstrapRoute,
 )
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -180,6 +182,18 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             value=OdooOverrideValue(
                                 source="literal",
                                 value="https://opw-testing.example.com",
+                            ),
+                        ),
+                    ),
+                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                        tenant="opw",
+                        name="OPW Testing",
+                        canonical_url="https://opw-testing.example.com",
+                        routes=(
+                            OdooWebsiteBootstrapRoute(
+                                name="Shop",
+                                url="/shop",
+                                homepage=True,
                             ),
                         ),
                     ),

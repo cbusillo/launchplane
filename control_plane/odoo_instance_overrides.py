@@ -1,6 +1,7 @@
 import base64
 import json
 from dataclasses import dataclass
+from typing import Literal
 
 import click
 
@@ -17,6 +18,7 @@ SHOPIFY_ALLOW_PRODUCTION_SETTING = "allow_production"
 SHOPIFY_PRODUCTION_INDICATORS_SETTING = "production_indicators"
 SHOPIFY_REQUIRED_SETTINGS = ("shop_url_key", "api_token", "webhook_key", "api_version")
 DEFAULT_SHOPIFY_PRODUCTION_INDICATORS = ("production", "live", "prod-")
+PostDeployWorkflowIntent = Literal["deploy", "restore", "bootstrap"]
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,7 @@ def _payload_override_value(
 def render_post_deploy_payload(
     record: OdooInstanceOverrideRecord,
     *,
+    workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -225,7 +228,7 @@ def render_post_deploy_payload(
         )
     payload["config_parameters"] = config_parameters
     payload["addon_settings"] = addon_settings
-    if record.website_bootstrap is not None:
+    if record.website_bootstrap is not None and workflow_intent != "restore":
         payload["website_bootstrap"] = record.website_bootstrap.model_dump(mode="json")
     return payload
 
@@ -263,10 +266,12 @@ def addon_setting_secret_env_key(*, addon_name: str, setting_name: str) -> str:
 def build_post_deploy_environment(
     record: OdooInstanceOverrideRecord,
     *,
+    workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
+        workflow_intent=workflow_intent,
         protected_shopify_store_keys=protected_shopify_store_keys,
     )
     inline_environment: dict[str, str] = {
@@ -302,9 +307,11 @@ def build_post_deploy_environment(
 def render_post_deploy_environment(
     record: OdooInstanceOverrideRecord,
     *,
+    workflow_intent: PostDeployWorkflowIntent = "deploy",
     protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> dict[str, str]:
     return build_post_deploy_environment(
         record,
+        workflow_intent=workflow_intent,
         protected_shopify_store_keys=protected_shopify_store_keys,
     ).inline_environment
