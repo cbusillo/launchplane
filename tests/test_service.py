@@ -19620,6 +19620,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
                                 "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
                                 "GH_TOKEN": "github-token",
+                                "LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example",
+                                "LAUNCHPLANE_NPMPLUS_IDENTITY": "automation@example.com",
+                                "LAUNCHPLANE_NPMPLUS_SECRET": "npmplus-secret",
                             },
                         },
                     },
@@ -19663,6 +19666,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT=50", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_GH_BINARY=gh", updated_env_text)
         self.assertIn("GH_TOKEN=github-token", updated_env_text)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example", updated_env_text)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com", updated_env_text)
+        self.assertIn("LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", updated_env_text)
         trigger_mock.assert_called_once_with(
