@@ -97,7 +97,7 @@ def wait_for_runtime_identity_healthcheck_with_retry(
                 payload=healthcheck_pass.payload,
                 json_parse_failed=healthcheck_pass.json_parse_failed,
             )
-            if status in {"match", "mismatch"}:
+            if status == "match":
                 return healthcheck_pass
             last_detail = detail
         sleep(1)

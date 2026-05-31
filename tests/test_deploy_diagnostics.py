@@ -66,6 +66,19 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
                     },
                     {"containerId": "other", "name": "postgres-1"},
                 ]
+            if path == "/api/docker.getConfig":
+                return {
+                    "Config": {
+                        "Labels": {
+                            "traefik.enable": "true",
+                            "traefik.docker.network": "dokploy-network",
+                            "com.docker.compose.project": "compose-launchplane-random",
+                        }
+                    },
+                    "NetworkSettings": {
+                        "Networks": {"dokploy-network": {}, "compose-launchplane-random_default": {}}
+                    },
+                }
             if path == "/api/compose.readLogs":
                 return "started\nLAUNCHPLANE_DATABASE_URL=postgresql://secret\n"
             raise AssertionError(f"Unexpected path: {path}")
@@ -96,6 +109,9 @@ class CaptureLaunchplaneDeployDiagnosticsTests(unittest.TestCase):
         self.assertIn('"diagnostic": "dokploy-target"', output.getvalue())
         self.assertIn('"docker_image_matches_expected": true', output.getvalue())
         self.assertIn('"containerId": "container-1"', output.getvalue())
+        self.assertIn('"diagnostic": "dokploy-container-config"', output.getvalue())
+        self.assertIn('"traefik_enable": "true"', output.getvalue())
+        self.assertIn('"has_dokploy_network": true', output.getvalue())
         self.assertIn("LAUNCHPLANE_DATABASE_URL=[redacted]", output.getvalue())
         self.assertNotIn("postgresql://secret", output.getvalue())
         self.assertEqual(requests[-1]["path"], "/api/compose.readLogs")
