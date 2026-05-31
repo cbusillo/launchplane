@@ -131,6 +131,120 @@ class IngressCliTests(unittest.TestCase):
         self.assertFalse(route["enabled"])
         self.assertFalse(route["npmplus_http3_support"])
 
+    def test_route_apply_accepts_identity_access_binding(self) -> None:
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"status": "planned", "dry_run": True},
+            }
+
+        with (
+            patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}),
+            patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post),
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "ingress",
+                    "route-apply",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--product",
+                    "launchplane",
+                    "--context",
+                    "reon-prod",
+                    "--domain",
+                    "ingress-canary.example.test",
+                    "--forward-host",
+                    "192.0.2.10",
+                    "--certificate-id",
+                    "47",
+                    "--identity-access-provider",
+                    "authentik",
+                    "--identity-access-send-basic-auth",
+                    "--reason",
+                    "test route identity access",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        ingress = payload["ingress"]
+        assert isinstance(ingress, dict)
+        route = ingress["route"]
+        assert isinstance(route, dict)
+        self.assertEqual(route["npmplus_auth_request"], "none")
+        self.assertEqual(
+            route["identity_access"],
+            {
+                "schema_version": 1,
+                "mode": "forward-auth",
+                "provider": "authentik",
+                "send_basic_auth": True,
+            },
+        )
+
+    def test_route_apply_rejects_conflicting_identity_access_binding(self) -> None:
+        with patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "ingress",
+                    "route-apply",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--product",
+                    "launchplane",
+                    "--context",
+                    "reon-prod",
+                    "--domain",
+                    "ingress-canary.example.test",
+                    "--forward-host",
+                    "192.0.2.10",
+                    "--auth-request",
+                    "authelia",
+                    "--identity-access-provider",
+                    "authentik",
+                    "--reason",
+                    "test route identity access",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("conflicts with --auth-request", result.output)
+
+    def test_route_apply_rejects_identity_access_basic_auth_without_authentik(self) -> None:
+        with patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "ingress",
+                    "route-apply",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--product",
+                    "launchplane",
+                    "--context",
+                    "reon-prod",
+                    "--domain",
+                    "ingress-canary.example.test",
+                    "--forward-host",
+                    "192.0.2.10",
+                    "--identity-access-provider",
+                    "authelia",
+                    "--identity-access-send-basic-auth",
+                    "--reason",
+                    "test route identity access",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("only valid with --identity-access-provider authentik", result.output)
+
     def test_route_apply_requires_idempotency_key_in_apply_mode(self) -> None:
         with patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}):
             result = CliRunner().invoke(

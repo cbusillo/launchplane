@@ -180,6 +180,7 @@ uv run launchplane ingress route-apply \
   --forward-host 192.0.2.10 \
   --forward-port 8080 \
   --certificate-id 1 \
+  --identity-access-provider authentik \
   --reason "Plan ingress route"
 ```
 
@@ -198,6 +199,11 @@ auth material through the Authentik integration for routes that intentionally
 need that mode. Keep Authentik instance placement, provider ids, app slugs, and
 private route evidence in private infra docs. Launchplane should consume only
 sanitized desired state and managed-secret references.
+
+Prefer the CLI's `--identity-access-provider` flag for new typed desired state.
+Use `--identity-access-send-basic-auth` only with `--identity-access-provider authentik`.
+The legacy `--auth-request` flag remains available for provider compatibility,
+but mixing it with a conflicting identity/access provider fails closed.
 
 Operators can also use the `Ingress Route Dry Run` GitHub workflow for a
 service-mediated canary plan through GitHub OIDC. The workflow accepts the
