@@ -639,6 +639,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 product="launchplane", context_name="reon-prod"
             )
             limited_records = store.list_ingress_route_audit_records(product="launchplane", limit=1)
+            loaded_record = store.read_ingress_route_audit_record(newer_record.record_id)
             self.assertTrue(written_path.exists())
 
         self.assertEqual(
@@ -646,6 +647,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             [newer_record.record_id, older_record.record_id],
         )
         self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
+        self.assertEqual(loaded_record.record_id, newer_record.record_id)
 
     def test_postgres_store_round_trips_ingress_route_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -681,9 +683,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             listed_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
             )
+            loaded_record = store.read_ingress_route_audit_record(record.record_id)
 
         self.assertEqual([stored.record_id for stored in listed_records], [record.record_id])
         self.assertEqual(listed_records[0].provider_host_id, 78)
+        self.assertEqual(loaded_record.record_id, record.record_id)
 
     def test_write_and_list_public_ingress_incident_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
