@@ -29,7 +29,6 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
-from control_plane.npmplus import NpmplusClient, NpmplusCredentials
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.agent_context_service import (
@@ -271,7 +270,14 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressClient,
     NpmplusIngressApplyResult,
 )
-from control_plane.workflows.ingress_provider import IngressProvider, NpmplusIngressProvider
+from control_plane.workflows.ingress_provider import (
+    IngressProvider,
+    NPMPLUS_BASE_URL_ENV_KEY,
+    NPMPLUS_IDENTITY_ENV_KEY,
+    NPMPLUS_SECRET_ENV_KEY,
+    NpmplusIngressProvider,
+    default_ingress_provider,
+)
 from control_plane.merge_train import MergeTrainDryRunResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -793,9 +799,9 @@ class _ResolvedProductDriverContext:
 
 
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
-_NPMPLUS_BASE_URL_ENV_KEY = "LAUNCHPLANE_NPMPLUS_BASE_URL"
-_NPMPLUS_IDENTITY_ENV_KEY = "LAUNCHPLANE_NPMPLUS_IDENTITY"
-_NPMPLUS_SECRET_ENV_KEY = "LAUNCHPLANE_NPMPLUS_SECRET"
+_NPMPLUS_BASE_URL_ENV_KEY = NPMPLUS_BASE_URL_ENV_KEY
+_NPMPLUS_IDENTITY_ENV_KEY = NPMPLUS_IDENTITY_ENV_KEY
+_NPMPLUS_SECRET_ENV_KEY = NPMPLUS_SECRET_ENV_KEY
 _LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
     {
@@ -6167,31 +6173,6 @@ def _local_operator_identity_from_bearer(
     return LocalOperatorIdentity(subject=subject, token_label=token_label)
 
 
-def _build_npmplus_ingress_client_from_env() -> NpmplusIngressClient:
-    required_env = (
-        _NPMPLUS_BASE_URL_ENV_KEY,
-        _NPMPLUS_IDENTITY_ENV_KEY,
-        _NPMPLUS_SECRET_ENV_KEY,
-    )
-    missing_env = tuple(key for key in required_env if not os.environ.get(key, "").strip())
-    if missing_env:
-        missing_list = ", ".join(missing_env)
-        raise click.ClickException(
-            f"NPMplus ingress client is not configured; missing {missing_list}."
-        )
-    return NpmplusClient(
-        credentials=NpmplusCredentials(
-            base_url=os.environ.get(_NPMPLUS_BASE_URL_ENV_KEY, ""),
-            identity=os.environ.get(_NPMPLUS_IDENTITY_ENV_KEY, ""),
-            secret=os.environ.get(_NPMPLUS_SECRET_ENV_KEY, ""),
-        )
-    )
-
-
-def _build_ingress_provider_from_env() -> IngressProvider:
-    return NpmplusIngressProvider(client=_build_npmplus_ingress_client_from_env())
-
-
 def _local_admin_identity_from_bearer(
     environ: dict[str, object],
 ) -> LocalAdminIdentity | None:
@@ -8300,7 +8281,7 @@ def create_launchplane_service_app(
 
             resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
         else:
-            resolved_ingress_provider_factory = _build_ingress_provider_from_env
+            resolved_ingress_provider_factory = default_ingress_provider
 
     def app(
         environ: dict[str, object],
