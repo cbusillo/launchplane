@@ -52,7 +52,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         payload = render_post_deploy_payload(record)
 
         self.assertEqual(
-            payload,
+            payload.to_wire_dict(),
             {
                 "schema_version": 1,
                 "context": "opw",
@@ -97,7 +97,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         encoded_payload = environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
         decoded_payload = json.loads(base64.b64decode(encoded_payload).decode("utf-8"))
 
-        self.assertEqual(decoded_payload, render_post_deploy_payload(record))
+        self.assertEqual(decoded_payload, render_post_deploy_payload(record).to_wire_dict())
         self.assertEqual(
             set(environment.inline_environment), {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}
         )
@@ -141,16 +141,17 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             ).decode("utf-8")
         )
 
-        self.assertEqual(payload["config_parameters"], [])
-        self.assertEqual(payload["addon_settings"], [])
-        website_bootstrap = cast("dict[str, object]", payload["website_bootstrap"])
+        wire_payload = payload.to_wire_dict()
+        self.assertEqual(wire_payload["config_parameters"], [])
+        self.assertEqual(wire_payload["addon_settings"], [])
+        website_bootstrap = cast("dict[str, object]", wire_payload["website_bootstrap"])
         routes = cast("list[dict[str, object]]", website_bootstrap["routes"])
         self.assertEqual(website_bootstrap["name"], "Example Site")
         self.assertEqual(
             website_bootstrap["canonical_url"], "https://example-testing.example.com"
         )
         self.assertEqual(routes[0]["url"], "/home")
-        self.assertEqual(decoded_payload, payload)
+        self.assertEqual(decoded_payload, wire_payload)
 
     def test_restore_intent_suppresses_website_bootstrap(self) -> None:
         record = OdooInstanceOverrideRecord(
@@ -181,6 +182,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         )
 
         payload = render_post_deploy_payload(record, workflow_intent="restore")
+        wire_payload = payload.to_wire_dict()
         environment = build_post_deploy_environment(record, workflow_intent="restore")
         decoded_payload = json.loads(
             base64.b64decode(
@@ -188,10 +190,10 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             ).decode("utf-8")
         )
 
-        self.assertNotIn("website_bootstrap", payload)
+        self.assertNotIn("website_bootstrap", wire_payload)
         self.assertNotIn("website_bootstrap", decoded_payload)
         self.assertEqual(
-            payload["config_parameters"],
+            wire_payload["config_parameters"],
             [
                 {
                     "key": "web.base.url",
@@ -202,7 +204,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(decoded_payload, payload)
+        self.assertEqual(decoded_payload, wire_payload)
 
     def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(
         self,
@@ -290,7 +292,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
 
         payload = render_post_deploy_payload(record)
         self.assertEqual(
-            payload["addon_settings"],
+            payload.to_wire_dict()["addon_settings"],
             [
                 {
                     "addon": "shopify",
@@ -352,7 +354,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         environment = build_post_deploy_environment(record)
 
         self.assertEqual(
-            payload["addon_settings"],
+            payload.to_wire_dict()["addon_settings"],
             [
                 {
                     "addon": "shopify",

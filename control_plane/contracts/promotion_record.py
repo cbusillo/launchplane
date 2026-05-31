@@ -64,6 +64,7 @@ class PostDeployUpdateEvidence(BaseModel):
     attempted: bool = False
     status: ReleaseStatus = "skipped"
     detail: str = ""
+    evidence: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_attempted_update(self) -> "PostDeployUpdateEvidence":

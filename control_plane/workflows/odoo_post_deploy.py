@@ -14,6 +14,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
     OdooOverrideApplyStatus,
 )
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -54,7 +56,13 @@ class OdooPostDeployResult(BaseModel):
     override_status: OdooOverrideApplyStatus = "skipped"
     override_record_found: bool = False
     override_payload_rendered: bool = False
+    override_payload_sha256: str = ""
+    override_payload_schema_version: int | None = None
+    override_count: int = 0
+    website_bootstrap_included: bool = False
+    workflow_intent: OdooPostDeployWorkflowIntent = "deploy"
     required_container_environment_keys: tuple[str, ...] = ()
+    override_evidence: dict[str, str] = Field(default_factory=dict)
     applied_at: str = ""
     error_message: str = ""
 
@@ -167,6 +175,10 @@ def execute_odoo_post_deploy(
     )
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
+    workflow_intent: OdooPostDeployWorkflowIntent = (
+        "restore" if run_destructive_restore else "deploy"
+    )
+    override_payload: OdooPostDeployPayload | None = None
 
     target_definition = _resolve_compose_target_definition(
         control_plane_root=control_plane_root,
@@ -181,10 +193,11 @@ def execute_odoo_post_deploy(
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     odoo_override_record,
-                    workflow_intent="restore" if run_destructive_restore else "deploy",
+                    workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
                 )
             )
+            override_payload = post_deploy_environment.payload
             workflow_environment_overrides = post_deploy_environment.inline_environment
             required_workflow_environment_keys = (
                 post_deploy_environment.required_container_environment_keys
@@ -203,6 +216,7 @@ def execute_odoo_post_deploy(
                 post_deploy_status="fail",
                 override_status="fail" if override_should_apply else "skipped",
                 override_record_found=True,
+                workflow_intent=workflow_intent,
                 required_container_environment_keys=required_workflow_environment_keys,
                 error_message=str(error),
             )
@@ -239,7 +253,19 @@ def execute_odoo_post_deploy(
             override_payload_rendered=bool(
                 workflow_environment_overrides or required_workflow_environment_keys
             ),
+            override_payload_sha256=override_payload.wire_sha256 if override_payload else "",
+            override_payload_schema_version=(
+                override_payload.schema_version if override_payload else None
+            ),
+            override_count=override_payload.override_count if override_payload else 0,
+            website_bootstrap_included=(
+                override_payload.website_bootstrap_included if override_payload else False
+            ),
+            workflow_intent=workflow_intent,
             required_container_environment_keys=required_workflow_environment_keys,
+            override_evidence=(
+                override_payload.redacted_evidence() if override_payload else {}
+            ),
             error_message=str(error),
         )
 
@@ -276,6 +302,14 @@ def execute_odoo_post_deploy(
         override_payload_rendered=bool(
             workflow_environment_overrides or required_workflow_environment_keys
         ),
+        override_payload_sha256=override_payload.wire_sha256 if override_payload else "",
+        override_payload_schema_version=(override_payload.schema_version if override_payload else None),
+        override_count=override_payload.override_count if override_payload else 0,
+        website_bootstrap_included=(
+            override_payload.website_bootstrap_included if override_payload else False
+        ),
+        workflow_intent=workflow_intent,
         required_container_environment_keys=required_workflow_environment_keys,
+        override_evidence=override_payload.redacted_evidence() if override_payload else {},
         applied_at=applied_at,
     )
