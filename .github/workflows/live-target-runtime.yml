@@ -49,7 +49,7 @@ jobs:
     steps:
       - name: Request live target runtime sync
         env:
-          SERVICE_URL: https://launchplane.shinycomputers.com
+          SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
           PRODUCT: ${{ inputs.product }}
           CONTEXT: ${{ inputs.context }}
           INSTANCE: ${{ inputs.instance }}

@@ -60,9 +60,7 @@ jobs:
       - launchplane
       - chris-testing-ops-gate
     env:
-      LAUNCHPLANE_SERVICE_URL: >-
-        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
-        'https://launchplane.shinycomputers.com' }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       RUNNER_HOST_NAME: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
       RUNNER_EXECUTION_LANE: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}

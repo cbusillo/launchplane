@@ -187,7 +187,10 @@ workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
 `/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
 reusable workflow defaults the Launchplane product key to
 `odoo-tenant-${context}` so publish metadata resolves through the tenant product
-profile that owns the image repository and stable lanes.
+profile that owns the image repository and stable lanes. Reusable Odoo workflows
+read the Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and
+derive the GitHub OIDC audience from that URL host unless the caller passes an
+explicit `launchplane_audience` input.
 
 Odoo testing deploys follow the same ownership shape. Tenant repos own the
 manual dispatch confirmation and pass an explicit stored `artifact_id` plus

@@ -56,7 +56,7 @@ jobs:
       KEY_NAME: ${{ inputs.key }}
       VALUE: ${{ inputs.value }}
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -75,10 +75,24 @@ jobs:
             echo 'Only web.base.url is currently service-writable.' >&2
             exit 1
           fi
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
+            echo 'Missing Launchplane service URL repository variable.' >&2
             exit 1
           fi
+          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            LAUNCHPLANE_SERVICE_AUDIENCE="$({
+              python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+            })"
+          fi
+          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
 
       - name: Write config parameter override
         shell: bash

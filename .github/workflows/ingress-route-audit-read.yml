@@ -54,9 +54,7 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_URL: >-
-        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
-        'https://launchplane.shinycomputers.com' }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
       CONTEXT: ${{ inputs.context }}
       RECORD_ID: ${{ inputs.record_id }}

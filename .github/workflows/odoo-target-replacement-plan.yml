@@ -67,7 +67,7 @@ jobs:
       DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
       CONFIRMATION: ${{ inputs.confirmation }}
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -76,13 +76,26 @@ jobs:
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
           : "${STRATEGY:?Missing strategy input}"
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || \
-             [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
             echo \
-              'Missing Launchplane service URL or OIDC audience variable.' \
+              'Missing Launchplane service URL variable.' \
               >&2
             exit 1
           fi
+          if [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            LAUNCHPLANE_SERVICE_AUDIENCE="$({
+              python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_SERVICE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_SERVICE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+            })"
+          fi
+          echo "LAUNCHPLANE_SERVICE_AUDIENCE=${LAUNCHPLANE_SERVICE_AUDIENCE}" >>"$GITHUB_ENV"
 
       - name: Build replacement plan
         shell: bash

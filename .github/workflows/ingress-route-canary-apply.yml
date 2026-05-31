@@ -31,9 +31,7 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_URL: >-
-        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
-        'https://launchplane.shinycomputers.com' }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       CANARY_PRODUCT: launchplane
       CANARY_CONTEXT: reon-prod
       CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}

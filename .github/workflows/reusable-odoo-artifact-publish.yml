@@ -23,6 +23,18 @@ name: Reusable Odoo Artifact Publish
         required: false
         default: "600000"
         type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
     secrets:
       ODOO_GHCR_PUBLISH_TOKEN:
         description: Token allowed to publish the tenant image to GHCR.
@@ -128,8 +140,8 @@ jobs:
         id: publish_inputs
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: https://launchplane.shinycomputers.com
-          audience: launchplane.shinycomputers.com
+          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/artifact-publish-inputs
           payload: >-
             {"schema_version":1,"inputs":{"schema_version":1}}
@@ -208,8 +220,8 @@ jobs:
         id: launchplane
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: https://launchplane.shinycomputers.com
-          audience: launchplane.shinycomputers.com
+          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/artifact-publish
           payload: >-
             {"schema_version":1,"publish":{"schema_version":1}}
