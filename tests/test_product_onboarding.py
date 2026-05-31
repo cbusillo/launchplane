@@ -398,32 +398,27 @@ class ProductOnboardingTests(unittest.TestCase):
             'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
-        self.assertIn("identity_access_provider:", workflow_text)
-        self.assertIn("identity_access_send_basic_auth:", workflow_text)
-        self.assertIn(
-            "IDENTITY_ACCESS_PROVIDER: ${{ inputs.identity_access_provider }}", workflow_text
-        )
-        self.assertIn(
-            "IDENTITY_ACCESS_SEND_BASIC_AUTH: ${{ inputs.identity_access_send_basic_auth }}",
-            workflow_text,
-        )
-        self.assertIn("identity_access_provider=authentik", workflow_text)
-        self.assertIn(
-            'error("identity_access_provider conflicts with route_options_json.npmplus_auth_request")',
-            workflow_text,
-        )
-        self.assertIn("identity_access: {", workflow_text)
-        self.assertIn("schema_version: 1", workflow_text)
-        self.assertIn('mode: "forward-auth"', workflow_text)
-        self.assertIn("provider: $identity_access_provider", workflow_text)
-        self.assertIn("send_basic_auth: $identity_access_send_basic_auth", workflow_text)
+        inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
+        self.assertEqual(inputs_section.count("        description:"), 10)
+        self.assertNotIn("identity_access_provider:", inputs_section)
+        self.assertNotIn("identity_access_send_basic_auth:", inputs_section)
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertIn(
             "npmplus_noindex: false",
             workflow_text,
         )
-        self.assertIn("} + $options", workflow_text)
+        self.assertIn("def option($key; $default):", workflow_text)
+        self.assertIn("if $options | has($key)", workflow_text)
+        self.assertIn("} + $route_options", workflow_text)
+        self.assertIn("require_exact_expected_host_domains: option", workflow_text)
+        self.assertIn("allow_create: option", workflow_text)
+        self.assertIn("allow_update: option", workflow_text)
+        self.assertIn("allow_enable_disable: option", workflow_text)
         for route_option in (
+            "require_exact_expected_host_domains",
+            "allow_create",
+            "allow_update",
+            "allow_enable_disable",
             "hsts_enabled",
             "hsts_subdomains",
             "trust_forwarded_proto",
@@ -434,6 +429,7 @@ class ProductOnboardingTests(unittest.TestCase):
             "npmplus_fancyindex",
             "npmplus_x_frame_options",
             "npmplus_auth_request",
+            "identity_access",
             "advanced_config",
             "locations",
         ):
