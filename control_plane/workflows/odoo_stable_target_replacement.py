@@ -976,6 +976,20 @@ def execute_odoo_stable_target_replacement_apply(
                 ).items()
             }
         )
+        converted_compose_file = control_plane_dokploy.fetch_dokploy_converted_compose_file(
+            host=host,
+            token=token,
+            compose_id=target_id_record.target_id,
+        )
+        runtime_source.update(
+            {
+                f"converted_{key}": value
+                for key, value in _raw_compose_route_evidence(
+                    compose_file=converted_compose_file,
+                    domain_hosts=plan.expected_domain_hosts,
+                ).items()
+            }
+        )
         current_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         )
@@ -1056,6 +1070,22 @@ def execute_odoo_stable_target_replacement_apply(
             {
                 f"post_deploy_{key}": value
                 for key, value in _dokploy_compose_metadata_evidence(deployed_payload).items()
+            }
+        )
+        deployed_converted_compose_file = (
+            control_plane_dokploy.fetch_dokploy_converted_compose_file(
+                host=host,
+                token=token,
+                compose_id=target_id_record.target_id,
+            )
+        )
+        runtime_source.update(
+            {
+                f"post_deploy_converted_{key}": value
+                for key, value in _raw_compose_route_evidence(
+                    compose_file=deployed_converted_compose_file,
+                    domain_hosts=plan.expected_domain_hosts,
+                ).items()
             }
         )
     except click.ClickException as error:
