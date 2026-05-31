@@ -28,6 +28,9 @@ name: Reusable Odoo Testing Deploy
         default: "2700000"
         type: string
     outputs:
+      operation_id:
+        description: Launchplane target replacement operation ID.
+        value: ${{ jobs.testing-deploy.outputs.operation_id }}
       deployment_record_id:
         description: Launchplane deployment record ID.
         value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}
@@ -35,14 +38,20 @@ name: Reusable Odoo Testing Deploy
         description: Minted testing release tuple ID.
         value: ${{ jobs.testing-deploy.outputs.release_tuple_id }}
       deployment_status:
-        description: Launchplane deployment status.
+        description: Target replacement deploy status.
         value: ${{ jobs.testing-deploy.outputs.deployment_status }}
       post_deploy_status:
         description: Odoo post-deploy status.
         value: ${{ jobs.testing-deploy.outputs.post_deploy_status }}
       destination_health_status:
-        description: Destination health status.
+        description: Stable Odoo health status.
         value: ${{ jobs.testing-deploy.outputs.destination_health_status }}
+      canonical_status:
+        description: Stable canonical URL verification status.
+        value: ${{ jobs.testing-deploy.outputs.canonical_status }}
+      logo_status:
+        description: Stable logo verification status.
+        value: ${{ jobs.testing-deploy.outputs.logo_status }}
       error_message:
         description: Launchplane driver error message, when present.
         value: ${{ jobs.testing-deploy.outputs.error_message }}
@@ -54,13 +63,16 @@ permissions:
 jobs:
   testing-deploy:
     outputs:
-      deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}
-      release_tuple_id: ${{ steps.lp.outputs.release_tuple_id }}
-      deployment_status: ${{ steps.lp.outputs.deployment_status }}
-      post_deploy_status: ${{ steps.lp.outputs.post_deploy_status }}
+      operation_id: ${{ steps.poll.outputs.operation_id }}
+      deployment_record_id: ${{ steps.poll.outputs.deployment_record_id }}
+      release_tuple_id: ${{ steps.poll.outputs.release_tuple_id }}
+      deployment_status: ${{ steps.poll.outputs.deployment_status }}
+      post_deploy_status: ${{ steps.poll.outputs.post_deploy_status }}
       destination_health_status: >-
-        ${{ steps.lp.outputs.destination_health_status }}
-      error_message: ${{ steps.lp.outputs.error_message }}
+        ${{ steps.poll.outputs.destination_health_status }}
+      canonical_status: ${{ steps.poll.outputs.canonical_status }}
+      logo_status: ${{ steps.poll.outputs.logo_status }}
+      error_message: ${{ steps.poll.outputs.error_message }}
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -77,46 +89,109 @@ jobs:
           fi
           echo "product=$product" >> "$GITHUB_OUTPUT"
 
-      - name: Request Launchplane Odoo testing deploy
+      - name: Request Launchplane Odoo target replacement apply
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
           launchplane-url: https://launchplane.shinycomputers.com
           audience: launchplane.shinycomputers.com
-          route-path: /v1/drivers/odoo/testing-deploy
+          route-path: /v1/drivers/odoo/target-replacement-apply
           payload: >-
-            {"schema_version":1,"deploy":{"schema_version":1,"instance":"testing"}}
+            {"schema_version":1,"replacement":{"schema_version":1,"instance":"testing","strategy":"recreate-in-place","allow_empty_data":true,"data_source_mode":"existing","verify_health":true,"verify_canonical":true,"verify_logo":true,"no_cache":false}}
           payload-fields: |-
             product=${{ steps.product.outputs.product }}
-            deploy.context=${{ inputs.context }}
-            deploy.artifact_id=${{ inputs.artifact_id }}
-            deploy.source_git_ref=${{ inputs.source_git_ref }}
+            replacement.product=${{ steps.product.outputs.product }}
+            replacement.artifact_id=${{ inputs.artifact_id }}
+            replacement.source_git_ref=${{ inputs.source_git_ref }}
           idempotency-key: >-
-            odoo-testing-deploy:${{ steps.product.outputs.product }}:${{
-              inputs.context
-            }}:testing:${{ inputs.artifact_id }}:${{ github.run_id }}:${{
-              github.run_attempt
-            }}
+            odoo-target-replacement-apply:${{ steps.product.outputs.product }}:testing:reusable-testing:${{ inputs.artifact_id }}:${{ github.run_id }}:${{ github.run_attempt }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
-          fail-result-paths: >-
-            result.deployment_status,result.post_deploy_status,
-            result.destination_health_status
+          fail-result-paths: result.status
           output-paths: >-
             trace_id=trace_id,
-            deployment_record_id=result.deployment_record_id,
-            release_tuple_id=result.release_tuple_id,
-            deployment_status=result.deployment_status,
-            post_deploy_status=result.post_deploy_status,
-            destination_health_status=result.destination_health_status,
-            error_message=result.error_message
+            operation_id=records.odoo_stable_target_replacement_operation_id,
+            poll_url=result.poll_url
+
+      - name: Poll target replacement operation
+        id: poll
+        env:
+          LAUNCHPLANE_URL: https://launchplane.shinycomputers.com
+          AUDIENCE: launchplane.shinycomputers.com
+          OPERATION_ID: ${{ steps.lp.outputs.operation_id }}
+          POLL_URL: ${{ steps.lp.outputs.poll_url }}
+        run: |
+          set -euo pipefail
+          if [ -z "$OPERATION_ID" ] || [ -z "$POLL_URL" ]; then
+            echo 'Target replacement response missing operation metadata.' >&2
+            exit 1
+          fi
+          deadline=$((SECONDS + 3600))
+          while true; do
+            token="$({
+              curl -fsSL \
+                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+              | jq -r '.value'
+            })"
+            status_code="$({
+              curl -sS \
+                -o odoo-testing-target-replacement.json \
+                -w '%{http_code}' \
+                -H "Authorization: Bearer ${token}" \
+                "${LAUNCHPLANE_URL}${POLL_URL}"
+            })"
+            if [ "$status_code" != "200" ]; then
+              echo "Target replacement poll failed: ${status_code}." >&2
+              cat odoo-testing-target-replacement.json >&2
+              exit 1
+            fi
+            operation_status="$(jq -r '.operation.status // empty' odoo-testing-target-replacement.json)"
+            if [ "$operation_status" = "pass" ] || [ "$operation_status" = "fail" ]; then
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Target replacement operation ${OPERATION_ID} timed out." >&2
+              jq . odoo-testing-target-replacement.json >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          result='.operation.result'
+          deployment_status="$(jq -r "${result}.deploy_status // \"\"" odoo-testing-target-replacement.json)"
+          post_deploy_status="$(jq -r "${result}.post_deploy_status // \"\"" odoo-testing-target-replacement.json)"
+          health_status="$(jq -r "${result}.health_status // \"\"" odoo-testing-target-replacement.json)"
+          canonical_status="$(jq -r "${result}.canonical_status // \"\"" odoo-testing-target-replacement.json)"
+          logo_status="$(jq -r "${result}.logo_status // \"\"" odoo-testing-target-replacement.json)"
+          error_message="$(jq -r '.operation.error_message // .operation.result.error_message // ""' odoo-testing-target-replacement.json)"
+          {
+            echo "operation_id=$OPERATION_ID"
+            echo "deployment_record_id=$(jq -r "${result}.deployment_record_id // \"\"" odoo-testing-target-replacement.json)"
+            echo "release_tuple_id=$(jq -r "${result}.release_tuple_id // \"\"" odoo-testing-target-replacement.json)"
+            echo "deployment_status=$deployment_status"
+            echo "post_deploy_status=$post_deploy_status"
+            echo "destination_health_status=$health_status"
+            echo "canonical_status=$canonical_status"
+            echo "logo_status=$logo_status"
+            echo "error_message=$error_message"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$operation_status" != "pass" ] || \
+             [ "$deployment_status" != "pass" ] || \
+             [ "$post_deploy_status" != "pass" ] || \
+             [ "$health_status" != "pass" ] || \
+             [ "$canonical_status" != "pass" ] || \
+             [ "$logo_status" != "pass" ]; then
+            echo 'Odoo testing target replacement did not pass.' >&2
+            jq . odoo-testing-target-replacement.json >&2
+            exit 1
+          fi
 
       - name: Report result
         env:
-          DEPLOYMENT_RECORD_ID: ${{ steps.lp.outputs.deployment_record_id }}
+          DEPLOYMENT_RECORD_ID: ${{ steps.poll.outputs.deployment_record_id }}
+          RELEASE_TUPLE_ID: ${{ steps.poll.outputs.release_tuple_id }}
           DESTINATION_HEALTH_STATUS: >-
-            ${{ steps.lp.outputs.destination_health_status }}
-          POST_DEPLOY_STATUS: ${{ steps.lp.outputs.post_deploy_status }}
-          RELEASE_TUPLE_ID: ${{ steps.lp.outputs.release_tuple_id }}
+            ${{ steps.poll.outputs.destination_health_status }}
+          POST_DEPLOY_STATUS: ${{ steps.poll.outputs.post_deploy_status }}
         run: |
           echo "deployment_record_id=$DEPLOYMENT_RECORD_ID"
           echo "release_tuple_id=$RELEASE_TUPLE_ID"

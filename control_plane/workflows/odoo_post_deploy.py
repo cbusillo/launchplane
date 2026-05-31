@@ -160,6 +160,11 @@ def execute_odoo_post_deploy(
     override_phase_enabled = bool(
         odoo_override_record is not None and request.phase in odoo_override_record.apply_on
     )
+    override_should_apply = override_phase_enabled or bool(
+        run_destructive_restore
+        and odoo_override_record is not None
+        and "deploy" in odoo_override_record.apply_on
+    )
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
 
@@ -171,7 +176,7 @@ def execute_odoo_post_deploy(
         control_plane_dokploy.protected_shopify_store_keys_for_target_definition(target_definition)
     )
 
-    if odoo_override_record is not None and override_phase_enabled:
+    if odoo_override_record is not None and override_should_apply:
         try:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
@@ -195,7 +200,7 @@ def execute_odoo_post_deploy(
                 instance=request.instance,
                 phase=request.phase,
                 post_deploy_status="fail",
-                override_status="fail",
+                override_status="fail" if override_should_apply else "skipped",
                 override_record_found=True,
                 required_container_environment_keys=required_workflow_environment_keys,
                 error_message=str(error),
@@ -216,7 +221,7 @@ def execute_odoo_post_deploy(
             run_destructive_restore=run_destructive_restore,
         )
     except click.ClickException as error:
-        if odoo_override_record is not None and override_phase_enabled:
+        if odoo_override_record is not None and override_should_apply:
             _write_odoo_instance_override_apply_result(
                 record_store=typed_record_store,
                 record=odoo_override_record,
@@ -228,7 +233,7 @@ def execute_odoo_post_deploy(
             instance=request.instance,
             phase=request.phase,
             post_deploy_status="fail",
-            override_status="fail" if override_phase_enabled else "skipped",
+            override_status="fail" if override_should_apply else "skipped",
             override_record_found=override_record_found,
             override_payload_rendered=bool(
                 workflow_environment_overrides or required_workflow_environment_keys
@@ -241,14 +246,14 @@ def execute_odoo_post_deploy(
     applied_at = ""
     detail = "No Odoo instance override record matched this post-deploy request."
     if odoo_override_record is not None:
-        if override_phase_enabled and (
+        if override_should_apply and (
             workflow_environment_overrides or required_workflow_environment_keys
         ):
             override_status = "pass"
             detail = (
                 "Applied Odoo instance overrides through the Launchplane Odoo post-deploy driver."
             )
-        elif override_phase_enabled:
+        elif override_should_apply:
             detail = "No Odoo instance overrides were rendered for this post-deploy run."
         else:
             detail = f"Odoo instance override record is not configured for phase {request.phase}."

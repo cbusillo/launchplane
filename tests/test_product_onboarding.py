@@ -170,7 +170,10 @@ class ProductOnboardingTests(unittest.TestCase):
                 script_text,
             )
             self.assertIn(f"deploy:odoo-{context_name}-artifact-publish-grant", script_text)
-            self.assertIn(f"deploy:odoo-{context_name}-testing-deploy-grant", script_text)
+            self.assertIn(
+                f"deploy:odoo-{context_name}-testing-target-replacement-grant",
+                script_text,
+            )
             self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text)
             self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
@@ -193,7 +196,7 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("workflow_call", workflow_text)
         self.assertIn("product:", workflow_text)
-        self.assertIn("product=\"odoo-tenant-${CONTEXT_NAME}\"", workflow_text)
+        self.assertIn('product="odoo-tenant-${CONTEXT_NAME}"', workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish", workflow_text)
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
@@ -226,11 +229,15 @@ class ProductOnboardingTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("/v1/drivers/odoo/testing-deploy", workflow_text)
-        self.assertIn("product=\"odoo-tenant-${CONTEXT_NAME}\"", workflow_text)
+        self.assertIn("/v1/drivers/odoo/target-replacement-apply", workflow_text)
+        self.assertIn('product="odoo-tenant-${CONTEXT_NAME}"', workflow_text)
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
         self.assertIn('"instance":"testing"', workflow_text)
-        self.assertIn("deploy.artifact_id=${{ inputs.artifact_id }}", workflow_text)
+        self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
+        self.assertIn(
+            "odoo_target_replacement_apply",
+            Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8"),
+        )
 
     def test_odoo_website_bootstrap_override_workflow_allows_opw_targets(self) -> None:
         workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
@@ -256,14 +263,20 @@ class ProductOnboardingTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("deploy.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
+        self.assertIn("replacement.source_git_ref=${{ inputs.source_git_ref }}", workflow_text)
         self.assertIn("outputs:", workflow_text)
-        self.assertIn("value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}", workflow_text)
-        self.assertIn("deployment_record_id: ${{ steps.lp.outputs.deployment_record_id }}", workflow_text)
+        self.assertIn(
+            "value: ${{ jobs.testing-deploy.outputs.deployment_record_id }}", workflow_text
+        )
+        self.assertIn(
+            "deployment_record_id: ${{ steps.poll.outputs.deployment_record_id }}", workflow_text
+        )
         for result_path in (
-            "result.deployment_status",
-            "result.post_deploy_status",
-            "result.destination_health_status",
+            "deploy_status",
+            "post_deploy_status",
+            "health_status",
+            "canonical_status",
+            "logo_status",
         ):
             self.assertIn(result_path, workflow_text)
 

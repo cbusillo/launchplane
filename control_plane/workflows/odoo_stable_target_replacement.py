@@ -8,6 +8,7 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -19,8 +20,10 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
@@ -61,6 +64,8 @@ class OdooStableTargetReplacementStore(Protocol):
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
+
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
 
 
 DokployRequest = Callable[..., JsonValue]
@@ -136,6 +141,7 @@ class _ApplyResultBase(BaseModel):
         self,
         *,
         deploy_status: Literal["pass", "fail"],
+        release_tuple_id: str = "",
         post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped",
         health_status: Literal["pass", "fail", "skipped"] = "skipped",
         canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
@@ -154,6 +160,7 @@ class _ApplyResultBase(BaseModel):
             instance=self.instance,
             strategy="recreate-in-place",
             deployment_record_id=self.deployment_record_id,
+            release_tuple_id=release_tuple_id,
             deploy_status=deploy_status,
             post_deploy_status=post_deploy_status,
             health_status=health_status,
@@ -213,8 +220,7 @@ def _raw_compose_route_evidence(
         route_name = control_plane_dokploy._traefik_route_name(domain_host=domain_host)
         evidence[f"domain_{domain_host}_http_rule_present"] = (
             "true"
-            if f"traefik.http.routers.{route_name}-web.rule=Host(`{domain_host}`)"
-            in compose_file
+            if f"traefik.http.routers.{route_name}-web.rule=Host(`{domain_host}`)" in compose_file
             else "false"
         )
         evidence[f"domain_{domain_host}_https_rule_present"] = (
@@ -246,7 +252,9 @@ def _dokploy_domain_route_evidence(
     evidence: dict[str, str] = {
         "domain_record_count": str(len(domains)),
         "domain_hosts": ",".join(
-            sorted(str(domain.get("host") or "").strip() for domain in domains if domain.get("host"))
+            sorted(
+                str(domain.get("host") or "").strip() for domain in domains if domain.get("host")
+            )
         ),
     }
     for raw_domain_host in expected_domain_hosts:
@@ -273,22 +281,20 @@ def _dokploy_domain_route_evidence(
         )
         evidence[f"{prefix}_port"] = _runtime_source_value(matching_domain.get("port"))
         evidence[f"{prefix}_port_matches_runtime"] = (
-            "true" if _runtime_source_value(matching_domain.get("port")) == str(runtime_port) else "false"
+            "true"
+            if _runtime_source_value(matching_domain.get("port")) == str(runtime_port)
+            else "false"
         )
         evidence[f"{prefix}_https"] = _runtime_source_value(matching_domain.get("https"))
         evidence[f"{prefix}_certificate_type"] = _runtime_source_value(
             matching_domain.get("certificateType")
         )
-        evidence[f"{prefix}_domain_type"] = _runtime_source_value(
-            matching_domain.get("domainType")
-        )
+        evidence[f"{prefix}_domain_type"] = _runtime_source_value(matching_domain.get("domainType"))
         evidence[f"{prefix}_path"] = _runtime_source_value(matching_domain.get("path"))
         evidence[f"{prefix}_internal_path"] = _runtime_source_value(
             matching_domain.get("internalPath")
         )
-        evidence[f"{prefix}_strip_path"] = _runtime_source_value(
-            matching_domain.get("stripPath")
-        )
+        evidence[f"{prefix}_strip_path"] = _runtime_source_value(matching_domain.get("stripPath"))
         evidence[f"{prefix}_unique_config_key_present"] = (
             "true" if _runtime_source_value(matching_domain.get("uniqueConfigKey")) else "false"
         )
@@ -316,9 +322,7 @@ def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, 
         evidence.update(
             {
                 "latest_deployment_key": control_plane_dokploy.deployment_key(latest_deployment),
-                "latest_deployment_status": _runtime_source_value(
-                    latest_deployment.get("status")
-                ),
+                "latest_deployment_status": _runtime_source_value(latest_deployment.get("status")),
                 "latest_deployment_title": _runtime_source_value(latest_deployment.get("title")),
                 "latest_deployment_created_at": _runtime_source_value(
                     latest_deployment.get("createdAt") or latest_deployment.get("created_at")
@@ -343,9 +347,7 @@ def _container_id(container: JsonObject) -> str:
     )
 
 
-def _web_container_for_app(
-    *, containers_payload: JsonValue, app_name: str
-) -> JsonObject | None:
+def _web_container_for_app(*, containers_payload: JsonValue, app_name: str) -> JsonObject | None:
     containers = _collect_json_objects(containers_payload)
     if not app_name.strip():
         return None
@@ -402,7 +404,9 @@ def _dokploy_container_route_evidence(
     expected_domain_hosts: tuple[str, ...],
 ) -> dict[str, str]:
     containers = _collect_json_objects(containers_payload)
-    app_containers = [container for container in containers if app_name in _container_name(container)]
+    app_containers = [
+        container for container in containers if app_name in _container_name(container)
+    ]
     web_container = _web_container_for_app(
         containers_payload=containers_payload,
         app_name=app_name,
@@ -416,7 +420,9 @@ def _dokploy_container_route_evidence(
         "container_server_id_present": "true" if server_id else "false",
         "container_match_count": str(len(app_containers)),
         "container_web_found": "true" if web_container is not None else "false",
-        "container_web_id_present": "true" if web_container and _container_id(web_container) else "false",
+        "container_web_id_present": "true"
+        if web_container and _container_id(web_container)
+        else "false",
         "container_web_name": _container_name(web_container or {}),
         "container_web_state": _runtime_source_value(
             (web_container or {}).get("state") or (web_container or {}).get("State")
@@ -432,9 +438,7 @@ def _dokploy_container_route_evidence(
         "container_traefik_enable": labels.get("traefik.enable", ""),
         "container_traefik_network": labels.get("traefik.docker.network", ""),
         "container_networks": ",".join(network_names),
-        "container_has_dokploy_network": "true"
-        if "dokploy-network" in network_names
-        else "false",
+        "container_has_dokploy_network": "true" if "dokploy-network" in network_names else "false",
     }
     label_items = tuple(labels.items())
     for raw_domain_host in expected_domain_hosts:
@@ -445,8 +449,7 @@ def _dokploy_container_route_evidence(
         prefix = f"container_domain_{domain_host}"
         evidence[f"{prefix}_http_rule_present"] = (
             "true"
-            if labels.get(f"traefik.http.routers.{route_name}-web.rule")
-            == f"Host(`{domain_host}`)"
+            if labels.get(f"traefik.http.routers.{route_name}-web.rule") == f"Host(`{domain_host}`)"
             else "false"
         )
         evidence[f"{prefix}_https_rule_present"] = (
@@ -961,17 +964,16 @@ def execute_odoo_stable_target_replacement_apply(
     )
     if target_record.target_type != "compose":
         raise click.ClickException("Odoo target replacement apply requires a compose target.")
-    if not plan.expected_artifact_id.strip():
-        raise click.ClickException(
-            "Odoo target replacement apply requires inventory artifact evidence."
-        )
-    if not plan.expected_source_git_ref.strip():
-        raise click.ClickException(
-            "Odoo target replacement apply requires inventory source git ref evidence."
-        )
-
     artifact_id = request.artifact_id or plan.expected_artifact_id
     source_git_ref = request.source_git_ref or plan.expected_source_git_ref
+    if not artifact_id.strip():
+        raise click.ClickException(
+            "Odoo target replacement apply requires artifact_id or inventory artifact evidence."
+        )
+    if not source_git_ref.strip():
+        raise click.ClickException(
+            "Odoo target replacement apply requires source_git_ref or inventory source git ref evidence."
+        )
     artifact_manifest = record_store.read_artifact_manifest(artifact_id)
     if artifact_manifest.source_commit != source_git_ref:
         raise click.ClickException(
@@ -1283,10 +1285,17 @@ def execute_odoo_stable_target_replacement_apply(
             error_message=str(error),
         )
 
+    post_deploy_phase: OdooOverrideApplyPhase = (
+        "restore" if plan.data_source_mode == "upstream_restore" else "deploy"
+    )
     post_deploy_result = execute_odoo_post_deploy(
         control_plane_root=control_plane_root,
         record_store=record_store,
-        request=OdooPostDeployRequest(context=plan.context, instance=plan.instance, phase="deploy"),
+        request=OdooPostDeployRequest(
+            context=plan.context,
+            instance=plan.instance,
+            phase=post_deploy_phase,
+        ),
         run_destructive_restore=plan.data_source_mode == "upstream_restore",
     )
     post_deploy_evidence = PostDeployUpdateEvidence(
@@ -1386,8 +1395,15 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
+    release_tuple_id = _write_release_tuple_from_deployment(
+        record_store=record_store,
+        deployment_record=deployment_record,
+        artifact_manifest=artifact_manifest,
+        minted_at=finished_at,
+    )
     return base_result.result(
         deploy_status="pass",
+        release_tuple_id=release_tuple_id,
         post_deploy_status="pass",
         health_status=health_status,
         canonical_status=canonical_status,
@@ -1399,3 +1415,25 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_identity_injected=True,
         runtime_source=runtime_source,
     )
+
+
+def _write_release_tuple_from_deployment(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    deployment_record: DeploymentRecord,
+    artifact_manifest: ArtifactIdentityManifest,
+    minted_at: str,
+) -> str:
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        deployment_record.instance
+    ):
+        return ""
+    release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+        context_name=deployment_record.context,
+        channel_name=deployment_record.instance,
+        artifact_manifest=artifact_manifest,
+        deployment_record_id=deployment_record.record_id,
+        minted_at=minted_at,
+    )
+    record_store.write_release_tuple_record(release_tuple)
+    return release_tuple.tuple_id

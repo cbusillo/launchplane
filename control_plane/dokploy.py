@@ -52,6 +52,13 @@ POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
     "ODOO_FILESTORE_PATH",
     "ODOO_DATA_WORKFLOW_LOCK_FILE",
 }
+ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
+    "ODOO_UPSTREAM_HOST",
+    "ODOO_UPSTREAM_USER",
+    "ODOO_UPSTREAM_DB_NAME",
+    "ODOO_UPSTREAM_DB_USER",
+    "ODOO_UPSTREAM_FILESTORE_PATH",
+)
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
@@ -1467,6 +1474,21 @@ def run_compose_post_deploy_update(
         current_env_map=current_env_map,
         env_file=env_file,
     )
+    resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
+    resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
+    if run_destructive_restore:
+        upstream_restore_environment = _resolve_upstream_restore_workflow_environment(
+            desired_env_map=desired_env_map,
+        )
+        resolved_workflow_environment_overrides.update(upstream_restore_environment)
+        resolved_required_workflow_environment_keys = tuple(
+            sorted(
+                {
+                    *resolved_required_workflow_environment_keys,
+                    *ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS,
+                }
+            )
+        )
     schedule_timeout_seconds = (
         target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
     )
@@ -1546,8 +1568,8 @@ def run_compose_post_deploy_update(
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
         workflow_mode="restore" if run_destructive_restore else "maintenance",
-        workflow_environment_overrides=workflow_environment_overrides or {},
-        required_workflow_environment_keys=required_workflow_environment_keys,
+        workflow_environment_overrides=resolved_workflow_environment_overrides,
+        required_workflow_environment_keys=resolved_required_workflow_environment_keys,
         protected_shopify_store_keys=protected_shopify_store_keys,
     )
     schedule_payload: JsonObject = {
@@ -2561,6 +2583,25 @@ def _apply_post_deploy_env_file_overrides(
             f"{allowed_key_list}. Unsupported keys: {unsupported_key_list}."
         )
     return desired_env_map
+
+
+def _resolve_upstream_restore_workflow_environment(
+    *, desired_env_map: Mapping[str, str]
+) -> dict[str, str]:
+    upstream_environment: dict[str, str] = {}
+    missing_keys: list[str] = []
+    for env_key in ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS:
+        value = str(desired_env_map.get(env_key) or "").strip()
+        if not value:
+            missing_keys.append(env_key)
+            continue
+        upstream_environment[env_key] = value
+    if missing_keys:
+        raise click.ClickException(
+            "Compose post-deploy restore requires upstream Odoo source environment keys in the live target environment. "
+            f"Missing keys: {', '.join(missing_keys)}."
+        )
+    return upstream_environment
 
 
 def _parse_env_file(env_file: Path) -> dict[str, str]:

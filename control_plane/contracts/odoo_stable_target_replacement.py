@@ -63,6 +63,7 @@ class OdooStableTargetReplacementApplyResult(BaseModel):
     instance: str
     strategy: Literal["recreate-in-place"]
     deployment_record_id: str = ""
+    release_tuple_id: str = ""
     deploy_status: Literal["pass", "fail"]
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     health_status: Literal["pass", "fail", "skipped"] = "skipped"
