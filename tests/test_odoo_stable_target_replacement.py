@@ -681,6 +681,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
             ) as ensure_domain,
             patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                return_value=rendered_compose_file,
+            ) as fetch_converted_compose,
+            patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
                 side_effect=_update_env,
             ) as update_env,
@@ -736,6 +740,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             runtime_port=8069,
         )
         update_env.assert_called_once()
+        self.assertEqual(fetch_converted_compose.call_count, 2)
         trigger_deploy.assert_called_once()
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
@@ -795,6 +800,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(
             final_deployment.runtime_source["post_deploy_latest_deployment_key"],
             "deploy-456",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["converted_traefik_router_label_count"], "8"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source[
+                "post_deploy_converted_domain_cm-testing.shinycomputers.com_https_rule_present"
+            ],
+            "true",
         )
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None
@@ -865,6 +879,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ) as sync_source,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                return_value=control_plane_dokploy.render_odoo_raw_compose_file(
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:fresh",
+                    domain_hosts=("cm-testing.shinycomputers.com",),
+                    runtime_port=8069,
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",

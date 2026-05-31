@@ -1227,6 +1227,32 @@ def ensure_compose_web_domain_route(
     return domain_id
 
 
+def fetch_dokploy_converted_compose_file(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+) -> str:
+    normalized_compose_id = compose_id.strip()
+    if not normalized_compose_id:
+        raise click.ClickException("Converted compose fetch requires a compose id.")
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.getConvertedCompose",
+        query={"composeId": normalized_compose_id},
+    )
+    if isinstance(payload, str):
+        return payload
+    payload_as_object = as_json_object(payload)
+    if payload_as_object is not None:
+        for key_name in ("composeFile", "compose", "content", "raw"):
+            value = payload_as_object.get(key_name)
+            if isinstance(value, str):
+                return value
+    raise click.ClickException("Dokploy converted compose response did not include compose text.")
+
+
 def _build_raw_compose_evidence(
     *, source_type: str, compose_file: str, changed: bool
 ) -> dict[str, str]:
