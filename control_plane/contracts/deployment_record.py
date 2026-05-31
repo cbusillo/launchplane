@@ -12,7 +12,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 
-DelegatedExecutor = Literal["control-plane.dokploy"]
+DelegatedExecutor = str
 
 
 class ResolvedTargetEvidence(BaseModel):
@@ -70,6 +70,9 @@ class DeploymentRecord(BaseModel):
             raise ValueError("deployment record requires instance")
         if not self.source_git_ref.strip():
             raise ValueError("deployment record requires source_git_ref")
+        self.delegated_executor = self.delegated_executor.strip()
+        if not self.delegated_executor:
+            raise ValueError("deployment record requires delegated_executor")
         if self.deployed_target is None and self.resolved_target is not None:
             self.deployed_target = self.resolved_target.to_deployed_target_reference()
         return self

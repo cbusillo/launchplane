@@ -70,6 +70,13 @@ release, backup, promotion, migration, and post-deploy invariants are either
 represented in generic contracts or still explicitly wrapped by the product
 driver.
 
+Generic-web deploy resolves and executes runtime targets through a deploy
+provider adapter. The default adapter is Dokploy, but generic-web orchestration
+must depend on the adapter protocol rather than importing provider clients
+directly. Deployment records must carry the adapter's provider identity,
+provider target reference, and delegated executor so operator evidence stays
+accurate when a future deploy provider is introduced.
+
 ## Capability Design
 
 Use capability names to describe operator-visible behavior, not implementation
