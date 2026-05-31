@@ -53,6 +53,22 @@ name: Ingress Route Dry Run
         required: true
         default: "{}"
         type: string
+      identity_access_provider:
+        description: Provider-neutral identity/access provider for forward auth.
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - anubis
+          - tinyauth
+          - authelia
+          - authentik
+      identity_access_send_basic_auth:
+        description: Use Authentik basic-auth forwarding for the identity/access binding.
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -86,6 +102,8 @@ jobs:
           FORWARD_PORT: ${{ inputs.forward_port }}
           CERTIFICATE_ID: ${{ inputs.certificate_id }}
           ROUTE_OPTIONS_JSON: ${{ inputs.route_options_json }}
+          IDENTITY_ACCESS_PROVIDER: ${{ inputs.identity_access_provider }}
+          IDENTITY_ACCESS_SEND_BASIC_AUTH: ${{ inputs.identity_access_send_basic_auth }}
         run: |
           set -euo pipefail
           payload_file="$RUNNER_TEMP/ingress-route-dry-run-request.json"
@@ -97,12 +115,24 @@ jobs:
             --arg forward_scheme "$FORWARD_SCHEME" \
             --arg forward_host "$FORWARD_HOST" \
             --arg route_options_json "$ROUTE_OPTIONS_JSON" \
+            --arg identity_access_provider "$IDENTITY_ACCESS_PROVIDER" \
             --argjson expected_host_id "$EXPECTED_HOST_ID" \
             --argjson forward_port "$FORWARD_PORT" \
             --argjson certificate_id "$CERTIFICATE_ID" \
+            --argjson identity_access_send_basic_auth "$IDENTITY_ACCESS_SEND_BASIC_AUTH" \
             '($route_options_json | fromjson) as $options |
+            (if $identity_access_provider == "none" then "none"
+             elif $identity_access_provider == "authentik" and $identity_access_send_basic_auth then "authentik-send-basic-auth"
+             else $identity_access_provider
+             end) as $mapped_auth_request |
             if ($options | type) != "object" then
               error("route_options_json must be a JSON object")
+            elif $identity_access_provider == "none" and $identity_access_send_basic_auth then
+              error("identity_access_send_basic_auth requires identity_access_provider=authentik")
+            elif $identity_access_provider != "authentik" and $identity_access_send_basic_auth then
+              error("identity_access_send_basic_auth is only valid with identity_access_provider=authentik")
+            elif $identity_access_provider != "none" and (($options.npmplus_auth_request // "none") != "none") and ($options.npmplus_auth_request != $mapped_auth_request) then
+              error("identity_access_provider conflicts with route_options_json.npmplus_auth_request")
             elif ([
               $options
               | keys[]
@@ -129,6 +159,29 @@ jobs:
             ] | length) > 0 then
               error("route_options_json contains unsupported route option key(s)")
             else
+            ({
+              domain_names: [$domain],
+              forward_scheme: $forward_scheme,
+              forward_host: $forward_host,
+              forward_port: $forward_port,
+              certificate_id: $certificate_id,
+              enabled: true,
+              ssl_forced: true,
+              http2_support: true,
+              npmplus_http3_support: true,
+              npmplus_noindex: false,
+              access_list_id: 0
+            } + $options +
+            (if $identity_access_provider == "none" then {}
+             else {
+               identity_access: {
+                 schema_version: 1,
+                 mode: "forward-auth",
+                 provider: $identity_access_provider,
+                 send_basic_auth: $identity_access_send_basic_auth
+               }
+             }
+             end)) as $route |
             {
               schema_version: 1,
               product: $product,
@@ -138,19 +191,7 @@ jobs:
                 mode: "dry-run",
                 expected_host_id: $expected_host_id,
                 reason: $reason,
-                route: {
-                  domain_names: [$domain],
-                  forward_scheme: $forward_scheme,
-                  forward_host: $forward_host,
-                  forward_port: $forward_port,
-                  certificate_id: $certificate_id,
-                  enabled: true,
-                  ssl_forced: true,
-                  http2_support: true,
-                  npmplus_http3_support: true,
-                  npmplus_noindex: false,
-                  access_list_id: 0
-                } + $options
+                route: $route
               }
             }
             end' >"$payload_file"

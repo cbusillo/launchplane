@@ -261,6 +261,25 @@ class ProductOnboardingTests(unittest.TestCase):
             'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
+        self.assertIn("identity_access_provider:", workflow_text)
+        self.assertIn("identity_access_send_basic_auth:", workflow_text)
+        self.assertIn(
+            "IDENTITY_ACCESS_PROVIDER: ${{ inputs.identity_access_provider }}", workflow_text
+        )
+        self.assertIn(
+            "IDENTITY_ACCESS_SEND_BASIC_AUTH: ${{ inputs.identity_access_send_basic_auth }}",
+            workflow_text,
+        )
+        self.assertIn("identity_access_provider=authentik", workflow_text)
+        self.assertIn(
+            'error("identity_access_provider conflicts with route_options_json.npmplus_auth_request")',
+            workflow_text,
+        )
+        self.assertIn("identity_access: {", workflow_text)
+        self.assertIn("schema_version: 1", workflow_text)
+        self.assertIn('mode: "forward-auth"', workflow_text)
+        self.assertIn("provider: $identity_access_provider", workflow_text)
+        self.assertIn("send_basic_auth: $identity_access_send_basic_auth", workflow_text)
         self.assertIn(
             "npmplus_noindex: false",
             workflow_text,
