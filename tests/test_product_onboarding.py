@@ -280,6 +280,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn('mode: "forward-auth"', workflow_text)
         self.assertIn("provider: $identity_access_provider", workflow_text)
         self.assertIn("send_basic_auth: $identity_access_send_basic_auth", workflow_text)
+        self.assertIn("categories=\\($categories)", workflow_text)
         self.assertIn(
             "npmplus_noindex: false",
             workflow_text,
@@ -350,6 +351,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertNotIn("      expected_host_id:", inputs_section)
         self.assertIn('forward_scheme: "http"', workflow_text)
         self.assertIn("npmplus_noindex: true", workflow_text)
+        self.assertIn("categories=\\($categories)", workflow_text)
         self.assertNotIn("route_options_json", workflow_text)
         self.assertIn("ingress-route-canary-apply.yml", script_text)
         self.assertIn("deploy:ingress-route-canary-apply-grant", script_text)
@@ -425,7 +427,9 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("LAUNCHPLANE_ALLOW_DIRECT_DOKPLOY_FALLBACK=true", workflow_text)
         self.assertIn("scripts/deploy/emergency-dokploy-rollback.py", workflow_text)
-        self.assertNotIn("from control_plane import dokploy as control_plane_dokploy", workflow_text)
+        self.assertNotIn(
+            "from control_plane import dokploy as control_plane_dokploy", workflow_text
+        )
         self.assertIn("inputs.break_glass_confirm == ''", workflow_text)
         self.assertIn(
             "inputs.break_glass_confirm == 'ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY'",
