@@ -2076,11 +2076,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "planned")
         self.assertTrue(payload["result"]["dry_run"])
         self.assertEqual(payload["result"]["operations"][0]["action"], "create")
+        self.assertEqual(
+            payload["result"]["operations"][0]["change_categories"],
+            ["route", "upstream", "certificate", "tls", "provider_options"],
+        )
         self.assertIn("ingress_route_audit_record_id", payload["records"])
         self.assertEqual(client.calls, ["list"])
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].mode, "dry-run")
         self.assertEqual(records[0].status, "planned")
+        self.assertEqual(
+            records[0].operations[0].change_categories,
+            ("route", "upstream", "certificate", "tls", "provider_options"),
+        )
         self.assertEqual(records[0].trace_id, payload["trace_id"])
 
     def test_ingress_route_audit_record_api_lists_and_reads_records(self) -> None:
@@ -20244,9 +20252,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "target_type": "compose",
                         "target_id": "compose-123",
                         "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                        "oauth_env": {
-                            "LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example"
-                        },
+                        "oauth_env": {"LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example"},
                         "oauth_env_removals": ["LAUNCHPLANE_NPMPLUS_BASE_URL"],
                     },
                 },

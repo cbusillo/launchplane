@@ -650,6 +650,20 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual([record.record_id for record in limited_records], [newer_record.record_id])
         self.assertEqual(loaded_record.record_id, newer_record.record_id)
 
+    def test_ingress_route_audit_operation_accepts_legacy_missing_categories(
+        self,
+    ) -> None:
+        operation = IngressRouteAuditOperation.model_validate(
+            {
+                "action": "update",
+                "host_id": 78,
+                "domain_names": ["ingress-canary.example.test"],
+                "requires_apply": True,
+            }
+        )
+
+        self.assertEqual(operation.change_categories, ())
+
     def test_postgres_store_round_trips_ingress_route_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"

@@ -215,7 +215,11 @@ asks the service to reject the request unless the expected provider host's domai
 set exactly matches the requested canary domain set. Dry-run and apply responses
 write Launchplane-owned ingress route audit records that preserve the trace id,
 mode, status, requested domains, expected/provider host ids, operations, reason,
-and idempotency key. Keep this workflow canary-scoped until broader route
+and idempotency key. Each plan operation includes high-level change categories
+such as `route`, `upstream`, `certificate`, `tls`, `access_list`,
+`identity_access`, `provider_options`, and `enabled`; those categories make
+identity/access drift visible without storing provider topology or secret values
+in the public contract. Keep this workflow canary-scoped until broader route
 ownership and approval UX are explicit.
 
 Operators with `ingress_route.plan` for the target product/context can inspect

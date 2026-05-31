@@ -17,6 +17,16 @@ class IngressRouteAuditOperation(BaseModel):
     host_id: int | None = Field(default=None, ge=1)
     domain_names: tuple[str, ...]
     requires_apply: bool
+    change_categories: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_operation(self) -> "IngressRouteAuditOperation":
+        self.change_categories = tuple(
+            dict.fromkeys(
+                category.strip().lower() for category in self.change_categories if category.strip()
+            )
+        )
+        return self
 
 
 class IngressRouteAuditRecord(BaseModel):
