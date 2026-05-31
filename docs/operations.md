@@ -148,6 +148,13 @@ DB-backed GitHub-human grants for `product_config.plan` and
 Leave those variables unset to skip reconciliation; do not hard-code human
 logins or product-specific operator grants in source.
 
+Routine local-operator product-config grants are scoped, not wildcard. By
+default the deploy reconciliation derives product/context scopes from the typed
+Launchplane seed import catalog. Set
+`LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for an explicit
+operator-reviewed override; use local-admin grants for rare broader repair
+authority instead of widening routine local-operator access.
+
 The deploy workflow maintains DB-backed grants for SellYourOutboard operational
 workflows, including product profile cutover reads/writes, production promotion,
 and generic-web preview refresh/destroy requests. The grant request returns only
