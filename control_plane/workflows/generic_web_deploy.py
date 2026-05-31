@@ -223,9 +223,9 @@ def _build_post_deploy_context(
 ) -> GenericWebPostDeployContext:
     resolved_target = resolved_deploy_target.resolved_target
     deployed_target = resolved_deploy_target.deployed_target
-    target_category = "unknown"
+    target_category: DeployTargetCategory = "unknown"
     provider_id = ""
-    provider_target_type = resolved_target.target_type
+    provider_target_type = str(resolved_target.target_type)
     if deployed_target is not None:
         target_category = deployed_target.target_category
         provider_id = deployed_target.provider_id
