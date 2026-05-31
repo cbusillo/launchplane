@@ -328,6 +328,136 @@ def _dokploy_compose_metadata_evidence(target_payload: JsonObject) -> dict[str, 
     return evidence
 
 
+def _container_name(container: JsonObject) -> str:
+    return _runtime_source_value(
+        container.get("name") or container.get("Name") or container.get("Names")
+    )
+
+
+def _container_id(container: JsonObject) -> str:
+    return _runtime_source_value(
+        container.get("containerId") or container.get("id") or container.get("Id")
+    )
+
+
+def _web_container_for_app(
+    *, containers_payload: JsonValue, app_name: str
+) -> JsonObject | None:
+    containers = _collect_json_objects(containers_payload)
+    if not app_name.strip():
+        return None
+    matching = [container for container in containers if app_name in _container_name(container)]
+    if not matching:
+        return None
+    web_suffixes = ("-web-1", "_web_1", "-web", "_web")
+    return next(
+        (
+            container
+            for container in matching
+            if any(_container_name(container).endswith(suffix) for suffix in web_suffixes)
+        ),
+        matching[0],
+    )
+
+
+def _container_config_labels(config_payload: JsonValue) -> dict[str, str]:
+    config = control_plane_dokploy.as_json_object(config_payload)
+    if config is None:
+        return {}
+    current: object = config
+    for key_name in ("Config", "Labels"):
+        if not isinstance(current, dict):
+            current = None
+            break
+        current = current.get(key_name)
+    if not isinstance(current, dict):
+        return {}
+    return {str(key): str(value) for key, value in current.items()}
+
+
+def _container_config_network_names(config_payload: JsonValue) -> tuple[str, ...]:
+    config = control_plane_dokploy.as_json_object(config_payload)
+    if config is None:
+        return ()
+    current: object = config
+    for key_name in ("NetworkSettings", "Networks"):
+        if not isinstance(current, dict):
+            current = None
+            break
+        current = current.get(key_name)
+    if not isinstance(current, dict):
+        return ()
+    return tuple(sorted(str(key) for key in current))
+
+
+def _dokploy_container_route_evidence(
+    *,
+    containers_payload: JsonValue,
+    config_payload: JsonValue | None,
+    app_name: str,
+    expected_domain_hosts: tuple[str, ...],
+) -> dict[str, str]:
+    containers = _collect_json_objects(containers_payload)
+    app_containers = [container for container in containers if app_name in _container_name(container)]
+    web_container = _web_container_for_app(
+        containers_payload=containers_payload,
+        app_name=app_name,
+    )
+    labels = _container_config_labels(config_payload) if config_payload is not None else {}
+    network_names = (
+        _container_config_network_names(config_payload) if config_payload is not None else ()
+    )
+    evidence: dict[str, str] = {
+        "container_app_name": app_name,
+        "container_match_count": str(len(app_containers)),
+        "container_web_found": "true" if web_container is not None else "false",
+        "container_web_id_present": "true" if web_container and _container_id(web_container) else "false",
+        "container_web_name": _container_name(web_container or {}),
+        "container_web_state": _runtime_source_value(
+            (web_container or {}).get("state") or (web_container or {}).get("State")
+        ),
+        "container_web_status": _runtime_source_value(
+            (web_container or {}).get("status") or (web_container or {}).get("Status")
+        ),
+        "container_config_present": "true" if config_payload is not None else "false",
+        "container_label_count": str(len(labels)),
+        "container_traefik_label_count": str(
+            len([key for key in labels if key.startswith("traefik.")])
+        ),
+        "container_traefik_enable": labels.get("traefik.enable", ""),
+        "container_traefik_network": labels.get("traefik.docker.network", ""),
+        "container_networks": ",".join(network_names),
+        "container_has_dokploy_network": "true"
+        if "dokploy-network" in network_names
+        else "false",
+    }
+    label_items = tuple(labels.items())
+    for raw_domain_host in expected_domain_hosts:
+        domain_host = raw_domain_host.strip().lower()
+        if not domain_host:
+            continue
+        route_name = control_plane_dokploy._traefik_route_name(domain_host=domain_host)
+        prefix = f"container_domain_{domain_host}"
+        evidence[f"{prefix}_http_rule_present"] = (
+            "true"
+            if labels.get(f"traefik.http.routers.{route_name}-web.rule")
+            == f"Host(`{domain_host}`)"
+            else "false"
+        )
+        evidence[f"{prefix}_https_rule_present"] = (
+            "true"
+            if labels.get(f"traefik.http.routers.{route_name}-websecure.rule")
+            == f"Host(`{domain_host}`)"
+            else "false"
+        )
+        evidence[f"{prefix}_any_host_rule_present"] = (
+            "true"
+            if any(f"Host(`{domain_host}`)" == value for _key, value in label_items)
+            else "false"
+        )
+    return evidence
+
+
 def _collect_json_objects(raw_items: JsonValue | None) -> list[JsonObject]:
     if not isinstance(raw_items, list):
         return []
@@ -1085,6 +1215,38 @@ def execute_odoo_stable_target_replacement_apply(
                 for key, value in _raw_compose_route_evidence(
                     compose_file=deployed_converted_compose_file,
                     domain_hosts=plan.expected_domain_hosts,
+                ).items()
+            }
+        )
+        containers_payload = dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getContainersByAppNameMatch",
+            query={
+                "appName": str(deployed_payload.get("appName") or ""),
+                "appType": "docker-compose",
+            },
+        )
+        web_container = _web_container_for_app(
+            containers_payload=containers_payload,
+            app_name=str(deployed_payload.get("appName") or ""),
+        )
+        config_payload: JsonValue | None = None
+        if web_container is not None and _container_id(web_container):
+            config_payload = dokploy_request(
+                host=host,
+                token=token,
+                path="/api/docker.getConfig",
+                query={"containerId": _container_id(web_container)},
+            )
+        runtime_source.update(
+            {
+                f"post_deploy_{key}": value
+                for key, value in _dokploy_container_route_evidence(
+                    containers_payload=containers_payload,
+                    config_payload=config_payload,
+                    app_name=str(deployed_payload.get("appName") or ""),
+                    expected_domain_hosts=plan.expected_domain_hosts,
                 ).items()
             }
         )
