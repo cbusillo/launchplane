@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      omit_npmplus_env:
+        description: Temporarily omit NPMplus env for one compatibility deploy.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -286,6 +291,7 @@ jobs:
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
                 --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
+                --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -332,21 +338,21 @@ jobs:
                     end
                   )
                   + (
-                    if $npmplus_base_url != "" then
+                    if (($omit_npmplus_env | not) and $npmplus_base_url != "") then
                       {LAUNCHPLANE_NPMPLUS_BASE_URL: $npmplus_base_url}
                     else
                       {}
                     end
                   )
                   + (
-                    if $npmplus_identity != "" then
+                    if (($omit_npmplus_env | not) and $npmplus_identity != "") then
                       {LAUNCHPLANE_NPMPLUS_IDENTITY: $npmplus_identity}
                     else
                       {}
                     end
                   )
                   + (
-                    if $npmplus_secret != "" then
+                    if (($omit_npmplus_env | not) and $npmplus_secret != "") then
                       {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
                     else
                       {}
