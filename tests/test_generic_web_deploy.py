@@ -285,6 +285,10 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(contexts[0].product, "sellyouroutboard")
         self.assertEqual(contexts[0].deployment_record_id, store.deployments[0].record_id)
         self.assertEqual(contexts[0].target_id, "target-123")
+        self.assertEqual(contexts[0].target_category, "service")
+        self.assertEqual(contexts[0].provider_id, "fake-cloud")
+        self.assertEqual(contexts[0].provider_target_type, "managed-service")
+        self.assertEqual(contexts[0].target_type, "application")
 
     def test_execute_generic_web_deploy_keeps_deploy_pass_when_post_deploy_extension_fails(
         self,
