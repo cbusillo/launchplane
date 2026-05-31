@@ -1346,6 +1346,14 @@ post_grant \
   odoo-cm-website-bootstrap-override
 post_grant \
   "$GITHUB_REPOSITORY" \
+  odoo-website-bootstrap-override.yml \
+  odoo-tenant-opw \
+  opw \
+  odoo_website_bootstrap_override.write \
+  deploy:odoo-opw-website-bootstrap-override-grant \
+  odoo-opw-website-bootstrap-override
+post_grant \
+  "$GITHUB_REPOSITORY" \
   odoo-stable-bootstrap.yml \
   odoo-tenant-cm \
   cm \
