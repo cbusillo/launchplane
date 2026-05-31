@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Literal, Protocol
+from typing import Callable, Literal, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -85,8 +86,11 @@ class GenericWebPostDeployContext(BaseModel):
     instance: str
     deployment_record_id: str
     target_name: str
-    target_type: DokployTargetType
     target_id: str
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = ""
+    provider_target_type: str = ""
+    target_type: str = ""
     artifact_id: str
     source_git_ref: str
 
@@ -100,6 +104,22 @@ class GenericWebPostDeployContext(BaseModel):
             raise ValueError("generic web post-deploy context requires instance")
         if not self.deployment_record_id.strip():
             raise ValueError("generic web post-deploy context requires deployment_record_id")
+        self.target_category = cast(
+            DeployTargetCategory, self.target_category.strip().lower()
+        )
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.target_type = self.target_type.strip().lower()
+        if not self.target_type:
+            self.target_type = self.provider_target_type or self.target_category
+        if self.target_category == "unknown" and self.target_type in {
+            "application",
+            "compose",
+            "container",
+            "service",
+            "static",
+        }:
+            self.target_category = cast(DeployTargetCategory, self.target_type)
         if not self.target_name.strip():
             raise ValueError("generic web post-deploy context requires target_name")
         if not self.target_id.strip():
@@ -188,6 +208,41 @@ def _build_runtime_identity(
         source_git_ref=ship_request.source_git_ref,
         image_reference=ship_request.artifact_id,
         deployed_at=deployed_at,
+    )
+
+
+def _build_post_deploy_context(
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    deployment_record_id: str,
+    resolved_deploy_target: GenericWebResolvedDeployTarget,
+    artifact_id: str,
+    source_git_ref: str,
+) -> GenericWebPostDeployContext:
+    resolved_target = resolved_deploy_target.resolved_target
+    deployed_target = resolved_deploy_target.deployed_target
+    target_category = "unknown"
+    provider_id = ""
+    provider_target_type = resolved_target.target_type
+    if deployed_target is not None:
+        target_category = deployed_target.target_category
+        provider_id = deployed_target.provider_id
+        provider_target_type = deployed_target.provider_target_type
+    return GenericWebPostDeployContext(
+        product=product,
+        context=context,
+        instance=instance,
+        deployment_record_id=deployment_record_id,
+        target_name=resolved_target.target_name,
+        target_id=resolved_target.target_id,
+        target_category=target_category,
+        provider_id=provider_id,
+        provider_target_type=provider_target_type,
+        target_type=resolved_target.target_type,
+        artifact_id=artifact_id,
+        source_git_ref=source_git_ref,
     )
 
 
@@ -331,14 +386,12 @@ def execute_generic_web_deploy(
             post_deploy_update = _run_post_deploy_extension(
                 control_plane_root=control_plane_root,
                 record_store=record_store,
-                context=GenericWebPostDeployContext(
+                context=_build_post_deploy_context(
                     product=resolved_profile.product,
                     context=resolved_lane.context,
                     instance=resolved_lane.instance,
                     deployment_record_id=record_id,
-                    target_name=resolved_target.target_name,
-                    target_type=resolved_target.target_type,
-                    target_id=resolved_target.target_id,
+                    resolved_deploy_target=resolved_deploy_target,
                     artifact_id=ship_request.artifact_id,
                     source_git_ref=ship_request.source_git_ref,
                 ),
