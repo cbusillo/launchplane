@@ -54,8 +54,9 @@ typed repository methods, not through service/UI code that reaches into JSONB
 payloads. The first GUI-facing repository projections are:
 
 - `LaunchplaneLaneSummary`: lane inventory, release tuple, latest deployment,
-  latest promotion, latest backup gate, target metadata, runtime environment
-  records, Odoo override metadata, and secret binding status.
+  latest promotion, latest backup gate, provider-neutral deployed target
+  metadata, runtime environment records, Odoo override metadata, and secret
+  binding status.
 - `LaunchplanePreviewSummary`: preview identity plus recent/latest generation
   state.
 
@@ -122,6 +123,11 @@ an ORM column/table or remains only in the evidence payload.
 - Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.
   Provider-specific names, domains, policies, schedule, and app details stay
   payload-only until a provider-neutral target model needs them.
+- Deployment records carry provider-neutral deployed target evidence in the
+  payload (`provider_id`, `target_category`, `target_id`, and `display_name`).
+  Existing Dokploy-shaped `resolved_target` and deploy-mode fields remain
+  readable compatibility evidence and are translated into the neutral target
+  reference when no explicit provider-neutral target is present.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
   `updated_at`. Individual key/value settings stay payload-only until GUI
   filtering or editing requires a setting table.

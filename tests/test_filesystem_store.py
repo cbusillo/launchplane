@@ -12,6 +12,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -1258,6 +1259,59 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             resolved_target = loaded_record.resolved_target
             assert resolved_target is not None
             self.assertEqual(resolved_target.target_id, "compose-123")
+            deployed_target = loaded_record.deployed_target
+            assert deployed_target is not None
+            self.assertEqual(deployed_target.provider_id, "dokploy")
+            self.assertEqual(deployed_target.target_category, "compose")
+            self.assertEqual(deployed_target.target_id, "compose-123")
+            self.assertEqual(deployed_target.display_name, "opw-prod")
+
+    def test_deployment_record_accepts_provider_neutral_target_without_dokploy_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = DeploymentRecord(
+                record_id="deployment-20260410T182231Z-syo-prod",
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
+                context="syo",
+                instance="prod",
+                source_git_ref="abc123",
+                deployed_target=DeployedTargetReference(
+                    provider_id="fake-cloud",
+                    target_category="service",
+                    target_id="svc-123",
+                    display_name="syo-prod-service",
+                    provider_target_type="managed-service",
+                    provider_evidence={"region": "us-east-1"},
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="syo-prod-service",
+                    target_type="application",
+                    deploy_mode="fake-cloud-service-api",
+                    provider_id="fake-cloud",
+                    target_category="service",
+                    provider_deploy_mode="service-api",
+                    deployment_id="deploy-123",
+                    status="pass",
+                    started_at="2026-04-10T18:22:31Z",
+                    finished_at="2026-04-10T18:24:00Z",
+                ),
+            )
+
+            store.write_deployment_record(record)
+            loaded_record = store.read_deployment_record(record.record_id)
+
+        self.assertIsNone(loaded_record.resolved_target)
+        deployed_target = loaded_record.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.provider_id, "fake-cloud")
+        self.assertEqual(deployed_target.target_category, "service")
+        self.assertEqual(deployed_target.provider_target_type, "managed-service")
+        self.assertEqual(deployed_target.provider_evidence, {"region": "us-east-1"})
+        self.assertEqual(loaded_record.deploy.provider_id, "fake-cloud")
+        self.assertEqual(loaded_record.deploy.target_category, "service")
 
     def test_list_deployment_records_filters_and_sorts_latest_first(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

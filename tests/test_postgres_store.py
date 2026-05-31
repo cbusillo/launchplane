@@ -25,6 +25,7 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -1312,6 +1313,59 @@ class PostgresRecordStoreTests(unittest.TestCase):
         resolved_target = loaded_record.resolved_target
         assert resolved_target is not None
         self.assertEqual(resolved_target.target_id, "compose-123")
+        deployed_target = loaded_record.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.provider_id, "dokploy")
+        self.assertEqual(deployed_target.target_category, "compose")
+
+    def test_write_and_read_provider_neutral_deployment_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = DeploymentRecord(
+                record_id="deployment-20260420T153000Z-syo-prod",
+                artifact_identity=ArtifactIdentityReference(
+                    artifact_id="artifact-20260420-a1b2c3d4"
+                ),
+                context="syo",
+                instance="prod",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                deployed_target=DeployedTargetReference(
+                    provider_id="fake-cloud",
+                    target_category="service",
+                    target_id="svc-123",
+                    display_name="syo-prod-service",
+                    provider_target_type="managed-service",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="syo-prod-service",
+                    target_type="application",
+                    deploy_mode="fake-cloud-service-api",
+                    provider_id="fake-cloud",
+                    target_category="service",
+                    deployment_id="deploy-123",
+                    status="pass",
+                    started_at="2026-04-20T15:30:00Z",
+                    finished_at="2026-04-20T15:32:00Z",
+                ),
+            )
+
+            store.write_deployment_record(record)
+            loaded_record = store.read_deployment_record(record.record_id)
+            store.close()
+
+        self.assertIsNone(loaded_record.resolved_target)
+        deployed_target = loaded_record.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.provider_id, "fake-cloud")
+        self.assertEqual(deployed_target.target_category, "service")
+        self.assertEqual(deployed_target.target_id, "svc-123")
+        self.assertEqual(loaded_record.deploy.provider_id, "fake-cloud")
+        self.assertEqual(loaded_record.deploy.target_category, "service")
 
     def test_write_and_list_generic_web_rollback_plan_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2434,6 +2488,11 @@ env_var = "GH_TOKEN"
         dokploy_target = summary.dokploy_target
         assert dokploy_target is not None
         self.assertEqual(dokploy_target.target_name, "opw-testing")
+        deployed_target = summary.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.provider_id, "dokploy")
+        self.assertEqual(deployed_target.target_category, "compose")
+        self.assertEqual(deployed_target.target_id, "compose-123")
         self.assertEqual(
             [
                 (record.scope, record.context, record.instance)
