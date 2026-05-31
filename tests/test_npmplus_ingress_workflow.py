@@ -108,6 +108,10 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "planned")
         self.assertTrue(result.dry_run)
         self.assertEqual(result.operations[0].action, "create")
+        self.assertEqual(
+            result.operations[0].change_categories,
+            ("route", "upstream", "certificate", "tls", "provider_options"),
+        )
         self.assertEqual(client.calls, ["list"])
         self.assertEqual(client.proxy_hosts, [])
 
@@ -132,6 +136,7 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("upstream",))
         self.assertEqual(client.calls, ["list", "update:78"])
         self.assertEqual(result.proxy_host.forward_port if result.proxy_host else None, 8123)
 
@@ -144,6 +149,7 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(tuple(operation.action for operation in result.operations), ("disable",))
+        self.assertEqual(result.operations[0].change_categories, ("enabled",))
         self.assertFalse(result.proxy_host.enabled if result.proxy_host else True)
         self.assertEqual(client.calls, ["list", "disable:78"])
 
@@ -169,6 +175,7 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
+        self.assertEqual(result.operations[0].change_categories, ())
         self.assertEqual(client.calls, ["list"])
 
     def test_noop_ignores_api_assigned_location_ids(self) -> None:
@@ -184,6 +191,35 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
         self.assertEqual(client.calls, ["list"])
+
+    def test_update_identifies_identity_access_change(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(npmplus_auth_request="none"),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(
+                route=_desired_route(
+                    identity_access={
+                        "mode": "forward-auth",
+                        "provider": "authentik",
+                    }
+                )
+            ),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("identity_access",))
+
+    def test_update_identifies_location_change_as_provider_options(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(locations=[_location(forward_port=9001)]),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(route=_desired_route(locations=[_location()])),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("provider_options",))
 
     def test_identity_access_binding_maps_authentik_forward_auth(self) -> None:
         route = _desired_route(

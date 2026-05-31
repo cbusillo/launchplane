@@ -14,9 +14,62 @@ from control_plane.npmplus import (
 
 type NpmplusIngressMode = Literal["dry-run", "apply"]
 type NpmplusIngressOperationAction = Literal["create", "update", "enable", "disable", "no-op"]
+type NpmplusIngressChangeCategory = Literal[
+    "route",
+    "upstream",
+    "certificate",
+    "tls",
+    "access_list",
+    "identity_access",
+    "provider_options",
+    "enabled",
+]
 type NpmplusIngressStatus = Literal["planned", "applied", "unchanged"]
 type IngressIdentityAccessMode = Literal["none", "forward-auth"]
 type IngressIdentityAccessProvider = Literal["none", "anubis", "tinyauth", "authelia", "authentik"]
+
+
+_CHANGE_CATEGORY_ORDER: tuple[NpmplusIngressChangeCategory, ...] = (
+    "route",
+    "upstream",
+    "certificate",
+    "tls",
+    "access_list",
+    "identity_access",
+    "provider_options",
+    "enabled",
+)
+_CHANGE_CATEGORY_FIELDS: dict[NpmplusIngressChangeCategory, frozenset[str]] = {
+    "route": frozenset({"domain_names"}),
+    "upstream": frozenset({"forward_scheme", "forward_host", "forward_port"}),
+    "certificate": frozenset({"certificate_id"}),
+    "tls": frozenset(
+        {
+            "ssl_forced",
+            "hsts_enabled",
+            "hsts_subdomains",
+            "trust_forwarded_proto",
+            "http2_support",
+            "npmplus_http3_support",
+        }
+    ),
+    "access_list": frozenset({"access_list_id"}),
+    "identity_access": frozenset({"npmplus_auth_request"}),
+    "provider_options": frozenset(
+        {
+            "advanced_config",
+            "locations",
+            "npmplus_noindex",
+            "npmplus_crowdsec_appsec",
+            "npmplus_proxy_request_buffering",
+            "npmplus_proxy_response_buffering",
+            "npmplus_upstream_compression",
+            "npmplus_fancyindex",
+            "npmplus_x_frame_options",
+        }
+    ),
+    "enabled": frozenset({"enabled"}),
+}
 
 
 class NpmplusIngressClient(Protocol):
@@ -156,6 +209,7 @@ class NpmplusIngressOperation(BaseModel):
     host_id: int | None = None
     domain_names: tuple[str, ...]
     requires_apply: bool
+    change_categories: tuple[NpmplusIngressChangeCategory, ...] = ()
 
 
 class NpmplusIngressApplyResult(BaseModel):
@@ -299,11 +353,13 @@ def _plan_operations(
                 action="create",
                 domain_names=operation_domains,
                 requires_apply=True,
+                change_categories=_create_change_categories(desired_payload),
             ),
         )
 
     operations: list[NpmplusIngressOperation] = []
-    if not _payload_matches(existing_host, desired_payload):
+    change_categories = _update_change_categories(existing_host, desired_payload)
+    if change_categories:
         if not request.allow_update:
             raise click.ClickException("NPMplus ingress update is not allowed for this request.")
         operations.append(
@@ -312,6 +368,7 @@ def _plan_operations(
                 host_id=existing_host.id,
                 domain_names=operation_domains,
                 requires_apply=True,
+                change_categories=change_categories,
             )
         )
 
@@ -326,6 +383,7 @@ def _plan_operations(
                 host_id=existing_host.id,
                 domain_names=operation_domains,
                 requires_apply=True,
+                change_categories=("enabled",),
             )
         )
 
@@ -346,6 +404,47 @@ def _payload_matches(
     desired_payload: NpmplusProxyHostPayload,
 ) -> bool:
     return _comparable_payload(existing_host) == _comparable_payload(desired_payload)
+
+
+def _create_change_categories(
+    desired_payload: NpmplusProxyHostPayload,
+) -> tuple[NpmplusIngressChangeCategory, ...]:
+    categories: set[NpmplusIngressChangeCategory] = {
+        "route",
+        "upstream",
+        "certificate",
+        "tls",
+        "provider_options",
+    }
+    if desired_payload.access_list_id != 0:
+        categories.add("access_list")
+    if desired_payload.npmplus_auth_request != "none":
+        categories.add("identity_access")
+    if not desired_payload.enabled:
+        categories.add("enabled")
+    return _ordered_change_categories(categories)
+
+
+def _update_change_categories(
+    existing_host: NpmplusProxyHost,
+    desired_payload: NpmplusProxyHostPayload,
+) -> tuple[NpmplusIngressChangeCategory, ...]:
+    existing_comparison = _comparable_payload(existing_host)
+    desired_comparison = _comparable_payload(desired_payload)
+    categories = {
+        category
+        for category, fields in _CHANGE_CATEGORY_FIELDS.items()
+        if any(existing_comparison.get(field) != desired_comparison.get(field) for field in fields)
+    }
+    if existing_comparison != desired_comparison and not categories:
+        categories.add("provider_options")
+    return _ordered_change_categories(categories)
+
+
+def _ordered_change_categories(
+    categories: set[NpmplusIngressChangeCategory],
+) -> tuple[NpmplusIngressChangeCategory, ...]:
+    return tuple(category for category in _CHANGE_CATEGORY_ORDER if category in categories)
 
 
 def _comparable_payload(
