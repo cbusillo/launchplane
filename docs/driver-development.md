@@ -136,6 +136,48 @@ Keep slices small. Land read-only descriptors and profile shape before
 high-risk provider mutations. Land readiness checks before create/update/delete
 actions when a provider mutation depends on external target state.
 
+## Provider Adapter Slices
+
+Provider adapters may land before a full driver route when the first useful
+slice is proving an external control-plane boundary. Keep these adapters small,
+typed, and tested with mocked provider calls. Do not read secrets from ad hoc
+local files inside the adapter; callers must pass credentials from Launchplane
+managed secret or operator configuration boundaries.
+
+The NPMplus adapter in `control_plane/npmplus.py` is the first ingress-provider
+slice. It models session-cookie authentication, proxy-host payloads, and the
+proxy-host create/read/update/disable/enable/delete lifecycle that was proven
+against a disposable canary route. Future ingress driver routes should use this
+adapter instead of direct NPMplus SQLite or generated nginx config writes.
+
+The service-backed ingress route is `POST /v1/drivers/ingress/route-apply`.
+Callers send a product/context envelope plus a typed route request. `mode` is
+`dry-run` by default for CLI callers; `apply` must be explicit. The route uses
+`ingress_route.plan` for dry-run authorization and `ingress_route.apply` for
+provider mutation authorization. The service constructs the NPMplus client from
+environment keys named `LAUNCHPLANE_NPMPLUS_BASE_URL`,
+`LAUNCHPLANE_NPMPLUS_IDENTITY`, and `LAUNCHPLANE_NPMPLUS_SECRET`; do not commit
+real values or local operator overrides.
+
+The matching CLI entrypoint is service-mediated:
+
+```bash
+uv run launchplane ingress route-apply \
+  --service-url https://launchplane.example \
+  --product launchplane \
+  --context example-prod \
+  --domain app.example.com \
+  --forward-host 192.0.2.10 \
+  --forward-port 8080 \
+  --certificate-id 1 \
+  --reason "Plan ingress route"
+```
+
+Use `--apply` only after reviewing a matching dry-run. Provider mutations require
+an explicit `--idempotency-key`. The CLI accepts a bearer token from
+`LAUNCHPLANE_SERVICE_TOKEN` by default or a signed browser session via
+`--session-cookie`; it must not read NPMplus credentials locally.
+
 ## Product Repo Boundary
 
 Driver development should make product repos thinner, not larger. When a new

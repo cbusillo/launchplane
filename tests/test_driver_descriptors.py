@@ -130,13 +130,24 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertEqual(
             [descriptor.driver_id for descriptor in descriptors],
-            ["generic-web", "odoo", "verireel"],
+            ["generic-web", "ingress", "odoo", "verireel"],
         )
         descriptor_json = json.dumps(
             [descriptor.model_dump(mode="json") for descriptor in descriptors], sort_keys=True
         )
+        self.assertNotIn("NPMplus", descriptor_json)
         self.assertNotIn("Dokploy", descriptor_json)
         self.assertNotIn("launchplane/self-deploy", descriptor_json)
+
+    def test_ingress_descriptor_exposes_route_apply(self) -> None:
+        descriptor = read_driver_descriptor("ingress")
+        actions = {action.action_id: action for action in descriptor.actions}
+
+        self.assertEqual(actions["route_apply"].route_path, "/v1/drivers/ingress/route-apply")
+        self.assertEqual(actions["route_apply"].authz_action, "ingress_route.apply")
+        self.assertEqual(actions["route_apply"].alternate_authz_actions, ("ingress_route.plan",))
+        self.assertIn("ingress_route.plan", actions["route_apply"].description)
+        self.assertEqual(actions["route_apply"].safety, "mutation")
 
     def test_odoo_descriptor_marks_prod_rollback_as_destructive(self) -> None:
         descriptor = read_driver_descriptor("odoo")
@@ -637,6 +648,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 {
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+                    control_plane_service._NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
                     "/v1/agent/write-intents/evaluate",
                     "/v1/product-config/apply",
                     "/v1/authz-policies/github-actions/grants",

@@ -1,0 +1,239 @@
+import unittest
+
+import click
+
+from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
+from control_plane.workflows.npmplus_ingress import (
+    NpmplusIngressApplyRequest,
+    NpmplusIngressRouteDesiredState,
+    apply_npmplus_ingress_route,
+)
+
+
+class _FakeNpmplusClient:
+    def __init__(self, proxy_hosts: tuple[NpmplusProxyHost, ...] = ()) -> None:
+        self.proxy_hosts = list(proxy_hosts)
+        self.calls: list[str] = []
+        self.next_id = 100
+
+    def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]:
+        self.calls.append("list")
+        return tuple(self.proxy_hosts)
+
+    def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+        self.calls.append("create")
+        created = NpmplusProxyHost.model_validate({"id": self.next_id, **payload.to_api_payload()})
+        self.proxy_hosts.append(created)
+        return created
+
+    def update_proxy_host(
+        self, *, host_id: int, payload: NpmplusProxyHostPayload
+    ) -> NpmplusProxyHost:
+        self.calls.append(f"update:{host_id}")
+        updated = NpmplusProxyHost.model_validate({"id": host_id, **payload.to_api_payload()})
+        self.proxy_hosts = [updated if host.id == host_id else host for host in self.proxy_hosts]
+        return updated
+
+    def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self.calls.append(f"disable:{host_id}")
+        return self._set_enabled(host_id=host_id, enabled=False)
+
+    def enable_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+        self.calls.append(f"enable:{host_id}")
+        return self._set_enabled(host_id=host_id, enabled=True)
+
+    def _set_enabled(self, *, host_id: int, enabled: bool) -> NpmplusProxyHost:
+        for index, host in enumerate(self.proxy_hosts):
+            if host.id == host_id:
+                updated = NpmplusProxyHost.model_validate(
+                    {**host.model_dump(mode="json"), "enabled": enabled}
+                )
+                self.proxy_hosts[index] = updated
+                return updated
+        raise AssertionError(f"Unknown proxy host: {host_id}")
+
+
+def _desired_route(**overrides: object) -> NpmplusIngressRouteDesiredState:
+    return NpmplusIngressRouteDesiredState.model_validate(
+        {
+            "domain_names": ["Ingress-Canary.Example.Test"],
+            "forward_scheme": "http",
+            "forward_host": "192.0.2.10",
+            "forward_port": 8123,
+            "certificate_id": 47,
+            **overrides,
+        }
+    )
+
+
+def _request(
+    *,
+    mode: str = "dry-run",
+    route: NpmplusIngressRouteDesiredState | None = None,
+    **overrides: object,
+) -> NpmplusIngressApplyRequest:
+    return NpmplusIngressApplyRequest.model_validate(
+        {
+            "mode": mode,
+            "route": (route or _desired_route()).model_dump(mode="json"),
+            "reason": "test ingress workflow",
+            **overrides,
+        }
+    )
+
+
+def _proxy_host(*, id: int = 78, enabled: bool = True, **overrides: object) -> NpmplusProxyHost:
+    payload = _desired_route(**overrides).to_proxy_host_payload().model_dump(mode="json")
+    return NpmplusProxyHost.model_validate({"id": id, **payload, "enabled": enabled})
+
+
+def _location(**overrides: object) -> dict[str, object]:
+    return {
+        "path": "/ws",
+        "forward_scheme": "http",
+        "forward_host": "192.0.2.11",
+        "forward_port": 9000,
+        **overrides,
+    }
+
+
+class NpmplusIngressWorkflowTests(unittest.TestCase):
+    def test_dry_run_plans_create_without_mutating(self) -> None:
+        client = _FakeNpmplusClient()
+
+        result = apply_npmplus_ingress_route(client=client, request=_request())
+
+        self.assertEqual(result.status, "planned")
+        self.assertTrue(result.dry_run)
+        self.assertEqual(result.operations[0].action, "create")
+        self.assertEqual(client.calls, ["list"])
+        self.assertEqual(client.proxy_hosts, [])
+
+    def test_apply_creates_missing_proxy_host(self) -> None:
+        client = _FakeNpmplusClient()
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply"),
+        )
+
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(result.proxy_host.id if result.proxy_host else None, 100)
+        self.assertEqual(client.calls, ["list", "create"])
+
+    def test_apply_updates_existing_proxy_host(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(forward_port=8080),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply"),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(client.calls, ["list", "update:78"])
+        self.assertEqual(result.proxy_host.forward_port if result.proxy_host else None, 8123)
+
+    def test_apply_disables_existing_proxy_host(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply", route=_desired_route(enabled=False)),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("disable",))
+        self.assertFalse(result.proxy_host.enabled if result.proxy_host else True)
+        self.assertEqual(client.calls, ["list", "disable:78"])
+
+    def test_apply_update_skips_redundant_lifecycle_call(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(enabled=True, forward_port=8080),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply", route=_desired_route(enabled=False)),
+        )
+
+        self.assertEqual(
+            tuple(operation.action for operation in result.operations),
+            ("update", "disable"),
+        )
+        self.assertFalse(result.proxy_host.enabled if result.proxy_host else True)
+        self.assertEqual(client.calls, ["list", "update:78"])
+
+    def test_noop_when_existing_route_matches_desired_state(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(),))
+
+        result = apply_npmplus_ingress_route(client=client, request=_request(mode="apply"))
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
+        self.assertEqual(client.calls, ["list"])
+
+    def test_noop_ignores_api_assigned_location_ids(self) -> None:
+        route = _desired_route(locations=[_location()])
+        existing = _proxy_host(locations=[_location(id=42)])
+        client = _FakeNpmplusClient((existing,))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply", route=route),
+        )
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
+        self.assertEqual(client.calls, ["list"])
+
+    def test_rejects_ambiguous_domain_matches(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(id=78), _proxy_host(id=79)))
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(client=client, request=_request())
+
+    def test_rejects_missing_expected_host_id(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(id=78),))
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(
+                client=client,
+                request=_request(expected_host_id=79),
+            )
+
+    def test_rejects_expected_host_id_when_expected_host_domain_does_not_match(
+        self,
+    ) -> None:
+        client = _FakeNpmplusClient((_proxy_host(id=79, domain_names=["other.example.test"]),))
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(
+                client=client,
+                request=_request(expected_host_id=79),
+            )
+
+    def test_rejects_expected_host_id_when_domain_matches_another_host(self) -> None:
+        client = _FakeNpmplusClient(
+            (
+                _proxy_host(id=78),
+                _proxy_host(id=79, domain_names=["other.example.test"]),
+            )
+        )
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(
+                client=client,
+                request=_request(expected_host_id=79),
+            )
+
+    def test_rejects_create_when_disallowed(self) -> None:
+        client = _FakeNpmplusClient()
+
+        with self.assertRaises(click.ClickException):
+            apply_npmplus_ingress_route(
+                client=client,
+                request=_request(allow_create=False),
+            )
+
+        self.assertEqual(client.calls, ["list"])
+
+
+if __name__ == "__main__":
+    unittest.main()
