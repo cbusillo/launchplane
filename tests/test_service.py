@@ -184,6 +184,11 @@ from control_plane.workflows.generic_web_preview import (
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
 from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
+from control_plane.workflows.ingress_provider import NpmplusIngressProvider
+from control_plane.workflows.npmplus_ingress import (
+    NpmplusIngressApplyRequest,
+    NpmplusIngressApplyResult,
+)
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
@@ -262,6 +267,23 @@ class _FakeNpmplusIngressClient:
                 self.proxy_hosts[index] = updated
                 return updated
         raise AssertionError(f"Unknown proxy host: {host_id}")
+
+
+class _FakeIngressProvider:
+    provider_id = "fake-ingress"
+    delegated_executor = "control-plane.fake-ingress"
+
+    def __init__(self, result: NpmplusIngressApplyResult) -> None:
+        self.result = result
+        self.requests: list[NpmplusIngressApplyRequest] = []
+
+    def apply_route(
+        self,
+        *,
+        request: NpmplusIngressApplyRequest,
+    ) -> NpmplusIngressApplyResult:
+        self.requests.append(request)
+        return self.result
 
 
 class _FakeGitHubResponse:
@@ -2392,6 +2414,64 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records[0].mode, "apply")
         self.assertEqual(records[0].idempotency_key, "npmplus-ingress-apply")
         self.assertEqual(records[0].provider_host_id, 100)
+
+    def test_ingress_route_apply_uses_provider_adapter(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        provider = _FakeIngressProvider(
+            NpmplusIngressProvider(client=client).apply_route(
+                request=NpmplusIngressApplyRequest.model_validate(
+                    _npmplus_ingress_route_payload()["ingress"]
+                )
+            )
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                ingress_provider_factory=lambda: provider,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(),
+                headers={"Idempotency-Key": "ingress-provider-plan"},
+            )
+            records = FilesystemRecordStore(root / "state").list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["ingress_provider"], "fake-ingress")
+        self.assertEqual(payload["result"]["status"], "planned")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].provider, "fake-ingress")
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(
+            provider.requests[0].route.domain_names,
+            ("ingress-canary.example.test",),
+        )
 
     def test_npmplus_ingress_route_apply_fails_before_mutation_when_audit_unavailable(
         self,
