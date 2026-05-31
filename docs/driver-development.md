@@ -178,6 +178,13 @@ an explicit `--idempotency-key`. The CLI accepts a bearer token from
 `LAUNCHPLANE_SERVICE_TOKEN` by default or a signed browser session via
 `--session-cookie`; it must not read NPMplus credentials locally.
 
+Operators can also use the `Ingress Route Dry Run` GitHub workflow for a
+service-mediated canary plan through GitHub OIDC. The workflow accepts the
+product, context, domain, upstream target, existing certificate id, expected
+provider host id, and route toggles as manual inputs, then calls the same route with
+`mode: dry-run`. Its authz grant is plan-only; an apply still requires the
+separate `ingress_route.apply` permission and an explicit mutation path.
+
 ## Product Repo Boundary
 
 Driver development should make product repos thinner, not larger. When a new
