@@ -1,0 +1,417 @@
+{
+  "schema_version": 1,
+  "imports": [
+    {
+      "kind": "product_onboarding",
+      "import_id": "discord-blue-product-onboarding",
+      "target_id_env": [
+        {
+          "context": "discord-blue",
+          "instance": "prod",
+          "env": "DISCORD_BLUE_DOKPLOY_TARGET_ID"
+        }
+      ],
+      "manifest": {
+        "product": "discord-blue",
+        "display_name": "Discord Blue",
+        "repository": "cbusillo/discord-blue",
+        "driver_id": "generic-web",
+        "image_repository": "ghcr.io/cbusillo/discord-blue",
+        "runtime_port": 8787,
+        "health_path": "/health",
+        "lanes": [
+          {
+            "instance": "prod",
+            "context": "discord-blue"
+          }
+        ],
+        "dokploy_targets": [
+          {
+            "context": "discord-blue",
+            "instance": "prod",
+            "target_id": "__DISCORD_BLUE_DOKPLOY_TARGET_ID__",
+            "target_type": "application",
+            "target_name": "discord-blue",
+            "healthcheck_enabled": false,
+            "deploy_timeout_seconds": 600
+          }
+        ],
+        "runtime_environments": [
+          {
+            "scope": "instance",
+            "context": "discord-blue",
+            "instance": "prod",
+            "env": {
+              "DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"
+            }
+          }
+        ],
+        "secret_bindings": [
+          {
+            "binding_key": "DISCORD_TOKEN",
+            "context": "discord-blue",
+            "instance": "prod"
+          }
+        ],
+        "source_label": "import-material:discord-blue-product-onboarding"
+      }
+    },
+    {
+      "kind": "product_onboarding",
+      "import_id": "verireel-product-onboarding",
+      "manifest": {
+        "product": "verireel",
+        "display_name": "VeriReel",
+        "repository": "cbusillo/verireel",
+        "driver_id": "verireel",
+        "image_repository": "ghcr.io/cbusillo/verireel-app",
+        "runtime_port": 3000,
+        "health_path": "/api/health",
+        "lanes": [
+          {
+            "instance": "testing",
+            "context": "verireel",
+            "base_url": "https://ver-testing.shinycomputers.com"
+          },
+          {
+            "instance": "prod",
+            "context": "verireel",
+            "base_url": "https://ver-prod.shinycomputers.com"
+          }
+        ],
+        "preview": {
+          "enabled": true,
+          "context": "verireel-testing",
+          "enable_label": "preview",
+          "slug_template": "pr-{number}",
+          "app_name_prefix": "ver-preview",
+          "template_instance": "testing",
+          "preview_url_env_keys": ["VERIREEL_APP_URL", "BETTER_AUTH_URL"],
+          "preview_domain_env_keys": ["LAUNCHPLANE_PREVIEW_BASE_URL"],
+          "data_transport_mode": "driver"
+        },
+        "runtime_environments": [
+          {
+            "scope": "context",
+            "context": "verireel-testing",
+            "env": {
+              "LAUNCHPLANE_PREVIEW_BASE_URL": "https://ver-preview.shinycomputers.com"
+            }
+          }
+        ],
+        "expected_config": {
+          "managed_secret_bindings": [
+            {
+              "binding_key": "BETTER_AUTH_SECRET",
+              "context": "verireel",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "VERIREEL_SECRETS_MASTER_KEY",
+              "context": "verireel",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "VERIREEL_CRON_SECRET",
+              "context": "verireel",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "POSTGRES_PASSWORD",
+              "context": "verireel",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "BETTER_AUTH_SECRET",
+              "context": "verireel",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "VERIREEL_SECRETS_MASTER_KEY",
+              "context": "verireel",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "VERIREEL_CRON_SECRET",
+              "context": "verireel",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "POSTGRES_PASSWORD",
+              "context": "verireel",
+              "instance": "prod"
+            }
+          ]
+        },
+        "source_label": "import-material:verireel-product-onboarding"
+      }
+    },
+    {
+      "kind": "product_onboarding",
+      "import_id": "odoo-cm-product-onboarding",
+      "target_id_env": [
+        {
+          "context": "cm",
+          "instance": "testing",
+          "env": "ODOO_CM_TESTING_DOKPLOY_TARGET_ID"
+        },
+        {
+          "context": "cm",
+          "instance": "prod",
+          "env": "ODOO_CM_PROD_DOKPLOY_TARGET_ID"
+        }
+      ],
+      "manifest": {
+        "product": "odoo-tenant-cm",
+        "display_name": "Odoo CM",
+        "repository": "cbusillo/odoo-tenant-cm",
+        "driver_id": "odoo",
+        "image_repository": "ghcr.io/cbusillo/odoo-tenant-cm",
+        "runtime_port": 8069,
+        "health_path": "/launchplane/health",
+        "lanes": [
+          {
+            "instance": "testing",
+            "context": "cm",
+            "odoo_stable_bootstrap": {
+              "enabled": true,
+              "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+              "data_source_mode": "empty",
+              "confirmation": "bootstrap cm testing",
+              "expected_target_name": "cm-testing",
+              "expected_domains": ["cm-testing.shinycomputers.com"],
+              "require_health_verification": true,
+              "require_canonical_verification": true,
+              "require_logo_verification": true
+            },
+            "odoo_data_policy": {
+              "data_authority": "resettable",
+              "allowed_rebuild_sources": ["empty"],
+              "requires_backup_before_destroy": false,
+              "requires_restore_proof": false,
+              "requires_runtime_identity": true
+            }
+          },
+          {
+            "instance": "prod",
+            "context": "cm",
+            "odoo_stable_bootstrap": {
+              "enabled": true,
+              "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+              "data_source_mode": "empty",
+              "confirmation": "bootstrap cm prod",
+              "expected_target_name": "cm-prod",
+              "expected_domains": ["cellmechanic.com"],
+              "require_health_verification": true,
+              "require_canonical_verification": true,
+              "require_logo_verification": true
+            },
+            "odoo_data_policy": {
+              "data_authority": "resettable",
+              "allowed_rebuild_sources": ["empty"],
+              "requires_backup_before_destroy": false,
+              "requires_restore_proof": false,
+              "requires_runtime_identity": true
+            }
+          }
+        ],
+        "preview": {
+          "enabled": true,
+          "context": "cm",
+          "enable_label": "preview",
+          "slug_template": "pr-{number}",
+          "app_name_prefix": "cm-odoo-preview",
+          "template_instance": "testing",
+          "override_env": {
+            "ODOO_INSTALL_MODULES": "cm_custom,cm_website"
+          },
+          "preview_url_env_keys": ["WEB_BASE_URL"],
+          "data_transport_mode": "driver"
+        },
+        "dokploy_targets": [
+          {
+            "context": "cm",
+            "instance": "testing",
+            "target_id": "__ODOO_CM_TESTING_DOKPLOY_TARGET_ID__",
+            "target_type": "compose",
+            "target_name": "cm-testing",
+            "domains": ["cm-testing.shinycomputers.com"],
+            "healthcheck_path": "/web/health",
+            "healthcheck_enabled": true,
+            "deploy_timeout_seconds": 900
+          },
+          {
+            "context": "cm",
+            "instance": "prod",
+            "target_id": "__ODOO_CM_PROD_DOKPLOY_TARGET_ID__",
+            "target_type": "compose",
+            "target_name": "cm-prod",
+            "domains": ["cm-prod.shinycomputers.com"],
+            "healthcheck_path": "/web/health",
+            "healthcheck_enabled": true,
+            "deploy_timeout_seconds": 900
+          }
+        ],
+        "source_label": "import-material:odoo-cm-product-onboarding"
+      }
+    },
+    {
+      "kind": "product_onboarding",
+      "import_id": "odoo-opw-product-onboarding",
+      "target_id_env": [
+        {
+          "context": "opw",
+          "instance": "testing",
+          "env": "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID"
+        },
+        {
+          "context": "opw",
+          "instance": "prod",
+          "env": "ODOO_OPW_PROD_DOKPLOY_TARGET_ID"
+        }
+      ],
+      "manifest": {
+        "product": "odoo-tenant-opw",
+        "display_name": "Odoo OPW",
+        "repository": "cbusillo/odoo-tenant-opw",
+        "driver_id": "odoo",
+        "image_repository": "ghcr.io/cbusillo/odoo-tenant-opw",
+        "runtime_port": 8069,
+        "health_path": "/launchplane/health",
+        "lanes": [
+          {
+            "instance": "testing",
+            "context": "opw",
+            "base_url": "https://opw-testing.shinycomputers.com",
+            "health_url": "https://opw-testing.shinycomputers.com/launchplane/health",
+            "odoo_prelaunch_rebuild": {
+              "enabled": true,
+              "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+              "data_source_mode": "upstream_restore",
+              "confirmation": "restore opw upstream",
+              "expected_target_name": "opw-testing",
+              "expected_domains": ["opw-testing.shinycomputers.com"]
+            },
+            "odoo_data_policy": {
+              "data_authority": "restorable",
+              "allowed_rebuild_sources": ["upstream_restore"],
+              "upstream_source": "odoo-tenant-opw/opw/testing-upstream",
+              "requires_backup_before_destroy": true,
+              "requires_restore_proof": true,
+              "requires_runtime_identity": true
+            }
+          },
+          {
+            "instance": "prod",
+            "context": "opw",
+            "base_url": "https://opw-prod.shinycomputers.com",
+            "health_url": "https://opw-prod.shinycomputers.com/launchplane/health",
+            "odoo_prelaunch_rebuild": {
+              "enabled": true,
+              "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+              "data_source_mode": "upstream_restore",
+              "confirmation": "restore opw upstream",
+              "expected_target_name": "opw-prod",
+              "expected_domains": ["opw-prod.shinycomputers.com"]
+            },
+            "odoo_data_policy": {
+              "data_authority": "restorable",
+              "allowed_rebuild_sources": ["upstream_restore"],
+              "upstream_source": "odoo-tenant-opw/opw/prod-upstream",
+              "requires_backup_before_destroy": true,
+              "requires_restore_proof": true,
+              "requires_runtime_identity": true
+            }
+          }
+        ],
+        "preview": {
+          "enabled": true,
+          "context": "opw",
+          "enable_label": "preview",
+          "slug_template": "pr-{number}",
+          "app_name_prefix": "odoo-tenant-opw",
+          "template_instance": "testing",
+          "override_env": {
+            "ODOO_INSTALL_MODULES": "opw_custom"
+          },
+          "preview_url_env_keys": ["WEB_BASE_URL"],
+          "data_transport_mode": "driver"
+        },
+        "dokploy_targets": [
+          {
+            "context": "opw",
+            "instance": "testing",
+            "target_id": "__ODOO_OPW_TESTING_DOKPLOY_TARGET_ID__",
+            "target_type": "compose",
+            "target_name": "opw-testing",
+            "domains": ["opw-testing.shinycomputers.com"],
+            "healthcheck_path": "/web/health",
+            "healthcheck_enabled": true,
+            "deploy_timeout_seconds": 900
+          },
+          {
+            "context": "opw",
+            "instance": "prod",
+            "target_id": "__ODOO_OPW_PROD_DOKPLOY_TARGET_ID__",
+            "target_type": "compose",
+            "target_name": "opw-prod",
+            "domains": ["opw-prod.shinycomputers.com"],
+            "healthcheck_path": "/web/health",
+            "healthcheck_enabled": true,
+            "deploy_timeout_seconds": 900
+          }
+        ],
+        "source_label": "import-material:odoo-opw-product-onboarding"
+      }
+    },
+    {
+      "kind": "runtime_key_safety_policy",
+      "import_id": "launchplane-runtime-key-safety-policy",
+      "source_label": "import-material:runtime-key-safety-policy",
+      "rules": [
+        {
+          "binding_key": "DISCORD_TOKEN",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["discord-blue"],
+          "allowed_instances": ["prod"]
+        },
+        {
+          "binding_key": "RESEND_API_KEY",
+          "secret_class": "shared_safe",
+          "allowed_contexts": ["sellyouroutboard"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
+          "binding_key": "SMTP_PASSWORD",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["sellyouroutboard"],
+          "allowed_instances": ["prod"]
+        },
+        {
+          "binding_key": "META_CONVERSIONS_API_TOKEN",
+          "secret_class": "shared_safe",
+          "allowed_contexts": ["sellyouroutboard"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
+          "binding_key": "ODOO_ADMIN_PASSWORD",
+          "secret_class": "testing",
+          "allowed_contexts": ["cm", "opw"],
+          "allowed_instances": ["testing"]
+        },
+        {
+          "binding_key": "ODOO_DB_PASSWORD",
+          "secret_class": "testing",
+          "allowed_contexts": ["cm", "opw"],
+          "allowed_instances": ["testing"]
+        },
+        {
+          "binding_key": "ODOO_MASTER_PASSWORD",
+          "secret_class": "testing",
+          "allowed_contexts": ["cm", "opw"],
+          "allowed_instances": ["testing"]
+        }
+      ]
+    }
+  ]
+}
