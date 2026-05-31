@@ -15,6 +15,8 @@ from control_plane.npmplus import (
 type NpmplusIngressMode = Literal["dry-run", "apply"]
 type NpmplusIngressOperationAction = Literal["create", "update", "enable", "disable", "no-op"]
 type NpmplusIngressStatus = Literal["planned", "applied", "unchanged"]
+type IngressIdentityAccessMode = Literal["none", "forward-auth"]
+type IngressIdentityAccessProvider = Literal["none", "anubis", "tinyauth", "authelia", "authentik"]
 
 
 class NpmplusIngressClient(Protocol):
@@ -29,6 +31,49 @@ class NpmplusIngressClient(Protocol):
     def disable_proxy_host(self, host_id: int) -> NpmplusProxyHost: ...
 
     def enable_proxy_host(self, host_id: int) -> NpmplusProxyHost: ...
+
+
+class IngressIdentityAccessBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = 1
+    mode: IngressIdentityAccessMode = "none"
+    provider: IngressIdentityAccessProvider = "none"
+    send_basic_auth: bool = False
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> "IngressIdentityAccessBinding":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported ingress identity/access schema version")
+        if self.mode == "none":
+            if self.provider != "none" or self.send_basic_auth:
+                raise ValueError("Disabled ingress identity/access binding must use provider=none")
+        elif self.provider == "none":
+            raise ValueError("Forward-auth ingress identity/access binding requires a provider")
+        return self
+
+    def to_npmplus_auth_request(self) -> NpmplusAuthRequest:
+        if self.mode == "none":
+            return "none"
+        if self.provider == "authentik" and self.send_basic_auth:
+            return "authentik-send-basic-auth"
+        if self.provider in {"anubis", "tinyauth", "authelia", "authentik"}:
+            return self.provider
+        raise ValueError("Unsupported ingress identity/access provider")
+
+
+def identity_access_from_npmplus_auth_request(
+    auth_request: NpmplusAuthRequest,
+) -> IngressIdentityAccessBinding:
+    if auth_request == "none":
+        return IngressIdentityAccessBinding()
+    if auth_request == "authentik":
+        return IngressIdentityAccessBinding(mode="forward-auth", provider="authentik")
+    if auth_request == "authentik-send-basic-auth":
+        return IngressIdentityAccessBinding(
+            mode="forward-auth", provider="authentik", send_basic_auth=True
+        )
+    return IngressIdentityAccessBinding(mode="forward-auth", provider=auth_request)
 
 
 class NpmplusIngressRouteDesiredState(BaseModel):
@@ -54,12 +99,28 @@ class NpmplusIngressRouteDesiredState(BaseModel):
     npmplus_fancyindex: bool = False
     npmplus_x_frame_options: Literal["DENY", "SAMEORIGIN", "upstream", "none"] = "SAMEORIGIN"
     npmplus_auth_request: NpmplusAuthRequest = "none"
+    identity_access: IngressIdentityAccessBinding | None = None
     advanced_config: str = ""
     enabled: bool = True
     locations: tuple[NpmplusLocationPayload, ...] = ()
 
+    @model_validator(mode="after")
+    def _validate_identity_access(self) -> "NpmplusIngressRouteDesiredState":
+        if self.identity_access is None:
+            return self
+        mapped_auth_request = self.identity_access.to_npmplus_auth_request()
+        if "npmplus_auth_request" in self.model_fields_set and self.npmplus_auth_request not in {
+            "none",
+            mapped_auth_request,
+        }:
+            raise ValueError("ingress identity_access conflicts with npmplus_auth_request")
+        self.npmplus_auth_request = mapped_auth_request
+        return self
+
     def to_proxy_host_payload(self) -> NpmplusProxyHostPayload:
-        return NpmplusProxyHostPayload.model_validate(self.model_dump(mode="json"))
+        return NpmplusProxyHostPayload.model_validate(
+            self.model_dump(mode="json", exclude={"identity_access"})
+        )
 
 
 class NpmplusIngressApplyRequest(BaseModel):
