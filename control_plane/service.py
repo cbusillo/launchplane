@@ -270,8 +270,8 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressClient,
     NpmplusIngressApplyResult,
-    apply_npmplus_ingress_route,
 )
+from control_plane.workflows.ingress_provider import IngressProvider, NpmplusIngressProvider
 from control_plane.merge_train import MergeTrainDryRunResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -704,6 +704,10 @@ class _TestLaunchplaneServiceRecordStore(Protocol):
     def backend_name(self) -> str: ...
 
     def close(self) -> None: ...
+
+
+class _IngressProviderFactory(Protocol):
+    def __call__(self) -> IngressProvider: ...
 
 
 class _NpmplusIngressClientFactory(Protocol):
@@ -5236,6 +5240,8 @@ def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
         return frozenset({"deployment_record_id", "release_tuple_id"})
     if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
         return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
+    if route_path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
+        return frozenset({"ingress_provider"})
     return frozenset()
 
 
@@ -5970,6 +5976,7 @@ def _write_ingress_route_audit_record(
     trace_id: str,
     product: str,
     context: str,
+    provider: str,
     request: NpmplusIngressApplyRequest,
     result: NpmplusIngressApplyResult,
     idempotency_key: str,
@@ -5987,6 +5994,7 @@ def _write_ingress_route_audit_record(
         ),
         product=product,
         context=context,
+        provider=provider,
         mode=request.mode,
         status=result.status,
         dry_run=result.dry_run,
@@ -6012,6 +6020,7 @@ def _write_ingress_route_pending_audit_record(
     trace_id: str,
     product: str,
     context: str,
+    provider: str,
     request: NpmplusIngressApplyRequest,
     idempotency_key: str,
 ) -> IngressRouteAuditRecord:
@@ -6027,6 +6036,7 @@ def _write_ingress_route_pending_audit_record(
         ),
         product=product,
         context=context,
+        provider=provider,
         mode=request.mode,
         status="pending",
         dry_run=request.mode == "dry-run",
@@ -6176,6 +6186,10 @@ def _build_npmplus_ingress_client_from_env() -> NpmplusIngressClient:
             secret=os.environ.get(_NPMPLUS_SECRET_ENV_KEY, ""),
         )
     )
+
+
+def _build_ingress_provider_from_env() -> IngressProvider:
+    return NpmplusIngressProvider(client=_build_npmplus_ingress_client_from_env())
 
 
 def _local_admin_identity_from_bearer(
@@ -8241,6 +8255,7 @@ def create_launchplane_service_app(
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
+    ingress_provider_factory: _IngressProviderFactory | None = None,
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
@@ -8277,9 +8292,15 @@ def create_launchplane_service_app(
         )
     )
     write_routes = _build_write_routes()
-    resolved_npmplus_ingress_client_factory = (
-        npmplus_ingress_client_factory or _build_npmplus_ingress_client_from_env
-    )
+    resolved_ingress_provider_factory = ingress_provider_factory
+    if resolved_ingress_provider_factory is None:
+        if npmplus_ingress_client_factory is not None:
+            def npmplus_ingress_provider_from_client_factory() -> IngressProvider:
+                return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
+
+            resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
+        else:
+            resolved_ingress_provider_factory = _build_ingress_provider_from_env
 
     def app(
         environ: dict[str, object],
@@ -11320,6 +11341,7 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                ingress_provider = resolved_ingress_provider_factory()
                 if ingress_request.ingress.mode == "apply":
                     idempotent_response = _check_idempotent_request(
                         record_store=record_store,
@@ -11337,11 +11359,11 @@ def create_launchplane_service_app(
                         trace_id=request_trace_id,
                         product=ingress_request.product,
                         context=ingress_request.context,
+                        provider=ingress_provider.provider_id,
                         request=ingress_request.ingress,
                         idempotency_key=request_idempotency_key,
                     )
-                ingress_result = apply_npmplus_ingress_route(
-                    client=resolved_npmplus_ingress_client_factory(),
+                ingress_result = ingress_provider.apply_route(
                     request=ingress_request.ingress,
                 )
                 ingress_audit_record = _write_ingress_route_audit_record(
@@ -11349,12 +11371,13 @@ def create_launchplane_service_app(
                     trace_id=request_trace_id,
                     product=ingress_request.product,
                     context=ingress_request.context,
+                    provider=ingress_provider.provider_id,
                     request=ingress_request.ingress,
                     result=ingress_result,
                     idempotency_key=request_idempotency_key,
                 )
                 result = {
-                    "ingress_provider": "npmplus",
+                    "ingress_provider": ingress_provider.provider_id,
                     "ingress_status": ingress_result.status,
                     "ingress_dry_run": ingress_result.dry_run,
                 }
