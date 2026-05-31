@@ -357,6 +357,36 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("          - prod", workflow_text)
         self.assertNotIn("writes only cm/testing", workflow_text)
 
+    def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
+        workflow_dir = Path(".github/workflows")
+        forbidden_literals = (
+            "https://launchplane.shinycomputers.com",
+            "launchplane.shinycomputers.com",
+        )
+
+        for workflow_path in workflow_dir.glob("*.yml"):
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            for literal in forbidden_literals:
+                with self.subTest(workflow=workflow_path.name, literal=literal):
+                    self.assertNotIn(literal, workflow_text)
+
+    def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
+        workflow_paths = (
+            Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
+            Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
+            Path(".github/workflows/reusable-odoo-post-deploy.yml"),
+            Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
+            Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
+        )
+
+        for workflow_path in workflow_paths:
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                self.assertIn("launchplane_url:", workflow_text)
+                self.assertIn("launchplane_audience:", workflow_text)
+                self.assertIn("inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL", workflow_text)
+                self.assertIn("audience: ${{ inputs.launchplane_audience }}", workflow_text)
+
     def test_ingress_route_dry_run_workflow_rejects_non_object_options(self) -> None:
         workflow_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
             encoding="utf-8"

@@ -27,6 +27,18 @@ name: Reusable Odoo Testing Deploy
         required: false
         default: "2700000"
         type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
     outputs:
       operation_id:
         description: Launchplane target replacement operation ID.
@@ -93,8 +105,8 @@ jobs:
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: https://launchplane.shinycomputers.com
-          audience: launchplane.shinycomputers.com
+          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/target-replacement-apply
           payload: >-
             {"schema_version":1,"replacement":{"schema_version":1,"instance":"testing","strategy":"recreate-in-place","allow_empty_data":true,"data_source_mode":"existing","verify_health":true,"verify_canonical":true,"verify_logo":true,"no_cache":false}}
@@ -115,12 +127,27 @@ jobs:
       - name: Poll target replacement operation
         id: poll
         env:
-          LAUNCHPLANE_URL: https://launchplane.shinycomputers.com
-          AUDIENCE: launchplane.shinycomputers.com
+          LAUNCHPLANE_URL: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          AUDIENCE: ${{ inputs.launchplane_audience }}
           OPERATION_ID: ${{ steps.lp.outputs.operation_id }}
           POLL_URL: ${{ steps.lp.outputs.poll_url }}
         run: |
           set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing Launchplane service URL. Set LAUNCHPLANE_PUBLIC_URL or pass launchplane_url.}"
+          if [ -z "${AUDIENCE:-}" ]; then
+            AUDIENCE="$({
+              python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+            })"
+          fi
+          echo "AUDIENCE=${AUDIENCE}" >>"$GITHUB_ENV"
           if [ -z "$OPERATION_ID" ] || [ -z "$POLL_URL" ]; then
             echo 'Target replacement response missing operation metadata.' >&2
             exit 1

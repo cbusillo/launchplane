@@ -13,6 +13,18 @@ name: Reusable Odoo Prod Promotion
         required: false
         default: "2700000"
         type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -28,8 +40,8 @@ jobs:
         id: lp
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: https://launchplane.shinycomputers.com
-          audience: launchplane.shinycomputers.com
+          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/prod-promotion-run
           payload: >-
             {"schema_version":1,"product":"odoo","run":{"schema_version":1}}

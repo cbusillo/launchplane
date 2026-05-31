@@ -277,6 +277,9 @@ testing environment of its own.
 Required GitHub configuration for that workflow:
 
 - repository variables:
+  - `LAUNCHPLANE_PUBLIC_URL`
+  - optional `LAUNCHPLANE_SERVICE_AUDIENCE`; when unset, trusted workflows
+    derive the GitHub OIDC audience from `LAUNCHPLANE_PUBLIC_URL`'s host
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
   - `LAUNCHPLANE_DEPLOY_HEALTH_URLS`

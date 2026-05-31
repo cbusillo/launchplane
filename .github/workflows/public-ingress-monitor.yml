@@ -31,9 +31,7 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_URL: >-
-        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
-        'https://launchplane.shinycomputers.com' }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '10' }}
       NOTIFY: >-
         ${{ github.event_name == 'schedule' && 'true' ||

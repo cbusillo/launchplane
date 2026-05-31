@@ -70,9 +70,7 @@ jobs:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
-      LAUNCHPLANE_URL: >-
-        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
-        'https://launchplane.shinycomputers.com' }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       APPLY_POLICY: ${{ inputs.apply && 'true' || 'false' }}
       POLICY_REPOSITORY: ${{ inputs.repository }}
       POLICY_BASE_BRANCH: ${{ inputs.base_branch }}
