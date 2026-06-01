@@ -8,27 +8,33 @@ def build_product_onboarding_service_result(
 ) -> tuple[dict[str, object], dict[str, object]]:
     result: dict[str, object] = {
         "product_profile": onboarding_result.product_profile.product,
+        "provider_target_count": len(onboarding_result.dokploy_targets),
+        "provider_target_id_count": len(onboarding_result.dokploy_target_ids),
         "dokploy_target_count": len(onboarding_result.dokploy_targets),
         "dokploy_target_id_count": len(onboarding_result.dokploy_target_ids),
         "runtime_environment_record_count": len(onboarding_result.runtime_environments),
         "secret_binding_count": len(onboarding_result.secret_bindings),
     }
+    provider_targets = [
+        record.model_dump(mode="json") for record in onboarding_result.dokploy_targets
+    ]
+    provider_target_ids = [
+        {
+            "context": record.context,
+            "instance": record.instance,
+            "target_id_recorded": bool(record.target_id.strip()),
+            "updated_at": record.updated_at,
+            "source_label": record.source_label,
+        }
+        for record in onboarding_result.dokploy_target_ids
+    ]
     driver_result: dict[str, object] = {
         "product": onboarding_result.product,
         "product_profile": onboarding_result.product_profile.model_dump(mode="json"),
-        "dokploy_targets": [
-            record.model_dump(mode="json") for record in onboarding_result.dokploy_targets
-        ],
-        "dokploy_target_ids": [
-            {
-                "context": record.context,
-                "instance": record.instance,
-                "target_id_recorded": bool(record.target_id.strip()),
-                "updated_at": record.updated_at,
-                "source_label": record.source_label,
-            }
-            for record in onboarding_result.dokploy_target_ids
-        ],
+        "provider_targets": provider_targets,
+        "provider_target_ids": provider_target_ids,
+        "dokploy_targets": provider_targets,
+        "dokploy_target_ids": provider_target_ids,
         "runtime_environment_records": [
             {
                 "scope": record.scope,

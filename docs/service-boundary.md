@@ -836,7 +836,9 @@ records, target-id records, runtime-environment records, and managed secret
 binding placeholders. It is restricted to `product_onboarding.apply` authority
 for product/context `launchplane`, requires DB-backed storage, returns only
 sanitized summaries, and exists so the Launchplane seed import workflow can seed
-product records without product repos storing live lifecycle truth.
+product records without product repos storing live lifecycle truth. Responses
+include neutral `provider_target*` summary keys while retaining `dokploy_*`
+compatibility keys until the target-record write path is migrated.
 
 Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
 accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
