@@ -165,6 +165,24 @@ class ProductOnboardingManifest(BaseModel):
     updated_at: str = ""
     source_label: str = "product-onboarding"
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_provider_targets(cls, data: object) -> object:
+        if not isinstance(data, dict) or "provider_targets" not in data:
+            return data
+        updated = dict(data)
+        raw_provider_targets = updated.pop("provider_targets")
+        raw_dokploy_targets = updated.get("dokploy_targets", ())
+        if raw_dokploy_targets is None or raw_dokploy_targets == () or raw_dokploy_targets == []:
+            updated["dokploy_targets"] = raw_provider_targets or ()
+            return updated
+
+        provider_targets = _normalized_onboarding_targets(raw_provider_targets)
+        dokploy_targets = _normalized_onboarding_targets(raw_dokploy_targets)
+        if provider_targets != dokploy_targets:
+            raise ValueError("provider_targets must match dokploy_targets when both are set")
+        return updated
+
     @model_validator(mode="after")
     def _validate_manifest(self) -> "ProductOnboardingManifest":
         if not self.product.strip():
@@ -275,3 +293,14 @@ class ProductOnboardingManifest(BaseModel):
         return ProductExpectedConfigProfile.model_validate(
             self.expected_config.model_dump(mode="json")
         )
+
+
+def _normalized_onboarding_targets(data: object) -> tuple[dict[str, object], ...]:
+    if data is None:
+        return ()
+    if not isinstance(data, (list, tuple)):
+        raise ValueError("product onboarding provider_targets must be a list")
+    return tuple(
+        ProductOnboardingTargetManifest.model_validate(target).model_dump(mode="json")
+        for target in data
+    )

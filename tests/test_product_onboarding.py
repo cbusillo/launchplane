@@ -1377,6 +1377,46 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "disabled")
 
+    def test_product_onboarding_manifest_accepts_provider_targets_alias(self) -> None:
+        payload = _manifest_payload()
+        payload["provider_targets"] = payload.pop("dokploy_targets")
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(len(manifest.dokploy_targets), 2)
+        self.assertEqual(
+            [
+                (target.context, target.instance, target.target_type, target.target_id)
+                for target in manifest.dokploy_targets
+            ],
+            [
+                ("example-site-testing", "testing", "application", "app-testing-123"),
+                ("example-site-prod", "prod", "application", "app-prod-123"),
+            ],
+        )
+        self.assertNotIn("provider_targets", manifest.model_dump())
+
+    def test_product_onboarding_manifest_accepts_matching_provider_targets_alias(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        payload["provider_targets"] = json.loads(json.dumps(payload["dokploy_targets"]))
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(len(manifest.dokploy_targets), 2)
+
+    def test_product_onboarding_manifest_rejects_conflicting_provider_targets_alias(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        provider_targets = json.loads(json.dumps(payload["dokploy_targets"]))
+        provider_targets[0]["target_id"] = "app-other-123"
+        payload["provider_targets"] = provider_targets
+
+        with self.assertRaisesRegex(ValueError, "provider_targets must match dokploy_targets"):
+            ProductOnboardingManifest.model_validate(payload)
+
     def test_product_onboarding_manifest_rejects_unowned_target_route(self) -> None:
         payload = _manifest_payload()
         payload["dokploy_targets"] = [
