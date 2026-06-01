@@ -60,13 +60,15 @@ The manifest is applied idempotently and writes Launchplane-owned records for:
 - product profile with product key, owning repo, driver id, image repository,
   runtime port, health path, and preview policy
 - lane profiles for stable instances such as `testing` and `prod`
-- Dokploy or provider target records and target-id records
+- provider target records and target-id records
 - runtime-environment records for non-secret settings
 - disabled managed secret binding placeholders for required secret keys
 
-Each onboarding `dokploy_targets` entry must include the live provider
-`target_id`. Launchplane fails closed instead of seeding a target record that a
-later deploy cannot resolve.
+Each onboarding target entry must include the live provider `target_id`.
+Manifests may use the neutral `provider_targets` input name; Launchplane
+normalizes it to the existing `dokploy_targets` compatibility field until the
+target-record write path is migrated. Launchplane fails closed instead of
+seeding a target record that a later deploy cannot resolve.
 
 When the Dokploy application or compose target already exists, adopt it into
 Launchplane before or after onboarding instead of hand-editing target ids into
