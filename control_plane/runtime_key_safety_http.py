@@ -135,9 +135,4 @@ def _runtime_key_safety_policy_authorized(
         action="runtime_key_safety.write",
         product=product,
         context=LAUNCHPLANE_SERVICE_CONTEXT,
-    ) or authz_policy.allows(
-        identity=identity,
-        action="launchplane_service_deploy.execute",
-        product=product,
-        context=LAUNCHPLANE_SERVICE_CONTEXT,
     )

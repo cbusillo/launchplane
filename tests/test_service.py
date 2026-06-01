@@ -21483,6 +21483,66 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_runtime_key_safety_policy_endpoint_rejects_self_deploy_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/runtime-key-safety/policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "rules": [
+                        {
+                            "binding_key": "RESEND_API_KEY",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        }
+                    ],
+                },
+                headers={"Idempotency-Key": "runtime-key-safety-policy:self-deploy-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_live_target_runtime_api_dry_run_returns_redacted_delta(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
