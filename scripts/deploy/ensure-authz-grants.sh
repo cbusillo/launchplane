@@ -75,6 +75,63 @@ post_grant() {
   return 1
 }
 
+post_workflow_rule_removal() {
+  local repository="$1"
+  local workflow_file="$2"
+  local product_name="$3"
+  local context_name="$4"
+  local action_name="$5"
+  local source_label="$6"
+  local idempotency_suffix="$7"
+  local event_name="${8:-workflow_dispatch}"
+  local workflow_ref_suffix="${9:-refs/heads/main}"
+  local request_payload response_file status_code
+
+  request_payload="$({
+    jq -n \
+      --arg repository "$repository" \
+      --arg workflow_ref "${repository}/.github/workflows/${workflow_file}@${workflow_ref_suffix}" \
+      --arg event_name "$event_name" \
+      --arg product_name "$product_name" \
+      --arg context_name "$context_name" \
+      --arg action_name "$action_name" \
+      --arg source_label "$source_label" \
+      '{
+        schema_version: 1,
+        product: "launchplane",
+        mode: "apply",
+        reason: ("Deploy workflow removing stale authz rule " + $source_label),
+        related_issue: "cbusillo/launchplane#1049",
+        removal: {
+          repository: $repository,
+          workflow_refs: [$workflow_ref],
+          event_names: [$event_name],
+          products: [$product_name],
+          contexts: [$context_name],
+          actions: [$action_name],
+          source_label: $source_label
+        }
+      }'
+  })"
+  response_file="$(mktemp)"
+  status_code="$(curl -sS \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${oidc_token}" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: launchplane-authz-rule-removal:${idempotency_suffix}:${GITHUB_SHA}" \
+    --data "$request_payload" \
+    "${LAUNCHPLANE_SERVICE_URL}/v1/authz-policies/github-actions/removals")"
+  if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+    cat "$response_file"
+    return 0
+  fi
+  cat "$response_file" >&2
+  echo "Launchplane authz rule removal request failed with HTTP ${status_code}." >&2
+  return 1
+}
+
 post_terminal_agent_grant() {
   local product_name="$1"
   local context_name="$2"
@@ -633,6 +690,14 @@ post_grant \
   merge_train.policy_import \
   deploy:merge-train-policy-import-grant \
   merge-train-policy-import
+post_workflow_rule_removal \
+  "$GITHUB_REPOSITORY" \
+  merge-train-policy-import.yml \
+  launchplane \
+  launchplane \
+  launchplane_service_deploy.execute \
+  deploy:stale-merge-train-policy-import-self-deploy-removal \
+  stale-merge-train-policy-import-self-deploy
 post_grant \
   "$GITHUB_REPOSITORY" \
   launchplane-seed-import.yml \
@@ -641,6 +706,14 @@ post_grant \
   product_onboarding.apply \
   deploy:launchplane-seed-import-product-onboarding-grant \
   launchplane-seed-import-product-onboarding
+post_workflow_rule_removal \
+  "$GITHUB_REPOSITORY" \
+  launchplane-seed-import.yml \
+  launchplane \
+  launchplane \
+  launchplane_service_deploy.execute \
+  deploy:stale-launchplane-seed-import-self-deploy-removal \
+  stale-launchplane-seed-import-self-deploy
 post_grant \
   "$GITHUB_REPOSITORY" \
   launchplane-seed-import.yml \
