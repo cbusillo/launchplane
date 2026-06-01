@@ -401,6 +401,9 @@ migrations from inside the Dokploy network that can resolve the shared Postgres
 service hostname. The self-deploy workflow should not run shared database
 migrations from the GitHub runner; keep Launchplane migrations additive and
 rollback-aware so a failed health check can still return to the previous image.
+The service route keeps OIDC authz and idempotency at the HTTP boundary, then
+delegates provider target env mutation and deployment triggering to the
+Launchplane self-deploy workflow module.
 If a shared database already has Launchplane tables but no `alembic_version`
 table from the pre-migration `create_all` era, the entrypoint stamps the newest
 revision that matches the detected legacy table set before applying later
