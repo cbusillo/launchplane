@@ -9,6 +9,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -131,10 +132,42 @@ class GenericWebProdPromotionResult(BaseModel):
     release_tag: str = ""
     release_url: str = ""
     target_name: str = ""
-    target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = ""
+    provider_target_type: str = ""
+    target_type: str = ""
     dry_run: bool = False
     error_message: str = ""
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "GenericWebProdPromotionResult":
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.target_type = self.target_type.strip().lower()
+        if not self.provider_target_type and self.target_type:
+            self.provider_target_type = self.target_type
+        if self.target_category == "unknown":
+            if self.provider_target_type == "application" or self.target_type == "application":
+                self.target_category = "application"
+            elif self.provider_target_type == "compose" or self.target_type == "compose":
+                self.target_category = "compose"
+        if not self.provider_id and self.target_category in {"application", "compose"}:
+            self.provider_id = "dokploy"
+        if not self.target_type:
+            self.target_type = self.provider_target_type or self.target_category
+        return self
+
+
+class GenericWebProdPromotionTargetResultFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_name: str
+    target_id: str
+    target_category: DeployTargetCategory
+    provider_id: str
+    provider_target_type: str
+    target_type: str
 
 
 def resolve_generic_web_promotion_lanes(
@@ -643,6 +676,33 @@ def _promotion_target_type(
     return "application"
 
 
+def _result_target_fields(
+    *,
+    record: PromotionRecord,
+    deployment_record: DeploymentRecord | None,
+    target_id: str,
+) -> GenericWebProdPromotionTargetResultFields:
+    target_category: DeployTargetCategory = record.deploy.target_category or "unknown"
+    provider_id = record.deploy.provider_id
+    provider_target_type = str(record.deploy.target_type)
+    if deployment_record is not None and deployment_record.deployed_target is not None:
+        deployed_target = deployment_record.deployed_target
+        target_category = deployed_target.target_category
+        provider_id = deployed_target.provider_id
+        provider_target_type = deployed_target.provider_target_type
+        target_id = deployed_target.target_id
+    if not provider_target_type:
+        provider_target_type = record.deploy.target_type
+    return GenericWebProdPromotionTargetResultFields(
+        target_name=record.deploy.target_name,
+        target_id=target_id,
+        target_category=target_category,
+        provider_id=provider_id,
+        provider_target_type=provider_target_type,
+        target_type=provider_target_type or target_category,
+    )
+
+
 def _build_promotion_record(
     *,
     request: GenericWebProdPromotionRequest,
@@ -888,6 +948,11 @@ def _result_from_record(
     dry_run: bool,
     error_message: str,
 ) -> GenericWebProdPromotionResult:
+    target_fields = _result_target_fields(
+        record=record,
+        deployment_record=deployment_record,
+        target_id=target_id,
+    )
     return GenericWebProdPromotionResult(
         product=request.product,
         context=record.context,
@@ -907,9 +972,12 @@ def _result_from_record(
         source_health_status=record.source_health.status,
         destination_health_status=record.destination_health.status,
         release_tag=request.release_tag,
-        target_name=record.deploy.target_name,
-        target_type=record.deploy.target_type,
-        target_id=target_id,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        target_type=target_fields.target_type,
         dry_run=dry_run,
         error_message=error_message,
     )
