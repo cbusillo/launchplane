@@ -204,19 +204,12 @@ local_operator_product_config_scopes_json() {
        | map({product: (.product // ""), context: (.context // "")})
        | map(select((.product | length) > 0 and (.context | length) > 0))
        | unique_by(.product, .context)' \
-      <<<"${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON}"
+      <<<"${LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON}" \
+      || return 1
     return 0
   fi
 
-  jq -c \
-    '[.imports[]
-      | .manifest as $manifest
-      | select(($manifest.product // "") != "")
-      | ($manifest.lanes // [])[]?
-      | select((.context // "") != "")
-      | {product: $manifest.product, context: .context}]
-     | unique_by(.product, .context)' \
-    import-material/launchplane/seed-imports/catalog.json
+  printf '[]\n'
 }
 
 post_local_operator_product_config_grants() {
@@ -228,7 +221,7 @@ post_local_operator_product_config_grants() {
   scopes_json="$(local_operator_product_config_scopes_json)"
   scope_count="$(jq 'length' <<<"$scopes_json")"
   if [ "$scope_count" = "0" ]; then
-    echo "No local-operator product-config scopes configured; skipping ${action_name} grant."
+    echo "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
     return 0
   fi
 
