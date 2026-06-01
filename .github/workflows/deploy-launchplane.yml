@@ -619,6 +619,8 @@ jobs:
         env:
           LAUNCHPLANE_SERVICE_AUDIENCE: ${{ steps.service.outputs.service_audience }}
           LAUNCHPLANE_SERVICE_URL: ${{ steps.service.outputs.service_url }}
+          LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON: >-
+            ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}
         run: bash scripts/deploy/ensure-authz-grants.sh
 
   emergency-dokploy-rollback:

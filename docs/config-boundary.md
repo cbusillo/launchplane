@@ -161,7 +161,8 @@ live authority across DB, files, and process env:
   material under `import-material/launchplane/seed-imports/`. They are applied
   only through the manual `Launchplane Seed Import` workflow, which calls
   service routes with OIDC and records evidence; normal deploy does not reapply
-  those mutable DB records.
+  those mutable DB records or derive routine operator product-config scopes from
+  the seed catalog.
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.
