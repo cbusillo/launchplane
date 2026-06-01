@@ -161,6 +161,13 @@ for product/context `launchplane`, covering both manual dispatches and automatic
 CI-success deploys. Those grants keep future grant reconciliation separate from
 Launchplane self-deploy authority.
 
+During the #1049 compatibility cleanup, the same deploy reconciliation removes
+known stale `launchplane_service_deploy.execute` GitHub Actions rules for the
+seed-import and merge-train policy import workflows through the service-backed
+removals route. This cleanup is exact-match and must stay paired with the
+narrow `product_onboarding.apply`, `runtime_key_safety.write`, and
+`merge_train.policy_import` grants.
+
 Routine local-operator product-config grants are scoped, not wildcard, and the
 deploy reconciliation skips them unless explicit product/context scopes are
 configured. Set `LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for

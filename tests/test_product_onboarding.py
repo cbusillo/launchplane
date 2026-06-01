@@ -605,6 +605,108 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("authz-policy-grant-maintenance-run", script_text)
         self.assertIn("workflow_run", script_text)
 
+    def test_deploy_authz_grants_remove_stale_import_self_deploy_rules(self) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                "    request_payload=''\n"
+                "    request_url=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                '        --data) shift; request_payload="$1" ;;\n'
+                "        http*) request_url=\"$1\" ;;\n"
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                "    if printf '%s' \"$request_url\" | grep -q '/v1/authz-policies/github-actions/removals'; then\n"
+                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-REMOVAL---' >> \"$CAPTURED_REMOVALS\"\n"
+                "    fi\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_removals = temporary_directory / "removals.jsonl"
+            captured_removals.touch()
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
+                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
+                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
+                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
+                "CAPTURED_REMOVALS": str(captured_removals),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            removals = [
+                json.loads(removal_text)["removal"]
+                for removal_text in captured_removals.read_text().split(
+                    "---END-REMOVAL---"
+                )
+                if removal_text.strip()
+            ]
+
+        removal_index = {
+            (removal["workflow_refs"][0], removal["source_label"]): removal
+            for removal in removals
+        }
+        expected_workflows = {
+            (
+                "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main",
+                "deploy:stale-launchplane-seed-import-self-deploy-removal",
+            ),
+            (
+                "cbusillo/launchplane/.github/workflows/merge-train-policy-import.yml@refs/heads/main",
+                "deploy:stale-merge-train-policy-import-self-deploy-removal",
+            ),
+        }
+        self.assertEqual(set(removal_index), expected_workflows)
+        for removal in removal_index.values():
+            self.assertEqual(removal["repository"], "cbusillo/launchplane")
+            self.assertEqual(removal["event_names"], ["workflow_dispatch"])
+            self.assertEqual(removal["products"], ["launchplane"])
+            self.assertEqual(removal["contexts"], ["launchplane"])
+            self.assertEqual(removal["actions"], ["launchplane_service_deploy.execute"])
+
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
             encoding="utf-8"
