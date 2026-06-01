@@ -20099,11 +20099,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
                     return_value={
                         "env": (
                             "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:old\n"
@@ -20113,10 +20113,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
                 ) as update_env_mock,
                 patch(
-                    "control_plane.service.control_plane_dokploy.trigger_deployment"
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
                 ) as trigger_mock,
             ):
                 status_code, payload = _invoke_app(
@@ -20294,11 +20294,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.com", "token-123"),
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.fetch_dokploy_target_payload",
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
                     return_value={
                         "env": "DOCKER_IMAGE_REFERENCE=old\n"
                         "LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example\n"
@@ -20307,9 +20307,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.update_dokploy_target_env"
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.update_dokploy_target_env"
                 ) as update_env_mock,
-                patch("control_plane.service.control_plane_dokploy.trigger_deployment"),
+                patch(
+                    "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.trigger_deployment"
+                ),
             ):
                 status_code, payload = _invoke_app(
                     app,
