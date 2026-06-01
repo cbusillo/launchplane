@@ -619,7 +619,7 @@ post_grant \
   merge-train-policy-import.yml \
   launchplane \
   launchplane \
-  launchplane_service_deploy.execute \
+  merge_train.policy_import \
   deploy:merge-train-policy-import-grant \
   merge-train-policy-import
 post_grant \

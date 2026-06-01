@@ -12404,7 +12404,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="merge_train.policy_import",
                     product=merge_train_policy_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
