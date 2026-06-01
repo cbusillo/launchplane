@@ -23713,6 +23713,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["result"]["deploy_status"], "pass")
             self.assertEqual(payload["result"]["target_id"], "testing-app-123")
+            self.assertEqual(payload["result"]["target_category"], "application")
+            self.assertEqual(payload["result"]["provider_id"], "dokploy")
+            self.assertEqual(payload["result"]["provider_target_type"], "application")
+            self.assertEqual(payload["result"]["target_type"], "application")
             execute_mock.assert_called_once()
 
     def test_verireel_testing_verification_driver_updates_deployment_record(self) -> None:
@@ -25903,6 +25907,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["result"]["deploy_status"], "pass")
             self.assertEqual(payload["result"]["target_id"], "prod-app-123")
+            self.assertEqual(payload["result"]["target_category"], "application")
+            self.assertEqual(payload["result"]["provider_id"], "dokploy")
+            self.assertEqual(payload["result"]["provider_target_type"], "application")
+            self.assertEqual(payload["result"]["target_type"], "application")
             execute_mock.assert_called_once()
 
     def test_verireel_prod_deploy_driver_rejects_unauthorized_workflow(self) -> None:
@@ -26033,6 +26041,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload["result"]["promotion_record_id"],
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1",
             )
+            self.assertEqual(payload["result"]["target_category"], "application")
+            self.assertEqual(payload["result"]["provider_id"], "dokploy")
+            self.assertEqual(payload["result"]["provider_target_type"], "application")
+            self.assertEqual(payload["result"]["target_type"], "application")
             execute_mock.assert_called_once()
             request = execute_mock.call_args.kwargs["request"]
             self.assertEqual(request.source_health_status, "pass")

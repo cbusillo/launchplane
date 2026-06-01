@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
@@ -73,14 +74,44 @@ class VeriReelStableDeployResult(BaseModel):
     deploy_started_at: str
     deploy_finished_at: str
     target_name: str
-    target_type: DokployTargetType
     target_id: str
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = "dokploy"
+    provider_target_type: str = ""
+    target_type: str = ""
     rollout_status: ReleaseStatus = "skipped"
     rollout_base_url: str = ""
     rollout_health_urls: tuple[str, ...] = ()
     rollout_started_at: str = ""
     rollout_finished_at: str = ""
     error_message: str = ""
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "VeriReelStableDeployResult":
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.target_type = self.target_type.strip().lower()
+        if not self.provider_target_type and self.target_type:
+            self.provider_target_type = self.target_type
+        if self.target_category == "unknown":
+            if self.provider_target_type == "application" or self.target_type == "application":
+                self.target_category = "application"
+            elif self.provider_target_type == "compose" or self.target_type == "compose":
+                self.target_category = "compose"
+        if not self.target_type:
+            self.target_type = self.provider_target_type or self.target_category
+        return self
+
+
+class VeriReelStableDeployTargetResultFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_name: str
+    target_id: str
+    target_category: DeployTargetCategory
+    provider_id: str
+    provider_target_type: str
+    target_type: str
 
 
 def _artifact_tag(artifact_id: str) -> str:
@@ -145,6 +176,53 @@ def _fallback_ship_request(request: VeriReelStableDeployRequest) -> ShipRequest:
         verify_health=False,
         no_cache=request.no_cache,
         destination_health=HealthcheckEvidence(status="skipped"),
+    )
+
+
+def _result_target_fields(
+    *, target_name: str, target_id: str, target_category: DeployTargetCategory
+) -> VeriReelStableDeployTargetResultFields:
+    return VeriReelStableDeployTargetResultFields(
+        target_name=target_name,
+        target_id=target_id,
+        target_category=target_category,
+        provider_id="dokploy",
+        provider_target_type=target_category,
+        target_type=target_category,
+    )
+
+
+def _build_result(
+    *,
+    deployment_record_id: str,
+    deploy_status: Literal["pass", "fail"],
+    deploy_started_at: str,
+    deploy_finished_at: str,
+    target_fields: VeriReelStableDeployTargetResultFields,
+    rollout_status: ReleaseStatus = "skipped",
+    rollout_base_url: str = "",
+    rollout_health_urls: tuple[str, ...] = (),
+    rollout_started_at: str = "",
+    rollout_finished_at: str = "",
+    error_message: str = "",
+) -> VeriReelStableDeployResult:
+    return VeriReelStableDeployResult(
+        deployment_record_id=deployment_record_id,
+        deploy_status=deploy_status,
+        deploy_started_at=deploy_started_at,
+        deploy_finished_at=deploy_finished_at,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        target_type=target_fields.target_type,
+        rollout_status=rollout_status,
+        rollout_base_url=rollout_base_url,
+        rollout_health_urls=rollout_health_urls,
+        rollout_started_at=rollout_started_at,
+        rollout_finished_at=rollout_finished_at,
+        error_message=error_message,
     )
 
 
@@ -272,14 +350,16 @@ def execute_verireel_stable_deploy(
                 finished_at=finished_at,
             )
         )
-        return VeriReelStableDeployResult(
+        return _build_result(
             deployment_record_id=record_id,
             deploy_status="fail",
             deploy_started_at=started_at,
             deploy_finished_at=finished_at,
-            target_name=fallback_request.target_name,
-            target_type=fallback_request.target_type,
-            target_id="",
+            target_fields=_result_target_fields(
+                target_name=fallback_request.target_name,
+                target_id="",
+                target_category="application",
+            ),
             error_message=str(exc),
         )
 
@@ -321,14 +401,16 @@ def execute_verireel_stable_deploy(
                 resolved_target=resolved_target,
             )
         )
-        return VeriReelStableDeployResult(
+        return _build_result(
             deployment_record_id=record_id,
             deploy_status="fail",
             deploy_started_at=started_at,
             deploy_finished_at=finished_at,
-            target_name=resolved_target.target_name,
-            target_type=resolved_target.target_type,
-            target_id=resolved_target.target_id,
+            target_fields=_result_target_fields(
+                target_name=resolved_target.target_name,
+                target_id=resolved_target.target_id,
+                target_category=resolved_target.target_type,
+            ),
             error_message=str(exc),
         )
 
@@ -361,14 +443,16 @@ def execute_verireel_stable_deploy(
                 ),
             )
         )
-        return VeriReelStableDeployResult(
+        return _build_result(
             deployment_record_id=record_id,
             deploy_status="pass",
             deploy_started_at=started_at,
             deploy_finished_at=finished_at,
-            target_name=resolved_target.target_name,
-            target_type=resolved_target.target_type,
-            target_id=resolved_target.target_id,
+            target_fields=_result_target_fields(
+                target_name=resolved_target.target_name,
+                target_id=resolved_target.target_id,
+                target_category=resolved_target.target_type,
+            ),
             rollout_status="fail",
             rollout_base_url=failed_rollout_result.base_url,
             rollout_health_urls=failed_rollout_result.health_urls,
@@ -396,14 +480,16 @@ def execute_verireel_stable_deploy(
             ),
         )
     )
-    return VeriReelStableDeployResult(
+    return _build_result(
         deployment_record_id=record_id,
         deploy_status="pass",
         deploy_started_at=started_at,
         deploy_finished_at=finished_at,
-        target_name=resolved_target.target_name,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
+        target_fields=_result_target_fields(
+            target_name=resolved_target.target_name,
+            target_id=resolved_target.target_id,
+            target_category=resolved_target.target_type,
+        ),
         rollout_status=rollout_result.status,
         rollout_base_url=rollout_result.base_url,
         rollout_health_urls=rollout_result.health_urls,

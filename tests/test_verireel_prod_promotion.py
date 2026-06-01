@@ -127,6 +127,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.rollout_status, "pass")
             self.assertEqual(result.migration_status, "pass")
             self.assertEqual(result.health_status, "pass")
+            self.assertEqual(result.target_category, "application")
+            self.assertEqual(result.provider_id, "dokploy")
+            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_type, "application")
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
@@ -215,6 +219,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.rollout_status, "pass")
             self.assertEqual(result.migration_status, "fail")
             self.assertEqual(result.health_status, "skipped")
+            self.assertEqual(result.target_category, "application")
+            self.assertEqual(result.provider_id, "dokploy")
+            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_type, "application")
             self.assertIn("Prisma migration", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
@@ -294,6 +302,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.rollout_status, "pass")
             self.assertEqual(result.migration_status, "pass")
             self.assertEqual(result.health_status, "fail")
+            self.assertEqual(result.target_category, "application")
+            self.assertEqual(result.provider_id, "dokploy")
+            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_type, "application")
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
@@ -358,6 +370,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.deploy_status, "pass")
             self.assertEqual(result.rollout_status, "fail")
+            self.assertEqual(result.target_category, "application")
+            self.assertEqual(result.provider_id, "dokploy")
+            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_type, "application")
             self.assertIn("rollout page verification", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
@@ -389,6 +405,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(result.deploy_status, "fail")
+            self.assertEqual(result.target_category, "application")
+            self.assertEqual(result.provider_id, "dokploy")
+            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_type, "application")
             self.assertIn("requires stored backup gate record", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
