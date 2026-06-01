@@ -20510,6 +20510,110 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(repeat_payload["result"]["changed"], False)
 
+    def test_authz_policy_removal_endpoint_writes_db_record_and_updates_runtime(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        },
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/removals",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Remove broad deploy authority after route narrowing.",
+                    "related_issue": "cbusillo/launchplane#1049",
+                    "removal": {
+                        "repository": "cbusillo/launchplane",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                        "source_label": "test:authz-removal",
+                    },
+                },
+                headers={"Idempotency-Key": "authz-removal:deploy-authority"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+            repeat_status_code, repeat_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/removals",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Remove broad deploy authority after route narrowing.",
+                    "related_issue": "cbusillo/launchplane#1049",
+                    "removal": {
+                        "repository": "cbusillo/launchplane",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                        "source_label": "test:authz-removal",
+                    },
+                },
+                headers={"Idempotency-Key": "authz-removal:deploy-authority-repeat"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["authz_policy_record_id"], active_policy.record_id)
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["diff"]["removed_rule_count"], 1)
+        self.assertNotIn('"requested_removal":', json.dumps(payload, sort_keys=True))
+        self.assertFalse(
+            active_policy.policy.allows(
+                identity=_identity(repository="cbusillo/launchplane"),
+                action="launchplane_service_deploy.execute",
+                product="launchplane",
+                context="launchplane",
+            )
+        )
+        self.assertEqual(repeat_status_code, 202)
+        self.assertEqual(repeat_payload["result"]["changed"], False)
+
     def test_authz_policy_grant_endpoint_dry_run_does_not_write_or_reload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -20609,6 +20713,90 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIsNone(dry_run_idempotency_record)
         self.assertEqual(profile_status_code, 403)
         self.assertEqual(profile_payload["error"]["code"], "authorization_denied")
+
+    def test_authz_policy_removal_endpoint_dry_run_does_not_write_or_reload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["authz_policy_grant.write"],
+                        },
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        },
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/removals",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "reason": "Inspect broad deploy authority removal.",
+                    "related_issue": "cbusillo/launchplane#1049",
+                    "removal": {
+                        "repository": "cbusillo/launchplane",
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                        "source_label": "test:authz-removal",
+                    },
+                },
+                headers={"Idempotency-Key": "authz-removal:dry-run"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                dry_run_idempotency_record = store.read_idempotency_record(
+                    scope=(
+                        "cbusillo/launchplane|"
+                        "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main|"
+                        "repo:every/verireel:pull_request"
+                    ),
+                    route_path="/v1/authz-policies/github-actions/removals",
+                    idempotency_key="authz-removal:dry-run",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry_run")
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["diff"]["matched_rule_count"], 1)
+        self.assertEqual(len(active_records), 1)
+        self.assertIsNone(dry_run_idempotency_record)
 
     def test_authz_policy_grant_endpoint_allows_admin_human_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -21425,6 +21613,62 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 headers={"Idempotency-Key": "authz-grant:self-deploy-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_authz_policy_removal_endpoint_rejects_self_deploy_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/removals",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Attempt policy removal with deploy authority.",
+                    "removal": {
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["launchplane_service_deploy.execute"],
+                    },
+                },
+                headers={"Idempotency-Key": "authz-removal:self-deploy-denied"},
             )
 
         self.assertEqual(status_code, 403)

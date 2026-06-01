@@ -58,6 +58,7 @@ VeriReel product paths:
   - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
+  - `POST /v1/authz-policies/github-actions/removals`
   - `POST /v1/authz-policies/github-humans/grants`
   - `POST /v1/authz-policies/terminal-agents/grants`
   - `POST /v1/authz-policies/local-operators/grants`
@@ -132,15 +133,16 @@ Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes. The authz policy
-grant routes accept GitHub Actions OIDC callers and authenticated admin human
-sessions, require the `authz_policy_grant.write` action, and remain the
-service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
+grant and removal routes accept GitHub Actions OIDC callers and authenticated
+admin human sessions, require the `authz_policy_grant.write` action, and remain
+the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
 human policy rules. Terminal-agent, local-operator, and local-admin grant routes
-use the same policy-admin boundary for DB-backed owner-agent rules. Grant
-requests support
-`dry_run` and `apply` modes. Apply requests must include an audit reason and
-write a new active policy record only when the grant is not already present, and
-immediately refresh the in-process policy used by the current service worker.
+use the same policy-admin boundary for DB-backed owner-agent rules. Grant and
+removal requests support `dry_run` and `apply` modes. Apply requests must include
+an audit reason and write a new active policy record only when the policy
+changes, then immediately refresh the in-process policy used by the current
+service worker. GitHub Actions removals match complete policy rules by exact
+equality; partial selectors do not remove broader or narrower rules.
 Responses return record metadata, rule counts, a compact diff, and redacted audit
 metadata rather than echoing workflow refs, human logins, owner-agent subjects,
 or the full policy body.

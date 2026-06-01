@@ -447,6 +447,110 @@ def authz_policies_grant_workflow(
     click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
 
 
+@authz_policies.command("remove-workflow-rule")
+@click.option(
+    "--service-url",
+    required=True,
+    help="Deployed Launchplane service base URL. Shared/prod removals go through the service API.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a short-lived bearer token for the service.",
+)
+@click.option(
+    "--session-cookie",
+    default="",
+    help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
+)
+@click.option("--repository", required=True, help="GitHub owner/repo rule target.")
+@click.option(
+    "--workflow-ref", "workflow_refs", multiple=True, help="Exact workflow_ref pattern."
+)
+@click.option(
+    "--job-workflow-ref",
+    "job_workflow_refs",
+    multiple=True,
+    help="Exact job_workflow_ref pattern.",
+)
+@click.option("--event-name", "event_names", multiple=True, help="Exact GitHub event name.")
+@click.option("--ref", "refs", multiple=True, help="Exact Git ref.")
+@click.option("--environment", "environments", multiple=True, help="Exact GitHub environment.")
+@click.option("--product", "products", multiple=True, required=True, help="Exact product.")
+@click.option("--context", "contexts", multiple=True, help="Exact Launchplane context.")
+@click.option(
+    "--action", "actions", multiple=True, required=True, help="Exact Launchplane action."
+)
+@click.option("--reason", default="", help="Required audit reason when --apply is used.")
+@click.option(
+    "--related-issue",
+    default="",
+    help="Optional related GitHub issue, e.g. cbusillo/launchplane#1049.",
+)
+@click.option("--source-label", default="cli:authz-remove-workflow-rule", show_default=True)
+@click.option(
+    "--idempotency-key", default="", help="Optional explicit Idempotency-Key for apply requests."
+)
+@click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
+@click.option("--apply", "mode", flag_value="apply")
+def authz_policies_remove_workflow_rule(
+    service_url: str,
+    bearer_token_env: str,
+    session_cookie: str,
+    repository: str,
+    workflow_refs: tuple[str, ...],
+    job_workflow_refs: tuple[str, ...],
+    event_names: tuple[str, ...],
+    refs: tuple[str, ...],
+    environments: tuple[str, ...],
+    products: tuple[str, ...],
+    contexts: tuple[str, ...],
+    actions: tuple[str, ...],
+    reason: str,
+    related_issue: str,
+    source_label: str,
+    idempotency_key: str,
+    mode: str,
+) -> None:
+    bearer_token = ""
+    if not session_cookie.strip():
+        token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
+        bearer_token = os.environ.get(token_env_key, "").strip()
+        if not bearer_token:
+            raise click.ClickException(
+                f"{token_env_key} is required unless --session-cookie is provided."
+            )
+    payload = {
+        "schema_version": 1,
+        "product": "launchplane",
+        "mode": mode,
+        "reason": reason,
+        "related_issue": related_issue,
+        "removal": {
+            "repository": repository,
+            "workflow_refs": list(workflow_refs),
+            "job_workflow_refs": list(job_workflow_refs),
+            "event_names": list(event_names),
+            "refs": list(refs),
+            "environments": list(environments),
+            "products": list(products),
+            "contexts": list(contexts),
+            "actions": list(actions),
+            "source_label": source_label,
+        },
+    }
+    response_payload = _post_launchplane_service_json(
+        service_url=service_url,
+        path="/v1/authz-policies/github-actions/removals",
+        payload=payload,
+        bearer_token=bearer_token,
+        session_cookie=session_cookie,
+        idempotency_key=idempotency_key,
+    )
+    click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
+
+
 @authz_policies.command("grant-human")
 @click.option(
     "--service-url",

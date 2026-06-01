@@ -131,13 +131,19 @@ Operators should mutate shared or production authz through the deployed service,
 not by running arbitrary local DB writes from a checkout. Use
 `uv run launchplane authz-policies grant-workflow --service-url ... --dry-run`
 or `uv run launchplane authz-policies grant-human --service-url ... --dry-run`
-to inspect the diff, then rerun with `--apply --reason ...` and an idempotency
-key when the grant is approved. The CLI is a thin service client: it sends a
-short-lived bearer token or a Launchplane browser session cookie, and the
-service validates the caller's `authz_policy_grant.write` authority, writes any
-new active policy record, stores audit metadata, and reloads the current service
-worker's active policy. Launchplane self-deploy authority is separate and does
-not authorize authz policy grant maintenance.
+to inspect grant diffs. Use
+`uv run launchplane authz-policies remove-workflow-rule --service-url ... --dry-run`
+to inspect exact GitHub Actions rule removals, such as broad workflow
+`launchplane_service_deploy.execute` rules left behind after route narrowing.
+Removal requests match the complete persisted rule; partial selectors do not
+remove broader or narrower rules. Rerun with `--apply --reason ...` and an
+idempotency key only after the dry-run diff is reviewed. The CLI is a thin
+service client: it sends a short-lived bearer token or a Launchplane browser
+session cookie, and the service validates the caller's
+`authz_policy_grant.write` authority, writes any new active policy record,
+stores audit metadata, and reloads the current service worker's active policy.
+Launchplane self-deploy authority is separate and does not authorize authz
+policy grant maintenance.
 
 The Launchplane deploy workflow also reconciles configured signed-in operator
 grants for product-config writes. Set

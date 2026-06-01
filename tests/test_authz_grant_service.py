@@ -7,12 +7,16 @@ from typing import cast
 from control_plane.authz_grant_service import (
     AuthzPolicyGitHubActionsGrant,
     AuthzPolicyGitHubActionsGrantEnvelope,
+    AuthzPolicyGitHubActionsRemovalEnvelope,
     AuthzPolicyGitHubHumanGrant,
     AuthzPolicyGitHubHumanGrantEnvelope,
     authz_policy_grant_response_audit_payload,
+    build_authz_policy_github_actions_removal_service_result,
     build_authz_policy_grant_service_result,
+    plan_github_actions_authz_policy_removal,
     plan_github_actions_authz_policy_grant,
     plan_github_human_authz_policy_grant,
+    write_github_actions_authz_policy_removal,
     write_github_actions_authz_policy_grant,
     write_github_human_authz_policy_grant,
 )
@@ -105,6 +109,24 @@ def _grant_request(mode: str = "apply") -> AuthzPolicyGitHubActionsGrantEnvelope
                 "contexts": ["launchplane"],
                 "actions": ["product_profile.read"],
                 "source_label": "test:audit-grant",
+            },
+        }
+    )
+
+
+def _removal_request(mode: str = "apply") -> AuthzPolicyGitHubActionsRemovalEnvelope:
+    return AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
+        {
+            "product": "launchplane",
+            "mode": mode,
+            "reason": "Remove broad Launchplane deploy authority after narrowing routes.",
+            "related_issue": "cbusillo/launchplane#1049",
+            "removal": {
+                "repository": "cbusillo/launchplane",
+                "products": ["launchplane"],
+                "contexts": ["launchplane"],
+                "actions": ["launchplane_service_deploy.execute"],
+                "source_label": "test:authz-removal",
             },
         }
     )
@@ -268,6 +290,140 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertEqual(same_record.record_id, record.record_id)
         self.assertEqual(len(store.written_records), 1)
         self.assertEqual(same_audit["changed"], False)
+
+    def test_plan_and_write_removal_records_changed_policy(self) -> None:
+        store = _AuthzPolicyStore((_active_record(),))
+        request = _removal_request()
+
+        _current_policy, current_record, diff = plan_github_actions_authz_policy_removal(
+            record_store=store,
+            removal=request.removal,
+        )
+        self.assertEqual(current_record.record_id, store.records[0].record_id)
+        self.assertEqual(diff["changed"], True)
+        self.assertEqual(diff["matched_rule_count"], 1)
+        self.assertEqual(diff["new_github_actions_rule_count"], 0)
+
+        updated_policy, record, changed, write_diff, audit = (
+            write_github_actions_authz_policy_removal(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-remove",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(write_diff, diff)
+        self.assertEqual(store.written_records, [record])
+        self.assertEqual(updated_policy.github_actions, ())
+        self.assertEqual(audit["reason"], request.reason)
+        self.assertIn("requested_removal", audit)
+
+        result, driver_result = build_authz_policy_github_actions_removal_service_result(
+            authz_policy_record=record,
+            changed=changed,
+            mode=request.mode,
+            diff=write_diff,
+            audit=audit,
+        )
+        self.assertEqual(result["authz_policy_record_id"], record.record_id)
+        driver_audit = cast(dict[str, object], driver_result["audit"])
+        self.assertNotIn("requested_removal", driver_audit)
+        requested_removal_summary = cast(
+            dict[str, object], driver_audit["requested_removal_summary"]
+        )
+        self.assertEqual(
+            requested_removal_summary["actions"], ["launchplane_service_deploy.execute"]
+        )
+
+    def test_repeated_removal_does_not_write_new_record(self) -> None:
+        store = _AuthzPolicyStore((_active_record(),))
+        request = _removal_request()
+        _updated_policy, record, _changed, _diff, _audit = (
+            write_github_actions_authz_policy_removal(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-remove",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+        )
+
+        _same_policy, same_record, same_changed, same_diff, same_audit = (
+            write_github_actions_authz_policy_removal(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-remove-repeat",
+                now_timestamp=lambda: "2026-05-07T16:01:00Z",
+            )
+        )
+
+        self.assertFalse(same_changed)
+        self.assertEqual(same_record.record_id, record.record_id)
+        self.assertEqual(same_diff["matched_rule_count"], 0)
+        self.assertEqual(len(store.written_records), 1)
+        self.assertEqual(same_audit["changed"], False)
+
+    def test_removal_requires_exact_rule_match(self) -> None:
+        store = _AuthzPolicyStore((_active_record(),))
+        request = AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
+            {
+                "product": "launchplane",
+                "mode": "dry_run",
+                "removal": {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                    ],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service_deploy.execute"],
+                },
+            }
+        )
+
+        _policy, _record, diff = plan_github_actions_authz_policy_removal(
+            record_store=store,
+            removal=request.removal,
+        )
+
+        self.assertEqual(diff["changed"], False)
+        self.assertEqual(diff["matched_rule_count"], 0)
+        self.assertEqual(diff["new_github_actions_rule_count"], 1)
+
+    def test_removal_deletes_duplicate_exact_rules(self) -> None:
+        record = _active_record()
+        duplicate_policy = record.policy.model_copy(
+            update={"github_actions": record.policy.github_actions * 2}
+        )
+        duplicate_record = LaunchplaneAuthzPolicyRecord(
+            record_id="launchplane-authz-policy-duplicate-test",
+            status="active",
+            source="test:duplicates",
+            updated_at="2026-05-07T15:30:00Z",
+            policy_sha256=authz_policy_sha256(duplicate_policy),
+            policy=duplicate_policy,
+        )
+        store = _AuthzPolicyStore((duplicate_record,))
+        request = _removal_request()
+
+        updated_policy, _record, changed, diff, _audit = (
+            write_github_actions_authz_policy_removal(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-remove-duplicates",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(diff["matched_rule_count"], 2)
+        self.assertEqual(diff["removed_rule_count"], 2)
+        self.assertEqual(updated_policy.github_actions, ())
 
     def test_response_audit_replaces_requested_grant_with_summary(self) -> None:
         audit: dict[str, object] = {
