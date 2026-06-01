@@ -324,6 +324,11 @@ payload/evidence artifact for review.
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
 runner rather than an internal-only provider hostname.
 
+The manual Merge Train Policy Import workflow uses GitHub OIDC with
+`merge_train.policy_import` authority for product/context `launchplane`. It does
+not inherit Launchplane self-deploy authority; use that workflow for DB-backed
+merge-train policy imports instead of direct DB writes from a local checkout.
+
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
 roll back to the prior digest when verification fails.

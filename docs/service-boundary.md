@@ -406,8 +406,8 @@ creation and guarded PR-native landing, and writes
 
 `POST /v1/merge-train/policies/import` is the service-owned write path for merge
 train policy records. It requires database storage and
-`launchplane_service_deploy.execute` on product/context `launchplane`, accepts
-`dry_run` and `apply`, and writes the supplied typed record only in apply mode.
+`merge_train.policy_import` on product/context `launchplane`, accepts `dry_run`
+and `apply`, and writes the supplied typed record only in apply mode.
 Shared and production policy changes should use this route rather than direct DB
 CLI writes from an arbitrary checkout.
 

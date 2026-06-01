@@ -6970,7 +6970,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["merge_train.policy_import"],
                         }
                     ]
                 }
@@ -7041,7 +7041,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["merge_train.policy_import"],
                         }
                     ]
                 }
@@ -7094,6 +7094,64 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records, ())
         self.assertIsNone(idempotency_record)
 
+    def test_merge_train_policy_import_endpoint_rejects_self_deploy_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-self-deploy-denied",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:self-deploy-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_merge_train_policy_import_endpoint_rejects_non_launchplane_product(
         self,
     ) -> None:
@@ -7111,7 +7169,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane", "other-product"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["merge_train.policy_import"],
                         }
                     ]
                 }
