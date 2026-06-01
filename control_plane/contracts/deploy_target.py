@@ -4,6 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+
 DeployTargetCategory = Literal[
     "application",
     "compose",
@@ -136,3 +139,87 @@ class DeployedTargetReference(BaseModel):
             normalized_evidence[key] = raw_value.strip()
         self.provider_evidence = normalized_evidence
         return self
+
+
+class ProviderTargetRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: str
+    provider_id: str
+    target_category: DeployTargetCategory = "unknown"
+    target_id: str
+    display_name: str
+    provider_target_type: str = ""
+    provider_evidence: dict[str, str] = Field(default_factory=dict)
+    updated_at: str
+    source_label: str = ""
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "ProviderTargetRecord":
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        self.provider_id = self.provider_id.strip().lower()
+        self.target_id = self.target_id.strip()
+        self.display_name = self.display_name.strip()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.updated_at = self.updated_at.strip()
+        self.source_label = self.source_label.strip()
+        if not self.context:
+            raise ValueError("provider target record requires context")
+        if not self.instance:
+            raise ValueError("provider target record requires instance")
+        if not self.provider_id:
+            raise ValueError("provider target record requires provider_id")
+        if not self.target_id:
+            raise ValueError("provider target record requires target_id")
+        if not self.display_name:
+            raise ValueError("provider target record requires display_name")
+        if not self.updated_at:
+            raise ValueError("provider target record requires updated_at")
+        normalized_evidence: dict[str, str] = {}
+        for raw_key, raw_value in self.provider_evidence.items():
+            key = raw_key.strip()
+            if not key:
+                raise ValueError("provider target evidence keys must be non-empty")
+            normalized_evidence[key] = raw_value.strip()
+        self.provider_evidence = normalized_evidence
+        return self
+
+    @classmethod
+    def from_dokploy_records(
+        cls,
+        *,
+        target_record: DokployTargetRecord,
+        target_id_record: DokployTargetIdRecord,
+    ) -> "ProviderTargetRecord":
+        if target_record.context != target_id_record.context:
+            raise ValueError("Dokploy target context must match target-id context")
+        if target_record.instance != target_id_record.instance:
+            raise ValueError("Dokploy target instance must match target-id instance")
+        return cls(
+            context=target_record.context,
+            instance=target_record.instance,
+            provider_id="dokploy",
+            target_category=target_record.target_type,
+            target_id=target_id_record.target_id,
+            display_name=target_record.target_name or target_record.instance,
+            provider_target_type=target_record.target_type,
+            provider_evidence={"project_name": target_record.project_name}
+            if target_record.project_name
+            else {},
+            updated_at=max(target_record.updated_at, target_id_record.updated_at),
+            source_label=target_record.source_label.strip()
+            or target_id_record.source_label.strip(),
+        )
+
+    def to_deployed_target_reference(self) -> DeployedTargetReference:
+        return DeployedTargetReference(
+            provider_id=self.provider_id,
+            target_category=self.target_category,
+            target_id=self.target_id,
+            display_name=self.display_name,
+            provider_target_type=self.provider_target_type,
+            provider_evidence=self.provider_evidence,
+        )
