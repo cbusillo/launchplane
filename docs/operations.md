@@ -148,6 +148,13 @@ DB-backed GitHub-human grants for `product_config.plan` and
 Leave those variables unset to skip reconciliation; do not hard-code human
 logins or product-specific operator grants in source.
 
+The deploy workflow also reconciles its own `authz_policy_grant.write` grants
+for product/context `launchplane`, covering both manual dispatches and automatic
+CI-success deploys. Those grants are a staged migration path for authz policy
+maintenance; authz grant routes can be narrowed to policy-admin authority after
+the DB-backed grants are present, without relying on Launchplane self-deploy
+authority for future grant reconciliation.
+
 Routine local-operator product-config grants are scoped, not wildcard, and the
 deploy reconciliation skips them unless explicit product/context scopes are
 configured. Set `LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for

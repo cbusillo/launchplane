@@ -614,6 +614,17 @@ post_grant \
   deploy:merge-train-runner-schedule-grant \
   merge-train-runner-schedule \
   schedule
+post_launchplane_service_grant \
+  deploy-launchplane.yml \
+  authz_policy_grant.write \
+  deploy:authz-policy-grant-maintenance-dispatch \
+  authz-policy-grant-maintenance-dispatch
+post_launchplane_service_grant \
+  deploy-launchplane.yml \
+  authz_policy_grant.write \
+  deploy:authz-policy-grant-maintenance-run \
+  authz-policy-grant-maintenance-run \
+  workflow_run
 post_grant \
   "$GITHUB_REPOSITORY" \
   merge-train-policy-import.yml \

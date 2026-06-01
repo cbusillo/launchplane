@@ -594,6 +594,17 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("local-admin-self-deploy", script_text)
         self.assertIn("launchplane_service_deploy.execute", script_text)
 
+    def test_deploy_authz_grants_stage_dedicated_policy_grant_authority(self) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("deploy-launchplane.yml", script_text)
+        self.assertIn("authz_policy_grant.write", script_text)
+        self.assertIn("deploy:authz-policy-grant-maintenance-dispatch", script_text)
+        self.assertIn("authz-policy-grant-maintenance-dispatch", script_text)
+        self.assertIn("deploy:authz-policy-grant-maintenance-run", script_text)
+        self.assertIn("authz-policy-grant-maintenance-run", script_text)
+        self.assertIn("workflow_run", script_text)
+
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
             encoding="utf-8"
