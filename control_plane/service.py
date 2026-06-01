@@ -2512,6 +2512,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         "/v1/product-config/apply",
         _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
+        "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
         "/v1/authz-policies/local-operators/grants",
@@ -3196,6 +3197,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
+        "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
         "/v1/authz-policies/local-operators/grants",
@@ -5948,6 +5950,7 @@ def _should_store_idempotency_record(
         path
         in {
             "/v1/authz-policies/github-actions/grants",
+            "/v1/authz-policies/github-actions/removals",
             "/v1/authz-policies/github-humans/grants",
             "/v1/authz-policies/terminal-agents/grants",
             "/v1/authz-policies/local-operators/grants",
@@ -11958,6 +11961,122 @@ def create_launchplane_service_app(
                         diff=diff,
                         audit=audit,
                     )
+                )
+            elif path == "/v1/authz-policies/github-actions/removals":
+                authz_removal_request = control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Authz policy removals require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="authz_policy_grant.write",
+                    product=authz_removal_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot remove Launchplane authz policy grants.",
+                            },
+                        },
+                    )
+                if authz_removal_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    (
+                        current_policy,
+                        current_record,
+                        diff,
+                    ) = control_plane_authz_grant_service.plan_github_actions_authz_policy_removal(
+                        record_store=record_store,
+                        removal=authz_removal_request.removal,
+                    )
+                    audit = control_plane_authz_grant_service.authz_policy_github_actions_removal_audit_payload(
+                        request=authz_removal_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                        now_timestamp=_now_timestamp,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if authz_removal_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = control_plane_authz_grant_service.write_github_actions_authz_policy_removal(
+                            record_store=record_store,
+                            request=authz_removal_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            now_timestamp=_now_timestamp,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authz_policy_unavailable",
+                                "message": "Launchplane active authz policy is unavailable.",
+                            },
+                        },
+                    )
+                if authz_removal_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
+                result, driver_result = control_plane_authz_grant_service.build_authz_policy_github_actions_removal_service_result(
+                    authz_policy_record=authz_policy_record,
+                    changed=changed,
+                    mode=authz_removal_request.mode,
+                    diff=diff,
+                    audit=audit,
                 )
             elif path == "/v1/authz-policies/github-humans/grants":
                 human_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_validate(

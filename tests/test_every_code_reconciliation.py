@@ -99,6 +99,61 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("LAUNCHPLANE_SERVICE_TOKEN is required", result.output)
 
+    def test_cli_authz_remove_workflow_rule_posts_service_dry_run_request(self) -> None:
+        runner = CliRunner()
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"mode": "dry_run", "changed": True},
+            }
+
+        with (
+            patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}),
+            patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "authz-policies",
+                    "remove-workflow-rule",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--repository",
+                    "cbusillo/launchplane",
+                    "--product",
+                    "launchplane",
+                    "--context",
+                    "launchplane",
+                    "--action",
+                    "launchplane_service_deploy.execute",
+                    "--reason",
+                    "Inspect broad deploy authority removal.",
+                    "--related-issue",
+                    "cbusillo/launchplane#1049",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(captured_request["bearer_token"], "service-token")
+        self.assertEqual(captured_request["session_cookie"], "")
+        self.assertEqual(
+            captured_request["path"], "/v1/authz-policies/github-actions/removals"
+        )
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["reason"], "Inspect broad deploy authority removal.")
+        removal = payload["removal"]
+        assert isinstance(removal, dict)
+        self.assertEqual(removal["repository"], "cbusillo/launchplane")
+        self.assertEqual(removal["actions"], ["launchplane_service_deploy.execute"])
+        response_payload = json.loads(result.output)
+        self.assertEqual(response_payload["result"]["mode"], "dry_run")
+
     def test_cli_authz_grant_human_posts_service_request(self) -> None:
         runner = CliRunner()
         captured_request: dict[str, object] = {}
