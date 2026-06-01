@@ -20402,7 +20402,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -20525,7 +20525,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -20622,7 +20622,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -20695,7 +20695,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -20806,7 +20806,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -20909,7 +20909,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -21016,7 +21016,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -21109,7 +21109,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -21217,7 +21217,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "roles": ["admin"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                         }
                     ]
                 }
@@ -21290,7 +21290,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "github_actions": [
                         {
                             "repository": "cbusillo/launchplane",
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["authz_policy_grant.write"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
                         }
@@ -21324,7 +21324,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
-    def test_authz_policy_grant_endpoint_rejects_without_self_deploy_permission(self) -> None:
+    def test_authz_policy_grant_endpoint_rejects_without_policy_grant_permission(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -21369,6 +21369,62 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 },
                 headers={"Idempotency-Key": "authz-grant:unauthorized"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_authz_policy_grant_endpoint_rejects_self_deploy_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Attempt policy grant with deploy authority.",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["product_profile.read"],
+                    },
+                },
+                headers={"Idempotency-Key": "authz-grant:self-deploy-denied"},
             )
 
         self.assertEqual(status_code, 403)
