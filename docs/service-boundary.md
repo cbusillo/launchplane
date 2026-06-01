@@ -863,6 +863,10 @@ Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
 Launchplane resolves the context from the DB-backed product profile lane and the
 runtime target from DB-backed Dokploy target records.
+Product environment reads expose a neutral provider-target projection when a
+lane has paired DB-backed Dokploy target and target-id records, but generic-web
+deploy and live runtime apply still resolve and mutate through those Dokploy
+records until the provider-neutral write path exists.
 
 Generic web prod promotion can be exercised directly with
 `POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only use this

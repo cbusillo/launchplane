@@ -27,6 +27,7 @@ from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -3120,6 +3121,44 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneDokployTargetRow.instance.asc(),
             ),
         )
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord:
+        target_record = self.read_dokploy_target_record(
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        target_id_record = self.read_dokploy_target_id_record(
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        return ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
+
+    def list_provider_target_records(
+        self, *, provider_id: str = ""
+    ) -> tuple[ProviderTargetRecord, ...]:
+        normalized_provider_id = provider_id.strip().lower()
+        target_id_records = {
+            (record.context, record.instance): record
+            for record in self.list_dokploy_target_id_records()
+        }
+        provider_records: list[ProviderTargetRecord] = []
+        for target_record in self.list_dokploy_target_records():
+            target_id_record = target_id_records.get((target_record.context, target_record.instance))
+            if target_id_record is None:
+                continue
+            provider_record = ProviderTargetRecord.from_dokploy_records(
+                target_record=target_record,
+                target_id_record=target_id_record,
+            )
+            if normalized_provider_id and provider_record.provider_id != normalized_provider_id:
+                continue
+            provider_records.append(provider_record)
+        return tuple(provider_records)
 
     def delete_dokploy_target_record(
         self,

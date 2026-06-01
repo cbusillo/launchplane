@@ -131,9 +131,10 @@ an ORM column/table or remains only in the evidence payload.
 - Provider target records define the neutral target inventory contract:
   `context`, `instance`, `provider_id`, `target_category`, `target_id`,
   `display_name`, `provider_target_type`, `updated_at`, and payload-only
-  provider evidence. Existing Dokploy target and target-id records remain the
-  active storage/write path until a later migration adds provider-neutral
-  storage and read-model coverage.
+  provider evidence. Launchplane read models can project these neutral records
+  from paired Dokploy target and target-id records. Existing Dokploy target and
+  target-id records remain the active storage/write path until a later migration
+  adds provider-neutral storage.
 - Shared ship and promotion request/evidence contracts accept a neutral
   `target_reference` compatibility input for target name, provider id,
   category, and provider target type. Persisted records still write the flat
@@ -572,6 +573,10 @@ state/
   domains, health policy, and typed product policies.
 - Live `target_id` values remain a sibling DB-backed record so operators can
   update route metadata and route identity independently when needed.
+- Paired Dokploy target and target-id records project to the neutral
+  `ProviderTargetRecord` read model. Missing halves remain missing; Launchplane
+  does not fabricate provider-neutral target identity from only route metadata or
+  only a live id.
 - Shopify guard values such as protected store keys now belong in
   `policies.shopify.protected_store_keys` on this record instead of a route map
   hardcoded in Python.

@@ -222,6 +222,8 @@ class ProductTargetSummary(BaseModel):
     provider: str = "dokploy"
     target_type: str = ""
     target_name: str = ""
+    target_id: str = ""
+    provider_target_type: str = ""
     target_id_recorded: bool = False
     artifact_manifest: ArtifactIdentityManifest | None = None
     expected_runtime_identity: RuntimeIdentity | None = None
@@ -1693,6 +1695,27 @@ def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTarge
     elif lane_summary.latest_deployment is not None:
         expected_identity = lane_summary.latest_deployment.runtime_identity
         destination_health = lane_summary.latest_deployment.destination_health
+    if lane_summary.provider_target is not None:
+        return ProductTargetSummary(
+            provider=lane_summary.provider_target.provider_id,
+            target_type=lane_summary.provider_target.target_category,
+            target_name=lane_summary.provider_target.display_name,
+            target_id=lane_summary.provider_target.target_id,
+            provider_target_type=lane_summary.provider_target.provider_target_type,
+            target_id_recorded=True,
+            artifact_manifest=lane_summary.artifact_manifest,
+            expected_runtime_identity=expected_identity,
+            observed_runtime_identity=destination_health.observed_runtime_identity
+            if destination_health is not None
+            else None,
+            runtime_identity_status=destination_health.runtime_identity_status
+            if destination_health is not None
+            else "unchecked",
+            runtime_identity_detail=destination_health.runtime_identity_detail
+            if destination_health is not None
+            else "",
+            trust_state="recorded",
+        )
     if lane_summary.dokploy_target is None:
         return ProductTargetSummary(
             artifact_manifest=lane_summary.artifact_manifest,

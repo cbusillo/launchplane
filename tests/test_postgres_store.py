@@ -212,6 +212,32 @@ def _deployment_record(*, record_id: str, started_at: str, finished_at: str) -> 
     )
 
 
+def _deployment_record_with_target_id(
+    *, record_id: str, target_id: str, started_at: str, finished_at: str
+) -> DeploymentRecord:
+    return DeploymentRecord(
+        record_id=record_id,
+        artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+        context="opw",
+        instance="testing",
+        source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+        resolved_target=ResolvedTargetEvidence(
+            target_type="compose",
+            target_id=target_id,
+            target_name="opw-testing",
+        ),
+        deploy=DeploymentEvidence(
+            target_name="opw-testing",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            deployment_id="dokploy-1",
+            status="pass",
+            started_at=started_at,
+            finished_at=finished_at,
+        ),
+    )
+
+
 def _generic_web_rollback_plan_record(
     *, plan_id: str, created_at: str
 ) -> GenericWebRollbackPlanRecord:
@@ -346,10 +372,13 @@ def _dokploy_target_id_record(
     )
 
 
-def _dokploy_target_record(*, context: str = "opw", instance: str = "prod") -> DokployTargetRecord:
+def _dokploy_target_record(
+    *, context: str = "opw", instance: str = "prod", project_name: str = ""
+) -> DokployTargetRecord:
     return DokployTargetRecord(
         context=context,
         instance=instance,
+        project_name=project_name,
         target_type="compose",
         target_name=f"{context}-{instance}",
         source_git_ref="origin/main",
@@ -1080,6 +1109,92 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded.compose_path, "./docker-compose.yml")
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].context, "opw")
+
+    def test_provider_target_records_project_from_dokploy_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            store.write_dokploy_target_record(
+                _dokploy_target_record(
+                    context="syo",
+                    instance="prod",
+                    project_name="syo-prod-project",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="syo",
+                    instance="prod",
+                    target_id="app-syo-prod",
+                )
+            )
+
+            loaded = store.read_provider_target_record(context_name="syo", instance_name="prod")
+            listed = store.list_provider_target_records()
+            filtered = store.list_provider_target_records(provider_id=" DOKPLOY ")
+            store.close()
+
+        self.assertEqual(loaded.provider_id, "dokploy")
+        self.assertEqual(loaded.context, "syo")
+        self.assertEqual(loaded.instance, "prod")
+        self.assertEqual(loaded.target_category, "compose")
+        self.assertEqual(loaded.target_id, "app-syo-prod")
+        self.assertEqual(loaded.provider_target_type, "compose")
+        self.assertEqual(loaded.provider_evidence["project_name"], "syo-prod-project")
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0], loaded)
+        self.assertEqual(filtered, (loaded,))
+
+    def test_provider_target_list_skips_incomplete_dokploy_pairs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="syo", instance="prod")
+            )
+
+            self.assertEqual(store.list_provider_target_records(), ())
+            with self.assertRaises(FileNotFoundError):
+                store.read_provider_target_record(context_name="syo", instance_name="prod")
+            store.close()
+
+    def test_read_lane_summary_keeps_deployment_target_evidence_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            store.write_deployment_record(
+                _deployment_record_with_target_id(
+                    record_id="deployment-20260420T153000Z-opw-testing",
+                    target_id="old-compose-id",
+                    started_at="2026-04-20T15:30:00Z",
+                    finished_at="2026-04-20T15:32:00Z",
+                )
+            )
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="opw", instance="testing")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="opw",
+                    instance="testing",
+                    target_id="current-compose-id",
+                )
+            )
+
+            summary = store.read_lane_summary(context_name="opw", instance_name="testing")
+            store.close()
+
+        provider_target = summary.provider_target
+        assert provider_target is not None
+        self.assertEqual(provider_target.target_id, "current-compose-id")
+        deployed_target = summary.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.target_id, "old-compose-id")
 
     def test_idempotency_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2535,6 +2650,11 @@ env_var = "GH_TOKEN"
         dokploy_target = summary.dokploy_target
         assert dokploy_target is not None
         self.assertEqual(dokploy_target.target_name, "opw-testing")
+        provider_target = summary.provider_target
+        assert provider_target is not None
+        self.assertEqual(provider_target.provider_id, "dokploy")
+        self.assertEqual(provider_target.target_category, "compose")
+        self.assertEqual(provider_target.target_id, "compose-123")
         deployed_target = summary.deployed_target
         assert deployed_target is not None
         self.assertEqual(deployed_target.provider_id, "dokploy")
