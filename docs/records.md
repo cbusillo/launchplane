@@ -128,6 +128,12 @@ an ORM column/table or remains only in the evidence payload.
   Existing Dokploy-shaped `resolved_target` and deploy-mode fields remain
   readable compatibility evidence and are translated into the neutral target
   reference when no explicit provider-neutral target is present.
+- Shared ship and promotion request/evidence contracts accept a neutral
+  `target_reference` compatibility input for target name, provider id,
+  category, and provider target type. Persisted records still write the flat
+  compatibility fields until the record schema migration has explicit
+  retirement criteria; mixed neutral and legacy target facts fail closed when
+  they disagree.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
   `updated_at`. Individual key/value settings stay payload-only until GUI
   filtering or editing requires a setting table.

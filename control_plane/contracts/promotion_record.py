@@ -2,7 +2,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.deploy_target import DeployTargetCategory
+from control_plane.contracts.deploy_target import (
+    DeployTargetCategory,
+    DeployTargetContractReference,
+    apply_target_reference_defaults,
+    ensure_target_reference_matches,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 ReleaseStatus = Literal["pending", "pass", "fail", "skipped"]
@@ -53,6 +58,9 @@ class DeploymentEvidence(BaseModel):
     target_name: str
     target_type: Literal["compose", "application"]
     deploy_mode: str
+    target_reference: DeployTargetContractReference | None = Field(
+        default=None, exclude=True
+    )
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
     provider_target_type: str = ""
@@ -61,6 +69,11 @@ class DeploymentEvidence(BaseModel):
     status: ReleaseStatus = "pending"
     started_at: str = ""
     finished_at: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_target_reference_defaults(cls, data: object) -> object:
+        return apply_target_reference_defaults(data)
 
     @model_validator(mode="after")
     def _validate_provider_evidence(self) -> "DeploymentEvidence":
@@ -75,6 +88,14 @@ class DeploymentEvidence(BaseModel):
             self.provider_target_type = self.target_type
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
+        self.target_reference = ensure_target_reference_matches(
+            self.target_reference,
+            target_name=self.target_name,
+            target_type=self.target_type,
+            provider_id=self.provider_id,
+            target_category=self.target_category,
+            provider_target_type=self.provider_target_type,
+        )
         return self
 
 
@@ -188,6 +209,9 @@ class PromotionRequest(BaseModel):
     to_instance: str
     target_name: str
     target_type: Literal["compose", "application"]
+    target_reference: DeployTargetContractReference | None = Field(
+        default=None, exclude=True
+    )
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
     provider_target_type: str = ""
@@ -203,6 +227,11 @@ class PromotionRequest(BaseModel):
     source_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     backup_gate: BackupGateEvidence = Field(default_factory=BackupGateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_target_reference_defaults(cls, data: object) -> object:
+        return apply_target_reference_defaults(data)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PromotionRequest":
@@ -227,6 +256,14 @@ class PromotionRequest(BaseModel):
             self.provider_target_type = self.target_type
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
+        self.target_reference = ensure_target_reference_matches(
+            self.target_reference,
+            target_name=self.target_name,
+            target_type=self.target_type,
+            provider_id=self.provider_id,
+            target_category=self.target_category,
+            provider_target_type=self.provider_target_type,
+        )
         if self.from_instance == self.to_instance:
             raise ValueError("promotion source and destination instances must differ")
         return self
