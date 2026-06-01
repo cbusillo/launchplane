@@ -1347,6 +1347,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     deploy_mode="fake-cloud-service-api",
                     provider_id="fake-cloud",
                     target_category="service",
+                    provider_target_type="managed-service",
                     deployment_id="deploy-123",
                     status="pass",
                     started_at="2026-04-20T15:30:00Z",
@@ -1366,6 +1367,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(deployed_target.target_id, "svc-123")
         self.assertEqual(loaded_record.deploy.provider_id, "fake-cloud")
         self.assertEqual(loaded_record.deploy.target_category, "service")
+        self.assertEqual(loaded_record.deploy.provider_target_type, "managed-service")
 
     def test_write_and_read_resolved_target_uses_deploy_provider_id(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1394,6 +1396,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     deploy_mode="fake-cloud-service-api",
                     provider_id="fake-cloud",
                     target_category="service",
+                    provider_target_type="managed-service",
                     deployment_id="deploy-123",
                     status="pass",
                     started_at="2026-04-20T15:30:00Z",
@@ -1408,6 +1411,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
         deployed_target = loaded_record.deployed_target
         assert deployed_target is not None
         self.assertEqual(deployed_target.provider_id, "fake-cloud")
+        self.assertEqual(deployed_target.provider_target_type, "managed-service")
         self.assertEqual(deployed_target.target_id, "svc-123")
 
     def test_write_and_list_generic_web_rollback_plan_records(self) -> None:

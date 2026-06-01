@@ -80,4 +80,6 @@ class DeploymentRecord(BaseModel):
             self.deployed_target = self.resolved_target.to_deployed_target_reference(
                 provider_id=provider_id
             )
+            if self.deploy.provider_target_type:
+                self.deployed_target.provider_target_type = self.deploy.provider_target_type
         return self

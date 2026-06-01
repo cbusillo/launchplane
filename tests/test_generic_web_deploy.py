@@ -132,6 +132,7 @@ class _FakeGenericWebDeployProvider:
                 deploy_mode="fake-cloud-service-api",
                 provider_id=self.provider_id,
                 target_category="service",
+                provider_target_type="managed-service",
                 provider_deploy_mode="service-api",
                 wait=True,
                 timeout_seconds=request_timeout_seconds,
@@ -488,6 +489,10 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(store.deployments[0].delegated_executor, "control-plane.fake-cloud")
         self.assertEqual(store.deployments[0].deploy.provider_id, "fake-cloud")
         self.assertEqual(
+            store.deployments[0].deploy.provider_target_type,
+            "application",
+        )
+        self.assertEqual(
             store.deployments[0].deploy.provider_deploy_mode,
             "fake-cloud-application-api",
         )
@@ -523,6 +528,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(resolved.ship_request.provider_id, "dokploy")
         self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-application-api")
         self.assertEqual(resolved.ship_request.target_category, "application")
+        self.assertEqual(resolved.ship_request.provider_target_type, "application")
         self.assertEqual(resolved.resolved_target.target_id, "target-123")
         self.assertEqual(resolved.deploy_timeout_seconds, 45)
 

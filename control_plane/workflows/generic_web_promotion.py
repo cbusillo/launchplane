@@ -719,6 +719,10 @@ def _build_promotion_record(
 ) -> PromotionRecord:
     target_deploy_mode = "dokploy-application-api"
     target_deployment_id = "control-plane-dokploy"
+    provider_id = "dokploy"
+    target_category: DeployTargetCategory = target_type
+    provider_target_type = str(target_type)
+    provider_deploy_mode = target_deploy_mode
     resolved_target_name = target_name or _fallback_target_name(
         request=request,
         lane=ProductLaneProfile(instance=request.to_instance, context=context),
@@ -728,6 +732,10 @@ def _build_promotion_record(
         target_deployment_id = deployment_record.deploy.deployment_id
         resolved_target_name = deployment_record.deploy.target_name
         target_type = deployment_record.deploy.target_type
+        provider_id = deployment_record.deploy.provider_id
+        target_category = deployment_record.deploy.target_category or target_type
+        provider_target_type = deployment_record.deploy.provider_target_type
+        provider_deploy_mode = deployment_record.deploy.provider_deploy_mode
     return PromotionRecord(
         record_id=promotion_record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=request.artifact_id),
@@ -742,6 +750,10 @@ def _build_promotion_record(
             target_name=resolved_target_name,
             target_type=target_type,
             deploy_mode=target_deploy_mode,
+            provider_id=provider_id,
+            target_category=target_category,
+            provider_target_type=provider_target_type,
+            provider_deploy_mode=provider_deploy_mode,
             deployment_id=target_deployment_id,
             status=deployment_status,
             started_at=deployment_record.deploy.started_at if deployment_record is not None else "",

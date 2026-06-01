@@ -114,6 +114,7 @@ class DokployGenericWebDeployProvider:
             deploy_mode=deploy_mode,
             provider_id=self.provider_id,
             target_category=target_definition.target_type,
+            provider_target_type=target_definition.target_type,
             provider_deploy_mode=deploy_mode,
             wait=True,
             timeout_seconds=request_timeout_seconds,

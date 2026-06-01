@@ -1306,6 +1306,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     deploy_mode="fake-cloud-service-api",
                     provider_id="fake-cloud",
                     target_category="service",
+                    provider_target_type="managed-service",
                     provider_deploy_mode="service-api",
                     deployment_id="deploy-123",
                     status="pass",
@@ -1326,6 +1327,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(deployed_target.provider_evidence, {"region": "us-east-1"})
         self.assertEqual(loaded_record.deploy.provider_id, "fake-cloud")
         self.assertEqual(loaded_record.deploy.target_category, "service")
+        self.assertEqual(loaded_record.deploy.provider_target_type, "managed-service")
 
     def test_deployment_record_derives_deployed_target_provider_from_deploy_evidence(
         self,
@@ -1347,6 +1349,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 deploy_mode="fake-cloud-application-api",
                 provider_id="fake-cloud",
                 target_category="service",
+                provider_target_type="managed-service",
                 provider_deploy_mode="application-api",
                 deployment_id="deploy-123",
                 status="pass",
@@ -1358,7 +1361,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         deployed_target = record.deployed_target
         assert deployed_target is not None
         self.assertEqual(deployed_target.provider_id, "fake-cloud")
-        self.assertEqual(deployed_target.provider_target_type, "application")
+        self.assertEqual(deployed_target.provider_target_type, "managed-service")
         self.assertEqual(deployed_target.target_id, "svc-123")
 
     def test_list_deployment_records_filters_and_sorts_latest_first(self) -> None:

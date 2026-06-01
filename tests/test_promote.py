@@ -373,6 +373,89 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertTrue(record.post_deploy_update.attempted)
         self.assertEqual(record.post_deploy_update.status, "pass")
 
+    def test_ship_request_defaults_provider_target_type_from_legacy_target_type(self) -> None:
+        request = ShipRequest(
+            artifact_id="artifact-sha256-image456",
+            context="opw",
+            instance="prod",
+            source_git_ref="abc123",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+        )
+
+        self.assertEqual(request.provider_id, "dokploy")
+        self.assertEqual(request.target_category, "compose")
+        self.assertEqual(request.provider_target_type, "compose")
+        self.assertEqual(request.provider_deploy_mode, "dokploy-compose-api")
+
+    def test_promotion_request_accepts_provider_target_type(self) -> None:
+        request = PromotionRequest(
+            artifact_id="artifact-sha256-image456",
+            backup_record_id="backup-opw-prod-20260410T182231Z",
+            source_git_ref="abc123",
+            context="opw",
+            from_instance="testing",
+            to_instance="prod",
+            target_name="syo-prod-service",
+            target_type="application",
+            provider_id="fake-cloud",
+            target_category="service",
+            provider_target_type="managed-service",
+            deploy_mode="fake-cloud-service-api",
+            provider_deploy_mode="service-api",
+        )
+
+        self.assertEqual(request.provider_id, "fake-cloud")
+        self.assertEqual(request.target_category, "service")
+        self.assertEqual(request.provider_target_type, "managed-service")
+        self.assertEqual(request.provider_deploy_mode, "service-api")
+
+    def test_deployment_evidence_accepts_provider_target_type(self) -> None:
+        evidence = DeploymentEvidence(
+            target_name="syo-prod-service",
+            target_type="application",
+            deploy_mode="fake-cloud-service-api",
+            provider_id="fake-cloud",
+            target_category="service",
+            provider_target_type="managed-service",
+            provider_deploy_mode="service-api",
+        )
+
+        self.assertEqual(evidence.provider_id, "fake-cloud")
+        self.assertEqual(evidence.target_category, "service")
+        self.assertEqual(evidence.provider_target_type, "managed-service")
+        self.assertEqual(evidence.provider_deploy_mode, "service-api")
+
+    def test_build_executed_promotion_record_preserves_provider_target_type(self) -> None:
+        request = PromotionRequest(
+            artifact_id="artifact-sha256-image456",
+            backup_record_id="backup-opw-prod-20260410T182231Z",
+            source_git_ref="abc123",
+            context="syo",
+            from_instance="testing",
+            to_instance="prod",
+            target_name="syo-prod-service",
+            target_type="application",
+            provider_id="fake-cloud",
+            target_category="service",
+            provider_target_type="managed-service",
+            deploy_mode="fake-cloud-service-api",
+            provider_deploy_mode="service-api",
+        )
+
+        record = build_executed_promotion_record(
+            request=request,
+            record_id="promotion-1",
+            deployment_id="deploy-123",
+            deployment_status="pass",
+        )
+
+        self.assertEqual(record.deploy.provider_id, "fake-cloud")
+        self.assertEqual(record.deploy.target_category, "service")
+        self.assertEqual(record.deploy.provider_target_type, "managed-service")
+        self.assertEqual(record.deploy.provider_deploy_mode, "service-api")
+
     def test_promotion_record_requires_backup_record_id_for_passing_backup_gate(self) -> None:
         with self.assertRaisesRegex(ValueError, "backup_record_id"):
             PromotionRecord(
