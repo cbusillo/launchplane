@@ -871,6 +871,12 @@ workflow remains responsible for product release/tag behavior while Launchplane
 supplies authz, managed `GITHUB_TOKEN` lookup, dispatch inputs, and workflow-run
 observation.
 
+Generic web deploy and prod-promotion responses expose provider-neutral target
+metadata with `target_category`, `provider_id`, and `provider_target_type`.
+The legacy `target_type` response field remains as a compatibility alias for
+older workflow callers, but provider-neutral callers should read
+`target_category` first.
+
 Generic web preview desired-state discovery uses
 `POST /v1/drivers/generic-web/preview-desired-state`. The request names the
 product and optional pull-request label/page limit; Launchplane resolves the

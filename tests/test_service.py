@@ -16142,6 +16142,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["records"]["inventory_record_id"], "sellyouroutboard-testing-prod")
         self.assertEqual(payload["result"]["source_health_status"], "pass")
         self.assertEqual(payload["result"]["destination_health_status"], "pass")
+        self.assertEqual(payload["result"]["target_category"], "application")
+        self.assertEqual(payload["result"]["provider_id"], "dokploy")
+        self.assertEqual(payload["result"]["provider_target_type"], "application")
+        self.assertEqual(payload["result"]["target_type"], "application")
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_rejects_wrong_product_context(self) -> None:
@@ -16288,6 +16292,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             payload["records"]["promotion_record_id"], "promotion-odoo-testing-to-prod"
         )
         self.assertEqual(payload["records"]["deployment_record_id"], "deployment-odoo-prod")
+        self.assertEqual(payload["result"]["target_category"], "application")
+        self.assertEqual(payload["result"]["provider_id"], "dokploy")
+        self.assertEqual(payload["result"]["provider_target_type"], "application")
+        self.assertEqual(payload["result"]["target_type"], "application")
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_accepts_padded_lane_context(self) -> None:
@@ -16376,6 +16384,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["status"], "accepted")
         self.assertEqual(payload["records"]["promotion_record_id"], "promotion-syo-testing-to-prod")
+        self.assertEqual(payload["result"]["target_category"], "application")
+        self.assertEqual(payload["result"]["provider_id"], "dokploy")
+        self.assertEqual(payload["result"]["provider_target_type"], "application")
+        self.assertEqual(payload["result"]["target_type"], "application")
         execute_mock.assert_called_once()
 
     def test_human_session_can_dry_run_generic_web_prod_promotion(self) -> None:
