@@ -133,10 +133,11 @@ deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes. The authz policy
 grant routes accept GitHub Actions OIDC callers and authenticated admin human
-sessions, require the `launchplane_service_deploy.execute` action, and remain
-the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
+sessions, require the `authz_policy_grant.write` action, and remain the
+service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
 human policy rules. Terminal-agent, local-operator, and local-admin grant routes
-use the same boundary for DB-backed owner-agent rules. Grant requests support
+use the same policy-admin boundary for DB-backed owner-agent rules. Grant
+requests support
 `dry_run` and `apply` modes. Apply requests must include an audit reason and
 write a new active policy record only when the grant is not already present, and
 immediately refresh the in-process policy used by the current service worker.

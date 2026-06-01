@@ -11860,7 +11860,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="authz_policy_grant.write",
                     product=authz_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
@@ -11978,7 +11978,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="authz_policy_grant.write",
                     product=human_authz_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
@@ -12096,7 +12096,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="authz_policy_grant.write",
                     product=terminal_authz_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
@@ -12207,7 +12207,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="authz_policy_grant.write",
                     product=local_operator_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
@@ -12303,7 +12303,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="launchplane_service_deploy.execute",
+                    action="authz_policy_grant.write",
                     product=local_admin_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):

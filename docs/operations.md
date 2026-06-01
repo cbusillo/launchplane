@@ -134,8 +134,10 @@ or `uv run launchplane authz-policies grant-human --service-url ... --dry-run`
 to inspect the diff, then rerun with `--apply --reason ...` and an idempotency
 key when the grant is approved. The CLI is a thin service client: it sends a
 short-lived bearer token or a Launchplane browser session cookie, and the
-service validates the caller, writes any new active policy record, stores audit
-metadata, and reloads the current service worker's active policy.
+service validates the caller's `authz_policy_grant.write` authority, writes any
+new active policy record, stores audit metadata, and reloads the current service
+worker's active policy. Launchplane self-deploy authority is separate and does
+not authorize authz policy grant maintenance.
 
 The Launchplane deploy workflow also reconciles configured signed-in operator
 grants for product-config writes. Set
@@ -150,10 +152,8 @@ logins or product-specific operator grants in source.
 
 The deploy workflow also reconciles its own `authz_policy_grant.write` grants
 for product/context `launchplane`, covering both manual dispatches and automatic
-CI-success deploys. Those grants are a staged migration path for authz policy
-maintenance; authz grant routes can be narrowed to policy-admin authority after
-the DB-backed grants are present, without relying on Launchplane self-deploy
-authority for future grant reconciliation.
+CI-success deploys. Those grants keep future grant reconciliation separate from
+Launchplane self-deploy authority.
 
 Routine local-operator product-config grants are scoped, not wildcard, and the
 deploy reconciliation skips them unless explicit product/context scopes are
