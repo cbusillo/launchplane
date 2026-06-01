@@ -25,7 +25,7 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.deploy_target import DeployedTargetReference
+from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -389,6 +389,28 @@ def _dokploy_target_record(
         domains=(f"https://{instance}.example.com",),
         updated_at="2026-04-21T18:30:00Z",
         source_label="import:test",
+    )
+
+
+def _provider_target_record(
+    *,
+    context: str = "syo",
+    instance: str = "prod",
+    provider_id: str = "dokploy",
+    target_id: str = "app-syo-prod",
+    updated_at: str = "2026-04-21T18:35:00Z",
+) -> ProviderTargetRecord:
+    return ProviderTargetRecord(
+        context=context,
+        instance=instance,
+        provider_id=provider_id,
+        target_category="application",
+        target_id=target_id,
+        display_name=f"{context}-{instance}",
+        provider_target_type="application",
+        provider_evidence={"project_name": f"{context}-project"},
+        updated_at=updated_at,
+        source_label="test:provider-target",
     )
 
 
@@ -894,14 +916,48 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             store.write_artifact_manifest(manifest)
             store.write_ingress_route_audit_record(ingress_route_audit)
+            provider_target = _provider_target_record(context="reon", instance="prod")
+            store.write_provider_target_record(provider_target)
+            inspect_engine = create_engine(database_url)
+            inspector = inspect(inspect_engine)
+            table_names = set(inspector.get_table_names())
+            provider_target_columns = {
+                column["name"] for column in inspector.get_columns("launchplane_provider_targets")
+            }
+            provider_target_indexes = {
+                index["name"] for index in inspector.get_indexes("launchplane_provider_targets")
+            }
             loaded = store.read_artifact_manifest(manifest.artifact_id)
+            loaded_provider_target = store.read_provider_target_record(
+                context_name="reon",
+                instance_name="prod",
+            )
             audit_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
             )
             store.close()
+            inspect_engine.dispose()
 
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
         self.assertEqual(loaded.image.digest, "sha256:image123")
+        self.assertEqual(loaded_provider_target.target_id, provider_target.target_id)
+        self.assertIn("launchplane_provider_targets", table_names)
+        self.assertGreaterEqual(
+            provider_target_columns,
+            {
+                "context",
+                "instance",
+                "provider_id",
+                "target_category",
+                "target_id",
+                "display_name",
+                "provider_target_type",
+                "updated_at",
+                "payload",
+            },
+        )
+        self.assertIn("launchplane_provider_targets_provider_idx", provider_target_indexes)
+        self.assertIn("launchplane_provider_targets_updated_idx", provider_target_indexes)
         self.assertEqual(
             [record.record_id for record in audit_records], [ingress_route_audit.record_id]
         )
@@ -1146,6 +1202,164 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(len(listed), 1)
         self.assertEqual(listed[0], loaded)
         self.assertEqual(filtered, (loaded,))
+
+    def test_provider_target_records_round_trip_from_physical_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            record = _provider_target_record(
+                context="verireel",
+                instance="prod",
+                provider_id=" Dokploy ",
+                target_id="app-verireel-prod",
+            )
+            store.write_provider_target_record(record)
+
+            loaded = store.read_provider_target_record(
+                context_name="verireel",
+                instance_name="prod",
+            )
+            listed = store.list_provider_target_records()
+            filtered = store.list_provider_target_records(provider_id=" DOKPLOY ")
+            store.close()
+
+        self.assertEqual(loaded, record)
+        self.assertEqual(listed, (record,))
+        self.assertEqual(filtered, (record,))
+
+    def test_delete_provider_target_record_uses_current_authority_match(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            record = _provider_target_record(context="verireel", instance="prod")
+            changed_record = _provider_target_record(
+                context="verireel",
+                instance="prod",
+                target_id="app-verireel-prod-new",
+            )
+            store.write_provider_target_record(record)
+
+            changed_status = store.delete_provider_target_record(expected_record=changed_record)
+            loaded_after_changed = store.read_provider_target_record(
+                context_name="verireel",
+                instance_name="prod",
+            )
+            deleted_status = store.delete_provider_target_record(expected_record=record)
+            missing_status = store.delete_provider_target_record(expected_record=record)
+            store.close()
+
+        self.assertEqual(changed_status, "changed")
+        self.assertEqual(loaded_after_changed, record)
+        self.assertEqual(deleted_status, "deleted")
+        self.assertEqual(missing_status, "missing")
+
+    def test_provider_target_physical_storage_precedes_dokploy_projection(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            physical_record = _provider_target_record(
+                context="syo",
+                instance="prod",
+                target_id="physical-app-syo-prod",
+            )
+            store.write_provider_target_record(physical_record)
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="syo", instance="prod")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="syo",
+                    instance="prod",
+                    target_id="projected-app-syo-prod",
+                )
+            )
+
+            loaded = store.read_provider_target_record(context_name="syo", instance_name="prod")
+            listed = store.list_provider_target_records()
+            summary = store.read_lane_summary(context_name="syo", instance_name="prod")
+            store.close()
+
+        self.assertEqual(loaded, physical_record)
+        self.assertEqual(listed, (physical_record,))
+        self.assertEqual(summary.provider_target, physical_record)
+
+    def test_provider_target_filter_suppresses_shadowed_dokploy_projection(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            physical_record = _provider_target_record(
+                context="syo",
+                instance="prod",
+                provider_id="future-provider",
+                target_id="physical-syo-prod",
+            )
+            store.write_provider_target_record(physical_record)
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="syo", instance="prod")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="syo",
+                    instance="prod",
+                    target_id="legacy-dokploy-syo-prod",
+                )
+            )
+
+            dokploy_records = store.list_provider_target_records(provider_id="dokploy")
+            future_provider_records = store.list_provider_target_records(
+                provider_id="future-provider"
+            )
+            store.close()
+
+        self.assertEqual(dokploy_records, ())
+        self.assertEqual(future_provider_records, (physical_record,))
+
+    def test_provider_target_list_combines_physical_and_projected_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            physical_record = _provider_target_record(
+                context="verireel",
+                instance="prod",
+                target_id="app-verireel-prod",
+            )
+            store.write_provider_target_record(physical_record)
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="syo", instance="prod")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="syo",
+                    instance="prod",
+                    target_id="app-syo-prod",
+                )
+            )
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="incomplete", instance="prod")
+            )
+
+            listed = store.list_provider_target_records()
+            filtered = store.list_provider_target_records(provider_id="dokploy")
+            store.close()
+
+        self.assertEqual(
+            [(record.context, record.instance, record.target_id) for record in listed],
+            [
+                ("syo", "prod", "app-syo-prod"),
+                ("verireel", "prod", "app-verireel-prod"),
+            ],
+        )
+        self.assertEqual(filtered, listed)
 
     def test_provider_target_list_skips_incomplete_dokploy_pairs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
