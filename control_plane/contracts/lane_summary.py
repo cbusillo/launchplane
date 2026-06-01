@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance
-from control_plane.contracts.deploy_target import DeployedTargetReference
+from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -27,6 +27,7 @@ class LaunchplaneLaneSummary(BaseModel):
     latest_promotion: PromotionRecord | None = None
     latest_backup_gate: BackupGateRecord | None = None
     deployed_target: DeployedTargetReference | None = None
+    provider_target: ProviderTargetRecord | None = None
     dokploy_target_id: DokployTargetIdRecord | None = None
     dokploy_target: DokployTargetRecord | None = None
     runtime_environment_records: tuple[RuntimeEnvironmentRecord, ...] = ()
@@ -40,6 +41,12 @@ class LaunchplaneLaneSummary(BaseModel):
 
     @model_validator(mode="after")
     def _populate_provider_neutral_target(self) -> "LaunchplaneLaneSummary":
+        if self.provider_target is None:
+            if self.dokploy_target is not None and self.dokploy_target_id is not None:
+                self.provider_target = ProviderTargetRecord.from_dokploy_records(
+                    target_record=self.dokploy_target,
+                    target_id_record=self.dokploy_target_id,
+                )
         if self.deployed_target is None and self.latest_deployment is not None:
             self.deployed_target = self.latest_deployment.deployed_target
         return self
