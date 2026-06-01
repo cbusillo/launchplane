@@ -124,6 +124,7 @@ def build_deployment_record(
             deploy_mode=request.deploy_mode,
             provider_id=request.provider_id,
             target_category=request.target_category,
+            provider_target_type=request.provider_target_type,
             provider_deploy_mode=request.provider_deploy_mode,
             deployment_id=deployment_id,
             status=deployment_status,

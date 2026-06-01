@@ -55,6 +55,7 @@ class DeploymentEvidence(BaseModel):
     deploy_mode: str
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
+    provider_target_type: str = ""
     provider_deploy_mode: str = ""
     deployment_id: str = ""
     status: ReleaseStatus = "pending"
@@ -64,11 +65,14 @@ class DeploymentEvidence(BaseModel):
     @model_validator(mode="after")
     def _validate_provider_evidence(self) -> "DeploymentEvidence":
         self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
         self.provider_deploy_mode = self.provider_deploy_mode.strip()
         if not self.provider_id:
             raise ValueError("deployment evidence requires provider_id")
         if self.target_category is None:
             self.target_category = self.target_type
+        if not self.provider_target_type:
+            self.provider_target_type = self.target_type
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
         return self
@@ -184,7 +188,11 @@ class PromotionRequest(BaseModel):
     to_instance: str
     target_name: str
     target_type: Literal["compose", "application"]
+    provider_id: str = "dokploy"
+    target_category: DeployTargetCategory | None = None
+    provider_target_type: str = ""
     deploy_mode: str
+    provider_deploy_mode: str = ""
     wait: bool = True
     timeout_seconds: int | None = Field(default=None, ge=1)
     verify_health: bool = True
@@ -208,6 +216,17 @@ class PromotionRequest(BaseModel):
             raise ValueError("promotion request requires target_name")
         if not self.deploy_mode.strip():
             raise ValueError("promotion request requires deploy_mode")
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.provider_deploy_mode = self.provider_deploy_mode.strip()
+        if not self.provider_id:
+            raise ValueError("promotion request requires provider_id")
+        if self.target_category is None:
+            self.target_category = self.target_type
+        if not self.provider_target_type:
+            self.provider_target_type = self.target_type
+        if not self.provider_deploy_mode:
+            self.provider_deploy_mode = self.deploy_mode
         if self.from_instance == self.to_instance:
             raise ValueError("promotion source and destination instances must differ")
         return self
