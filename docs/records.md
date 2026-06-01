@@ -128,6 +128,12 @@ an ORM column/table or remains only in the evidence payload.
   Existing Dokploy-shaped `resolved_target` and deploy-mode fields remain
   readable compatibility evidence and are translated into the neutral target
   reference when no explicit provider-neutral target is present.
+- Provider target records define the neutral target inventory contract:
+  `context`, `instance`, `provider_id`, `target_category`, `target_id`,
+  `display_name`, `provider_target_type`, `updated_at`, and payload-only
+  provider evidence. Existing Dokploy target and target-id records remain the
+  active storage/write path until a later migration adds provider-neutral
+  storage and read-model coverage.
 - Shared ship and promotion request/evidence contracts accept a neutral
   `target_reference` compatibility input for target name, provider id,
   category, and provider target type. Persisted records still write the flat
