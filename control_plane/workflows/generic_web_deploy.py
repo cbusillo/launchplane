@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -72,10 +71,33 @@ class GenericWebDeployResult(BaseModel):
     context: str
     instance: str
     target_name: str = ""
-    target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = ""
+    provider_target_type: str = ""
+    target_type: str = ""
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "GenericWebDeployResult":
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.target_type = self.target_type.strip().lower()
+        if not self.target_type:
+            self.target_type = self.provider_target_type or self.target_category
+        return self
+
+
+class GenericWebDeployTargetResultFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_name: str
+    target_id: str
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = ""
+    provider_target_type: str = ""
+    target_type: str = ""
 
 
 class GenericWebPostDeployContext(BaseModel):
@@ -243,6 +265,28 @@ def _build_post_deploy_context(
         target_type=resolved_target.target_type,
         artifact_id=artifact_id,
         source_git_ref=source_git_ref,
+    )
+
+
+def _deploy_result_target_fields(
+    *, resolved_deploy_target: GenericWebResolvedDeployTarget
+) -> GenericWebDeployTargetResultFields:
+    resolved_target = resolved_deploy_target.resolved_target
+    deployed_target = resolved_deploy_target.deployed_target
+    provider_id = ""
+    target_category: DeployTargetCategory = "unknown"
+    provider_target_type = str(resolved_target.target_type)
+    if deployed_target is not None:
+        provider_id = deployed_target.provider_id
+        target_category = deployed_target.target_category
+        provider_target_type = deployed_target.provider_target_type
+    return GenericWebDeployTargetResultFields(
+        target_name=resolved_target.target_name,
+        target_id=resolved_target.target_id,
+        target_category=target_category,
+        provider_id=provider_id,
+        provider_target_type=provider_target_type,
+        target_type=provider_target_type or resolved_target.target_type,
     )
 
 
@@ -442,6 +486,9 @@ def execute_generic_web_deploy(
                     updated_at=finished_at,
                 )
             )
+        target_fields = _deploy_result_target_fields(
+            resolved_deploy_target=resolved_deploy_target
+        )
         return GenericWebDeployResult(
             deployment_record_id=record_id,
             deploy_status=deployment_status,
@@ -450,9 +497,12 @@ def execute_generic_web_deploy(
             product=resolved_profile.product,
             context=resolved_lane.context,
             instance=resolved_lane.instance,
-            target_name=resolved_target.target_name,
-            target_type=resolved_target.target_type,
-            target_id=resolved_target.target_id,
+            target_name=target_fields.target_name,
+            target_id=target_fields.target_id,
+            target_category=target_fields.target_category,
+            provider_id=target_fields.provider_id,
+            provider_target_type=target_fields.provider_target_type,
+            target_type=target_fields.target_type,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
@@ -484,6 +534,7 @@ def execute_generic_web_deploy(
             updated_at=finished_at,
         )
     )
+    target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
     return GenericWebDeployResult(
         deployment_record_id=record_id,
         deploy_status="pass",
@@ -492,9 +543,12 @@ def execute_generic_web_deploy(
         product=resolved_profile.product,
         context=resolved_lane.context,
         instance=resolved_lane.instance,
-        target_name=resolved_target.target_name,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        target_type=target_fields.target_type,
         post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
 

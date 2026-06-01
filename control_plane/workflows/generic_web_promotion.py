@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.parse import quote
 
 import click
@@ -300,7 +300,10 @@ def execute_generic_web_prod_promotion(
                 deployment_record=deployment_record,
                 deployment_status="fail",
                 target_name=deploy_result.target_name,
-                target_type=deploy_result.target_type or "application",
+                target_type=_promotion_target_type(
+                    deploy_result_target_type=deploy_result.target_type,
+                    deployment_record=deployment_record,
+                ),
                 deployment_record_id=deploy_result.deployment_record_id,
             )
             record_store.write_promotion_record(final_record)
@@ -331,7 +334,10 @@ def execute_generic_web_prod_promotion(
         deployment_record=deployment_record,
         deployment_status=deploy_result.deploy_status,
         target_name=deploy_result.target_name,
-        target_type=deploy_result.target_type or "application",
+        target_type=_promotion_target_type(
+            deploy_result_target_type=deploy_result.target_type,
+            deployment_record=deployment_record,
+        ),
         deployment_record_id=deploy_result.deployment_record_id,
     )
     record_store.write_promotion_record(final_record)
@@ -625,6 +631,16 @@ def _write_deployment_health(
     )
     record_store.write_deployment_record(updated_record)
     return updated_record
+
+
+def _promotion_target_type(
+    *, deploy_result_target_type: str, deployment_record: DeploymentRecord | None
+) -> DokployTargetType:
+    if deployment_record is not None:
+        return deployment_record.deploy.target_type
+    if deploy_result_target_type in {"compose", "application"}:
+        return cast(DokployTargetType, deploy_result_target_type)
+    return "application"
 
 
 def _build_promotion_record(
