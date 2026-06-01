@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from typing import Protocol
+from typing import Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import (
@@ -21,6 +22,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.workflows.verireel_stable_deploy import (
+    VeriReelStableDeployResult,
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
 )
@@ -111,9 +113,39 @@ class VeriReelProdPromotionResult(BaseModel):
     deploy_started_at: str = ""
     deploy_finished_at: str = ""
     target_name: str
-    target_type: DokployTargetType
     target_id: str
+    target_category: DeployTargetCategory = "unknown"
+    provider_id: str = "dokploy"
+    provider_target_type: str = ""
+    target_type: str = ""
     error_message: str = ""
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> "VeriReelProdPromotionResult":
+        self.provider_id = self.provider_id.strip().lower()
+        self.provider_target_type = self.provider_target_type.strip().lower()
+        self.target_type = self.target_type.strip().lower()
+        if not self.provider_target_type and self.target_type:
+            self.provider_target_type = self.target_type
+        if self.target_category == "unknown":
+            if self.provider_target_type == "application" or self.target_type == "application":
+                self.target_category = "application"
+            elif self.provider_target_type == "compose" or self.target_type == "compose":
+                self.target_category = "compose"
+        if not self.target_type:
+            self.target_type = self.provider_target_type or self.target_category
+        return self
+
+
+class VeriReelProdPromotionTargetResultFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_name: str
+    target_id: str
+    target_category: DeployTargetCategory
+    provider_id: str
+    provider_target_type: str
+    target_type: str
 
 
 def _default_target_name() -> str:
@@ -126,6 +158,75 @@ def _default_target_type() -> DokployTargetType:
 
 def _default_deploy_mode() -> str:
     return "dokploy-application-api"
+
+
+def _default_target_result_fields() -> VeriReelProdPromotionTargetResultFields:
+    target_type = _default_target_type()
+    return VeriReelProdPromotionTargetResultFields(
+        target_name=_default_target_name(),
+        target_id="",
+        target_category=target_type,
+        provider_id="dokploy",
+        provider_target_type=target_type,
+        target_type=target_type,
+    )
+
+
+def _target_result_fields_from_deployment(
+    deployment_result: VeriReelStableDeployResult,
+) -> VeriReelProdPromotionTargetResultFields:
+    return VeriReelProdPromotionTargetResultFields(
+        target_name=deployment_result.target_name,
+        target_id=deployment_result.target_id,
+        target_category=deployment_result.target_category,
+        provider_id=deployment_result.provider_id,
+        provider_target_type=deployment_result.provider_target_type,
+        target_type=deployment_result.target_type,
+    )
+
+
+def _legacy_dokploy_target_type(
+    deployment_result: VeriReelStableDeployResult,
+) -> DokployTargetType:
+    if deployment_result.target_category in {"application", "compose"}:
+        return cast(DokployTargetType, deployment_result.target_category)
+    if deployment_result.target_type in {"application", "compose"}:
+        return cast(DokployTargetType, deployment_result.target_type)
+    return _default_target_type()
+
+
+def _build_result(
+    *,
+    promotion_record_id: str,
+    backup_record_id: str,
+    deploy_status: ReleaseStatus,
+    target_fields: VeriReelProdPromotionTargetResultFields,
+    deployment_record_id: str = "",
+    rollout_status: ReleaseStatus = "skipped",
+    migration_status: ReleaseStatus = "skipped",
+    health_status: ReleaseStatus = "skipped",
+    deploy_started_at: str = "",
+    deploy_finished_at: str = "",
+    error_message: str = "",
+) -> VeriReelProdPromotionResult:
+    return VeriReelProdPromotionResult(
+        promotion_record_id=promotion_record_id,
+        deployment_record_id=deployment_record_id,
+        backup_record_id=backup_record_id,
+        deploy_status=deploy_status,
+        rollout_status=rollout_status,
+        migration_status=migration_status,
+        health_status=health_status,
+        deploy_started_at=deploy_started_at,
+        deploy_finished_at=deploy_finished_at,
+        target_name=target_fields.target_name,
+        target_id=target_fields.target_id,
+        target_category=target_fields.target_category,
+        provider_id=target_fields.provider_id,
+        provider_target_type=target_fields.provider_target_type,
+        target_type=target_fields.target_type,
+        error_message=error_message,
+    )
 
 
 def _default_migration_command() -> str:
@@ -563,16 +664,14 @@ def execute_verireel_prod_promotion(
             backup_gate_record=None,
             error_message=error_message,
         )
-        return VeriReelProdPromotionResult(
+        return _build_result(
             promotion_record_id=request.promotion_record_id,
             backup_record_id=request.backup_record_id,
             deploy_status="fail",
             rollout_status="skipped",
             migration_status="skipped",
             health_status="skipped",
-            target_name=_default_target_name(),
-            target_type=_default_target_type(),
-            target_id="",
+            target_fields=_default_target_result_fields(),
             error_message=error_message,
         )
 
@@ -601,6 +700,9 @@ def execute_verireel_prod_promotion(
         except FileNotFoundError:
             deployment_record = None
 
+    target_fields = _target_result_fields_from_deployment(deployment_result)
+    legacy_target_type = _legacy_dokploy_target_type(deployment_result)
+
     if deployment_result.deploy_status != "pass":
         promotion_record = _build_promotion_record(
             request=request,
@@ -609,7 +711,7 @@ def execute_verireel_prod_promotion(
             deployment_record_id=deployment_result.deployment_record_id,
             target_id=deployment_result.target_id,
             target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
+            target_type=legacy_target_type,
             deploy_status=deployment_result.deploy_status,
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
@@ -618,7 +720,7 @@ def execute_verireel_prod_promotion(
             health_result=None,
         )
         record_store.write_promotion_record(promotion_record)
-        return VeriReelProdPromotionResult(
+        return _build_result(
             promotion_record_id=request.promotion_record_id,
             deployment_record_id=deployment_result.deployment_record_id,
             backup_record_id=backup_gate_record.record_id,
@@ -628,9 +730,7 @@ def execute_verireel_prod_promotion(
             health_status="skipped",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
-            target_id=deployment_result.target_id,
+            target_fields=target_fields,
             error_message=deployment_result.error_message,
         )
 
@@ -653,11 +753,11 @@ def execute_verireel_prod_promotion(
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
+            target_type=legacy_target_type,
             target_id=deployment_result.target_id,
             health_result=failed_rollout_result,
         )
-        return VeriReelProdPromotionResult(
+        return _build_result(
             promotion_record_id=request.promotion_record_id,
             deployment_record_id=deployment_result.deployment_record_id,
             backup_record_id=backup_gate_record.record_id,
@@ -667,9 +767,7 @@ def execute_verireel_prod_promotion(
             health_status="skipped",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
-            target_id=deployment_result.target_id,
+            target_fields=target_fields,
             error_message=error_message,
         )
     rollout_result = VeriReelRolloutVerificationResult(
@@ -684,7 +782,7 @@ def execute_verireel_prod_promotion(
         _run_prisma_migrations(
             control_plane_root=control_plane_root,
             request=request,
-            target_type=deployment_result.target_type,
+            target_type=legacy_target_type,
             target_id=deployment_result.target_id,
         )
     except click.ClickException as exc:
@@ -699,13 +797,13 @@ def execute_verireel_prod_promotion(
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
+            target_type=legacy_target_type,
             target_id=deployment_result.target_id,
             migration_status="fail",
             migration_detail=error_message,
             health_result=None,
         )
-        return VeriReelProdPromotionResult(
+        return _build_result(
             promotion_record_id=request.promotion_record_id,
             deployment_record_id=deployment_result.deployment_record_id,
             backup_record_id=backup_gate_record.record_id,
@@ -715,9 +813,7 @@ def execute_verireel_prod_promotion(
             health_status="skipped",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
-            target_id=deployment_result.target_id,
+            target_fields=target_fields,
             error_message=error_message,
         )
 
@@ -751,13 +847,13 @@ def execute_verireel_prod_promotion(
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
+            target_type=legacy_target_type,
             target_id=deployment_result.target_id,
             migration_status="pass",
             migration_detail="",
             health_result=failed_health_result,
         )
-        return VeriReelProdPromotionResult(
+        return _build_result(
             promotion_record_id=request.promotion_record_id,
             deployment_record_id=deployment_result.deployment_record_id,
             backup_record_id=backup_gate_record.record_id,
@@ -767,9 +863,7 @@ def execute_verireel_prod_promotion(
             health_status="fail",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            target_name=deployment_result.target_name,
-            target_type=deployment_result.target_type,
-            target_id=deployment_result.target_id,
+            target_fields=target_fields,
             error_message=error_message,
         )
 
@@ -780,7 +874,7 @@ def execute_verireel_prod_promotion(
         deployment_record_id=deployment_result.deployment_record_id,
         target_id=deployment_result.target_id,
         target_name=deployment_result.target_name,
-        target_type=deployment_result.target_type,
+        target_type=legacy_target_type,
         deploy_status=deployment_result.deploy_status,
         deploy_started_at=deployment_result.deploy_started_at,
         deploy_finished_at=deployment_result.deploy_finished_at,
@@ -789,7 +883,7 @@ def execute_verireel_prod_promotion(
         health_result=health_result,
     )
     record_store.write_promotion_record(promotion_record)
-    return VeriReelProdPromotionResult(
+    return _build_result(
         promotion_record_id=request.promotion_record_id,
         deployment_record_id=deployment_result.deployment_record_id,
         backup_record_id=backup_gate_record.record_id,
@@ -799,8 +893,6 @@ def execute_verireel_prod_promotion(
         health_status=health_result.status,
         deploy_started_at=deployment_result.deploy_started_at,
         deploy_finished_at=deployment_result.deploy_finished_at,
-        target_name=deployment_result.target_name,
-        target_type=deployment_result.target_type,
-        target_id=deployment_result.target_id,
+        target_fields=target_fields,
         error_message=deployment_result.error_message,
     )

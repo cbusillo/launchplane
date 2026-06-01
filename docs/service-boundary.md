@@ -1236,6 +1236,12 @@ source health status. Launchplane normalizes that status and writes it into the
 driver-owned promotion record; product workflows should not post a second
 rendered promotion evidence payload for fields the driver can derive.
 
+VeriReel deploy and prod-promotion responses expose provider-neutral target
+metadata with `target_category`, `provider_id`, and `provider_target_type`.
+The legacy `target_type` response field remains as a compatibility alias for
+older workflow callers, but provider-neutral callers should read
+`target_category` first.
+
 Recommended first success shape:
 
 ```json
