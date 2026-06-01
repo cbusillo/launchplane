@@ -623,6 +623,24 @@ class LaunchplaneDokployTargetRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneProviderTargetRow(Base):
+    __tablename__ = "launchplane_provider_targets"
+    __table_args__ = (
+        Index("launchplane_provider_targets_provider_idx", "provider_id", desc("updated_at")),
+        Index("launchplane_provider_targets_updated_idx", desc("updated_at")),
+    )
+
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    provider_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_category: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    provider_target_type: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneRuntimeEnvironmentRow(Base):
     __tablename__ = "launchplane_runtime_environments"
     __table_args__ = (Index("launchplane_runtime_environments_updated_idx", desc("updated_at")),)
@@ -3125,6 +3143,16 @@ class PostgresRecordStore(HumanSessionStore):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord:
+        record = self._read_optional_model(
+            model_type=ProviderTargetRecord,
+            orm_model=LaunchplaneProviderTargetRow,
+            filters=(
+                LaunchplaneProviderTargetRow.context == context_name,
+                LaunchplaneProviderTargetRow.instance == instance_name,
+            ),
+        )
+        if record is not None:
+            return record
         target_record = self.read_dokploy_target_record(
             context_name=context_name,
             instance_name=instance_name,
@@ -3142,13 +3170,35 @@ class PostgresRecordStore(HumanSessionStore):
         self, *, provider_id: str = ""
     ) -> tuple[ProviderTargetRecord, ...]:
         normalized_provider_id = provider_id.strip().lower()
+        all_physical_records = list(
+            self._list_models(
+                model_type=ProviderTargetRecord,
+                orm_model=LaunchplaneProviderTargetRow,
+                order_by=(
+                    LaunchplaneProviderTargetRow.context.asc(),
+                    LaunchplaneProviderTargetRow.instance.asc(),
+                ),
+            )
+        )
+        physical_record_keys = {
+            (record.context, record.instance) for record in all_physical_records
+        }
+        physical_records = list(
+            record
+            for record in all_physical_records
+            if not normalized_provider_id or record.provider_id == normalized_provider_id
+        )
         target_id_records = {
             (record.context, record.instance): record
             for record in self.list_dokploy_target_id_records()
         }
-        provider_records: list[ProviderTargetRecord] = []
+        provider_records: list[ProviderTargetRecord] = [*physical_records]
         for target_record in self.list_dokploy_target_records():
-            target_id_record = target_id_records.get((target_record.context, target_record.instance))
+            if (target_record.context, target_record.instance) in physical_record_keys:
+                continue
+            target_id_record = target_id_records.get(
+                (target_record.context, target_record.instance)
+            )
             if target_id_record is None:
                 continue
             provider_record = ProviderTargetRecord.from_dokploy_records(
@@ -3158,7 +3208,51 @@ class PostgresRecordStore(HumanSessionStore):
             if normalized_provider_id and provider_record.provider_id != normalized_provider_id:
                 continue
             provider_records.append(provider_record)
+        provider_records.sort(key=lambda record: (record.context, record.instance))
         return tuple(provider_records)
+
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
+        self._write_row(
+            LaunchplaneProviderTargetRow(
+                context=record.context,
+                instance=record.instance,
+                provider_id=record.provider_id,
+                target_category=record.target_category,
+                target_id=record.target_id,
+                display_name=record.display_name,
+                provider_target_type=record.provider_target_type,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def delete_provider_target_record(
+        self,
+        *,
+        expected_record: ProviderTargetRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        statement = (
+            select(LaunchplaneProviderTargetRow)
+            .where(
+                LaunchplaneProviderTargetRow.context == expected_record.context,
+                LaunchplaneProviderTargetRow.instance == expected_record.instance,
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return "missing"
+            current_record = self._read_payload(
+                model_type=ProviderTargetRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return "changed"
+            session.delete(row)
+            session.commit()
+            return "deleted"
 
     def delete_dokploy_target_record(
         self,
@@ -3397,6 +3491,10 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
                 None,
             ),
+            provider_target=self._read_optional_physical_provider_target_record(
+                context_name=context_name,
+                instance_name=instance_name,
+            ),
             dokploy_target_id=self._read_optional_model(
                 model_type=DokployTargetIdRecord,
                 orm_model=LaunchplaneDokployTargetIdRow,
@@ -3425,6 +3523,18 @@ class PostgresRecordStore(HumanSessionStore):
             secret_bindings=self.list_secret_bindings(
                 context_name=context_name,
                 instance_name=instance_name,
+            ),
+        )
+
+    def _read_optional_physical_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord | None:
+        return self._read_optional_model(
+            model_type=ProviderTargetRecord,
+            orm_model=LaunchplaneProviderTargetRow,
+            filters=(
+                LaunchplaneProviderTargetRow.context == context_name,
+                LaunchplaneProviderTargetRow.instance == instance_name,
             ),
         )
 
