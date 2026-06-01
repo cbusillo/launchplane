@@ -830,10 +830,10 @@ Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
 and writes the full Launchplane-owned bundle: product profile, Dokploy target
 records, target-id records, runtime-environment records, and managed secret
-binding placeholders. It is restricted to Launchplane service deploy authority,
-requires DB-backed storage, returns only sanitized summaries, and exists so the
-Launchplane deploy workflow can seed product records without product repos
-storing live lifecycle truth.
+binding placeholders. It is restricted to `product_onboarding.apply` authority
+for product/context `launchplane`, requires DB-backed storage, returns only
+sanitized summaries, and exists so the Launchplane seed import workflow can seed
+product records without product repos storing live lifecycle truth.
 
 Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
 accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
