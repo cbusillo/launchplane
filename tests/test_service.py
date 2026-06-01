@@ -11876,12 +11876,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "repository": "cbusillo/launchplane",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["launchplane_service_deploy.execute"],
+                            "actions": ["product_onboarding.apply"],
                         }
                     ]
                 }
@@ -11892,7 +11892,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/launchplane",
                         workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
                         ),
                         event_name="workflow_dispatch",
                     )
@@ -11982,6 +11982,73 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(secret_bindings[0].binding_key, "DISCORD_TOKEN")
         self.assertNotIn("secret_id", json.dumps(payload, sort_keys=True))
+
+    def test_product_onboarding_endpoint_rejects_self_deploy_authority(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/cbusillo/discord-blue",
+                        "runtime_port": 8787,
+                        "health_path": "/health",
+                        "lanes": [
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                            }
+                        ],
+                        "updated_at": "2026-05-04T18:00:00Z",
+                        "source_label": "test:discord-blue-onboarding",
+                    },
+                },
+                headers={"Idempotency-Key": "product-onboarding-self-deploy-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_product_overview_endpoint_is_generic_web_profile_driven(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

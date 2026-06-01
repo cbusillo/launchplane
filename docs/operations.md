@@ -315,7 +315,9 @@ Product onboarding manifests and runtime key-safety policies live under
 deploy does not apply those records. Use the manual `Launchplane Seed Import`
 workflow for dry-run evidence first, then rerun with `apply`, exact confirmation,
 and an operator reason when the DB-backed records need to be created or repaired.
-The workflow calls Launchplane service routes with GitHub OIDC and uploads the
+The workflow calls Launchplane service routes with GitHub OIDC and dedicated
+apply authority: `product_onboarding.apply` for product onboarding and
+`runtime_key_safety.write` for runtime key-safety policy records. It uploads the
 payload/evidence artifact for review.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the

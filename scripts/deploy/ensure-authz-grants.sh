@@ -627,7 +627,7 @@ post_grant \
   launchplane-seed-import.yml \
   launchplane \
   launchplane \
-  launchplane_service_deploy.execute \
+  product_onboarding.apply \
   deploy:launchplane-seed-import-product-onboarding-grant \
   launchplane-seed-import-product-onboarding
 post_grant \

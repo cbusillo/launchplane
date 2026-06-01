@@ -173,6 +173,14 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("launchplane-seed-import.yml", deploy_script)
         self.assertIn("deploy:launchplane-seed-import-product-onboarding-grant", deploy_script)
         self.assertIn("deploy:launchplane-seed-import-runtime-key-safety-grant", deploy_script)
+        onboarding_label_index = deploy_script.index(
+            "deploy:launchplane-seed-import-product-onboarding-grant"
+        )
+        onboarding_grant_block = deploy_script[
+            max(0, onboarding_label_index - 240) : onboarding_label_index + 120
+        ]
+        self.assertIn("product_onboarding.apply", onboarding_grant_block)
+        self.assertNotIn("launchplane_service_deploy.execute", onboarding_grant_block)
         self.assertIn("import-material/launchplane/seed-imports/catalog.json", workflow_text)
         self.assertIn("APPLY LAUNCHPLANE SEED IMPORTS", workflow_text)
         self.assertIn("--apply", workflow_text)
