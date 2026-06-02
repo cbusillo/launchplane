@@ -102,6 +102,7 @@ PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+ProviderTargetCreateStatus = Literal["created", "exists"]
 
 
 class _PayloadRow(Protocol):
@@ -3235,6 +3236,29 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def create_provider_target_record_if_absent(
+        self, record: ProviderTargetRecord
+    ) -> ProviderTargetCreateStatus:
+        row = LaunchplaneProviderTargetRow(
+            context=record.context,
+            instance=record.instance,
+            provider_id=record.provider_id,
+            target_category=record.target_category,
+            target_id=record.target_id,
+            display_name=record.display_name,
+            provider_target_type=record.provider_target_type,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+        with self._session_factory() as session:
+            session.add(row)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return "exists"
+        return "created"
 
     def delete_provider_target_record(
         self,
