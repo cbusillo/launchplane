@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 
@@ -1497,6 +1498,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             second_result = apply_product_onboarding_manifest(
                 record_store=store,
                 manifest=manifest,
+                updated_at="2026-05-03T02:30:00Z",
             )
 
             profile = store.read_product_profile_record("example-site")
@@ -1508,7 +1510,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             store.close()
 
         self.assertEqual(first_result.product, "example-site")
-        self.assertEqual(second_result.product_profile.updated_at, "2026-05-03T01:30:00Z")
+        self.assertEqual(second_result.product_profile.updated_at, "2026-05-03T02:30:00Z")
         self.assertEqual(profile.driver_id, "generic-web")
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertTrue(profile.lanes[0].odoo_stable_bootstrap.enabled)
@@ -1561,6 +1563,48 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(len(secret_bindings), 1)
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "disabled")
+        self.assertEqual(secret_bindings[0].created_at, first_result.secret_bindings[0].created_at)
+        self.assertEqual(secret_bindings[0].updated_at, second_result.secret_bindings[0].updated_at)
+
+    def test_apply_product_onboarding_manifest_preserves_configured_secret_binding(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-runtime-environment-smtp-password-example-site-prod-prod-binding-smtp-password",
+                    secret_id="secret-runtime-environment-smtp-password-example-site-prod-prod",
+                    integration="runtime_environment",
+                    binding_key="SMTP_PASSWORD",
+                    context="example-site-prod",
+                    instance="prod",
+                    status="configured",
+                    created_at="2026-05-03T00:30:00Z",
+                    updated_at="2026-05-03T00:30:00Z",
+                )
+            )
+
+            result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+            )
+
+            secret_bindings = store.list_secret_bindings(
+                integration="runtime_environment",
+                context_name="example-site-prod",
+                instance_name="prod",
+            )
+            store.close()
+
+        self.assertEqual(result.secret_bindings, ())
+        self.assertEqual(len(secret_bindings), 1)
+        self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
+        self.assertEqual(secret_bindings[0].status, "configured")
 
     def test_apply_product_onboarding_manifest_blocks_conflicting_provider_target(
         self,

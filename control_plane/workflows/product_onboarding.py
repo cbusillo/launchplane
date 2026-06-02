@@ -39,6 +39,15 @@ class ProductOnboardingRecordStore(Protocol):
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
 
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
     def write_secret_binding(self, binding: SecretBinding) -> None: ...
 
 
@@ -155,7 +164,11 @@ def build_physical_provider_target_records(
             target_id_record=target_id_record,
         )
         for target_record in provider_targets
-        if (target_id_record := target_ids_by_route.get((target_record.context, target_record.instance)))
+        if (
+            target_id_record := target_ids_by_route.get(
+                (target_record.context, target_record.instance)
+            )
+        )
         is not None
     )
 
@@ -177,22 +190,41 @@ def build_runtime_environment_records(
 
 
 def build_secret_bindings(
-    *, manifest: ProductOnboardingManifest, updated_at: str
+    *,
+    manifest: ProductOnboardingManifest,
+    updated_at: str,
+    existing_bindings: tuple[SecretBinding, ...] = (),
 ) -> tuple[SecretBinding, ...]:
-    return tuple(
-        SecretBinding(
-            binding_id=_secret_binding_id(product=manifest.product, binding=binding),
-            secret_id=_secret_id(product=manifest.product, binding=binding),
-            integration=binding.integration,
-            binding_key=binding.binding_key,
-            context=binding.context,
-            instance=binding.instance,
-            status=binding.status,
-            created_at=updated_at,
-            updated_at=updated_at,
+    existing_bindings_by_id = {binding.binding_id: binding for binding in existing_bindings}
+    configured_routes = {
+        (binding.integration, binding.binding_key, binding.context, binding.instance)
+        for binding in existing_bindings
+        if binding.status == "configured"
+    }
+    secret_bindings: list[SecretBinding] = []
+    for binding in manifest.secret_bindings:
+        if (
+            binding.status != "configured"
+            and (binding.integration, binding.binding_key, binding.context, binding.instance)
+            in configured_routes
+        ):
+            continue
+        binding_id = _secret_binding_id(product=manifest.product, binding=binding)
+        existing_binding = existing_bindings_by_id.get(binding_id)
+        secret_bindings.append(
+            SecretBinding(
+                binding_id=binding_id,
+                secret_id=_secret_id(product=manifest.product, binding=binding),
+                integration=binding.integration,
+                binding_key=binding.binding_key,
+                context=binding.context,
+                instance=binding.instance,
+                status=binding.status,
+                created_at=existing_binding.created_at if existing_binding else updated_at,
+                updated_at=updated_at,
+            )
         )
-        for binding in manifest.secret_bindings
-    )
+    return tuple(secret_bindings)
 
 
 def apply_product_onboarding_manifest(
@@ -214,7 +246,11 @@ def apply_product_onboarding_manifest(
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
-    secret_bindings = build_secret_bindings(manifest=manifest, updated_at=recorded_at)
+    secret_bindings = build_secret_bindings(
+        manifest=manifest,
+        updated_at=recorded_at,
+        existing_bindings=record_store.list_secret_bindings(limit=None),
+    )
     target_records_by_route = {
         (record.context, record.instance): record for record in provider_targets
     }
@@ -222,7 +258,10 @@ def apply_product_onboarding_manifest(
         (record.context, record.instance): record for record in provider_target_ids
     }
     provider_target_pairs = tuple(
-        (target_records_by_route[(record.context, record.instance)], target_id_records_by_route[(record.context, record.instance)])
+        (
+            target_records_by_route[(record.context, record.instance)],
+            target_id_records_by_route[(record.context, record.instance)],
+        )
         for record in physical_provider_targets
     )
     for target_record, target_id_record in provider_target_pairs:

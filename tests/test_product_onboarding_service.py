@@ -40,6 +40,23 @@ class _ProductOnboardingStore:
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
         self.runtime_environments.append(record)
 
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            binding
+            for binding in self.secret_bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        return bindings[:limit] if limit is not None else bindings
+
     def write_secret_binding(self, binding: SecretBinding) -> None:
         self.secret_bindings.append(binding)
 

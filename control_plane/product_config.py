@@ -167,11 +167,32 @@ def apply_product_config_bundle(
                 actor=actor,
                 source_label=source_label,
             )
+            secret_id = str(result["secret_id"])
+            binding_key = str(secret["binding_key"])
+            now = utc_now_timestamp()
+            _retire_disabled_runtime_secret_placeholders(
+                record_store=record_store,
+                configured_binding=SecretBinding(
+                    binding_id=control_plane_secrets.expected_secret_binding_id(
+                        secret_id=secret_id,
+                        binding_key=binding_key,
+                    ),
+                    secret_id=secret_id,
+                    integration=str(secret["integration"]),
+                    binding_key=binding_key,
+                    context=str(secret["context"]),
+                    instance=str(secret["instance"]),
+                    status="configured",
+                    created_at=now,
+                    updated_at=now,
+                ),
+                updated_at=now,
+            )
             secret_summaries.append(
                 _summarize_product_config_secret_input(
                     action=str(result["action"]),
                     secret=secret,
-                    secret_id=str(result["secret_id"]),
+                    secret_id=secret_id,
                 )
             )
             continue
@@ -509,13 +530,11 @@ def _planned_runtime_secret_bindings(
     record_store: ProductConfigStore,
     secrets: tuple[dict[str, object], ...],
 ) -> tuple[SecretBinding, ...]:
-    existing_bindings = {
-        binding.binding_id: binding
-        for binding in record_store.list_secret_bindings(
-            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            limit=None,
-        )
-    }
+    existing_runtime_bindings = record_store.list_secret_bindings(
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        limit=None,
+    )
+    existing_bindings = {binding.binding_id: binding for binding in existing_runtime_bindings}
     planned_bindings: list[SecretBinding] = []
     for secret in secrets:
         existing_record = record_store.find_secret_record(
@@ -554,7 +573,53 @@ def _planned_runtime_secret_bindings(
                 updated_at=now,
             )
         )
-    return tuple(planned_bindings)
+    planned_binding_ids = {binding.binding_id for binding in planned_bindings}
+    planned_routes = {
+        (binding.integration, binding.binding_key, binding.context, binding.instance)
+        for binding in planned_bindings
+    }
+    configured_existing_bindings = tuple(
+        binding
+        for binding in existing_runtime_bindings
+        if binding.status == "configured"
+        and binding.binding_id not in planned_binding_ids
+        and (binding.integration, binding.binding_key, binding.context, binding.instance)
+        in planned_routes
+    )
+    return (*planned_bindings, *configured_existing_bindings)
+
+
+def _retire_disabled_runtime_secret_placeholders(
+    *,
+    record_store: ProductConfigStore,
+    configured_binding: SecretBinding,
+    updated_at: str,
+) -> None:
+    if (
+        configured_binding.integration
+        != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+    ):
+        return
+    for binding in record_store.list_secret_bindings(
+        integration=configured_binding.integration,
+        context_name=configured_binding.context,
+        instance_name=configured_binding.instance,
+        limit=None,
+    ):
+        if binding.binding_id == configured_binding.binding_id:
+            continue
+        if binding.binding_key != configured_binding.binding_key:
+            continue
+        if binding.status != "disabled":
+            continue
+        record_store.write_secret_binding(
+            binding.model_copy(
+                update={
+                    "integration": f"retired:{binding.integration}",
+                    "updated_at": updated_at,
+                }
+            )
+        )
 
 
 def _product_config_runtime_environment_class(

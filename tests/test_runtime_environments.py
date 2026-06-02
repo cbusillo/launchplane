@@ -354,6 +354,141 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
         self.assertEqual(store.secret_audit_events[0].actor, "operator@example.com")
 
+    def test_product_config_apply_retires_disabled_runtime_secret_placeholder(self) -> None:
+        store = _FakeProductConfigStore()
+        store.runtime_key_safety_policy_records = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-discord-token",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="DISCORD_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("discord-blue",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            ),
+        )
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="binding-discord-blue-placeholder",
+                secret_id="secret-discord-blue-placeholder",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="prod",
+                status="disabled",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+
+        with patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+            clear=True,
+        ):
+            payload = control_plane_product_config.apply_product_config_bundle(
+                record_store=store,
+                payload={
+                    "schema_version": 1,
+                    "product": "discord-blue",
+                    "context": "discord-blue",
+                    "instance": "prod",
+                    "secrets": [
+                        {
+                            "name": "DISCORD_TOKEN",
+                            "binding_key": "DISCORD_TOKEN",
+                            "value": "discord-token-value",
+                        }
+                    ],
+                },
+                mode="apply",
+                actor="operator@example.com",
+                source_label="discord-blue-secret-config",
+            )
+
+        self.assertEqual(payload["status"], "ok")
+        active_bindings = store.list_secret_bindings(
+            integration="runtime_environment",
+            context_name="discord-blue",
+            instance_name="prod",
+        )
+        self.assertEqual(len(active_bindings), 1)
+        self.assertEqual(active_bindings[0].binding_key, "DISCORD_TOKEN")
+        self.assertEqual(active_bindings[0].status, "configured")
+        retired_placeholder = store.secret_bindings["binding-discord-blue-placeholder"]
+        self.assertEqual(retired_placeholder.integration, "retired:runtime_environment")
+        self.assertEqual(retired_placeholder.binding_key, "DISCORD_TOKEN")
+        self.assertEqual(retired_placeholder.status, "disabled")
+
+    def test_product_config_rejects_existing_configured_runtime_secret_duplicate(
+        self,
+    ) -> None:
+        store = _FakeProductConfigStore()
+        store.runtime_key_safety_policy_records = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-discord-token",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="DISCORD_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("discord-blue",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            ),
+        )
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="secret-legacy-discord-token-binding-discord-token",
+                secret_id="secret-legacy-discord-token",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="prod",
+                status="configured",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+
+        with patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+            clear=True,
+        ):
+            with self.assertRaises(control_plane_product_config.ProductConfigError) as caught:
+                control_plane_product_config.apply_product_config_bundle(
+                    record_store=store,
+                    payload={
+                        "schema_version": 1,
+                        "product": "discord-blue",
+                        "context": "discord-blue",
+                        "instance": "prod",
+                        "secrets": [
+                            {
+                                "name": "DISCORD_TOKEN",
+                                "binding_key": "DISCORD_TOKEN",
+                                "value": "discord-token-value",
+                            }
+                        ],
+                    },
+                    mode="apply",
+                    actor="operator@example.com",
+                    source_label="discord-blue-secret-config",
+                )
+
+        self.assertEqual(caught.exception.code, "runtime_key_safety_failed")
+        self.assertEqual(len(store.secret_records), 0)
+        self.assertEqual(len(store.secret_versions), 0)
+
     def test_environments_import_command_is_not_available(self) -> None:
         result = CliRunner().invoke(main, ["environments", "import"])
 
