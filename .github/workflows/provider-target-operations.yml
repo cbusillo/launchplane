@@ -52,7 +52,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: launchplane-provider-target-operations
+  group: >-
+    launchplane-provider-target-operations-${{ inputs.target_set }}-${{
+    inputs.context }}-${{ inputs.instance }}
   cancel-in-progress: false
 
 jobs:
@@ -169,6 +171,7 @@ jobs:
             response_file="provider-target-operation-results/${context}-${instance}.json"
             idempotency_key="provider-target:${MODE}:${PROVIDER_ID}:"
             idempotency_key+="${context}:${instance}"
+            idempotency_key+=":${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
             body="$({
               jq -n \
                 --arg mode "$MODE" \
