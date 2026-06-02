@@ -3211,6 +3211,16 @@ class PostgresRecordStore(HumanSessionStore):
         provider_records.sort(key=lambda record: (record.context, record.instance))
         return tuple(provider_records)
 
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]:
+        return self._list_models(
+            model_type=ProviderTargetRecord,
+            orm_model=LaunchplaneProviderTargetRow,
+            order_by=(
+                LaunchplaneProviderTargetRow.context.asc(),
+                LaunchplaneProviderTargetRow.instance.asc(),
+            ),
+        )
+
     def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
         self._write_row(
             LaunchplaneProviderTargetRow(
