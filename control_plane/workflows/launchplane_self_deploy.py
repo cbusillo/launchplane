@@ -61,6 +61,17 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     oauth_env_removals: tuple[str, ...] = ()
     no_cache: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_input(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        updated = dict(data)
+        raw_target_type = updated.get("target_type")
+        if isinstance(raw_target_type, str):
+            updated["target_type"] = raw_target_type.strip().lower()
+        return updated
+
     @model_validator(mode="after")
     def _validate_values(self) -> "LaunchplaneSelfDeployRequest":
         if not self.target_id.strip():

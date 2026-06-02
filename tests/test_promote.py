@@ -417,6 +417,26 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(request.provider_target_type, "compose")
         self.assertNotIn("target_reference", request.model_dump())
 
+    def test_ship_request_accepts_minimal_legacy_target_reference_input(self) -> None:
+        request = ShipRequest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "context": "opw",
+                "instance": "prod",
+                "source_git_ref": "abc123",
+                "target_reference": {
+                    "target_name": "opw-prod",
+                    "provider_id": "dokploy",
+                    "target_category": "compose",
+                },
+                "deploy_mode": "dokploy-compose-api",
+            }
+        )
+
+        self.assertEqual(request.target_name, "opw-prod")
+        self.assertEqual(request.target_type, "compose")
+        self.assertEqual(request.provider_target_type, "compose")
+
     def test_ship_request_rejects_conflicting_target_reference(self) -> None:
         with self.assertRaisesRegex(ValueError, "target_reference provider_id"):
             ShipRequest.model_validate(
@@ -489,6 +509,48 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(request.provider_target_type, "application")
         self.assertNotIn("target_reference", request.model_dump())
 
+    def test_promotion_request_accepts_minimal_legacy_target_reference_input(self) -> None:
+        request = PromotionRequest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "backup_record_id": "backup-opw-prod-20260410T182231Z",
+                "source_git_ref": "abc123",
+                "context": "opw",
+                "from_instance": "testing",
+                "to_instance": "prod",
+                "target_reference": {
+                    "target_name": "opw-prod",
+                    "provider_id": "dokploy",
+                    "target_category": "application",
+                },
+                "deploy_mode": "dokploy-application-api",
+            }
+        )
+
+        self.assertEqual(request.target_name, "opw-prod")
+        self.assertEqual(request.target_type, "application")
+        self.assertEqual(request.provider_target_type, "application")
+
+    def test_promotion_request_rejects_provider_reference_without_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference provider_target_type"):
+            PromotionRequest.model_validate(
+                {
+                    "artifact_id": "artifact-sha256-image456",
+                    "backup_record_id": "backup-opw-prod-20260410T182231Z",
+                    "source_git_ref": "abc123",
+                    "context": "opw",
+                    "from_instance": "testing",
+                    "to_instance": "prod",
+                    "target_reference": {
+                        "target_name": "opw-prod-service",
+                        "provider_id": "fake-cloud",
+                        "target_category": "service",
+                    },
+                    "target_type": "application",
+                    "deploy_mode": "fake-cloud-service-api",
+                }
+            )
+
     def test_promotion_request_rejects_conflicting_target_reference(self) -> None:
         with self.assertRaisesRegex(ValueError, "target_category does not match target_type"):
             PromotionRequest.model_validate(
@@ -551,6 +613,40 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(evidence.target_category, "compose")
         self.assertEqual(evidence.provider_target_type, "compose")
         self.assertNotIn("target_reference", evidence.model_dump())
+
+    def test_deployment_evidence_accepts_minimal_legacy_target_reference_input(self) -> None:
+        evidence = DeploymentEvidence.model_validate(
+            {
+                "target_reference": {
+                    "target_name": "opw-prod",
+                    "provider_id": "dokploy",
+                    "target_category": "compose",
+                },
+                "deploy_mode": "dokploy-compose-api",
+                "deployment_id": "deploy-123",
+                "status": "pass",
+            }
+        )
+
+        self.assertEqual(evidence.target_name, "opw-prod")
+        self.assertEqual(evidence.target_type, "compose")
+        self.assertEqual(evidence.provider_target_type, "compose")
+
+    def test_deployment_evidence_rejects_provider_reference_without_type(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference provider_target_type"):
+            DeploymentEvidence.model_validate(
+                {
+                    "target_reference": {
+                        "target_name": "opw-prod-service",
+                        "provider_id": "fake-cloud",
+                        "target_category": "service",
+                    },
+                    "target_type": "application",
+                    "deploy_mode": "fake-cloud-service-api",
+                    "deployment_id": "deploy-123",
+                    "status": "pass",
+                }
+            )
 
     def test_deployment_evidence_rejects_conflicting_target_reference(self) -> None:
         with self.assertRaisesRegex(ValueError, "provider_target_type does not match target_type"):
@@ -742,7 +838,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                                 target_name="opw-prod",
                                 domains=("opw-prod.shinycomputers.com",),
                             ),
-                        )
+                        ),
                     ),
                 ),
                 patch(
@@ -886,7 +982,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                                 target_name="cm-testing",
                                 domains=("cm-testing.shinycomputers.com",),
                             ),
-                        )
+                        ),
                     ),
                 ),
                 patch(
