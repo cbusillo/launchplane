@@ -156,7 +156,7 @@ class ProductOnboardingManifest(BaseModel):
     promotion_workflow: ProductPromotionWorkflowProfile = Field(
         default_factory=ProductPromotionWorkflowProfile
     )
-    dokploy_targets: tuple[ProductOnboardingTargetManifest, ...] = ()
+    provider_targets: tuple[ProductOnboardingTargetManifest, ...] = ()
     runtime_environments: tuple[ProductOnboardingRuntimeEnvironmentManifest, ...] = ()
     secret_bindings: tuple[ProductOnboardingSecretBindingManifest, ...] = ()
     expected_config: ProductOnboardingExpectedConfigManifest = Field(
@@ -165,21 +165,25 @@ class ProductOnboardingManifest(BaseModel):
     updated_at: str = ""
     source_label: str = "product-onboarding"
 
+    @property
+    def dokploy_targets(self) -> tuple[ProductOnboardingTargetManifest, ...]:
+        return self.provider_targets
+
     @model_validator(mode="before")
     @classmethod
     def _normalize_provider_targets(cls, data: object) -> object:
-        if not isinstance(data, dict) or "provider_targets" not in data:
+        if not isinstance(data, dict):
             return data
         updated = dict(data)
-        raw_provider_targets = updated.pop("provider_targets")
-        raw_dokploy_targets = updated.get("dokploy_targets", ())
-        if raw_dokploy_targets is None or raw_dokploy_targets == () or raw_dokploy_targets == []:
-            updated["dokploy_targets"] = raw_provider_targets or ()
+        raw_provider_targets = updated.get("provider_targets", ())
+        raw_dokploy_targets = updated.pop("dokploy_targets", ())
+        if raw_provider_targets is None or raw_provider_targets == () or raw_provider_targets == []:
+            updated["provider_targets"] = raw_dokploy_targets or ()
             return updated
 
         provider_targets = _normalized_onboarding_targets(raw_provider_targets)
         dokploy_targets = _normalized_onboarding_targets(raw_dokploy_targets)
-        if provider_targets != dokploy_targets:
+        if dokploy_targets and provider_targets != dokploy_targets:
             raise ValueError("provider_targets must match dokploy_targets when both are set")
         return updated
 
@@ -208,7 +212,7 @@ class ProductOnboardingManifest(BaseModel):
             raise ValueError("product onboarding lanes must be unique by instance")
         ProductPreviewProfile.model_validate(self.preview.model_dump(mode="json"))
 
-        for target in self.dokploy_targets:
+        for target in self.provider_targets:
             route = (target.context.strip(), target.instance.strip())
             if route not in lane_routes:
                 raise ValueError(

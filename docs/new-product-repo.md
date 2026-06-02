@@ -65,10 +65,11 @@ The manifest is applied idempotently and writes Launchplane-owned records for:
 - disabled managed secret binding placeholders for required secret keys
 
 Each onboarding target entry must include the live provider `target_id`.
-Manifests may use the neutral `provider_targets` input name; Launchplane
-normalizes it to the existing `dokploy_targets` compatibility field until the
-target-record write path is migrated. Launchplane fails closed instead of
-seeding a target record that a later deploy cannot resolve.
+Manifests should use the neutral `provider_targets` input name. Launchplane
+still accepts the existing `dokploy_targets` compatibility input for import
+material and older operator payloads while the target-record write path remains
+Dokploy-backed. Launchplane fails closed instead of seeding a target record that
+a later deploy cannot resolve.
 
 When the Dokploy application or compose target already exists, adopt it into
 Launchplane before or after onboarding instead of hand-editing target ids into

@@ -38,10 +38,18 @@ class ProductOnboardingApplyResult(BaseModel):
 
     product: str
     product_profile: LaunchplaneProductProfileRecord
-    dokploy_targets: tuple[DokployTargetRecord, ...] = ()
-    dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = ()
+    provider_targets: tuple[DokployTargetRecord, ...] = ()
+    provider_target_ids: tuple[DokployTargetIdRecord, ...] = ()
     runtime_environments: tuple[RuntimeEnvironmentRecord, ...] = ()
     secret_bindings: tuple[SecretBinding, ...] = ()
+
+    @property
+    def dokploy_targets(self) -> tuple[DokployTargetRecord, ...]:
+        return self.provider_targets
+
+    @property
+    def dokploy_target_ids(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self.provider_target_ids
 
 
 def build_product_profile_record(
@@ -76,7 +84,7 @@ def build_product_profile_record(
     )
 
 
-def build_dokploy_target_records(
+def build_provider_target_records(
     *, manifest: ProductOnboardingManifest, updated_at: str
 ) -> tuple[DokployTargetRecord, ...]:
     return tuple(
@@ -104,11 +112,11 @@ def build_dokploy_target_records(
             updated_at=updated_at,
             source_label=manifest.source_label,
         )
-        for target in manifest.dokploy_targets
+        for target in manifest.provider_targets
     )
 
 
-def build_dokploy_target_id_records(
+def build_provider_target_id_records(
     *, manifest: ProductOnboardingManifest, updated_at: str
 ) -> tuple[DokployTargetIdRecord, ...]:
     return tuple(
@@ -119,7 +127,7 @@ def build_dokploy_target_id_records(
             updated_at=updated_at,
             source_label=manifest.source_label,
         )
-        for target in manifest.dokploy_targets
+        for target in manifest.provider_targets
         if target.target_id.strip()
     )
 
@@ -167,17 +175,19 @@ def apply_product_onboarding_manifest(
 ) -> ProductOnboardingApplyResult:
     recorded_at = updated_at.strip() or manifest.updated_at.strip() or utc_now_timestamp()
     product_profile = build_product_profile_record(manifest=manifest, updated_at=recorded_at)
-    dokploy_targets = build_dokploy_target_records(manifest=manifest, updated_at=recorded_at)
-    dokploy_target_ids = build_dokploy_target_id_records(manifest=manifest, updated_at=recorded_at)
+    provider_targets = build_provider_target_records(manifest=manifest, updated_at=recorded_at)
+    provider_target_ids = build_provider_target_id_records(
+        manifest=manifest, updated_at=recorded_at
+    )
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
     secret_bindings = build_secret_bindings(manifest=manifest, updated_at=recorded_at)
 
     record_store.write_product_profile_record(product_profile)
-    for target_record in dokploy_targets:
+    for target_record in provider_targets:
         record_store.write_dokploy_target_record(target_record)
-    for target_id_record in dokploy_target_ids:
+    for target_id_record in provider_target_ids:
         record_store.write_dokploy_target_id_record(target_id_record)
     for runtime_record in runtime_environments:
         record_store.write_runtime_environment_record(runtime_record)
@@ -187,8 +197,8 @@ def apply_product_onboarding_manifest(
     return ProductOnboardingApplyResult(
         product=manifest.product,
         product_profile=product_profile,
-        dokploy_targets=dokploy_targets,
-        dokploy_target_ids=dokploy_target_ids,
+        provider_targets=provider_targets,
+        provider_target_ids=provider_target_ids,
         runtime_environments=runtime_environments,
         secret_bindings=secret_bindings,
     )

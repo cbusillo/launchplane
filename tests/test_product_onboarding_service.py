@@ -87,9 +87,7 @@ class ProductOnboardingServiceTests(unittest.TestCase):
         self.assertEqual(result["secret_binding_count"], 1)
         self.assertEqual(driver_result["product"], "discord-blue")
         self.assertEqual(driver_result["provider_targets"], driver_result["dokploy_targets"])
-        self.assertEqual(
-            driver_result["provider_target_ids"], driver_result["dokploy_target_ids"]
-        )
+        self.assertEqual(driver_result["provider_target_ids"], driver_result["dokploy_target_ids"])
         self.assertNotIn("secret_id", str(driver_result))
 
 
