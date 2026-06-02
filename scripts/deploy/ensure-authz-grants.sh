@@ -649,6 +649,22 @@ post_grant \
   runtime_key_safety.write \
   deploy:launchplane-seed-import-runtime-key-safety-grant \
   launchplane-seed-import-runtime-key-safety
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  provider-target-operations.yml \
+  launchplane \
+  launchplane \
+  provider_target.audit \
+  deploy:provider-target-operations-audit-grant \
+  provider-target-operations-audit
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  provider-target-operations.yml \
+  launchplane \
+  launchplane \
+  provider_target.backfill \
+  deploy:provider-target-operations-backfill-grant \
+  provider-target-operations-backfill
 post_syo_grant \
   promote-prod.yml \
   launchplane \

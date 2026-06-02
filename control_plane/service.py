@@ -241,6 +241,14 @@ from control_plane.product_config_http import (
     product_config_database_required_response,
     validate_product_config_apply_request,
 )
+from control_plane.provider_target_operations_http import (
+    PROVIDER_TARGET_OPERATIONS_ROUTE,
+    ProviderTargetOperationEnvelope,
+    ProviderTargetOperationRouteResult,
+    execute_provider_target_operation_route,
+    provider_target_operation_authorized,
+    provider_target_operation_requires_reason,
+)
 from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
@@ -3104,6 +3112,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
+        PROVIDER_TARGET_OPERATIONS_ROUTE,
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
         "/v1/product-profiles/legacy-context-cleanup/apply",
@@ -5862,6 +5871,12 @@ def _should_store_idempotency_record(
         path == "/v1/merge-train/policies/import"
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
+    ):
+        return False
+    if (
+        path == PROVIDER_TARGET_OPERATIONS_ROUTE
+        and isinstance(driver_result, dict)
+        and driver_result.get("mode") != "backfill-apply"
     ):
         return False
     if driver_result is None:
@@ -12597,6 +12612,86 @@ def create_launchplane_service_app(
                         onboarding_result
                     )
                 )
+            elif path == PROVIDER_TARGET_OPERATIONS_ROUTE:
+                provider_target_request = ProviderTargetOperationEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": (
+                                    "Provider-target operations require Launchplane"
+                                    " database storage."
+                                ),
+                            },
+                        },
+                    )
+                if provider_target_operation_requires_reason(
+                    identity=identity,
+                    request=provider_target_request,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "reason_required",
+                                "message": (
+                                    "Local operator provider-target backfill apply"
+                                    " requires a reason."
+                                ),
+                            },
+                        },
+                    )
+                if not provider_target_operation_authorized(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    request=provider_target_request,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot run Launchplane provider-target"
+                                    " operations."
+                                ),
+                            },
+                        },
+                    )
+                if provider_target_request.mode == "backfill-apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                provider_target_result = execute_provider_target_operation_route(
+                    record_store=record_store,
+                    request=provider_target_request,
+                )
+                assert isinstance(
+                    provider_target_result, ProviderTargetOperationRouteResult
+                )
+                result = provider_target_result.result
+                driver_result = provider_target_result.driver_result
             elif path == "/v1/drivers/launchplane/self-deploy":
                 self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
