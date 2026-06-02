@@ -49,7 +49,19 @@ is a long-running service with authenticated HTTP ingress. The CLI should remain
 a client of Launchplane's stable API contract or an explicit DB-backed operator
 tool, not a separate live-state authority.
 
-Provider-target Phase Two data changes must start with a read-only audit:
+Provider-target Phase Two data changes for shared or production lanes must use
+the deployed Launchplane service. The manual `Provider Target Operations`
+workflow calls `POST /v1/provider-targets/operations` with GitHub OIDC and is
+authorized through DB-backed `provider_target.audit` and
+`provider_target.backfill` grants for product/context `launchplane`. Run it
+first in `audit` or `backfill-dry-run` mode, review the artifact, then run
+`backfill-apply` only with the exact confirmation phrase and an operator reason.
+The initial Phase Two target set is ordered from the lower-risk proof lane into
+live production lanes: `discord-blue/prod`, `verireel/testing`,
+`verireel/prod`, `cm/testing`, `cm/prod`, `opw/testing`, and `opw/prod`.
+
+The local CLI remains a DB-backed inspection and rehearsal helper. Local
+provider-target data changes must start with a read-only audit:
 
 ```bash
 uv run launchplane storage provider-target-audit \
@@ -149,6 +161,7 @@ Current implementation scope:
 - `POST /v1/authz-policies/terminal-agents/grants`
 - `POST /v1/authz-policies/local-operators/grants`
 - `POST /v1/authz-policies/local-admins/grants`
+- `POST /v1/provider-targets/operations`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `POST /v1/public-ingress/notification-policies/apply`
@@ -215,6 +228,12 @@ and merge-train policy import workflows through the service-backed removals
 route. Do not reintroduce those broad rules; keep those workflows paired with
 the narrow `product_onboarding.apply`, `runtime_key_safety.write`, and
 `merge_train.policy_import` grants.
+
+The deploy workflow also reconciles the manual `Provider Target Operations`
+workflow grants. `provider_target.audit` covers audit and dry-run requests;
+`provider_target.backfill` covers apply requests. The route is intentionally
+Launchplane-scoped and single-route per request, so production rows are seeded
+through explicit audited workflow runs rather than local live-target commands.
 
 Routine local-operator product-config grants are scoped, not wildcard, and the
 deploy reconciliation skips them unless explicit product/context scopes are

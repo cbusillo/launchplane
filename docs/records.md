@@ -154,6 +154,12 @@ an ORM column/table or remains only in the evidence payload.
   physical row. Existing matching physical rows are skipped without churn,
   incomplete pairs are reported but not guessed, and conflicts or unsupported
   provider rows are never overwritten automatically.
+- Shared and production Phase Two backfill uses the deployed service route
+  `POST /v1/provider-targets/operations`, normally through the manual
+  `Provider Target Operations` workflow. The workflow records per-route audit,
+  dry-run, or apply evidence as artifacts and uses DB-backed
+  `provider_target.audit` or `provider_target.backfill` authz grants instead of
+  local checkout writes.
 - Shared ship and promotion request/evidence contracts accept a neutral
   `target_reference` compatibility input for target name, provider id,
   category, and provider target type. Persisted records still write the flat

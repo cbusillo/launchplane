@@ -52,6 +52,8 @@ VeriReel product paths:
   - `POST /v1/product-config/apply`
 - product onboarding route:
   - `POST /v1/product-onboarding/apply`
+- provider-target operation route:
+  - `POST /v1/provider-targets/operations`
 - product context cutover route:
   - `POST /v1/product-profiles/context-cutover/apply`
 - product legacy context cleanup route:
@@ -841,6 +843,17 @@ sanitized summaries, and exists so the Launchplane seed import workflow can seed
 product records without product repos storing live lifecycle truth. Responses
 include neutral `provider_target*` summary keys while retaining `dokploy_*`
 compatibility keys until the target-record write path is migrated.
+
+Provider-target Phase Two operations use `POST /v1/provider-targets/operations`.
+The route accepts one Launchplane-owned route at a time with mode `audit`,
+`backfill-dry-run`, or `backfill-apply`, `provider_id`, `context`, `instance`,
+and an apply-only `reason`. It requires DB-backed storage and authorizes through
+`provider_target.audit` for audit/dry-run or `provider_target.backfill` for
+apply, always scoped to product/context `launchplane`. Apply requests are
+idempotency-keyed and write only complete non-conflicting Dokploy target/id
+projections; existing rows and conflicts are reported rather than overwritten.
+The manual `Provider Target Operations` workflow is the supported shared and
+production caller for Phase Two backfill evidence.
 
 Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
 accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and

@@ -1,0 +1,251 @@
+---
+name: Provider Target Operations
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Provider target operation mode.
+        required: true
+        default: audit
+        type: choice
+        options:
+          - audit
+          - backfill-dry-run
+          - backfill-apply
+      target_set:
+        description: Route set to operate on.
+        required: true
+        default: single
+        type: choice
+        options:
+          - single
+          - phase-two-initial
+      context:
+        description: Route context when target_set=single.
+        required: false
+        default: verireel
+        type: string
+      instance:
+        description: Route instance when target_set=single.
+        required: false
+        default: testing
+        type: string
+      provider_id:
+        description: Provider id to inspect/backfill.
+        required: false
+        default: dokploy
+        type: string
+      confirmation:
+        description: Exact apply confirmation text.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Operator reason. Required when mode=backfill-apply.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-provider-target-operations
+  cancel-in-progress: false
+
+jobs:
+  operate:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      TARGET_SET: ${{ inputs.target_set }}
+      CONTEXT: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      PROVIDER_ID: ${{ inputs.provider_id }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve service endpoint
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"origin={parsed.scheme}://{parsed.netloc}\n")
+              handle.write(f"audience={parsed.hostname}\n")
+          PY
+
+      - name: Validate apply guard
+        if: env.MODE == 'backfill-apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "APPLY PROVIDER TARGET BACKFILL" ]; then
+            echo "Exact apply confirmation text is required." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
+            echo "reason is required when mode=backfill-apply." >&2
+            exit 1
+          fi
+
+      - name: Resolve target routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          routes_file="provider-target-routes.json"
+          case "$TARGET_SET" in
+            single)
+              if [ -z "$(printf '%s' "$CONTEXT" | xargs)" ]; then
+                echo "context is required when target_set=single." >&2
+                exit 1
+              fi
+              if [ -z "$(printf '%s' "$INSTANCE" | xargs)" ]; then
+                echo "instance is required when target_set=single." >&2
+                exit 1
+              fi
+              jq -n --arg context "$CONTEXT" --arg instance "$INSTANCE" \
+                '[{"context":$context,"instance":$instance}]' > "$routes_file"
+              ;;
+            phase-two-initial)
+              cat > "$routes_file" <<'JSON'
+          [
+            {"context":"discord-blue","instance":"prod"},
+            {"context":"verireel","instance":"testing"},
+            {"context":"verireel","instance":"prod"},
+            {"context":"cm","instance":"testing"},
+            {"context":"cm","instance":"prod"},
+            {"context":"opw","instance":"testing"},
+            {"context":"opw","instance":"prod"}
+          ]
+          JSON
+              ;;
+            *)
+              echo "Unsupported target_set: $TARGET_SET" >&2
+              exit 1
+              ;;
+          esac
+          jq . "$routes_file"
+
+      - name: Run provider-target operation
+        env:
+          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
+          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token value." >&2
+            exit 1
+          fi
+
+          mkdir -p provider-target-operation-results
+          jq -c '.[]' provider-target-routes.json | while read -r route; do
+            context="$(jq -r '.context' <<< "$route")"
+            instance="$(jq -r '.instance' <<< "$route")"
+            response_file="provider-target-operation-results/${context}-${instance}.json"
+            idempotency_key="provider-target:${MODE}:${PROVIDER_ID}:"
+            idempotency_key+="${context}:${instance}"
+            body="$({
+              jq -n \
+                --arg mode "$MODE" \
+                --arg provider_id "$PROVIDER_ID" \
+                --arg context "$context" \
+                --arg instance "$instance" \
+                --arg reason "$REASON" \
+                '{schema_version:1,
+                  mode:$mode,
+                  product:"launchplane",
+                  provider_id:$provider_id,
+                  context:$context,
+                  instance:$instance,
+                  reason:$reason}'
+            })"
+            status_code="$(curl -sS \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Accept: application/json' \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: ${idempotency_key}" \
+              --data "$body" \
+              "${SERVICE_ORIGIN%/}/v1/provider-targets/operations")"
+            jq . "$response_file"
+            if [ "$status_code" != "202" ]; then
+              printf 'Provider-target operation failed for %s/%s.\n' \
+                "$context" "$instance" >&2
+              echo "HTTP status: ${status_code}." >&2
+              exit 1
+            fi
+            operation_status="$({
+              jq -r '.result.operation_status // empty' "$response_file"
+            })"
+            if [ "$operation_status" != "ok" ]; then
+              printf 'Provider-target operation was not ok for %s/%s.\n' \
+                "$context" "$instance" >&2
+              echo "Status: ${operation_status}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Upload operation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: >-
+            provider-target-ops-${{ inputs.mode }}-${{ inputs.target_set }}
+          path: |
+            provider-target-routes.json
+            provider-target-operation-results/*.json
+          if-no-files-found: error
+
+      - name: Summarize operation
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Provider target operation"
+            echo
+            echo "- Mode: $MODE"
+            echo "- Target set: $TARGET_SET"
+            echo "- Provider: $PROVIDER_ID"
+            echo "- Results: provider-target-ops-${MODE}-${TARGET_SET}"
+            echo
+            if compgen -G 'provider-target-operation-results/*.json' \
+              > /dev/null; then
+              jq -s '[.[] | {
+                context:.result.context,
+                instance:.result.instance,
+                status:.result.operation_status,
+                blocked:.result.blocked_count,
+                warnings:.result.warning_count,
+                counts:.result.report.counts
+              }]' \
+                provider-target-operation-results/*.json
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
