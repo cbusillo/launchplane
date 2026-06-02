@@ -175,16 +175,25 @@ class ProductOnboardingManifest(BaseModel):
         if not isinstance(data, dict):
             return data
         updated = dict(data)
+        provider_targets_provided = "provider_targets" in updated
         raw_provider_targets = updated.get("provider_targets", ())
         raw_dokploy_targets = updated.pop("dokploy_targets", ())
-        if raw_provider_targets is None or raw_provider_targets == () or raw_provider_targets == []:
+        if not provider_targets_provided:
             updated["provider_targets"] = raw_dokploy_targets or ()
             return updated
 
+        if raw_provider_targets is None:
+            updated["provider_targets"] = raw_dokploy_targets or ()
+            return updated
         provider_targets = _normalized_onboarding_targets(raw_provider_targets)
+        if not provider_targets:
+            updated["provider_targets"] = provider_targets
+            return updated
+
         dokploy_targets = _normalized_onboarding_targets(raw_dokploy_targets)
         if dokploy_targets and provider_targets != dokploy_targets:
             raise ValueError("provider_targets must match dokploy_targets when both are set")
+        updated["provider_targets"] = provider_targets
         return updated
 
     @model_validator(mode="after")
