@@ -600,13 +600,19 @@ def _retire_disabled_runtime_secret_placeholders(
         != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
     ):
         return
+    context_name = configured_binding.context.strip()
+    instance_name = configured_binding.instance.strip()
+    if not context_name or not instance_name:
+        return
     for binding in record_store.list_secret_bindings(
         integration=configured_binding.integration,
-        context_name=configured_binding.context,
-        instance_name=configured_binding.instance,
+        context_name=context_name,
+        instance_name=instance_name,
         limit=None,
     ):
         if binding.binding_id == configured_binding.binding_id:
+            continue
+        if binding.context != context_name or binding.instance != instance_name:
             continue
         if binding.binding_key != configured_binding.binding_key:
             continue
