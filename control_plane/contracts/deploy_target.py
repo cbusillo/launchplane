@@ -64,10 +64,17 @@ def apply_target_reference_defaults(data: object) -> object:
         updated["provider_id"] = reference.provider_id
     if updated.get("target_category") in {None, ""}:
         updated["target_category"] = reference.target_category
+    legacy_target_type = reference.legacy_target_type()
+    reference_provider_target_type = reference.provider_target_type.strip()
     if not str(updated.get("provider_target_type", "")).strip():
-        updated["provider_target_type"] = reference.provider_target_type
+        if reference_provider_target_type:
+            updated["provider_target_type"] = reference_provider_target_type
+        elif legacy_target_type is not None:
+            updated["provider_target_type"] = legacy_target_type
+            updated["target_reference"] = reference.model_copy(
+                update={"provider_target_type": legacy_target_type}
+            )
     if not str(updated.get("target_type", "")).strip():
-        legacy_target_type = reference.legacy_target_type()
         if legacy_target_type is not None:
             updated["target_type"] = legacy_target_type
     return updated

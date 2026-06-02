@@ -77,9 +77,18 @@ class DeploymentRecord(BaseModel):
             raise ValueError("deployment record requires delegated_executor")
         if self.deployed_target is None and self.resolved_target is not None:
             provider_id = self.deploy.provider_id.strip().lower() or "dokploy"
+            target_category = self.deploy.target_category or self.resolved_target.target_type
+            provider_target_type = (
+                self.deploy.provider_target_type.strip().lower() or self.resolved_target.target_type
+            )
             self.deployed_target = self.resolved_target.to_deployed_target_reference(
                 provider_id=provider_id
             )
-            if self.deploy.provider_target_type:
+            self.deployed_target.target_category = target_category
+            self.deployed_target.provider_target_type = provider_target_type
+        elif self.deployed_target is not None:
+            if self.deployed_target.target_category == "unknown" and self.deploy.target_category:
+                self.deployed_target.target_category = self.deploy.target_category
+            if not self.deployed_target.provider_target_type and self.deploy.provider_target_type:
                 self.deployed_target.provider_target_type = self.deploy.provider_target_type
         return self

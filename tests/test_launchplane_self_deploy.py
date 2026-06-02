@@ -10,13 +10,15 @@ from control_plane.workflows.launchplane_self_deploy import (
 
 class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
     def test_execute_updates_target_env_and_triggers_deployment(self) -> None:
-        request = LaunchplaneSelfDeployRequest(
-            target_type="compose",
-            target_id="compose-123",
-            image_reference="ghcr.io/cbusillo/launchplane@sha256:new",
-            oauth_env={"LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example"},
-            oauth_env_removals=("LAUNCHPLANE_NPMPLUS_SECRET",),
-            no_cache=True,
+        request = LaunchplaneSelfDeployRequest.model_validate(
+            {
+                "target_type": " Compose ",
+                "target_id": "compose-123",
+                "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                "oauth_env": {"LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example"},
+                "oauth_env_removals": ("LAUNCHPLANE_NPMPLUS_SECRET",),
+                "no_cache": True,
+            }
         )
 
         with (
@@ -27,8 +29,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.launchplane_self_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
                 return_value={
-                    "env": "DOCKER_IMAGE_REFERENCE=old\n"
-                    "LAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
+                    "env": "DOCKER_IMAGE_REFERENCE=old\nLAUNCHPLANE_NPMPLUS_SECRET=npmplus-secret\n"
                 },
             ),
             patch(
