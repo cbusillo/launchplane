@@ -176,6 +176,12 @@ title: Secrets
   previously recorded matching dry-run. They must still send plaintext secret
   values only in the request body over the Launchplane service API. Do not copy
   those request bodies into logs, GitHub issues, PR bodies, or docs.
+- Product onboarding may create disabled managed-secret binding placeholders for
+  expected runtime secrets. Once product-config writes the configured managed
+  secret for the same integration, binding key, context, and instance, Launchplane
+  retires the disabled placeholder from active runtime-secret lookups. Later
+  onboarding imports preserve the configured binding instead of recreating the
+  disabled placeholder.
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.
