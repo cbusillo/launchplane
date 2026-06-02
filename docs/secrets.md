@@ -66,6 +66,11 @@ title: Secrets
 - Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
   `live-target-runtime.yml` workflow wrapper. Dry-run and apply both evaluate
   runtime key-safety policy before returning sanitized key/count evidence.
+- Live target runtime sync through the service API filters the resolved runtime
+  payload to the product profile's expected runtime-environment keys and
+  runtime managed-secret binding keys for the selected lane. Shared/global
+  runtime records can provide values, but they are not synced to an unrelated
+  product target unless that product profile declares the key.
 - Gates fail closed when a required binding is missing, disabled, ambiguous,
   unclassified, or scoped outside the target context/instance. A target with an
   unknown environment class also fails closed.

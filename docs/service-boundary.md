@@ -862,9 +862,10 @@ apply requires `live_target_runtime.apply`. The route resolves DB-backed runtime
 environment records, managed runtime secrets, and the tracked Dokploy target in
 the deployed Launchplane service, evaluates runtime key-safety policy, compares
 desired and live env by key, and returns sanitized key/count evidence without
-runtime values or secret plaintext. Apply updates only the Launchplane-owned
-keys on the live target, preserves unrelated live env, verifies persistence by
-key metadata, and can explicitly trigger a deploy when requested.
+runtime values or secret plaintext. Apply updates only the product profile's
+expected runtime environment keys and runtime managed-secret binding keys for
+the selected lane, preserves unrelated live env, verifies persistence by key
+metadata, and can explicitly trigger a deploy when requested.
 
 Live target runtime applies are service-boundary work. Operators and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make

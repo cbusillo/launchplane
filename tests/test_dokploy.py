@@ -102,6 +102,43 @@ def _write_odoo_product_profile_record(*, store: PostgresRecordStore) -> None:
     )
 
 
+def _write_live_target_product_profile_record(
+    *,
+    store: PostgresRecordStore,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard-testing",
+    instance: str = "prod",
+    runtime_keys: tuple[str, ...] = ("CONTACT_EMAIL_MODE",),
+    secret_binding_keys: tuple[str, ...] = (),
+) -> None:
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(
+            {
+                "product": product,
+                "display_name": "Sell Your Outboard",
+                "repository": "cbusillo/sellyouroutboard",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/cbusillo/sellyouroutboard"},
+                "runtime_port": 3000,
+                "health_path": "/api/health",
+                "lanes": ({"instance": instance, "context": context},),
+                "expected_config": {
+                    "runtime_environment_keys": tuple(
+                        {"key": key, "context": context, "instance": instance}
+                        for key in runtime_keys
+                    ),
+                    "managed_secret_bindings": tuple(
+                        {"binding_key": binding_key, "context": context, "instance": instance}
+                        for binding_key in secret_binding_keys
+                    ),
+                },
+                "updated_at": "2026-05-09T00:00:00Z",
+                "source": "test",
+            }
+        )
+    )
+
+
 class _FakeDokployTargetStore:
     def __init__(
         self,
@@ -1005,6 +1042,11 @@ target_name = "syo-prod-app"
 TRACKED_ONLY = "tracked-private-value"
 """,
                 )
+                _write_live_target_product_profile_record(
+                    store=store,
+                    runtime_keys=("CONTACT_EMAIL_MODE", "TRACKED_ONLY"),
+                    secret_binding_keys=("SMTP_PASSWORD",),
+                )
                 with patch.dict(
                     os.environ,
                     {
@@ -1055,6 +1097,8 @@ TRACKED_ONLY = "tracked-private-value"
                     [
                         "environments",
                         "apply-live-target",
+                        "--product",
+                        "sellyouroutboard",
                         "--context",
                         "sellyouroutboard-testing",
                         "--instance",
@@ -1111,6 +1155,7 @@ target_name = "syo-prod-app"
 deploy_timeout_seconds = 77
 """,
                 )
+                _write_live_target_product_profile_record(store=store)
             finally:
                 store.close()
 
@@ -1146,6 +1191,8 @@ deploy_timeout_seconds = 77
                     [
                         "environments",
                         "apply-live-target",
+                        "--product",
+                        "sellyouroutboard",
                         "--context",
                         "sellyouroutboard-testing",
                         "--instance",
@@ -1199,6 +1246,7 @@ target_name = "syo-prod-app"
 deploy_timeout_seconds = 77
 """,
                 )
+                _write_live_target_product_profile_record(store=store)
             finally:
                 store.close()
 
@@ -1231,6 +1279,8 @@ deploy_timeout_seconds = 77
                     [
                         "environments",
                         "apply-live-target",
+                        "--product",
+                        "sellyouroutboard",
                         "--context",
                         "sellyouroutboard-testing",
                         "--instance",
@@ -1259,6 +1309,8 @@ deploy_timeout_seconds = 77
             [
                 "environments",
                 "apply-live-target",
+                "--product",
+                "sellyouroutboard",
                 "--context",
                 "sellyouroutboard-testing",
                 "--instance",

@@ -1025,6 +1025,36 @@ def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dic
     return payload
 
 
+def _live_target_runtime_profile_payload(
+    *,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard",
+    instance: str = "prod",
+    include_context_secret: bool = False,
+) -> dict[str, object]:
+    payload = _product_profile_payload(product)
+    payload["lanes"] = (
+        {
+            "instance": instance,
+            "context": context,
+            "base_url": "https://www.sellyouroutboard.com",
+            "health_url": "https://www.sellyouroutboard.com/api/health",
+        },
+    )
+    expected_config: dict[str, object] = {
+        "runtime_environment_keys": [
+            {"key": "GOOGLE_ANALYTICS_MEASUREMENT_ID", "context": context, "instance": instance}
+        ],
+        "managed_secret_bindings": [],
+    }
+    if include_context_secret:
+        expected_config["managed_secret_bindings"] = [
+            {"binding_key": "CONTEXT_API_TOKEN", "context": context}
+        ]
+    payload["expected_config"] = expected_config
+    return payload
+
+
 def _product_profile_lanes(payload: dict[str, object]) -> tuple[dict[str, object], ...]:
     return cast(tuple[dict[str, object], ...], payload["lanes"])
 
@@ -22303,6 +22333,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         source_label="test",
                     )
                 )
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="global",
+                        env={"ODOO_DB_PASSWORD": "must-not-sync"},
+                        updated_at="2026-05-06T17:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _live_target_runtime_profile_payload(include_context_secret=True)
+                    )
+                )
                 _seed_tracked_target_records(
                     database_url=database_url,
                     context="sellyouroutboard",
@@ -22320,6 +22363,33 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     clear=True,
                 ):
                     _write_dokploy_managed_secrets(store=store)
+                    control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope="context",
+                        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                        name="context-api-token",
+                        plaintext_value="context-secret-value",
+                        binding_key="CONTEXT_API_TOKEN",
+                        context_name="sellyouroutboard",
+                        actor="test",
+                        source_label="test",
+                    )
+                    store.write_runtime_key_safety_policy_record(
+                        RuntimeKeySafetyPolicyRecord(
+                            record_id="runtime-key-safety-policy-live-target-test",
+                            status="active",
+                            source="test",
+                            updated_at="2026-05-05T20:00:00Z",
+                            rules=(
+                                RuntimeSecretSafetyRule(
+                                    binding_key="CONTEXT_API_TOKEN",
+                                    secret_class="prod_only",
+                                    allowed_contexts=("sellyouroutboard",),
+                                    allowed_instances=("prod",),
+                                ),
+                            ),
+                        )
+                    )
             finally:
                 store.close()
             policy = LaunchplaneAuthzPolicy.model_validate(
@@ -22394,9 +22464,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(result["mode"], "dry-run")
         self.assertEqual(
             result["runtime_environment"]["missing_keys"],
-            ["GOOGLE_ANALYTICS_MEASUREMENT_ID"],
+            ["CONTEXT_API_TOKEN", "GOOGLE_ANALYTICS_MEASUREMENT_ID"],
         )
+        self.assertEqual(
+            result["runtime_key_safety"]["checked_binding_keys"], ["CONTEXT_API_TOKEN"]
+        )
+        self.assertEqual(result["runtime_key_safety"]["status"], "pass")
+        self.assertNotIn("ODOO_DB_PASSWORD", result["runtime_environment"]["changed_keys"])
         self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+        self.assertNotIn("must-not-sync", json.dumps(payload))
+        self.assertNotIn("context-secret-value", json.dumps(payload))
 
     def test_live_target_runtime_api_apply_updates_env_and_verifies(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -22413,6 +22490,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
                         updated_at="2026-05-06T17:00:00Z",
                         source_label="test",
+                    )
+                )
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _live_target_runtime_profile_payload()
                     )
                 )
                 _seed_tracked_target_records(
