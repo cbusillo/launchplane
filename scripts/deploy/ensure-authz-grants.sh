@@ -334,6 +334,28 @@ post_launchplane_service_grant() {
     "$event_name"
 }
 
+post_launchplane_live_target_runtime_grants() {
+  local product_name="$1"
+  local context_name="$2"
+  local suffix="$3"
+  post_grant \
+    "$GITHUB_REPOSITORY" \
+    live-target-runtime.yml \
+    "$product_name" \
+    "$context_name" \
+    live_target_runtime.plan \
+    "deploy:${suffix}-live-target-runtime-plan-grant" \
+    "${suffix}-live-target-runtime-plan"
+  post_grant \
+    "$GITHUB_REPOSITORY" \
+    live-target-runtime.yml \
+    "$product_name" \
+    "$context_name" \
+    live_target_runtime.apply \
+    "deploy:${suffix}-live-target-runtime-apply-grant" \
+    "${suffix}-live-target-runtime-apply"
+}
+
 post_syo_grant() {
   local workflow_file="$1"
   local product_name="$2"
@@ -803,22 +825,26 @@ post_product_config_human_grant \
   product_config.apply \
   deploy:product-config-human-apply-grant \
   product-config-human-apply
-post_grant \
-  "$GITHUB_REPOSITORY" \
-  live-target-runtime.yml \
+post_launchplane_live_target_runtime_grants \
   sellyouroutboard \
   sellyouroutboard \
-  live_target_runtime.plan \
-  deploy:syo-live-target-runtime-plan-grant \
-  syo-live-target-runtime-plan
-post_grant \
-  "$GITHUB_REPOSITORY" \
-  live-target-runtime.yml \
-  sellyouroutboard \
-  sellyouroutboard \
-  live_target_runtime.apply \
-  deploy:syo-live-target-runtime-apply-grant \
-  syo-live-target-runtime-apply
+  syo
+post_launchplane_live_target_runtime_grants \
+  discord-blue \
+  discord-blue \
+  discord-blue
+post_launchplane_live_target_runtime_grants \
+  verireel \
+  verireel \
+  verireel
+post_launchplane_live_target_runtime_grants \
+  odoo-tenant-cm \
+  cm \
+  odoo-cm
+post_launchplane_live_target_runtime_grants \
+  odoo-tenant-opw \
+  opw \
+  odoo-opw
 post_grant \
   "$GITHUB_REPOSITORY" \
   odoo-target-replacement-plan.yml \

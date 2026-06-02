@@ -694,6 +694,107 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("runtime_key_safety.write", script_text)
         self.assertIn("merge_train.policy_import", script_text)
 
+    def test_deploy_authz_grants_include_phase_two_live_target_runtime_scopes(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                "    request_payload=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                '        --data) shift; request_payload="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                "    if printf '%s' \"$request_payload\" | grep -q 'live-target-runtime.yml'; then\n"
+                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
+                "    fi\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_grants = temporary_directory / "grants.jsonl"
+            captured_grants.touch()
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
+                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
+                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
+                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
+                "CAPTURED_GRANTS": str(captured_grants),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            grants = [
+                json.loads(grant_text)["grant"]
+                for grant_text in captured_grants.read_text().split("---END-GRANT---")
+                if grant_text.strip()
+            ]
+
+        grant_index = {
+            (grant["products"][0], grant["contexts"][0], grant["actions"][0]): grant
+            for grant in grants
+        }
+        expected_scopes = {
+            ("sellyouroutboard", "sellyouroutboard"),
+            ("discord-blue", "discord-blue"),
+            ("verireel", "verireel"),
+            ("odoo-tenant-cm", "cm"),
+            ("odoo-tenant-opw", "opw"),
+        }
+        for product, context in expected_scopes:
+            for action in ("live_target_runtime.plan", "live_target_runtime.apply"):
+                grant = grant_index[(product, context, action)]
+                self.assertEqual(grant["repository"], "cbusillo/launchplane")
+                self.assertEqual(
+                    grant["workflow_refs"],
+                    [
+                        "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                    ],
+                )
+                self.assertEqual(grant["event_names"], ["workflow_dispatch"])
+
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
             encoding="utf-8"
