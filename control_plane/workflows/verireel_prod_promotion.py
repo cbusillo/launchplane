@@ -225,9 +225,28 @@ def _provider_deploy_fields_from_deployment_record(
     provider_deploy_mode = deploy_mode
     if deployment_record is not None:
         deploy_mode = deployment_record.deploy.deploy_mode
-        provider_id = deployment_record.deploy.provider_id
-        target_category = deployment_record.deploy.target_category or target_type
-        provider_target_type = deployment_record.deploy.provider_target_type
+        legacy_category: DeployTargetCategory = target_type
+        record_target_category = deployment_record.deploy.target_category or legacy_category
+        if record_target_category == "unknown":
+            record_target_category = legacy_category
+        provider_id = _prefer_fresh_provider_metadata(
+            record_value=deployment_record.deploy.provider_id,
+            fallback_value=fallback.provider_id,
+            legacy_value="dokploy",
+        )
+        target_category = cast(
+            DeployTargetCategory,
+            _prefer_fresh_provider_metadata(
+                record_value=record_target_category,
+                fallback_value=fallback.target_category,
+                legacy_value=legacy_category,
+            ),
+        )
+        provider_target_type = _prefer_fresh_provider_metadata(
+            record_value=deployment_record.deploy.provider_target_type,
+            fallback_value=fallback.provider_target_type,
+            legacy_value=target_type,
+        )
         provider_deploy_mode = deployment_record.deploy.provider_deploy_mode
     return VeriReelProdPromotionDeployEvidenceFields(
         deploy_mode=deploy_mode,
@@ -236,6 +255,19 @@ def _provider_deploy_fields_from_deployment_record(
         provider_target_type=provider_target_type,
         provider_deploy_mode=provider_deploy_mode,
     )
+
+
+def _prefer_fresh_provider_metadata(
+    *,
+    record_value: str,
+    fallback_value: str,
+    legacy_value: str,
+) -> str:
+    if not record_value:
+        return fallback_value
+    if fallback_value and fallback_value != legacy_value and record_value == legacy_value:
+        return fallback_value
+    return record_value
 
 
 def _legacy_dokploy_target_type(
@@ -348,10 +380,12 @@ def _build_promotion_record(
     migration_status: ReleaseStatus,
     migration_detail: str,
     health_result: VeriReelRolloutVerificationResult | None,
+    target_fields: VeriReelProdPromotionTargetResultFields | None = None,
 ) -> PromotionRecord:
     provider_deploy_fields = _provider_deploy_fields_from_deployment_record(
         deployment_record=deployment_record,
-        fallback=VeriReelProdPromotionTargetResultFields(
+        fallback=target_fields
+        or VeriReelProdPromotionTargetResultFields(
             target_name=target_name,
             target_id=target_id,
             target_category=target_type,
@@ -803,6 +837,7 @@ def execute_verireel_prod_promotion(
             migration_status="skipped",
             migration_detail="",
             health_result=None,
+            target_fields=target_fields,
         )
         record_store.write_promotion_record(promotion_record)
         return _build_result(
@@ -975,6 +1010,7 @@ def execute_verireel_prod_promotion(
         migration_status="pass",
         migration_detail="",
         health_result=health_result,
+        target_fields=target_fields,
     )
     record_store.write_promotion_record(promotion_record)
     return _build_result(

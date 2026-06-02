@@ -157,6 +157,114 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 ("https://ver-prod.shinycomputers.com/api/health",),
             )
 
+    def test_execute_preserves_fresh_provider_metadata_from_deploy_result(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-21T18:05:00Z",
+                    source="verireel-prod-gate",
+                    status="pass",
+                    evidence={"snapshot_name": "ver-predeploy-20260421T180500Z"},
+                )
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890"
+                    ),
+                    context="verireel",
+                    instance="prod",
+                    source_git_ref="abcdef1234567890",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="prod-app-123",
+                        target_name="ver-prod-app",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        provider_id="dokploy",
+                        target_category="application",
+                        provider_target_type="application",
+                        provider_deploy_mode="dokploy-application-api",
+                        deployment_id="prod-app-123",
+                        status="pass",
+                        started_at="2026-04-21T18:20:00Z",
+                        finished_at="2026-04-21T18:21:15Z",
+                    ),
+                )
+            )
+            request = VeriReelProdPromotionRequest(
+                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                source_git_ref="abcdef1234567890",
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                source_health_status="pass",
+                expected_build_revision="abcdef1234567890",
+                expected_build_tag="sha-abcdef1234567890",
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                    return_value=VeriReelStableDeployResult(
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        deploy_status="pass",
+                        deploy_started_at="2026-04-21T18:20:00Z",
+                        deploy_finished_at="2026-04-21T18:21:15Z",
+                        target_name="ver-prod-app",
+                        target_id="prod-app-123",
+                        target_category="service",
+                        provider_id="runtime-provider",
+                        provider_target_type="managed-service",
+                        target_type="application",
+                        rollout_status="pass",
+                        rollout_base_url="https://ver-prod.shinycomputers.com",
+                        rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        rollout_started_at="2026-04-21T18:21:16Z",
+                        rollout_finished_at="2026-04-21T18:21:45Z",
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                    return_value=VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    ),
+                ),
+            ):
+                result = execute_verireel_prod_promotion(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=request,
+                )
+
+            self.assertEqual(result.provider_id, "runtime-provider")
+            self.assertEqual(result.target_category, "service")
+            self.assertEqual(result.provider_target_type, "managed-service")
+            promotion = store.read_promotion_record(
+                "promotion-verireel-testing-to-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(promotion.deploy.provider_id, "runtime-provider")
+            self.assertEqual(promotion.deploy.target_category, "service")
+            self.assertEqual(promotion.deploy.provider_target_type, "managed-service")
+            self.assertEqual(promotion.deploy.provider_deploy_mode, "dokploy-application-api")
+
     def test_execute_writes_failed_promotion_record_when_prisma_migration_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -1525,6 +1525,17 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("provider_targets", manifest.model_dump())
         self.assertNotIn("dokploy_targets", manifest.model_dump())
 
+    def test_product_onboarding_manifest_accepts_null_provider_targets_compat_input(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        payload["provider_targets"] = None
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(len(manifest.provider_targets), 2)
+        self.assertEqual(manifest.dokploy_targets, manifest.provider_targets)
+
     def test_product_onboarding_manifest_accepts_matching_provider_targets_input(
         self,
     ) -> None:
@@ -1535,6 +1546,17 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         self.assertEqual(len(manifest.provider_targets), 2)
         self.assertEqual(len(manifest.dokploy_targets), 2)
+
+    def test_product_onboarding_manifest_keeps_empty_provider_targets_intentional(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        payload["provider_targets"] = []
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(manifest.provider_targets, ())
+        self.assertEqual(manifest.dokploy_targets, ())
 
     def test_product_onboarding_manifest_rejects_conflicting_provider_targets_input(
         self,
