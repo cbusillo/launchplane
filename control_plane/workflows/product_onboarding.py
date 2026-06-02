@@ -70,6 +70,13 @@ class ProductOnboardingApplyResult(BaseModel):
         return self.provider_target_ids
 
 
+class ProductOnboardingSecretBindingPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active_bindings: tuple[SecretBinding, ...] = ()
+    retired_bindings: tuple[SecretBinding, ...] = ()
+
+
 def build_product_profile_record(
     *, manifest: ProductOnboardingManifest, updated_at: str
 ) -> LaunchplaneProductProfileRecord:
@@ -194,23 +201,27 @@ def build_secret_bindings(
     manifest: ProductOnboardingManifest,
     updated_at: str,
     existing_bindings: tuple[SecretBinding, ...] = (),
-) -> tuple[SecretBinding, ...]:
+) -> ProductOnboardingSecretBindingPlan:
     existing_bindings_by_id = {binding.binding_id: binding for binding in existing_bindings}
-    configured_routes = {
-        (binding.integration, binding.binding_key, binding.context, binding.instance)
-        for binding in existing_bindings
-        if binding.status == "configured"
-    }
     secret_bindings: list[SecretBinding] = []
+    retired_bindings: list[SecretBinding] = []
     for binding in manifest.secret_bindings:
-        if (
-            binding.status != "configured"
-            and (binding.integration, binding.binding_key, binding.context, binding.instance)
-            in configured_routes
-        ):
-            continue
         binding_id = _secret_binding_id(product=manifest.product, binding=binding)
         existing_binding = existing_bindings_by_id.get(binding_id)
+        if binding.status != "configured" and _configured_binding_satisfies_onboarding_binding(
+            existing_bindings=existing_bindings,
+            binding=binding,
+        ):
+            if existing_binding is not None and existing_binding.status == "disabled":
+                retired_bindings.append(
+                    existing_binding.model_copy(
+                        update={
+                            "integration": f"retired:{existing_binding.integration}",
+                            "updated_at": updated_at,
+                        }
+                    )
+                )
+            continue
         secret_bindings.append(
             SecretBinding(
                 binding_id=binding_id,
@@ -224,7 +235,41 @@ def build_secret_bindings(
                 updated_at=updated_at,
             )
         )
-    return tuple(secret_bindings)
+    return ProductOnboardingSecretBindingPlan(
+        active_bindings=tuple(secret_bindings),
+        retired_bindings=tuple(retired_bindings),
+    )
+
+
+def _configured_binding_satisfies_onboarding_binding(
+    *,
+    existing_bindings: tuple[SecretBinding, ...],
+    binding: ProductOnboardingSecretBindingManifest,
+) -> bool:
+    return any(
+        existing.integration == binding.integration
+        and existing.binding_key == binding.binding_key
+        and existing.status == "configured"
+        and _binding_route_satisfies_target(
+            binding_context=existing.context,
+            binding_instance=existing.instance,
+            target_context=binding.context,
+            target_instance=binding.instance,
+        )
+        for existing in existing_bindings
+    )
+
+
+def _binding_route_satisfies_target(
+    *, binding_context: str, binding_instance: str, target_context: str, target_instance: str
+) -> bool:
+    if not binding_context:
+        return True
+    if binding_context != target_context:
+        return False
+    if not binding_instance:
+        return True
+    return binding_instance == target_instance
 
 
 def apply_product_onboarding_manifest(
@@ -246,11 +291,12 @@ def apply_product_onboarding_manifest(
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
-    secret_bindings = build_secret_bindings(
+    secret_binding_plan = build_secret_bindings(
         manifest=manifest,
         updated_at=recorded_at,
         existing_bindings=record_store.list_secret_bindings(limit=None),
     )
+    secret_bindings = secret_binding_plan.active_bindings
     target_records_by_route = {
         (record.context, record.instance): record for record in provider_targets
     }
@@ -285,6 +331,8 @@ def apply_product_onboarding_manifest(
     for runtime_record in runtime_environments:
         record_store.write_runtime_environment_record(runtime_record)
     for binding in secret_bindings:
+        record_store.write_secret_binding(binding)
+    for binding in secret_binding_plan.retired_bindings:
         record_store.write_secret_binding(binding)
 
     return ProductOnboardingApplyResult(
