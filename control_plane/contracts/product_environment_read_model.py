@@ -1716,25 +1716,7 @@ def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTarge
             else "",
             trust_state="recorded",
         )
-    if lane_summary.dokploy_target is None:
-        return ProductTargetSummary(
-            artifact_manifest=lane_summary.artifact_manifest,
-            expected_runtime_identity=expected_identity,
-            observed_runtime_identity=destination_health.observed_runtime_identity
-            if destination_health is not None
-            else None,
-            runtime_identity_status=destination_health.runtime_identity_status
-            if destination_health is not None
-            else "unchecked",
-            runtime_identity_detail=destination_health.runtime_identity_detail
-            if destination_health is not None
-            else "",
-            trust_state=lane_summary.provenance.freshness_status,
-        )
     return ProductTargetSummary(
-        target_type=lane_summary.dokploy_target.target_type,
-        target_name=lane_summary.dokploy_target.target_name,
-        target_id_recorded=lane_summary.dokploy_target_id is not None,
         artifact_manifest=lane_summary.artifact_manifest,
         expected_runtime_identity=expected_identity,
         observed_runtime_identity=destination_health.observed_runtime_identity
@@ -1746,7 +1728,7 @@ def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTarge
         runtime_identity_detail=destination_health.runtime_identity_detail
         if destination_health is not None
         else "",
-        trust_state="recorded",
+        trust_state="missing",
     )
 
 

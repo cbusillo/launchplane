@@ -25,7 +25,11 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
+from control_plane.contracts.deploy_target import (
+    DeployedTargetReference,
+    DeployTargetCategory,
+    ProviderTargetRecord,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -397,17 +401,19 @@ def _provider_target_record(
     context: str = "syo",
     instance: str = "prod",
     provider_id: str = "dokploy",
+    target_category: DeployTargetCategory = "application",
     target_id: str = "app-syo-prod",
+    provider_target_type: str = "application",
     updated_at: str = "2026-04-21T18:35:00Z",
 ) -> ProviderTargetRecord:
     return ProviderTargetRecord(
         context=context,
         instance=instance,
         provider_id=provider_id,
-        target_category="application",
+        target_category=target_category,
         target_id=target_id,
         display_name=f"{context}-{instance}",
-        provider_target_type="application",
+        provider_target_type=provider_target_type,
         provider_evidence={"project_name": f"{context}-project"},
         updated_at=updated_at,
         source_label="test:provider-target",
@@ -1166,7 +1172,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(len(listed), 1)
             self.assertEqual(listed[0].context, "opw")
 
-    def test_provider_target_records_project_from_dokploy_records(self) -> None:
+    def test_provider_target_records_require_physical_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
@@ -1187,21 +1193,14 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 )
             )
 
-            loaded = store.read_provider_target_record(context_name="syo", instance_name="prod")
+            with self.assertRaises(FileNotFoundError):
+                store.read_provider_target_record(context_name="syo", instance_name="prod")
             listed = store.list_provider_target_records()
             filtered = store.list_provider_target_records(provider_id=" DOKPLOY ")
             store.close()
 
-        self.assertEqual(loaded.provider_id, "dokploy")
-        self.assertEqual(loaded.context, "syo")
-        self.assertEqual(loaded.instance, "prod")
-        self.assertEqual(loaded.target_category, "compose")
-        self.assertEqual(loaded.target_id, "app-syo-prod")
-        self.assertEqual(loaded.provider_target_type, "compose")
-        self.assertEqual(loaded.provider_evidence["project_name"], "syo-prod-project")
-        self.assertEqual(len(listed), 1)
-        self.assertEqual(listed[0], loaded)
-        self.assertEqual(filtered, (loaded,))
+        self.assertEqual(listed, ())
+        self.assertEqual(filtered, ())
 
     def test_provider_target_records_round_trip_from_physical_storage(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1345,7 +1344,33 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(dokploy_records, ())
         self.assertEqual(future_provider_records, (physical_record,))
 
-    def test_provider_target_list_combines_physical_and_projected_records(self) -> None:
+    def test_read_lane_summary_does_not_project_provider_target_from_dokploy_pair(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="syo", instance="prod")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(
+                    context="syo",
+                    instance="prod",
+                    target_id="legacy-dokploy-syo-prod",
+                )
+            )
+
+            summary = store.read_lane_summary(context_name="syo", instance_name="prod")
+            store.close()
+
+        self.assertIsNone(summary.provider_target)
+        self.assertIsNotNone(summary.dokploy_target)
+        self.assertIsNotNone(summary.dokploy_target_id)
+
+    def test_provider_target_list_returns_only_physical_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
@@ -1378,7 +1403,6 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(
             [(record.context, record.instance, record.target_id) for record in listed],
             [
-                ("syo", "prod", "app-syo-prod"),
                 ("verireel", "prod", "app-verireel-prod"),
             ],
         )
@@ -1412,11 +1436,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     finished_at="2026-04-20T15:32:00Z",
                 )
             )
-            store.write_dokploy_target_record(
-                _dokploy_target_record(context="opw", instance="testing")
-            )
-            store.write_dokploy_target_id_record(
-                _dokploy_target_id_record(
+            store.write_provider_target_record(
+                _provider_target_record(
                     context="opw",
                     instance="testing",
                     target_id="current-compose-id",
@@ -2826,6 +2847,15 @@ env_var = "GH_TOKEN"
             )
             store.write_dokploy_target_record(
                 _dokploy_target_record(context="opw", instance="testing")
+            )
+            store.write_provider_target_record(
+                _provider_target_record(
+                    context="opw",
+                    instance="testing",
+                    target_category="compose",
+                    target_id="compose-123",
+                    provider_target_type="compose",
+                )
             )
             store.write_runtime_environment_record(
                 _runtime_environment_record(

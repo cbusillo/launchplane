@@ -14,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactImageReference,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -1168,7 +1169,70 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertIn("odoo-devkit", detail.model_dump_json())
 
-    def test_product_environment_detail_exposes_provider_target_projection(self) -> None:
+    def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    project_name="example-site-prod-project",
+                    target_type="application",
+                    target_name="example-site-prod",
+                    updated_at="2026-05-02T22:30:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    target_id="app-example-prod",
+                    updated_at="2026-05-02T22:31:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-example-prod",
+                    display_name="example-site-prod",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site-prod-project"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+
+            detail = build_product_environment_detail(
+                record_store=store,
+                product=profile.product,
+                environment="prod",
+                action_allowed=lambda *_: False,
+            )
+            store.close()
+
+        self.assertEqual(detail.target.provider, "dokploy")
+        self.assertEqual(detail.target.target_type, "application")
+        self.assertEqual(detail.target.target_name, "example-site-prod")
+        self.assertEqual(detail.target.target_id, "app-example-prod")
+        self.assertEqual(detail.target.provider_target_type, "application")
+        self.assertTrue(detail.target.target_id_recorded)
+        self.assertEqual(detail.target.trust_state, "recorded")
+
+    def test_product_environment_detail_does_not_project_provider_target_from_dokploy_pair(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             database_url = f"sqlite+pysqlite:///{database_path}"
@@ -1208,12 +1272,12 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             store.close()
 
         self.assertEqual(detail.target.provider, "dokploy")
-        self.assertEqual(detail.target.target_type, "application")
-        self.assertEqual(detail.target.target_name, "example-site-prod")
-        self.assertEqual(detail.target.target_id, "app-example-prod")
-        self.assertEqual(detail.target.provider_target_type, "application")
-        self.assertTrue(detail.target.target_id_recorded)
-        self.assertEqual(detail.target.trust_state, "recorded")
+        self.assertEqual(detail.target.target_type, "")
+        self.assertEqual(detail.target.target_name, "")
+        self.assertEqual(detail.target.target_id, "")
+        self.assertEqual(detail.target.provider_target_type, "")
+        self.assertFalse(detail.target.target_id_recorded)
+        self.assertEqual(detail.target.trust_state, "missing")
 
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import click
 
-from control_plane.contracts.deploy_target import DeployedTargetReference
+from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
@@ -62,6 +64,74 @@ class _GenericWebDeployStore:
         self.inventories.append(record)
 
 
+class _DokployGenericWebDeployStore(_GenericWebDeployStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        *,
+        provider_target: ProviderTargetRecord | None = None,
+        dokploy_target: DokployTargetRecord | None = None,
+        dokploy_target_id: DokployTargetIdRecord | None = None,
+    ) -> None:
+        super().__init__(profile)
+        self.provider_target = provider_target or ProviderTargetRecord(
+            context="sellyouroutboard-testing",
+            instance="testing",
+            provider_id="dokploy",
+            target_category="application",
+            target_id="target-123",
+            display_name="provider-target-app",
+            provider_target_type="application",
+            updated_at="2026-04-30T22:00:00Z",
+            source_label="test",
+        )
+        self.dokploy_target = dokploy_target or DokployTargetRecord(
+            context="sellyouroutboard-testing",
+            instance="testing",
+            target_type="application",
+            target_name="dokploy-config-app",
+            updated_at="2026-04-30T22:00:00Z",
+            source_label="test",
+        )
+        self.dokploy_target_id = dokploy_target_id or DokployTargetIdRecord(
+            context="sellyouroutboard-testing",
+            instance="testing",
+            target_id="target-123",
+            updated_at="2026-04-30T22:00:00Z",
+            source_label="test",
+        )
+
+    def read_provider_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> ProviderTargetRecord:
+        if (
+            context_name == self.provider_target.context
+            and instance_name == self.provider_target.instance
+        ):
+            return self.provider_target
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        if (
+            context_name == self.dokploy_target.context
+            and instance_name == self.dokploy_target.instance
+        ):
+            return self.dokploy_target
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord:
+        if (
+            context_name == self.dokploy_target_id.context
+            and instance_name == self.dokploy_target_id.instance
+        ):
+            return self.dokploy_target_id
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+
 def _profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="sellyouroutboard",
@@ -115,12 +185,13 @@ class _FakeGenericWebDeployProvider:
         request_source_git_ref: str,
         request_timeout_seconds: int | None,
         request_no_cache: bool,
+        record_store: object,
         profile: LaunchplaneProductProfileRecord,
         lane: ProductLaneProfile,
         normalized_artifact_id: str,
         fallback_target_name: str,
     ) -> GenericWebResolvedDeployTarget:
-        del control_plane_root, request_artifact_id, profile, fallback_target_name
+        del control_plane_root, request_artifact_id, record_store, profile, fallback_target_name
         resolved = GenericWebResolvedDeployTarget(
             ship_request=ShipRequest(
                 artifact_id=normalized_artifact_id,
@@ -456,6 +527,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 request_source_git_ref: str,
                 request_timeout_seconds: int | None,
                 request_no_cache: bool,
+                record_store: object,
                 profile: LaunchplaneProductProfileRecord,
                 lane: ProductLaneProfile,
                 normalized_artifact_id: str,
@@ -467,6 +539,7 @@ class GenericWebDeployTests(unittest.TestCase):
                     request_source_git_ref,
                     request_timeout_seconds,
                     request_no_cache,
+                    record_store,
                     profile,
                     lane,
                     normalized_artifact_id,
@@ -502,16 +575,11 @@ class GenericWebDeployTests(unittest.TestCase):
         self,
     ) -> None:
         provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(_profile())
 
-        with (
-            patch(
-                "control_plane.workflows.generic_web_deploy_provider.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
-                return_value=_source_of_truth(),
-            ),
-            patch(
-                "control_plane.workflows.generic_web_deploy_provider.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={},
-            ),
+        with patch(
+            "control_plane.workflows.generic_web_deploy_provider.control_plane_runtime_environments.resolve_runtime_environment_values",
+            return_value={},
         ):
             resolved = provider.resolve_deploy_target(
                 control_plane_root=Path("."),
@@ -519,6 +587,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 request_source_git_ref="abc123",
                 request_timeout_seconds=45,
                 request_no_cache=True,
+                record_store=store,
                 profile=_profile(),
                 lane=_profile().lanes[0],
                 normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
@@ -529,8 +598,100 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(resolved.ship_request.deploy_mode, "dokploy-application-api")
         self.assertEqual(resolved.ship_request.target_category, "application")
         self.assertEqual(resolved.ship_request.provider_target_type, "application")
+        self.assertEqual(resolved.ship_request.target_name, "provider-target-app")
         self.assertEqual(resolved.resolved_target.target_id, "target-123")
+        self.assertEqual(resolved.resolved_target.target_name, "provider-target-app")
+        deployed_target = resolved.deployed_target
+        assert deployed_target is not None
+        self.assertEqual(deployed_target.display_name, "provider-target-app")
         self.assertEqual(resolved.deploy_timeout_seconds, 45)
+
+    def test_dokploy_provider_blocks_missing_provider_target_authority(self) -> None:
+        class MissingProviderTargetStore(_DokployGenericWebDeployStore):
+            def read_provider_target_record(
+                self, *, context_name: str, instance_name: str
+            ) -> ProviderTargetRecord:
+                raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+        provider = DokployGenericWebDeployProvider()
+        store = MissingProviderTargetStore(_profile())
+
+        with self.assertRaisesRegex(click.ClickException, "Missing provider-target authority"):
+            provider.resolve_deploy_target(
+                control_plane_root=Path("."),
+                request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                request_source_git_ref="abc123",
+                request_timeout_seconds=45,
+                request_no_cache=True,
+                record_store=store,
+                profile=_profile(),
+                lane=_profile().lanes[0],
+                normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                fallback_target_name="fallback-target",
+            )
+
+    def test_dokploy_provider_blocks_target_id_mismatch(self) -> None:
+        provider = DokployGenericWebDeployProvider()
+        store = _DokployGenericWebDeployStore(
+            _profile(),
+            provider_target=ProviderTargetRecord(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                provider_id="dokploy",
+                target_category="application",
+                target_id="provider-target-id",
+                display_name="provider-target-app",
+                provider_target_type="application",
+                updated_at="2026-04-30T22:00:00Z",
+                source_label="test",
+            ),
+        )
+
+        with self.assertRaisesRegex(click.ClickException, "Provider-target id mismatch"):
+            provider.resolve_deploy_target(
+                control_plane_root=Path("."),
+                request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                request_source_git_ref="abc123",
+                request_timeout_seconds=45,
+                request_no_cache=True,
+                record_store=store,
+                profile=_profile(),
+                lane=_profile().lanes[0],
+                normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                fallback_target_name="fallback-target",
+            )
+
+    def test_dokploy_provider_resolves_selected_lane_without_global_target_scan(
+        self,
+    ) -> None:
+        class StoreWithDangerousListMethods(_DokployGenericWebDeployStore):
+            def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]:
+                raise AssertionError("deploy resolution must not scan all Dokploy targets")
+
+            def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+                raise AssertionError("deploy resolution must not scan all Dokploy target ids")
+
+        provider = DokployGenericWebDeployProvider()
+        store = StoreWithDangerousListMethods(_profile())
+
+        with patch(
+            "control_plane.workflows.generic_web_deploy_provider.control_plane_runtime_environments.resolve_runtime_environment_values",
+            return_value={},
+        ):
+            resolved = provider.resolve_deploy_target(
+                control_plane_root=Path("."),
+                request_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                request_source_git_ref="abc123",
+                request_timeout_seconds=45,
+                request_no_cache=True,
+                record_store=store,
+                profile=_profile(),
+                lane=_profile().lanes[0],
+                normalized_artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                fallback_target_name="fallback-target",
+            )
+
+        self.assertEqual(resolved.resolved_target.target_id, "target-123")
 
     def test_resolve_generic_web_profile_lane_rejects_missing_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
