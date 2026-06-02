@@ -23,7 +23,9 @@ _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 def register_product_config_commands(
     main: click.Group,
     *,
-    summarize_product_profile_record: Callable[[LaunchplaneProductProfileRecord], dict[str, object]],
+    summarize_product_profile_record: Callable[
+        [LaunchplaneProductProfileRecord], dict[str, object]
+    ],
     summarize_dokploy_target_record: Callable[..., dict[str, object]],
     dokploy_target_route: Callable[[DokployTargetRecord | DokployTargetIdRecord], tuple[str, str]],
     target_id_map: Callable[[tuple[DokployTargetIdRecord, ...]], dict[tuple[str, str], str]],
@@ -136,7 +138,14 @@ def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at:
     finally:
         store.close()
 
-    target_id_map = callbacks.target_id_map(result.dokploy_target_ids)
+    target_id_map = callbacks.target_id_map(result.provider_target_ids)
+    provider_targets = [
+        callbacks.summarize_dokploy_target_record(
+            record,
+            target_id=target_id_map.get(callbacks.dokploy_target_route(record), ""),
+        )
+        for record in result.provider_targets
+    ]
     click.echo(
         json.dumps(
             {
@@ -145,14 +154,10 @@ def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at:
                 "product_profile": callbacks.summarize_product_profile_record(
                     result.product_profile
                 ),
-                "dokploy_target_count": len(result.dokploy_targets),
-                "dokploy_targets": [
-                    callbacks.summarize_dokploy_target_record(
-                        record,
-                        target_id=target_id_map.get(callbacks.dokploy_target_route(record), ""),
-                    )
-                    for record in result.dokploy_targets
-                ],
+                "provider_target_count": len(result.provider_targets),
+                "provider_targets": provider_targets,
+                "dokploy_target_count": len(result.provider_targets),
+                "dokploy_targets": provider_targets,
                 "runtime_environment_record_count": len(result.runtime_environments),
                 "runtime_environment_records": [
                     callbacks.summarize_runtime_environment_record(record)
@@ -174,11 +179,17 @@ class _ProductOnboardingApplyCallbacks:
     def __init__(
         self,
         *,
-        summarize_product_profile_record: Callable[[LaunchplaneProductProfileRecord], dict[str, object]],
+        summarize_product_profile_record: Callable[
+            [LaunchplaneProductProfileRecord], dict[str, object]
+        ],
         summarize_dokploy_target_record: Callable[..., dict[str, object]],
-        dokploy_target_route: Callable[[DokployTargetRecord | DokployTargetIdRecord], tuple[str, str]],
+        dokploy_target_route: Callable[
+            [DokployTargetRecord | DokployTargetIdRecord], tuple[str, str]
+        ],
         target_id_map: Callable[[tuple[DokployTargetIdRecord, ...]], dict[tuple[str, str], str]],
-        summarize_runtime_environment_record: Callable[[RuntimeEnvironmentRecord], dict[str, object]],
+        summarize_runtime_environment_record: Callable[
+            [RuntimeEnvironmentRecord], dict[str, object]
+        ],
         summarize_secret_binding_record: Callable[[SecretBinding], dict[str, object]],
     ) -> None:
         self.summarize_product_profile_record = summarize_product_profile_record

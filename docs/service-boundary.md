@@ -831,10 +831,12 @@ not include secret plaintext.
 
 Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
-and writes the full Launchplane-owned bundle: product profile, Dokploy target
-records, target-id records, runtime-environment records, and managed secret
-binding placeholders. It is restricted to `product_onboarding.apply` authority
-for product/context `launchplane`, requires DB-backed storage, returns only
+and writes the full Launchplane-owned bundle: product profile, existing
+Dokploy-backed target records, target-id records, runtime-environment records,
+and managed secret binding placeholders. Manifests should use neutral
+`provider_targets`; legacy `dokploy_targets` remains accepted as compatibility
+input. The route is restricted to `product_onboarding.apply` authority for
+product/context `launchplane`, requires DB-backed storage, returns only
 sanitized summaries, and exists so the Launchplane seed import workflow can seed
 product records without product repos storing live lifecycle truth. Responses
 include neutral `provider_target*` summary keys while retaining `dokploy_*`

@@ -142,27 +142,27 @@ def _seed_import_manifest(
     import_id: str, target_ids_by_env: dict[str, str] | None = None
 ) -> dict[str, object]:
     catalog = json.loads(
-        Path("import-material/launchplane/seed-imports/catalog.json").read_text(
-            encoding="utf-8"
-        )
+        Path("import-material/launchplane/seed-imports/catalog.json").read_text(encoding="utf-8")
     )
-    entry = next(
-        item for item in catalog["imports"] if item["import_id"] == import_id
-    )
+    entry = next(item for item in catalog["imports"] if item["import_id"] == import_id)
     manifest_payload = json.loads(json.dumps(entry["manifest"]))
     target_ids = target_ids_by_env or {}
     for mapping in entry.get("target_id_env", []):
-        for target in manifest_payload.get("dokploy_targets", []):
-            if target["context"] == mapping["context"] and target["instance"] == mapping["instance"]:
+        targets = manifest_payload.get("provider_targets")
+        if targets is None:
+            targets = manifest_payload.get("dokploy_targets", [])
+        for target in targets:
+            if (
+                target["context"] == mapping["context"]
+                and target["instance"] == mapping["instance"]
+            ):
                 target["target_id"] = target_ids.get(mapping["env"], "")
     return cast(dict[str, object], manifest_payload)
 
 
 class ProductOnboardingTests(unittest.TestCase):
     def test_launchplane_seed_import_workflow_owns_seed_writes(self) -> None:
-        deploy_script = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
-            encoding="utf-8"
-        )
+        deploy_script = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
         workflow_text = Path(".github/workflows/launchplane-seed-import.yml").read_text(
             encoding="utf-8"
         )
@@ -209,7 +209,10 @@ class ProductOnboardingTests(unittest.TestCase):
             if entry["kind"] == "product_onboarding":
                 manifest_payload = json.loads(json.dumps(entry["manifest"]))
                 for mapping in entry.get("target_id_env", []):
-                    for target in manifest_payload.get("dokploy_targets", []):
+                    targets = manifest_payload.get("provider_targets")
+                    if targets is None:
+                        targets = manifest_payload.get("dokploy_targets", [])
+                    for target in targets:
                         if (
                             target["context"] == mapping["context"]
                             and target["instance"] == mapping["instance"]
@@ -258,6 +261,77 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ODOO_CM_TESTING_DOKPLOY_TARGET_ID is required", result.stderr)
+
+    def test_launchplane_seed_import_script_patches_provider_targets(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            output_dir = temporary_directory / "seed-import"
+            catalog_path = temporary_directory / "catalog.json"
+            manifest_payload = _manifest_payload()
+            manifest_payload["provider_targets"] = manifest_payload.pop("dokploy_targets")
+            manifest_payload["dokploy_targets"] = json.loads(
+                json.dumps(manifest_payload["provider_targets"])
+            )
+            for target in cast(list[dict[str, object]], manifest_payload["provider_targets"]):
+                if target["instance"] == "prod":
+                    target["target_id"] = ""
+            for target in cast(list[dict[str, object]], manifest_payload["dokploy_targets"]):
+                if target["instance"] == "prod":
+                    target["target_id"] = ""
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "imports": [
+                            {
+                                "import_id": "example-provider-targets",
+                                "kind": "product_onboarding",
+                                "manifest": manifest_payload,
+                                "target_id_env": [
+                                    {
+                                        "context": "example-site-prod",
+                                        "instance": "prod",
+                                        "env": "EXAMPLE_PROD_TARGET_ID",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "scripts/deploy/apply-launchplane-seed-imports.py",
+                    "--catalog",
+                    str(catalog_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--import-id",
+                    "example-provider-targets",
+                    "--reason",
+                    "test dry run",
+                ],
+                check=False,
+                capture_output=True,
+                env={**os.environ, "EXAMPLE_PROD_TARGET_ID": "app-prod-patched"},
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            output_payload = json.loads(
+                (output_dir / "example-provider-targets-payload.json").read_text(encoding="utf-8")
+            )
+
+        manifest = output_payload["manifest"]
+        self.assertIn("provider_targets", manifest)
+        self.assertNotIn("dokploy_targets", manifest)
+        provider_targets = manifest["provider_targets"]
+        self.assertEqual(provider_targets[1]["target_id"], "app-prod-patched")
 
     def test_deploy_authz_grants_include_scheduled_merge_train_runner(
         self,
@@ -393,7 +467,9 @@ class ProductOnboardingTests(unittest.TestCase):
             with self.subTest(workflow=workflow_path.name):
                 self.assertIn("launchplane_url:", workflow_text)
                 self.assertIn("launchplane_audience:", workflow_text)
-                self.assertIn("inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL", workflow_text)
+                self.assertIn(
+                    "inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL", workflow_text
+                )
                 self.assertIn("audience: ${{ inputs.launchplane_audience }}", workflow_text)
 
     def test_ingress_route_dry_run_workflow_rejects_non_object_options(self) -> None:
@@ -1148,9 +1224,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
-                grant["source_label"].startswith(
-                    "deploy:local-operator-product-config-"
-                )
+                grant["source_label"].startswith("deploy:local-operator-product-config-")
             )
 
     def test_seed_import_verireel_onboarding_manifest_enrolls_preview_lifecycle(self) -> None:
@@ -1377,26 +1451,40 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "disabled")
 
-    def test_product_onboarding_manifest_accepts_provider_targets_alias(self) -> None:
+    def test_product_onboarding_manifest_prefers_provider_targets(self) -> None:
         payload = _manifest_payload()
         payload["provider_targets"] = payload.pop("dokploy_targets")
 
         manifest = ProductOnboardingManifest.model_validate(payload)
 
+        self.assertEqual(len(manifest.provider_targets), 2)
         self.assertEqual(len(manifest.dokploy_targets), 2)
         self.assertEqual(
             [
                 (target.context, target.instance, target.target_type, target.target_id)
-                for target in manifest.dokploy_targets
+                for target in manifest.provider_targets
             ],
             [
                 ("example-site-testing", "testing", "application", "app-testing-123"),
                 ("example-site-prod", "prod", "application", "app-prod-123"),
             ],
         )
-        self.assertNotIn("provider_targets", manifest.model_dump())
+        self.assertIn("provider_targets", manifest.model_dump())
+        self.assertNotIn("dokploy_targets", manifest.model_dump())
 
-    def test_product_onboarding_manifest_accepts_matching_provider_targets_alias(
+    def test_product_onboarding_manifest_accepts_dokploy_targets_compat_input(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(len(manifest.provider_targets), 2)
+        self.assertEqual(manifest.dokploy_targets, manifest.provider_targets)
+        self.assertIn("provider_targets", manifest.model_dump())
+        self.assertNotIn("dokploy_targets", manifest.model_dump())
+
+    def test_product_onboarding_manifest_accepts_matching_provider_targets_input(
         self,
     ) -> None:
         payload = _manifest_payload()
@@ -1404,9 +1492,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         manifest = ProductOnboardingManifest.model_validate(payload)
 
+        self.assertEqual(len(manifest.provider_targets), 2)
         self.assertEqual(len(manifest.dokploy_targets), 2)
 
-    def test_product_onboarding_manifest_rejects_conflicting_provider_targets_alias(
+    def test_product_onboarding_manifest_rejects_conflicting_provider_targets_input(
         self,
     ) -> None:
         payload = _manifest_payload()
