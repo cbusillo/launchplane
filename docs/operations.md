@@ -35,6 +35,8 @@ API path instead of running the local command from an arbitrary checkout.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 - `storage provider-target-audit`: run the read-only provider-target parity
   preflight before Phase Two backfill or provider-target authority cutover.
+- `storage provider-target-backfill`: dry-run or apply explicit provider-target
+  rows from complete Dokploy target/id pairs during Phase Two migration.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
@@ -59,6 +61,30 @@ command emits JSON and exits nonzero when explicit provider-target rows are
 missing, partial Dokploy pairs exist, or explicit rows disagree with the
 Dokploy-derived projection. Backfill and authority cutover should not proceed
 until the audit has no unresolved blockers for the affected lanes.
+
+Use the backfill command to seed missing physical rows after reviewing the audit
+output and after dual-write is deployed:
+
+```bash
+uv run launchplane storage provider-target-backfill \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+Dry-run is the default. It reports `would-create`, `skipped-exists`,
+`skipped-incomplete`, `skipped-conflict`, and `unsupported-provider` rows without
+writing anything. Review incomplete pairs and conflicts before applying; conflicts
+are never overwritten automatically. Apply only after the dry-run output is
+acceptable:
+
+```bash
+uv run launchplane storage provider-target-backfill \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --apply
+```
+
+Backfill writes only complete, non-conflicting Dokploy-derived rows and is
+idempotent. Re-run `storage provider-target-audit` after apply and require clean
+evidence before provider-target authority cutover.
 
 Provider-target dual-write is active for Launchplane-owned target identity
 mutations: product onboarding, Dokploy target adoption/creation, product context

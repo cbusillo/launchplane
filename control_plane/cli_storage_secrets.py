@@ -7,6 +7,7 @@ from control_plane.contracts.secret_record import SecretScope
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.provider_target_audit import audit_provider_targets
+from control_plane.workflows.provider_target_backfill import backfill_provider_targets
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -81,6 +82,41 @@ def storage_provider_target_audit(
         postgres_store.ensure_schema()
         result = audit_provider_targets(
             postgres_store,
+            provider_id=provider_id,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        click.echo(json.dumps(result.to_report_payload(), indent=2, sort_keys=True))
+    finally:
+        postgres_store.close()
+    if not result.ok:
+        raise click.exceptions.Exit(1)
+
+
+@storage.command("provider-target-backfill")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane provider-target records.",
+)
+@click.option("--apply", "apply_changes", is_flag=True, help="Write missing rows.")
+@click.option("--provider-id", default="", help="Optional provider id filter.")
+@click.option("--context", "context_name", default="", help="Optional context filter.")
+@click.option("--instance", "instance_name", default="", help="Optional instance filter.")
+def storage_provider_target_backfill(
+    database_url: str,
+    apply_changes: bool,
+    provider_id: str,
+    context_name: str,
+    instance_name: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        postgres_store.ensure_schema()
+        result = backfill_provider_targets(
+            postgres_store,
+            apply=apply_changes,
             provider_id=provider_id,
             context_name=context_name,
             instance_name=instance_name,

@@ -1229,6 +1229,29 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed, (record,))
         self.assertEqual(filtered, (record,))
 
+    def test_create_provider_target_record_if_absent_refuses_existing_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            record = _provider_target_record(context="verireel", instance="prod")
+            changed_record = _provider_target_record(
+                context="verireel",
+                instance="prod",
+                target_id="app-verireel-prod-new",
+            )
+            first_status = store.create_provider_target_record_if_absent(record)
+            second_status = store.create_provider_target_record_if_absent(changed_record)
+            loaded = store.read_provider_target_record(
+                context_name="verireel", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(first_status, "created")
+        self.assertEqual(second_status, "exists")
+        self.assertEqual(loaded, record)
+
     def test_delete_provider_target_record_uses_current_authority_match(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"

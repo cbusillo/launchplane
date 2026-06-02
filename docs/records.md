@@ -148,6 +148,12 @@ an ORM column/table or remains only in the evidence payload.
   with the neutral projection from paired Dokploy target and target-id records,
   reports missing halves and mismatches, and exits nonzero when unresolved
   blockers would make backfill or authority cutover unsafe.
+- `uv run launchplane storage provider-target-backfill` is the Phase Two seeding
+  path for explicit provider-target rows. Dry-run is the default; `--apply`
+  writes only complete Dokploy target/id projections that have no conflicting
+  physical row. Existing matching physical rows are skipped without churn,
+  incomplete pairs are reported but not guessed, and conflicts or unsupported
+  provider rows are never overwritten automatically.
 - Shared ship and promotion request/evidence contracts accept a neutral
   `target_reference` compatibility input for target name, provider id,
   category, and provider target type. Persisted records still write the flat
