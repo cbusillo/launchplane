@@ -442,6 +442,42 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(retired_placeholder.binding_key, "DISCORD_TOKEN")
         self.assertEqual(retired_placeholder.status, "disabled")
 
+    def test_runtime_secret_placeholder_retirement_requires_exact_route(self) -> None:
+        store = _FakeProductConfigStore()
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="binding-unrelated-placeholder",
+                secret_id="secret-unrelated-placeholder",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="prod",
+                status="disabled",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+
+        control_plane_product_config._retire_disabled_runtime_secret_placeholders(
+            record_store=store,
+            configured_binding=SecretBinding(
+                binding_id="binding-global-discord-token",
+                secret_id="secret-global-discord-token",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="",
+                instance="",
+                status="configured",
+                created_at="2026-05-02T00:00:00Z",
+                updated_at="2026-05-02T00:00:00Z",
+            ),
+            updated_at="2026-05-02T00:00:00Z",
+        )
+
+        unrelated_placeholder = store.secret_bindings["binding-unrelated-placeholder"]
+        self.assertEqual(unrelated_placeholder.integration, "runtime_environment")
+        self.assertEqual(unrelated_placeholder.status, "disabled")
+
     def test_product_config_rejects_existing_configured_runtime_secret_duplicate(
         self,
     ) -> None:
