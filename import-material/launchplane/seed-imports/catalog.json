@@ -53,6 +53,22 @@
             "instance": "prod"
           }
         ],
+        "expected_config": {
+          "runtime_environment_keys": [
+            {
+              "key": "DISCORD_BLUE_STATE_DIR",
+              "context": "discord-blue",
+              "instance": "prod"
+            }
+          ],
+          "managed_secret_bindings": [
+            {
+              "binding_key": "DISCORD_TOKEN",
+              "context": "discord-blue",
+              "instance": "prod"
+            }
+          ]
+        },
         "source_label": "import-material:discord-blue-product-onboarding"
       }
     },
