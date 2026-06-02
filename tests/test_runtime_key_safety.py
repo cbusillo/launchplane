@@ -180,6 +180,72 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertEqual(disabled_evaluation.status, "fail")
         self.assertEqual(disabled_evaluation.findings[0].code, "binding_disabled")
 
+    def test_more_specific_binding_satisfies_target_when_context_binding_also_exists(
+        self,
+    ) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="opw",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+            secret_bindings=(
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    binding_id="binding-context-token",
+                    secret_id="secret-context-token",
+                ).model_copy(update={"instance": ""}),
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    binding_id="binding-instance-token",
+                    secret_id="secret-instance-token",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    secret_class="testing",
+                    allowed_contexts=("opw",),
+                    allowed_instances=("testing",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+
+    def test_equally_specific_duplicate_bindings_remain_ambiguous(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="opw",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+            secret_bindings=(
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    binding_id="binding-first-token",
+                    secret_id="secret-first-token",
+                ),
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    binding_id="binding-second-token",
+                    secret_id="secret-second-token",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    secret_class="testing",
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(evaluation.findings[0].code, "ambiguous_binding")
+
     def test_context_and_instance_restrictions_fail_closed(self) -> None:
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(

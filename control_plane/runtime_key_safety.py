@@ -116,7 +116,8 @@ def evaluate_runtime_key_safety(
                 )
             )
             continue
-        if len(bindings) > 1:
+        effective_bindings = _effective_bindings_for_target(bindings, target=target)
+        if len(effective_bindings) > 1:
             findings.append(
                 RuntimeKeySafetyFinding(
                     code="ambiguous_binding",
@@ -126,7 +127,7 @@ def evaluate_runtime_key_safety(
             )
             continue
 
-        binding = bindings[0]
+        binding = effective_bindings[0]
         if binding.status != "configured":
             findings.append(
                 RuntimeKeySafetyFinding(
@@ -191,6 +192,25 @@ def _bindings_by_binding_key(
     for binding in secret_bindings:
         grouped.setdefault(binding.binding_key, []).append(binding)
     return {key: tuple(bindings) for key, bindings in grouped.items()}
+
+
+def _effective_bindings_for_target(
+    bindings: tuple[SecretBinding, ...], *, target: RuntimeKeySafetyTarget
+) -> tuple[SecretBinding, ...]:
+    highest_rank = max(_binding_route_rank(binding=binding, target=target) for binding in bindings)
+    return tuple(
+        binding
+        for binding in bindings
+        if _binding_route_rank(binding=binding, target=target) == highest_rank
+    )
+
+
+def _binding_route_rank(*, binding: SecretBinding, target: RuntimeKeySafetyTarget) -> int:
+    if binding.context == target.context and binding.instance == target.instance:
+        return 2
+    if binding.context == target.context and not binding.instance:
+        return 1
+    return 0
 
 
 def _evaluate_binding_rule(
