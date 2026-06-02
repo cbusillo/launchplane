@@ -1,12 +1,14 @@
+from typing import cast
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import (
     DeployTargetCategory,
+    DeployTargetCompatibilityType,
     DeployTargetContractReference,
     apply_target_reference_defaults,
     ensure_target_reference_matches,
 )
-from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 
 
@@ -18,11 +20,11 @@ class ShipRequest(BaseModel):
     context: str
     instance: str
     source_git_ref: str
-    target_name: str
-    target_type: DokployTargetType
-    target_reference: DeployTargetContractReference | None = Field(
-        default=None, exclude=True
+    target_name: str = ""
+    target_type: DeployTargetCompatibilityType = Field(
+        default=cast(DeployTargetCompatibilityType, "")
     )
+    target_reference: DeployTargetContractReference | None = Field(default=None, exclude=True)
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
     provider_target_type: str = ""
@@ -52,6 +54,11 @@ class ShipRequest(BaseModel):
             raise ValueError("ship request requires instance")
         if not self.source_git_ref.strip():
             raise ValueError("ship request requires source_git_ref")
+        self.target_name = self.target_name.strip()
+        if not self.target_name:
+            raise ValueError("ship request requires target_name")
+        if not self.target_type:
+            raise ValueError("ship request requires target_type")
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
         self.provider_deploy_mode = self.provider_deploy_mode.strip()

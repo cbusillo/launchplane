@@ -158,6 +158,26 @@ def resolve_ship_request_for_promotion(
             "Promotion request deploy_mode does not match resolved Dokploy ship mode. "
             f"Request={request.deploy_mode} configured={ship_request.deploy_mode}."
         )
+    if request.provider_id != ship_request.provider_id:
+        raise click.ClickException(
+            "Promotion request provider_id does not match resolved ship provider_id. "
+            f"Request={request.provider_id} configured={ship_request.provider_id}."
+        )
+    if request.target_category != ship_request.target_category:
+        raise click.ClickException(
+            "Promotion request target_category does not match resolved ship target_category. "
+            f"Request={request.target_category} configured={ship_request.target_category}."
+        )
+    if request.provider_target_type != ship_request.provider_target_type:
+        raise click.ClickException(
+            "Promotion request provider_target_type does not match resolved ship provider_target_type. "
+            f"Request={request.provider_target_type} configured={ship_request.provider_target_type}."
+        )
+    if request.provider_deploy_mode != ship_request.provider_deploy_mode:
+        raise click.ClickException(
+            "Promotion request provider_deploy_mode does not match resolved ship provider_deploy_mode. "
+            f"Request={request.provider_deploy_mode} configured={ship_request.provider_deploy_mode}."
+        )
     return ship_request
 
 
