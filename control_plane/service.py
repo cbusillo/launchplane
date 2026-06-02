@@ -12511,6 +12511,7 @@ def create_launchplane_service_app(
                 try:
                     driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
                         control_plane_root=resolved_root,
+                        product_name=live_target_runtime_request.product,
                         context_name=live_target_runtime_request.context,
                         instance_name=live_target_runtime_request.instance,
                         apply_changes=live_target_runtime_request.apply_changes,

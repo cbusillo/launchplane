@@ -8,14 +8,16 @@ import click
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeEnvironmentClass,
     RuntimeKeySafetyTarget,
 )
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
+    evaluate_runtime_key_safety,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -38,6 +40,10 @@ class DokployDeployTrigger(Protocol):
         deploy_timeout_seconds: int,
         no_cache: bool,
     ) -> dict[str, str]: ...
+
+
+class LiveTargetRuntimeProfileStore(RuntimeKeySafetyPolicyReadStore, Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
 def runtime_env_live_target_delta(
@@ -67,47 +73,52 @@ def runtime_env_live_target_delta(
     }
 
 
-def runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:
-    normalized_instance = instance_name.strip().lower()
-    if normalized_instance in {"prod", "production"}:
-        return "prod"
-    if normalized_instance in {"testing", "test", "staging", "stage"}:
-        return "testing"
-    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
-        return "preview"
-    if normalized_instance in {"dev", "local", "development"}:
-        return "dev"
-    return "unknown"
-
-
 def evaluate_runtime_key_safety_for_live_target_sync(
     *,
     record_store: RuntimeKeySafetyPolicyReadStore,
     context_name: str,
     instance_name: str,
     require_policy: bool = True,
+    required_binding_keys: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    bindings = record_store.list_secret_bindings(
+    all_runtime_bindings = record_store.list_secret_bindings(
         integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-        context_name=context_name,
-        instance_name=instance_name,
         limit=None,
     )
-    binding_keys = tuple(binding.binding_key for binding in bindings)
+    bindings = tuple(
+        binding
+        for binding in all_runtime_bindings
+        if _runtime_secret_binding_matches_target(
+            binding_context=binding.context,
+            binding_instance=binding.instance,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
+    binding_keys = required_binding_keys or tuple(binding.binding_key for binding in bindings)
     if not binding_keys:
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
-        evaluation = evaluate_runtime_key_safety_from_store(
-            record_store=record_store,
-            policy_record=policy_record,
-            target=RuntimeKeySafetyTarget(
-                context=context_name,
-                instance=instance_name,
-                environment_class=runtime_key_safety_environment_class(instance_name),
-            ),
-            required_binding_keys=binding_keys,
+        target = RuntimeKeySafetyTarget(
+            context=context_name,
+            instance=instance_name,
+            environment_class=runtime_key_safety_environment_class(instance_name),
         )
+        if required_binding_keys:
+            evaluation = evaluate_runtime_key_safety(
+                target=target,
+                required_binding_keys=binding_keys,
+                secret_bindings=bindings,
+                secret_rules=policy_record.rules,
+            )
+        else:
+            evaluation = evaluate_runtime_key_safety_from_store(
+                record_store=record_store,
+                policy_record=policy_record,
+                target=target,
+                required_binding_keys=binding_keys,
+            )
     except ValueError as error:
         if not require_policy:
             return {
@@ -142,6 +153,110 @@ def skipped_runtime_key_safety_summary() -> dict[str, object]:
     return {"required": False, "status": "skipped", "checked_binding_keys": []}
 
 
+def _runtime_secret_binding_matches_target(
+    *, binding_context: str, binding_instance: str, context_name: str, instance_name: str
+) -> bool:
+    if not binding_context:
+        return True
+    if binding_context != context_name:
+        return False
+    if not binding_instance:
+        return True
+    return binding_instance == instance_name
+
+
+def _require_product_profile_runtime_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    product_name: str,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    profile = record_store.read_product_profile_record(product_name)
+    lane = next(
+        (
+            candidate
+            for candidate in profile.lanes
+            if candidate.context == context_name and candidate.instance == instance_name
+        ),
+        None,
+    )
+    if lane is None:
+        raise LiveTargetRuntimeError(
+            f"Product {product_name!r} has no lane for {context_name}/{instance_name}.",
+            code="product_lane_not_found",
+        )
+    allowed_keys: set[str] = set()
+    for runtime_requirement in profile.expected_config.runtime_environment_keys:
+        if _expected_config_route_matches(
+            requirement_context=runtime_requirement.context,
+            requirement_instance=runtime_requirement.instance,
+            context_name=context_name,
+            instance_name=instance_name,
+        ):
+            allowed_keys.add(runtime_requirement.key)
+    for secret_requirement in profile.expected_config.managed_secret_bindings:
+        if (
+            secret_requirement.integration
+            != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+        ):
+            continue
+        if _expected_config_route_matches(
+            requirement_context=secret_requirement.context,
+            requirement_instance=secret_requirement.instance,
+            context_name=context_name,
+            instance_name=instance_name,
+        ):
+            allowed_keys.add(secret_requirement.binding_key)
+    if not allowed_keys:
+        raise LiveTargetRuntimeError(
+            f"Product {product_name!r} has no expected runtime keys for {context_name}/{instance_name}.",
+            code="runtime_environment_empty",
+        )
+    return allowed_keys
+
+
+def _require_product_profile_runtime_secret_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    product_name: str,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    profile = record_store.read_product_profile_record(product_name)
+    return {
+        requirement.binding_key
+        for requirement in profile.expected_config.managed_secret_bindings
+        if requirement.integration == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+        and _expected_config_route_matches(
+            requirement_context=requirement.context,
+            requirement_instance=requirement.instance,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    }
+
+
+def _expected_config_route_matches(
+    *,
+    requirement_context: str,
+    requirement_instance: str,
+    context_name: str,
+    instance_name: str,
+) -> bool:
+    if requirement_instance:
+        return requirement_context == context_name and requirement_instance == instance_name
+    if requirement_context:
+        return requirement_context == context_name
+    return True
+
+
+def _filter_runtime_environment_to_product_keys(
+    *, desired_env_map: dict[str, str], allowed_keys: set[str]
+) -> dict[str, str]:
+    return {key: value for key, value in desired_env_map.items() if key in allowed_keys}
+
+
 def require_dokploy_target_definition(
     *,
     source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
@@ -165,6 +280,7 @@ def require_dokploy_target_definition(
 def apply_live_target_runtime_environment(
     *,
     control_plane_root: Path,
+    product_name: str = "",
     context_name: str,
     instance_name: str,
     apply_changes: bool,
@@ -196,6 +312,40 @@ def apply_live_target_runtime_environment(
             code="runtime_environment_empty",
         )
 
+    database_url = resolve_database_url(None)
+    runtime_secret_binding_keys: set[str] = set()
+    if product_name.strip():
+        if database_url is None:
+            raise LiveTargetRuntimeError(
+                "Live target runtime product scoping requires LAUNCHPLANE_DATABASE_URL.",
+                code="runtime_environment_unavailable",
+            )
+        postgres_store = PostgresRecordStore(database_url=database_url)
+        try:
+            postgres_store.ensure_schema()
+            desired_env_map = _filter_runtime_environment_to_product_keys(
+                desired_env_map=desired_env_map,
+                allowed_keys=_require_product_profile_runtime_keys(
+                    record_store=postgres_store,
+                    product_name=product_name.strip(),
+                    context_name=context_name,
+                    instance_name=instance_name,
+                ),
+            )
+            runtime_secret_binding_keys = _require_product_profile_runtime_secret_keys(
+                record_store=postgres_store,
+                product_name=product_name.strip(),
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        finally:
+            postgres_store.close()
+        if not desired_env_map:
+            raise LiveTargetRuntimeError(
+                f"No expected Launchplane runtime environment values resolved for {product_name}/{context_name}/{instance_name}.",
+                code="runtime_environment_empty",
+            )
+
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
             control_plane_root=control_plane_root
@@ -224,7 +374,6 @@ def apply_live_target_runtime_environment(
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
 
-    database_url = resolve_database_url(None)
     if apply_changes and database_url is None:
         raise LiveTargetRuntimeError(
             "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed "
@@ -233,13 +382,16 @@ def apply_live_target_runtime_environment(
         )
     if database_url is not None and (not apply_changes or changed_key_count or deploy):
         postgres_store = PostgresRecordStore(database_url=database_url)
-        postgres_store.ensure_schema()
         try:
+            postgres_store.ensure_schema()
             runtime_key_safety = evaluate_runtime_key_safety_for_live_target_sync(
                 record_store=postgres_store,
                 context_name=context_name,
                 instance_name=instance_name,
                 require_policy=apply_changes,
+                required_binding_keys=tuple(
+                    sorted(key for key in runtime_secret_binding_keys if key in desired_env_map)
+                ),
             )
         finally:
             postgres_store.close()

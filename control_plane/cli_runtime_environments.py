@@ -453,6 +453,7 @@ def environments_sync_live_target(
 
 
 @environments.command("apply-live-target")
+@click.option("--product", "product_name", required=True)
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
 @click.option("--dry-run", "dry_run", is_flag=True, default=False)
@@ -461,6 +462,7 @@ def environments_sync_live_target(
 @click.option("--no-cache", is_flag=True, default=False)
 @click.option("--deploy-timeout-seconds", type=int, default=None, show_default=False)
 def environments_apply_live_target(
+    product_name: str,
     context_name: str,
     instance_name: str,
     dry_run: bool,
@@ -475,6 +477,7 @@ def environments_apply_live_target(
         raise click.ClickException("Deploy options require --apply.")
     callbacks = _runtime_environment_callbacks()
     payload = callbacks.apply_live_target_runtime_environment(
+        product_name=product_name,
         context_name=context_name,
         instance_name=instance_name,
         apply_changes=apply_changes,

@@ -3234,6 +3234,7 @@ def _sync_live_target_from_tracked_contract(
 
 def _apply_live_target_runtime_environment(
     *,
+    product_name: str,
     context_name: str,
     instance_name: str,
     apply_changes: bool,
@@ -3244,6 +3245,7 @@ def _apply_live_target_runtime_environment(
     try:
         return control_plane_live_target_runtime.apply_live_target_runtime_environment(
             control_plane_root=_control_plane_root(),
+            product_name=product_name,
             context_name=context_name,
             instance_name=instance_name,
             apply_changes=apply_changes,
