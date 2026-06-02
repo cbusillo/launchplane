@@ -150,6 +150,7 @@ class ProductOnboardingManifest(BaseModel):
     runtime_port: int = Field(ge=1, le=65535)
     health_path: str
     lanes: tuple[ProductOnboardingLaneManifest, ...]
+    historical_contexts: tuple[str, ...] = ()
     preview: ProductOnboardingPreviewManifest = Field(
         default_factory=ProductOnboardingPreviewManifest
     )
@@ -229,9 +230,23 @@ class ProductOnboardingManifest(BaseModel):
                     f"{target.context}/{target.instance}"
                 )
 
-        allowed_contexts = {lane.context.strip() for lane in self.lanes}
+        allowed_contexts = {self.product.strip()}
+        allowed_contexts.update(lane.context.strip() for lane in self.lanes)
         if self.preview.context.strip():
             allowed_contexts.add(self.preview.context.strip())
+        historical_contexts: list[str] = []
+        for raw_context in self.historical_contexts:
+            context = raw_context.strip()
+            if not context:
+                raise ValueError("product onboarding historical_contexts values must be non-empty")
+            if context in allowed_contexts:
+                raise ValueError(
+                    "product onboarding historical_contexts cannot include current product contexts: "
+                    f"{context}"
+                )
+            if context not in historical_contexts:
+                historical_contexts.append(context)
+        self.historical_contexts = tuple(historical_contexts)
         for record in self.runtime_environments:
             if record.scope == "global":
                 if record.context.strip() or record.instance.strip():

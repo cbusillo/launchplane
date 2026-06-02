@@ -30,6 +30,13 @@ ODOO_TESTING_SECRET_KEYS = (
     "ODOO_DB_PASSWORD",
     "ODOO_MASTER_PASSWORD",
 )
+SYO_RUNTIME_KEYS = (
+    "CONTACT_EMAIL_MODE",
+    "CONTACT_FROM_EMAIL",
+    "CONTACT_TO_EMAIL",
+    "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
+    "NEXT_PUBLIC_META_PIXEL_ID",
+)
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -271,6 +278,7 @@ class ProductOnboardingTests(unittest.TestCase):
             import_ids,
             {
                 "discord-blue-product-onboarding",
+                "sellyouroutboard-product-onboarding",
                 "verireel-product-onboarding",
                 "odoo-cm-product-onboarding",
                 "odoo-opw-product-onboarding",
@@ -1464,6 +1472,59 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
         self.assertEqual(manifest.source_label, "import-material:verireel-product-onboarding")
 
+    def test_seed_import_sellyouroutboard_onboarding_manifest_preserves_cutover_contract(
+        self,
+    ) -> None:
+        manifest_payload = _seed_import_manifest("sellyouroutboard-product-onboarding")
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+
+        self.assertEqual(manifest.product, "sellyouroutboard")
+        self.assertEqual(manifest.display_name, "SellYourOutboard.com")
+        self.assertEqual(manifest.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(manifest.driver_id, "generic-web")
+        self.assertEqual(manifest.image_repository, "ghcr.io/cbusillo/sellyouroutboard")
+        self.assertEqual(manifest.runtime_port, 3000)
+        self.assertEqual(manifest.health_path, "/api/health")
+        self.assertEqual(
+            [(lane.instance, lane.context, lane.base_url) for lane in manifest.lanes],
+            [
+                ("testing", "sellyouroutboard", "https://syo-testing.shinycomputers.com"),
+                ("prod", "sellyouroutboard", "https://www.sellyouroutboard.com"),
+            ],
+        )
+        self.assertEqual(manifest.historical_contexts, ("sellyouroutboard-testing",))
+        self.assertTrue(manifest.preview.enabled)
+        self.assertEqual(manifest.preview.context, "sellyouroutboard")
+        self.assertEqual(manifest.preview.app_name_prefix, "syo-preview")
+        self.assertEqual(manifest.preview.template_instance, "testing")
+        self.assertEqual(len(manifest.provider_targets), 0)
+        self.assertEqual(len(manifest.runtime_environments), 0)
+        self.assertEqual(len(manifest.secret_bindings), 0)
+        self.assertEqual(
+            [
+                (requirement.context, requirement.instance, requirement.key)
+                for requirement in manifest.expected_config.runtime_environment_keys
+            ],
+            [("sellyouroutboard", "testing", key) for key in SYO_RUNTIME_KEYS]
+            + [("sellyouroutboard", "prod", key) for key in SYO_RUNTIME_KEYS],
+        )
+        self.assertEqual(
+            [
+                (requirement.context, requirement.instance, requirement.binding_key)
+                for requirement in manifest.expected_config.managed_secret_bindings
+            ],
+            [
+                ("sellyouroutboard", "testing", "RESEND_API_KEY"),
+                ("sellyouroutboard", "testing", "META_CONVERSIONS_API_TOKEN"),
+                ("sellyouroutboard", "prod", "RESEND_API_KEY"),
+                ("sellyouroutboard", "prod", "META_CONVERSIONS_API_TOKEN"),
+            ],
+        )
+        self.assertEqual(
+            manifest.source_label,
+            "import-material:sellyouroutboard-product-onboarding",
+        )
+
     def test_seed_import_odoo_cm_onboarding_manifest_encodes_issue_backed_bootstrap_policy(
         self,
     ) -> None:
@@ -1598,6 +1659,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(first_result.product, "example-site")
         self.assertEqual(second_result.product_profile.updated_at, "2026-05-03T02:30:00Z")
         self.assertEqual(profile.driver_id, "generic-web")
+        self.assertEqual(profile.historical_contexts, ())
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertTrue(profile.lanes[0].odoo_stable_bootstrap.enabled)
         self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
@@ -1651,6 +1713,69 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(secret_bindings[0].status, "disabled")
         self.assertEqual(secret_bindings[0].created_at, first_result.secret_bindings[0].created_at)
         self.assertEqual(secret_bindings[0].updated_at, second_result.secret_bindings[0].updated_at)
+
+    def test_apply_product_onboarding_manifest_preserves_historical_contexts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest_payload = _manifest_payload()
+            manifest_payload["historical_contexts"] = [
+                "example-site-old",
+                "example-site-preview-old",
+            ]
+            manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+
+            result = apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+            profile = store.read_product_profile_record("example-site")
+            store.close()
+
+        self.assertEqual(
+            result.product_profile.historical_contexts,
+            ("example-site-old", "example-site-preview-old"),
+        )
+        self.assertEqual(
+            profile.historical_contexts,
+            ("example-site-old", "example-site-preview-old"),
+        )
+
+    def test_apply_product_onboarding_manifest_keeps_existing_historical_contexts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            first_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            store.write_product_profile_record(
+                first_result.product_profile.model_copy(
+                    update={
+                        "historical_contexts": ("example-site-old",),
+                        "updated_at": "2026-05-03T01:20:00Z",
+                        "source": "test:cutover",
+                    }
+                )
+            )
+
+            second_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T02:20:00Z",
+            )
+            profile = store.read_product_profile_record("example-site")
+            store.close()
+
+        self.assertEqual(second_result.product_profile.historical_contexts, ("example-site-old",))
+        self.assertEqual(profile.historical_contexts, ("example-site-old",))
 
     def test_apply_product_onboarding_manifest_preserves_configured_secret_binding(
         self,

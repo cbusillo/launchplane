@@ -74,6 +74,117 @@
     },
     {
       "kind": "product_onboarding",
+      "import_id": "sellyouroutboard-product-onboarding",
+      "manifest": {
+        "product": "sellyouroutboard",
+        "display_name": "SellYourOutboard.com",
+        "repository": "cbusillo/sellyouroutboard",
+        "driver_id": "generic-web",
+        "image_repository": "ghcr.io/cbusillo/sellyouroutboard",
+        "runtime_port": 3000,
+        "health_path": "/api/health",
+        "lanes": [
+          {
+            "instance": "testing",
+            "context": "sellyouroutboard",
+            "base_url": "https://syo-testing.shinycomputers.com"
+          },
+          {
+            "instance": "prod",
+            "context": "sellyouroutboard",
+            "base_url": "https://www.sellyouroutboard.com"
+          }
+        ],
+        "historical_contexts": ["sellyouroutboard-testing"],
+        "preview": {
+          "enabled": true,
+          "context": "sellyouroutboard",
+          "enable_label": "preview",
+          "slug_template": "pr-{number}",
+          "app_name_prefix": "syo-preview",
+          "template_instance": "testing"
+        },
+        "expected_config": {
+          "runtime_environment_keys": [
+            {
+              "key": "CONTACT_EMAIL_MODE",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "key": "CONTACT_FROM_EMAIL",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "key": "CONTACT_TO_EMAIL",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "key": "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "key": "NEXT_PUBLIC_META_PIXEL_ID",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "key": "CONTACT_EMAIL_MODE",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            },
+            {
+              "key": "CONTACT_FROM_EMAIL",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            },
+            {
+              "key": "CONTACT_TO_EMAIL",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            },
+            {
+              "key": "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            },
+            {
+              "key": "NEXT_PUBLIC_META_PIXEL_ID",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            }
+          ],
+          "managed_secret_bindings": [
+            {
+              "binding_key": "RESEND_API_KEY",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "META_CONVERSIONS_API_TOKEN",
+              "context": "sellyouroutboard",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "RESEND_API_KEY",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "META_CONVERSIONS_API_TOKEN",
+              "context": "sellyouroutboard",
+              "instance": "prod"
+            }
+          ]
+        },
+        "source_label": "import-material:sellyouroutboard-product-onboarding"
+      }
+    },
+    {
+      "kind": "product_onboarding",
       "import_id": "verireel-product-onboarding",
       "manifest": {
         "product": "verireel",

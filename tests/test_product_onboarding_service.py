@@ -22,6 +22,12 @@ class _ProductOnboardingStore:
         self.runtime_environments: list[RuntimeEnvironmentRecord] = []
         self.secret_bindings: list[SecretBinding] = []
 
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        for record in reversed(self.product_profiles):
+            if record.product == product:
+                return record
+        raise KeyError(product)
+
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         self.product_profiles.append(record)
 
