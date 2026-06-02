@@ -22475,6 +22475,102 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertNotIn("must-not-sync", json.dumps(payload))
         self.assertNotIn("context-secret-value", json.dumps(payload))
 
+    def test_live_target_runtime_api_requires_expected_managed_secret_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard",
+                        instance="prod",
+                        env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        updated_at="2026-05-06T17:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _live_target_runtime_profile_payload(include_context_secret=True)
+                    )
+                )
+                _seed_tracked_target_records(
+                    database_url=database_url,
+                    context="sellyouroutboard",
+                    instance="prod",
+                    target_id="application-syo-prod",
+                    target_type="application",
+                    target_name="syo-prod-app",
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                            ],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "application-syo-prod",
+                        "name": "syo-prod-app",
+                        "env": "CONTACT_EMAIL_MODE=resend\n",
+                    },
+                ),
+                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/live-target-runtime/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                    headers={"Idempotency-Key": "live-target-runtime:missing-secret"},
+                )
+
+        self.assertEqual(status_code, 400, msg=json.dumps(payload, indent=2, sort_keys=True))
+        update_env.assert_not_called()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "runtime_secret_values_missing")
+        self.assertIn("CONTEXT_API_TOKEN", payload["error"]["message"])
+        self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+
     def test_live_target_runtime_api_apply_updates_env_and_verifies(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

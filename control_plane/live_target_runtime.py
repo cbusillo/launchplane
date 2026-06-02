@@ -257,6 +257,18 @@ def _filter_runtime_environment_to_product_keys(
     return {key: value for key, value in desired_env_map.items() if key in allowed_keys}
 
 
+def _require_expected_runtime_secret_values(
+    *, desired_env_map: dict[str, str], runtime_secret_binding_keys: set[str]
+) -> None:
+    missing_keys = sorted(key for key in runtime_secret_binding_keys if key not in desired_env_map)
+    if missing_keys:
+        raise LiveTargetRuntimeError(
+            "Expected managed runtime secret values are missing from the resolved "
+            f"Launchplane runtime environment: {', '.join(missing_keys)}.",
+            code="runtime_secret_values_missing",
+        )
+
+
 def require_dokploy_target_definition(
     *,
     source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
@@ -338,6 +350,10 @@ def apply_live_target_runtime_environment(
                 context_name=context_name,
                 instance_name=instance_name,
             )
+            _require_expected_runtime_secret_values(
+                desired_env_map=desired_env_map,
+                runtime_secret_binding_keys=runtime_secret_binding_keys,
+            )
         finally:
             postgres_store.close()
         if not desired_env_map:
@@ -389,9 +405,7 @@ def apply_live_target_runtime_environment(
                 context_name=context_name,
                 instance_name=instance_name,
                 require_policy=apply_changes,
-                required_binding_keys=tuple(
-                    sorted(key for key in runtime_secret_binding_keys if key in desired_env_map)
-                ),
+                required_binding_keys=tuple(sorted(runtime_secret_binding_keys)),
             )
         finally:
             postgres_store.close()
