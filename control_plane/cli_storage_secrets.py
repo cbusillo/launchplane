@@ -6,6 +6,7 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.provider_target_audit import audit_provider_targets
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -57,6 +58,38 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     postgres_store.ensure_schema()
     counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
     click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
+@storage.command("provider-target-audit")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane provider-target records.",
+)
+@click.option("--provider-id", default="", help="Optional provider id filter.")
+@click.option("--context", "context_name", default="", help="Optional context filter.")
+@click.option("--instance", "instance_name", default="", help="Optional instance filter.")
+def storage_provider_target_audit(
+    database_url: str,
+    provider_id: str,
+    context_name: str,
+    instance_name: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        postgres_store.ensure_schema()
+        result = audit_provider_targets(
+            postgres_store,
+            provider_id=provider_id,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        click.echo(json.dumps(result.to_report_payload(), indent=2, sort_keys=True))
+    finally:
+        postgres_store.close()
+    if not result.ok:
+        raise click.exceptions.Exit(1)
 
 
 @secrets.command("put")

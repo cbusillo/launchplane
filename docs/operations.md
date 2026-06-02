@@ -33,6 +33,8 @@ API path instead of running the local command from an arbitrary checkout.
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
+- `storage provider-target-audit`: run the read-only provider-target parity
+  preflight before Phase Two backfill or provider-target authority cutover.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
 `inventory write-from-promotion`, and `release-tuples write-from-promotion`
@@ -44,6 +46,19 @@ Those commands are current implementation scaffolding. The Launchplane boundary
 is a long-running service with authenticated HTTP ingress. The CLI should remain
 a client of Launchplane's stable API contract or an explicit DB-backed operator
 tool, not a separate live-state authority.
+
+Provider-target Phase Two data changes must start with a read-only audit:
+
+```bash
+uv run launchplane storage provider-target-audit \
+  --database-url "$LAUNCHPLANE_DATABASE_URL"
+```
+
+Use `--provider-id`, `--context`, or `--instance` for narrower inspection. The
+command emits JSON and exits nonzero when explicit provider-target rows are
+missing, partial Dokploy pairs exist, or explicit rows disagree with the
+Dokploy-derived projection. Backfill and authority cutover should not proceed
+until the audit has no unresolved blockers for the affected lanes.
 
 ## Target Launchplane Ingress
 

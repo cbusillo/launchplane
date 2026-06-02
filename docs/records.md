@@ -137,6 +137,11 @@ an ORM column/table or remains only in the evidence payload.
   explicit provider-target row exists. Existing Dokploy target and target-id
   records remain the active live write/execution path until a later dual-write
   or cutover migration.
+- `uv run launchplane storage provider-target-audit` is the read-only Phase Two
+  preflight for this record family. It compares explicit provider-target rows
+  with the neutral projection from paired Dokploy target and target-id records,
+  reports missing halves and mismatches, and exits nonzero when unresolved
+  blockers would make backfill or authority cutover unsafe.
 - Shared ship and promotion request/evidence contracts accept a neutral
   `target_reference` compatibility input for target name, provider id,
   category, and provider target type. Persisted records still write the flat
