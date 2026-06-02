@@ -18,6 +18,18 @@ from control_plane.workflows.product_onboarding import apply_product_onboarding_
 
 
 CLI_MAIN = cast(Command, main)
+ODOO_TESTING_RUNTIME_KEYS = (
+    "ODOO_DB_NAME",
+    "ODOO_DB_USER",
+    "ODOO_DATA_VOLUME",
+    "ODOO_LOG_VOLUME",
+    "ODOO_DB_VOLUME",
+)
+ODOO_TESTING_SECRET_KEYS = (
+    "ODOO_ADMIN_PASSWORD",
+    "ODOO_DB_PASSWORD",
+    "ODOO_MASTER_PASSWORD",
+)
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -160,6 +172,64 @@ def _seed_import_manifest(
             ):
                 target["target_id"] = target_ids.get(mapping["env"], "")
     return cast(dict[str, object], manifest_payload)
+
+
+def _assert_odoo_testing_expected_runtime_contract(
+    test_case: unittest.TestCase,
+    *,
+    manifest: ProductOnboardingManifest,
+    context: str,
+    expected_database_name: str,
+) -> None:
+    runtime_record = next(
+        record
+        for record in manifest.runtime_environments
+        if record.context == context and record.instance == "testing"
+    )
+    test_case.assertEqual(runtime_record.scope, "instance")
+    test_case.assertEqual(
+        runtime_record.env,
+        {
+            "ODOO_DB_NAME": expected_database_name,
+            "ODOO_DB_USER": "odoo",
+            "ODOO_DATA_VOLUME": f"{context}_testing_odoo_data",
+            "ODOO_LOG_VOLUME": f"{context}_testing_odoo_logs",
+            "ODOO_DB_VOLUME": f"{context}_testing_odoo_db",
+        },
+    )
+    testing_secret_bindings = [
+        (binding.context, binding.instance, binding.binding_key)
+        for binding in manifest.secret_bindings
+        if binding.context == context and binding.instance == "testing"
+    ]
+    test_case.assertEqual(
+        testing_secret_bindings,
+        [(context, "testing", binding_key) for binding_key in ODOO_TESTING_SECRET_KEYS],
+    )
+    test_case.assertNotIn("prod", {record.instance for record in manifest.runtime_environments})
+    test_case.assertNotIn("prod", {binding.instance for binding in manifest.secret_bindings})
+    test_case.assertEqual(
+        [
+            (requirement.context, requirement.instance, requirement.key)
+            for requirement in manifest.expected_config.runtime_environment_keys
+        ],
+        [(context, "testing", key) for key in ODOO_TESTING_RUNTIME_KEYS],
+    )
+    test_case.assertEqual(
+        [
+            (requirement.context, requirement.instance, requirement.binding_key)
+            for requirement in manifest.expected_config.managed_secret_bindings
+        ],
+        [(context, "testing", binding_key) for binding_key in ODOO_TESTING_SECRET_KEYS],
+    )
+    test_case.assertNotIn(
+        "prod",
+        {requirement.instance for requirement in manifest.expected_config.runtime_environment_keys},
+    )
+    test_case.assertNotIn(
+        "prod",
+        {requirement.instance for requirement in manifest.expected_config.managed_secret_bindings},
+    )
 
 
 class ProductOnboardingTests(unittest.TestCase):
@@ -1440,6 +1510,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 ("cm", "prod", "compose", "compose-cm-prod"),
             ],
         )
+        _assert_odoo_testing_expected_runtime_contract(
+            self,
+            manifest=manifest,
+            context="cm",
+            expected_database_name="cm_testing",
+        )
         self.assertEqual(manifest.source_label, "import-material:odoo-cm-product-onboarding")
 
     def test_seed_import_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
@@ -1485,6 +1561,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(
             policies["prod"].expected_domains,
             ("opw-prod.shinycomputers.com",),
+        )
+        _assert_odoo_testing_expected_runtime_contract(
+            self,
+            manifest=manifest,
+            context="opw",
+            expected_database_name="opw_testing",
         )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:

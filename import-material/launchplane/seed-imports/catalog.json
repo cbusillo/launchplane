@@ -268,6 +268,83 @@
             "deploy_timeout_seconds": 900
           }
         ],
+        "runtime_environments": [
+          {
+            "scope": "instance",
+            "context": "cm",
+            "instance": "testing",
+            "env": {
+              "ODOO_DB_NAME": "cm_testing",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
+              "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
+              "ODOO_DB_VOLUME": "cm_testing_odoo_db"
+            }
+          }
+        ],
+        "secret_bindings": [
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "cm",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "cm",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "cm",
+            "instance": "testing"
+          }
+        ],
+        "expected_config": {
+          "runtime_environment_keys": [
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "cm",
+              "instance": "testing"
+            }
+          ],
+          "managed_secret_bindings": [
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "cm",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "cm",
+              "instance": "testing"
+            }
+          ]
+        },
         "source_label": "import-material:odoo-cm-product-onboarding"
       }
     },
@@ -377,6 +454,83 @@
             "deploy_timeout_seconds": 900
           }
         ],
+        "runtime_environments": [
+          {
+            "scope": "instance",
+            "context": "opw",
+            "instance": "testing",
+            "env": {
+              "ODOO_DB_NAME": "opw_testing",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "opw_testing_odoo_data",
+              "ODOO_LOG_VOLUME": "opw_testing_odoo_logs",
+              "ODOO_DB_VOLUME": "opw_testing_odoo_db"
+            }
+          }
+        ],
+        "secret_bindings": [
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "opw",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "opw",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "opw",
+            "instance": "testing"
+          }
+        ],
+        "expected_config": {
+          "runtime_environment_keys": [
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "opw",
+              "instance": "testing"
+            }
+          ],
+          "managed_secret_bindings": [
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "opw",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "opw",
+              "instance": "testing"
+            }
+          ]
+        },
         "source_label": "import-material:odoo-opw-product-onboarding"
       }
     },
