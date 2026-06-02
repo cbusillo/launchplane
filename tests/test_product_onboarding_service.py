@@ -2,32 +2,45 @@ from __future__ import annotations
 
 import unittest
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.product_onboarding_service import build_product_onboarding_service_result
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 
 
 class _ProductOnboardingStore:
     def __init__(self) -> None:
-        self.product_profiles: list[object] = []
-        self.dokploy_targets: list[object] = []
-        self.dokploy_target_ids: list[object] = []
-        self.runtime_environments: list[object] = []
-        self.secret_bindings: list[object] = []
+        self.product_profiles: list[LaunchplaneProductProfileRecord] = []
+        self.dokploy_targets: list[DokployTargetRecord] = []
+        self.dokploy_target_ids: list[DokployTargetIdRecord] = []
+        self.provider_targets: list[ProviderTargetRecord] = []
+        self.runtime_environments: list[RuntimeEnvironmentRecord] = []
+        self.secret_bindings: list[SecretBinding] = []
 
-    def write_product_profile_record(self, record: object) -> None:
+    def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
         self.product_profiles.append(record)
 
-    def write_dokploy_target_record(self, record: object) -> None:
+    def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self.dokploy_targets.append(record)
 
-    def write_dokploy_target_id_record(self, record: object) -> None:
+    def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
         self.dokploy_target_ids.append(record)
 
-    def write_runtime_environment_record(self, record: object) -> None:
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]:
+        return tuple(self.provider_targets)
+
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> None:
+        self.provider_targets.append(record)
+
+    def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
         self.runtime_environments.append(record)
 
-    def write_secret_binding(self, binding: object) -> None:
+    def write_secret_binding(self, binding: SecretBinding) -> None:
         self.secret_bindings.append(binding)
 
 
@@ -72,9 +85,8 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                 "source_label": "test:discord-blue-onboarding",
             }
         )
-        onboarding_result = apply_product_onboarding_manifest(
-            record_store=_ProductOnboardingStore(), manifest=manifest
-        )
+        store = _ProductOnboardingStore()
+        onboarding_result = apply_product_onboarding_manifest(record_store=store, manifest=manifest)
 
         result, driver_result = build_product_onboarding_service_result(onboarding_result)
 
@@ -85,6 +97,7 @@ class ProductOnboardingServiceTests(unittest.TestCase):
         self.assertEqual(result["dokploy_target_id_count"], 1)
         self.assertEqual(result["runtime_environment_record_count"], 1)
         self.assertEqual(result["secret_binding_count"], 1)
+        self.assertEqual(len(store.provider_targets), 1)
         self.assertEqual(driver_result["product"], "discord-blue")
         self.assertEqual(driver_result["provider_targets"], driver_result["dokploy_targets"])
         self.assertEqual(driver_result["provider_target_ids"], driver_result["dokploy_target_ids"])

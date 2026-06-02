@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -20,6 +21,9 @@ from control_plane.contracts.secret_record import (
     SecretBinding,
     SecretRecord,
     SecretVersion,
+)
+from control_plane.workflows.provider_target_dual_write import (
+    prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -97,6 +101,10 @@ class ProductContextCutoverStore(ProductContextCutoverReadStore, Protocol):
     ) -> CurrentAuthorityDeleteStatus: ...
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
+
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> None: ...
 
     def delete_dokploy_target_id_record(
         self, *, expected_record: DokployTargetIdRecord
@@ -581,6 +589,69 @@ def apply_product_context_cutover(
         return plan
 
     now = utc_now_timestamp()
+    source_target_records = tuple(
+        item
+        for item in record_store.list_dokploy_target_records()
+        if item.context == request.source_context
+    )
+    source_target_id_records = tuple(
+        item
+        for item in record_store.list_dokploy_target_id_records()
+        if item.context == request.source_context
+    )
+    target_target_records = {
+        target.instance: target
+        for target in record_store.list_dokploy_target_records()
+        if target.context == request.target_context
+    }
+    target_id_records = {
+        target.instance: target
+        for target in record_store.list_dokploy_target_id_records()
+        if target.context == request.target_context
+    }
+    planned_target_records = {
+        record.instance: record.model_copy(
+            update={
+                "context": request.target_context,
+                "updated_at": now,
+                "source_label": request.source_label,
+            }
+        )
+        for record in source_target_records
+        if record.instance not in target_target_records
+    }
+    planned_target_id_records = {
+        record.instance: DokployTargetIdRecord(
+            context=request.target_context,
+            instance=record.instance,
+            target_id=record.target_id,
+            updated_at=now,
+            source_label=request.source_label,
+        )
+        for record in source_target_id_records
+        if record.instance not in target_id_records
+    }
+    final_target_records = {**target_target_records, **planned_target_records}
+    final_target_id_records = {**target_id_records, **planned_target_id_records}
+    affected_target_instances = sorted(
+        set(planned_target_records) | set(planned_target_id_records)
+    )
+    planned_provider_target_records: dict[str, ProviderTargetRecord] = {}
+    for instance in affected_target_instances:
+        target_record = final_target_records.get(instance)
+        target_id_record = final_target_id_records.get(instance)
+        if target_record is None or target_id_record is None:
+            missing_record_type = "target" if target_record is None else "target-id"
+            raise ValueError(
+                "Provider target dual-write requires complete Dokploy target and target-id "
+                f"records for {request.target_context}/{instance}; missing {missing_record_type}."
+            )
+        planned_provider_target_records[instance] = prepare_provider_target_from_dokploy_records(
+            record_store=record_store,
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
+
     for runtime_record in record_store.list_runtime_environment_records(
         context_name=request.source_context
     ):
@@ -601,47 +672,14 @@ def apply_product_context_cutover(
                 )
             )
 
-    for dokploy_target_record in tuple(
-        item
-        for item in record_store.list_dokploy_target_records()
-        if item.context == request.source_context
-    ):
-        exists = any(
-            target.context == request.target_context
-            and target.instance == dokploy_target_record.instance
-            for target in record_store.list_dokploy_target_records()
-        )
-        if not exists:
-            record_store.write_dokploy_target_record(
-                dokploy_target_record.model_copy(
-                    update={
-                        "context": request.target_context,
-                        "updated_at": now,
-                        "source_label": request.source_label,
-                    }
-                )
-            )
+    for copied_target_record in planned_target_records.values():
+        record_store.write_dokploy_target_record(copied_target_record)
 
-    for target_id_record in tuple(
-        item
-        for item in record_store.list_dokploy_target_id_records()
-        if item.context == request.source_context
-    ):
-        exists = any(
-            target.context == request.target_context
-            and target.instance == target_id_record.instance
-            for target in record_store.list_dokploy_target_id_records()
-        )
-        if not exists:
-            record_store.write_dokploy_target_id_record(
-                DokployTargetIdRecord(
-                    context=request.target_context,
-                    instance=target_id_record.instance,
-                    target_id=target_id_record.target_id,
-                    updated_at=now,
-                    source_label=request.source_label,
-                )
-            )
+    for copied_target_id_record in planned_target_id_records.values():
+        record_store.write_dokploy_target_id_record(copied_target_id_record)
+
+    for provider_target_record in planned_provider_target_records.values():
+        record_store.write_provider_target_record(provider_target_record)
 
     for secret_record in record_store.list_secret_records(
         context_name=request.source_context,

@@ -31,6 +31,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -12040,6 +12041,101 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(secret_bindings[0].binding_key, "DISCORD_TOKEN")
         self.assertNotIn("secret_id", json.dumps(payload, sort_keys=True))
+
+    def test_product_onboarding_endpoint_rejects_provider_target_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+                store.write_provider_target_record(
+                    ProviderTargetRecord(
+                        context="discord-blue",
+                        instance="prod",
+                        provider_id="dokploy",
+                        target_category="application",
+                        target_id="stale-app-discord-blue",
+                        display_name="discord-blue",
+                        provider_target_type="application",
+                        provider_evidence={"project_name": "Discord Blue"},
+                        updated_at="2026-05-04T17:59:00Z",
+                        source_label="test:stale-provider-target",
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_onboarding.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/cbusillo/discord-blue",
+                        "runtime_port": 8787,
+                        "health_path": "/health",
+                        "lanes": [
+                            {"instance": "prod", "context": "discord-blue"},
+                        ],
+                        "provider_targets": [
+                            {
+                                "context": "discord-blue",
+                                "instance": "prod",
+                                "target_id": "app-discord-blue",
+                                "target_type": "application",
+                                "target_name": "discord-blue",
+                                "healthcheck_enabled": False,
+                            }
+                        ],
+                        "updated_at": "2026-05-04T18:00:00Z",
+                        "source_label": "test:discord-blue-onboarding",
+                    },
+                },
+                headers={"Idempotency-Key": "product-onboarding-discord-blue-conflict"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_product_onboarding_manifest")
+        self.assertIn("dual-write conflict", payload["error"]["message"])
 
     def test_product_onboarding_endpoint_rejects_self_deploy_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

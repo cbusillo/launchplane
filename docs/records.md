@@ -137,6 +137,12 @@ an ORM column/table or remains only in the evidence payload.
   explicit provider-target row exists. Existing Dokploy target and target-id
   records remain the active live write/execution path until a later dual-write
   or cutover migration.
+- Product onboarding, Dokploy target adoption/creation, product context cutover,
+  and tracked Dokploy target metadata commands now dual-write explicit
+  provider-target rows when a complete Dokploy target and target-id pair exists.
+  The dual-write is identity-only: Dokploy route/runtime execution metadata such
+  as domains, health policy, source metadata, env keys, and product policies
+  remains in the Dokploy target record.
 - `uv run launchplane storage provider-target-audit` is the read-only Phase Two
   preflight for this record family. It compares explicit provider-target rows
   with the neutral projection from paired Dokploy target and target-id records,
