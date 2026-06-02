@@ -410,6 +410,30 @@
           "allowed_instances": ["testing", "prod"]
         },
         {
+          "binding_key": "BETTER_AUTH_SECRET",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["verireel"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
+          "binding_key": "VERIREEL_SECRETS_MASTER_KEY",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["verireel"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
+          "binding_key": "VERIREEL_CRON_SECRET",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["verireel"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
+          "binding_key": "POSTGRES_PASSWORD",
+          "secret_class": "prod_only",
+          "allowed_contexts": ["verireel"],
+          "allowed_instances": ["testing", "prod"]
+        },
+        {
           "binding_key": "ODOO_ADMIN_PASSWORD",
           "secret_class": "testing",
           "allowed_contexts": ["cm", "opw"],
