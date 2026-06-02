@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.dokploy import JsonObject
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
@@ -117,6 +118,9 @@ class DokployTargetAdoptionTests(unittest.TestCase):
             target_id_record = store.read_dokploy_target_id_record(
                 context_name="odoo-tenant-cm", instance_name="testing"
             )
+            provider_target_record = store.read_provider_target_record(
+                context_name="odoo-tenant-cm", instance_name="testing"
+            )
             store.close()
 
         self.assertTrue(result.applied)
@@ -129,6 +133,50 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertIsNone(target_record.healthcheck_timeout_seconds)
         self.assertEqual(target_record.healthcheck_path, "/web/health")
         self.assertEqual(target_id_record.target_id, "compose-123")
+        self.assertEqual(provider_target_record.target_id, "compose-123")
+        self.assertEqual(provider_target_record.provider_target_type, "compose")
+
+    def test_adopt_target_blocks_conflicting_provider_target_before_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="discord-blue",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="stale-app-123",
+                    display_name="discord-blue-lxc",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "Discord Blue"},
+                    updated_at="2026-05-04T22:00:00Z",
+                    source_label="test:stale-provider-target",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "dual-write conflict"):
+                adopt_dokploy_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="discord-blue",
+                    instance="prod",
+                    target_type="application",
+                    target_id="app-123",
+                    project_name="Discord Blue",
+                    target_name="discord-blue-lxc",
+                    healthcheck_path="/health",
+                    updated_at="2026-05-04T22:35:00Z",
+                    apply=True,
+                    fetch_target_payload=lambda *_args: {"name": "discord-blue-lxc"},
+                )
+
+            self.assertEqual(store.list_dokploy_target_records(), ())
+            self.assertEqual(store.list_dokploy_target_id_records(), ())
+            store.close()
 
     def test_adopt_target_preserves_live_healthcheck_settings(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -691,6 +739,58 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual([path for path, _payload in requests], ["/api/application.create"])
         self.assertEqual(requests[0][1]["environmentId"], "env-existing")
         self.assertEqual(target_id_record.target_id, "app-456")
+
+    def test_create_application_target_blocks_existing_provider_target_before_provider_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="verireel",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="existing-app-123",
+                    display_name="verireel-testing",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "VeriReel"},
+                    updated_at="2026-05-04T23:00:00Z",
+                    source_label="test:existing-provider-target",
+                )
+            )
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                return {"applicationId": "app-456"}
+
+            with self.assertRaisesRegex(ValueError, "dual-write conflict"):
+                create_dokploy_application_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="verireel",
+                    instance="testing",
+                    target_name="verireel-testing",
+                    project_name="VeriReel",
+                    environment_id="env-existing",
+                    apply=True,
+                    mutate_provider=mutate_provider,
+                    fetch_target_payload=lambda *_args: {"name": "verireel-testing"},
+                )
+            target_records = store.list_dokploy_target_records()
+            target_id_records = store.list_dokploy_target_id_records()
+            store.close()
+
+        self.assertEqual(requests, [])
+        self.assertEqual(target_records, ())
+        self.assertEqual(target_id_records, ())
 
     def test_create_application_target_rejects_healthcheck_path_before_provider_mutation(
         self,

@@ -10,6 +10,7 @@ from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
@@ -1400,6 +1401,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             profile = store.read_product_profile_record("example-site")
             targets = store.list_dokploy_target_records()
             target_ids = store.list_dokploy_target_id_records()
+            provider_targets = store.list_physical_provider_target_records()
             runtime_records = store.list_runtime_environment_records()
             secret_bindings = store.list_secret_bindings()
             store.close()
@@ -1446,10 +1448,49 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
         self.assertEqual(len(targets), 2)
         self.assertEqual(len(target_ids), 2)
+        self.assertEqual(len(provider_targets), 2)
+        self.assertEqual(
+            [(record.context, record.instance, record.target_id) for record in provider_targets],
+            [
+                ("example-site-prod", "prod", "app-prod-123"),
+                ("example-site-testing", "testing", "app-testing-123"),
+            ],
+        )
         self.assertEqual(len(runtime_records), 1)
         self.assertEqual(len(secret_bindings), 1)
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "disabled")
+
+    def test_apply_product_onboarding_manifest_blocks_conflicting_provider_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="example-site-prod",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="stale-app-prod-123",
+                    display_name="example-site-prod",
+                    provider_target_type="application",
+                    provider_evidence={"project_name": "example-site"},
+                    updated_at="2026-05-03T00:00:00Z",
+                    source_label="test:stale-provider-target",
+                )
+            )
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+
+            with self.assertRaisesRegex(ValueError, "dual-write conflict"):
+                apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+
+            self.assertEqual(store.list_dokploy_target_records(), ())
+            self.assertEqual(store.list_dokploy_target_id_records(), ())
+            store.close()
 
     def test_product_onboarding_manifest_prefers_provider_targets(self) -> None:
         payload = _manifest_payload()

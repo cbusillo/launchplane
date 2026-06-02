@@ -6,12 +6,16 @@ from typing import Literal
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
+)
+from control_plane.workflows.provider_target_dual_write import (
+    prepare_provider_target_from_dokploy_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -388,7 +392,20 @@ def dokploy_targets_put_shopify_protected_store_key(
                 source_label=source_label,
             )
         )
+        target_id_record = _find_dokploy_target_id_record(
+            target_id_records=target_id_records,
+            context_name=record.context,
+            instance_name=record.instance,
+        )
+        prepare_provider_target_from_dokploy_records(
+            record_store=postgres_store,
+            target_record=record,
+            target_id_record=target_id_record,
+        )
         postgres_store.write_dokploy_target_record(record)
+        postgres_store.write_provider_target_record(
+            record=record_to_provider_target(record=record, target_id_record=target_id_record)
+        )
     finally:
         postgres_store.close()
     target_ids_by_route = target_id_map(target_id_records)
@@ -447,7 +464,20 @@ def dokploy_targets_unset_shopify_protected_store_key(
                 source_label=source_label,
             )
         )
+        target_id_record = _find_dokploy_target_id_record(
+            target_id_records=target_id_records,
+            context_name=record.context,
+            instance_name=record.instance,
+        )
+        prepare_provider_target_from_dokploy_records(
+            record_store=postgres_store,
+            target_record=record,
+            target_id_record=target_id_record,
+        )
         postgres_store.write_dokploy_target_record(record)
+        postgres_store.write_provider_target_record(
+            record=record_to_provider_target(record=record, target_id_record=target_id_record)
+        )
     finally:
         postgres_store.close()
     target_ids_by_route = target_id_map(target_id_records)
@@ -492,7 +522,20 @@ def dokploy_targets_relabel(
             instance_name=instance_name,
             source_label=source_label,
         )
+        target_id_record = _find_dokploy_target_id_record(
+            target_id_records=target_id_records,
+            context_name=record.context,
+            instance_name=record.instance,
+        )
+        prepare_provider_target_from_dokploy_records(
+            record_store=postgres_store,
+            target_record=record,
+            target_id_record=target_id_record,
+        )
         postgres_store.write_dokploy_target_record(record)
+        postgres_store.write_provider_target_record(
+            record=record_to_provider_target(record=record, target_id_record=target_id_record)
+        )
     finally:
         postgres_store.close()
     target_ids_by_route = target_id_map(target_id_records)
@@ -542,10 +585,34 @@ def _find_dokploy_target_record(
     return None
 
 
+def _find_dokploy_target_id_record(
+    *,
+    target_id_records: tuple[DokployTargetIdRecord, ...],
+    context_name: str,
+    instance_name: str,
+) -> DokployTargetIdRecord:
+    normalized_route = (context_name.strip().lower(), instance_name.strip().lower())
+    for record in target_id_records:
+        if dokploy_target_route(record) == normalized_route:
+            return record
+    raise click.ClickException(
+        "Missing DB-backed tracked Dokploy target-id record for the requested route."
+    )
+
+
 def target_id_map(
     target_id_records: tuple[DokployTargetIdRecord, ...],
 ) -> dict[tuple[str, str], str]:
     return {dokploy_target_route(record): record.target_id for record in target_id_records}
+
+
+def record_to_provider_target(
+    *, record: DokployTargetRecord, target_id_record: DokployTargetIdRecord
+) -> ProviderTargetRecord:
+    return ProviderTargetRecord.from_dokploy_records(
+        target_record=record,
+        target_id_record=target_id_record,
+    )
 
 
 def summarize_dokploy_target_record(

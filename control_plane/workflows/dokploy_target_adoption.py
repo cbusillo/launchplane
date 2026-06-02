@@ -3,9 +3,13 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
 from control_plane.dokploy import JsonObject
+from control_plane.workflows.provider_target_dual_write import (
+    prepare_provider_target_from_dokploy_records,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -14,6 +18,10 @@ class DokployTargetAdoptionRecordStore(Protocol):
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None: ...
 
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> None: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
+
 
 class DokployTargetAdoptionResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -21,6 +29,7 @@ class DokployTargetAdoptionResult(BaseModel):
     applied: bool
     target_record: DokployTargetRecord
     target_id_record: DokployTargetIdRecord
+    provider_target_record: ProviderTargetRecord
     provider_fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
     warnings: tuple[str, ...] = ()
 
@@ -46,6 +55,7 @@ class DokployTargetCreateResult(BaseModel):
     environment_id: str = ""
     target_record: DokployTargetRecord
     target_id_record: DokployTargetIdRecord
+    provider_target_record: ProviderTargetRecord
     provider_fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
     provider_requests: tuple[dict[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
@@ -132,15 +142,26 @@ def adopt_dokploy_target(
         updated_at=recorded_at,
         source_label=source_label.strip() or "cli:dokploy-targets:adopt",
     )
+    provider_target_record = ProviderTargetRecord.from_dokploy_records(
+        target_record=target_record,
+        target_id_record=target_id_record,
+    )
 
     if apply:
+        provider_target_record = prepare_provider_target_from_dokploy_records(
+            record_store=record_store,
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
         record_store.write_dokploy_target_record(target_record)
         record_store.write_dokploy_target_id_record(target_id_record)
+        record_store.write_provider_target_record(provider_target_record)
 
     return DokployTargetAdoptionResult(
         applied=apply,
         target_record=target_record,
         target_id_record=target_id_record,
+        provider_target_record=provider_target_record,
         provider_fields=provider_fields,
         warnings=warnings,
     )
@@ -243,14 +264,25 @@ def create_dokploy_application_target(
             updated_at=target_record.updated_at,
             source_label=target_record.source_label,
         )
+        provider_target_record = ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
         return DokployTargetCreateResult(
             applied=False,
             plan=plan,
             target_record=target_record,
             target_id_record=target_id_record,
+            provider_target_record=provider_target_record,
             provider_requests=provider_requests,
             warnings=("dry run only; provider was not mutated and records were not written",),
         )
+
+    _ensure_create_route_has_no_provider_target(
+        record_store=record_store,
+        context=normalized_context,
+        instance=normalized_instance,
+    )
 
     created_project_id = normalized_project_id
     if not created_project_id and not normalized_environment_id:
@@ -316,6 +348,7 @@ def create_dokploy_application_target(
         environment_id=created_environment_id,
         target_record=adoption.target_record,
         target_id_record=adoption.target_id_record,
+        provider_target_record=adoption.provider_target_record,
         provider_fields=adoption.provider_fields,
         provider_requests=provider_requests,
         warnings=adoption.warnings,
@@ -327,6 +360,17 @@ def _require_non_empty(value: str, field_name: str) -> str:
     if not normalized_value:
         raise ValueError(f"Dokploy target adoption requires {field_name}")
     return normalized_value
+
+
+def _ensure_create_route_has_no_provider_target(
+    *, record_store: DokployTargetAdoptionRecordStore, context: str, instance: str
+) -> None:
+    for record in record_store.list_physical_provider_target_records():
+        if record.context == context and record.instance == instance:
+            raise ValueError(
+                "Provider target dual-write conflict for "
+                f"{context}/{instance}; create would replace an explicit provider target."
+            )
 
 
 def _normalize_route_part(value: str, field_name: str) -> str:

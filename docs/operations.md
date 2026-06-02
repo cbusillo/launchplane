@@ -60,6 +60,13 @@ missing, partial Dokploy pairs exist, or explicit rows disagree with the
 Dokploy-derived projection. Backfill and authority cutover should not proceed
 until the audit has no unresolved blockers for the affected lanes.
 
+Provider-target dual-write is active for Launchplane-owned target identity
+mutations: product onboarding, Dokploy target adoption/creation, product context
+cutover, and tracked Dokploy target metadata commands. These paths validate an
+existing explicit provider-target row before mutating the Dokploy pair, write the
+Dokploy target/id records, then write the matching provider-target row. A stale
+explicit provider-target row blocks the mutation instead of being overwritten.
+
 ## Target Launchplane Ingress
 
 The target communication model is:

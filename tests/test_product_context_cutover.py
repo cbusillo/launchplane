@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -400,6 +401,10 @@ class ProductContextCutoverTests(unittest.TestCase):
                     context_name="sellyouroutboard",
                     instance_name="prod",
                 )
+                provider_target = store.read_provider_target_record(
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
                 secret = store.find_secret_record(
                     scope="context_instance",
                     integration="runtime_environment",
@@ -437,6 +442,8 @@ class ProductContextCutoverTests(unittest.TestCase):
         self.assertEqual(len(target_runtime_records), 2)
         self.assertEqual(target.target_name, "syo-prod-app")
         self.assertEqual(target_id.target_id, "target-prod-123")
+        self.assertEqual(provider_target.target_id, "target-prod-123")
+        self.assertEqual(provider_target.display_name, "syo-prod-app")
         self.assertEqual(secret.context, "sellyouroutboard")
         self.assertEqual(version.ciphertext, "encrypted-value")
         self.assertEqual([binding.binding_key for binding in bindings], ["SMTP_PASSWORD"])
@@ -449,6 +456,209 @@ class ProductContextCutoverTests(unittest.TestCase):
             {"created": 0, "skipped": 1},
         )
         self.assertEqual(_payload_section(repeated_payload, "profile")["action"], "unchanged")
+
+    def test_apply_context_cutover_blocks_conflicting_provider_target_before_writes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                store.write_provider_target_record(
+                    ProviderTargetRecord(
+                        context="sellyouroutboard",
+                        instance="prod",
+                        provider_id="dokploy",
+                        target_category="application",
+                        target_id="stale-target-prod-123",
+                        display_name="syo-prod-app",
+                        provider_target_type="application",
+                        provider_evidence={"project_name": "sellyouroutboard"},
+                        updated_at="2026-05-01T04:00:00Z",
+                        source_label="test:stale-provider-target",
+                    )
+                )
+
+                with self.assertRaisesRegex(ValueError, "dual-write conflict"):
+                    apply_product_context_cutover(
+                        record_store=store,
+                        request=ProductContextCutoverRequest(
+                            product="sellyouroutboard",
+                            source_context="sellyouroutboard-testing",
+                            target_context="sellyouroutboard",
+                            mode="apply",
+                            display_name="SellYourOutboard",
+                            source_label="test:cutover",
+                        ),
+                    )
+
+                target_runtime_records = store.list_runtime_environment_records(
+                    context_name="sellyouroutboard"
+                )
+                target_records = tuple(
+                    record
+                    for record in store.list_dokploy_target_records()
+                    if record.context == "sellyouroutboard"
+                )
+                target_id_records = tuple(
+                    record
+                    for record in store.list_dokploy_target_id_records()
+                    if record.context == "sellyouroutboard"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(target_runtime_records, ())
+        self.assertEqual(target_records, ())
+        self.assertEqual(target_id_records, ())
+
+    def test_apply_context_cutover_writes_provider_target_when_target_id_completes_existing_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                store.write_dokploy_target_record(
+                    DokployTargetRecord(
+                        context="sellyouroutboard",
+                        instance="prod",
+                        target_type="application",
+                        project_name="sellyouroutboard",
+                        target_name="syo-prod-app",
+                        domains=(
+                            "https://www.sellyouroutboard.com",
+                            "https://sellyouroutboard.com",
+                        ),
+                        healthcheck_path="/api/health",
+                        updated_at="2026-05-01T04:29:07Z",
+                        source_label="test:existing-target",
+                    )
+                )
+
+                apply_product_context_cutover(
+                    record_store=store,
+                    request=ProductContextCutoverRequest(
+                        product="sellyouroutboard",
+                        source_context="sellyouroutboard-testing",
+                        target_context="sellyouroutboard",
+                        mode="apply",
+                        display_name="SellYourOutboard",
+                        source_label="test:cutover",
+                    ),
+                )
+
+                provider_target = store.read_provider_target_record(
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+                target_id = store.read_dokploy_target_id_record(
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(target_id.target_id, "target-prod-123")
+        self.assertEqual(provider_target.target_id, "target-prod-123")
+        self.assertEqual(provider_target.display_name, "syo-prod-app")
+        self.assertEqual(provider_target.provider_evidence["project_name"], "sellyouroutboard")
+
+    def test_apply_context_cutover_blocks_target_id_only_source_before_writes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                deleted = store.delete_dokploy_target_record(
+                    expected_record=store.read_dokploy_target_record(
+                        context_name="sellyouroutboard-testing",
+                        instance_name="prod",
+                    )
+                )
+                self.assertEqual(deleted, "deleted")
+
+                with self.assertRaisesRegex(ValueError, "missing target"):
+                    apply_product_context_cutover(
+                        record_store=store,
+                        request=ProductContextCutoverRequest(
+                            product="sellyouroutboard",
+                            source_context="sellyouroutboard-testing",
+                            target_context="sellyouroutboard",
+                            mode="apply",
+                            display_name="SellYourOutboard",
+                            source_label="test:cutover",
+                        ),
+                    )
+
+                target_id_records = tuple(
+                    record
+                    for record in store.list_dokploy_target_id_records()
+                    if record.context == "sellyouroutboard"
+                )
+                target_runtime_records = store.list_runtime_environment_records(
+                    context_name="sellyouroutboard"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(target_id_records, ())
+        self.assertEqual(target_runtime_records, ())
+
+    def test_apply_context_cutover_blocks_target_only_source_before_writes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                deleted = store.delete_dokploy_target_id_record(
+                    expected_record=store.read_dokploy_target_id_record(
+                        context_name="sellyouroutboard-testing",
+                        instance_name="prod",
+                    )
+                )
+                self.assertEqual(deleted, "deleted")
+
+                with self.assertRaisesRegex(ValueError, "missing target-id"):
+                    apply_product_context_cutover(
+                        record_store=store,
+                        request=ProductContextCutoverRequest(
+                            product="sellyouroutboard",
+                            source_context="sellyouroutboard-testing",
+                            target_context="sellyouroutboard",
+                            mode="apply",
+                            display_name="SellYourOutboard",
+                            source_label="test:cutover",
+                        ),
+                    )
+
+                target_records = tuple(
+                    record
+                    for record in store.list_dokploy_target_records()
+                    if record.context == "sellyouroutboard"
+                )
+                target_runtime_records = store.list_runtime_environment_records(
+                    context_name="sellyouroutboard"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(target_records, ())
+        self.assertEqual(target_runtime_records, ())
 
     def test_apply_preserves_distinct_preview_context_in_history(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

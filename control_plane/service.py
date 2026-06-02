@@ -12574,10 +12574,24 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                onboarding_result = apply_product_onboarding_manifest(
-                    record_store=record_store,
-                    manifest=onboarding_request.manifest,
-                )
+                try:
+                    onboarding_result = apply_product_onboarding_manifest(
+                        record_store=record_store,
+                        manifest=onboarding_request.manifest,
+                    )
+                except ValueError as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_product_onboarding_manifest",
+                                "message": str(error),
+                            },
+                        },
+                    )
                 result, driver_result = (
                     control_plane_product_onboarding_service.build_product_onboarding_service_result(
                         onboarding_result

@@ -4,6 +4,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_onboarding_manifest import (
@@ -18,6 +19,10 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.workflows.provider_target_dual_write import (
+    prepare_provider_target_from_dokploy_records,
+    write_provider_target_from_dokploy_records,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -27,6 +32,10 @@ class ProductOnboardingRecordStore(Protocol):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None: ...
+
+    def write_provider_target_record(self, record: ProviderTargetRecord) -> None: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
 
@@ -132,6 +141,25 @@ def build_provider_target_id_records(
     )
 
 
+def build_physical_provider_target_records(
+    *,
+    provider_targets: tuple[DokployTargetRecord, ...],
+    provider_target_ids: tuple[DokployTargetIdRecord, ...],
+) -> tuple[ProviderTargetRecord, ...]:
+    target_ids_by_route = {
+        (record.context, record.instance): record for record in provider_target_ids
+    }
+    return tuple(
+        ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
+        for target_record in provider_targets
+        if (target_id_record := target_ids_by_route.get((target_record.context, target_record.instance)))
+        is not None
+    )
+
+
 def build_runtime_environment_records(
     *, manifest: ProductOnboardingManifest, updated_at: str
 ) -> tuple[RuntimeEnvironmentRecord, ...]:
@@ -179,16 +207,42 @@ def apply_product_onboarding_manifest(
     provider_target_ids = build_provider_target_id_records(
         manifest=manifest, updated_at=recorded_at
     )
+    physical_provider_targets = build_physical_provider_target_records(
+        provider_targets=provider_targets,
+        provider_target_ids=provider_target_ids,
+    )
     runtime_environments = build_runtime_environment_records(
         manifest=manifest, updated_at=recorded_at
     )
     secret_bindings = build_secret_bindings(manifest=manifest, updated_at=recorded_at)
+    target_records_by_route = {
+        (record.context, record.instance): record for record in provider_targets
+    }
+    target_id_records_by_route = {
+        (record.context, record.instance): record for record in provider_target_ids
+    }
+    provider_target_pairs = tuple(
+        (target_records_by_route[(record.context, record.instance)], target_id_records_by_route[(record.context, record.instance)])
+        for record in physical_provider_targets
+    )
+    for target_record, target_id_record in provider_target_pairs:
+        prepare_provider_target_from_dokploy_records(
+            record_store=record_store,
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
 
     record_store.write_product_profile_record(product_profile)
     for target_record in provider_targets:
         record_store.write_dokploy_target_record(target_record)
     for target_id_record in provider_target_ids:
         record_store.write_dokploy_target_id_record(target_id_record)
+    for target_record, target_id_record in provider_target_pairs:
+        write_provider_target_from_dokploy_records(
+            record_store=record_store,
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
     for runtime_record in runtime_environments:
         record_store.write_runtime_environment_record(runtime_record)
     for binding in secret_bindings:

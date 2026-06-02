@@ -491,6 +491,9 @@ target_type = "compose"
             stored_record = store.read_dokploy_target_record(
                 context_name="opw", instance_name="testing"
             )
+            provider_target = store.read_provider_target_record(
+                context_name="opw", instance_name="testing"
+            )
             store.close()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -504,6 +507,9 @@ target_type = "compose"
             stored_record.policies.shopify.protected_store_keys, ("yps-your-part-supplier",)
         )
         self.assertEqual(stored_record.source_label, "policy:test")
+        self.assertEqual(provider_target.target_id, "compose-123")
+        self.assertEqual(provider_target.provider_target_type, "compose")
+        self.assertEqual(provider_target.source_label, "policy:test")
 
     def test_dokploy_targets_unset_shopify_protected_store_key_reports_missing_keys(self) -> None:
         runner = CliRunner()
@@ -549,6 +555,9 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
             stored_record = store.read_dokploy_target_record(
                 context_name="opw", instance_name="testing"
             )
+            provider_target = store.read_provider_target_record(
+                context_name="opw", instance_name="testing"
+            )
             store.close()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -557,6 +566,7 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
         self.assertEqual(payload["missing_keys"], ["missing-store"])
         self.assertEqual(payload["record"]["shopify_protected_store_keys"], ["spare-store"])
         self.assertEqual(stored_record.policies.shopify.protected_store_keys, ("spare-store",))
+        self.assertEqual(provider_target.target_id, "compose-123")
 
     def test_dokploy_targets_put_shopify_protected_store_key_requires_existing_record(self) -> None:
         runner = CliRunner()
