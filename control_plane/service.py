@@ -8121,6 +8121,7 @@ def create_launchplane_service_app(
     resolved_ingress_provider_factory = ingress_provider_factory
     if resolved_ingress_provider_factory is None:
         if npmplus_ingress_client_factory is not None:
+
             def npmplus_ingress_provider_from_client_factory() -> IngressProvider:
                 return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
 
@@ -11913,12 +11914,14 @@ def create_launchplane_service_app(
                     authz_policy = updated_policy
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
-                result, driver_result = control_plane_authz_grant_service.build_authz_policy_github_actions_removal_service_result(
-                    authz_policy_record=authz_policy_record,
-                    changed=changed,
-                    mode=authz_removal_request.mode,
-                    diff=diff,
-                    audit=audit,
+                result, driver_result = (
+                    control_plane_authz_grant_service.build_authz_policy_github_actions_removal_service_result(
+                        authz_policy_record=authz_policy_record,
+                        changed=changed,
+                        mode=authz_removal_request.mode,
+                        diff=diff,
+                        audit=audit,
+                    )
                 )
             elif path == "/v1/authz-policies/github-humans/grants":
                 human_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_validate(
@@ -12613,9 +12616,7 @@ def create_launchplane_service_app(
                     )
                 )
             elif path == PROVIDER_TARGET_OPERATIONS_ROUTE:
-                provider_target_request = ProviderTargetOperationEnvelope.model_validate(
-                    payload
-                )
+                provider_target_request = ProviderTargetOperationEnvelope.model_validate(payload)
                 if not isinstance(record_store, PostgresRecordStore):
                     return _json_response(
                         start_response=start_response,
@@ -12665,13 +12666,28 @@ def create_launchplane_service_app(
                             "error": {
                                 "code": "authorization_denied",
                                 "message": (
-                                    "Workflow cannot run Launchplane provider-target"
-                                    " operations."
+                                    "Workflow cannot run Launchplane provider-target operations."
                                 ),
                             },
                         },
                     )
                 if provider_target_request.mode == "backfill-apply":
+                    if not request_idempotency_key:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_required",
+                                    "message": (
+                                        "Provider-target backfill apply requests require"
+                                        " an Idempotency-Key header."
+                                    ),
+                                },
+                            },
+                        )
                     idempotent_response = _check_idempotent_request(
                         record_store=record_store,
                         scope=request_scope,
@@ -12687,9 +12703,7 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=provider_target_request,
                 )
-                assert isinstance(
-                    provider_target_result, ProviderTargetOperationRouteResult
-                )
+                assert isinstance(provider_target_result, ProviderTargetOperationRouteResult)
                 result = provider_target_result.result
                 driver_result = provider_target_result.driver_result
             elif path == "/v1/drivers/launchplane/self-deploy":

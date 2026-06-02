@@ -12393,6 +12393,79 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_provider_target_operation_endpoint_rejects_apply_without_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="verireel",
+                instance="testing",
+                target_id="app-verireel-testing",
+                target_type="application",
+                target_name="ver-testing-app",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": [
+                                "provider_target.audit",
+                                "provider_target.backfill",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/provider-targets/operations",
+                payload={
+                    "schema_version": 1,
+                    "mode": "backfill-apply",
+                    "product": "launchplane",
+                    "provider_id": "dokploy",
+                    "context": "verireel",
+                    "instance": "testing",
+                    "reason": "Seed provider-target row for Phase Two cutover.",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                provider_targets = store.list_provider_target_records()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "idempotency_key_required")
+        self.assertEqual(provider_targets, ())
+
     def test_product_overview_endpoint_is_generic_web_profile_driven(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
