@@ -55,6 +55,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         target_name="ver-prod-app",
                         target_type="application",
                         deploy_mode="dokploy-application-api",
+                        provider_id="runtime-provider",
+                        target_category="service",
+                        provider_target_type="managed-service",
+                        provider_deploy_mode="service-api",
                         deployment_id="control-plane-dokploy",
                         status="pass",
                         started_at="2026-04-21T18:20:00Z",
@@ -127,9 +131,9 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.rollout_status, "pass")
             self.assertEqual(result.migration_status, "pass")
             self.assertEqual(result.health_status, "pass")
-            self.assertEqual(result.target_category, "application")
-            self.assertEqual(result.provider_id, "dokploy")
-            self.assertEqual(result.provider_target_type, "application")
+            self.assertEqual(result.target_category, "service")
+            self.assertEqual(result.provider_id, "runtime-provider")
+            self.assertEqual(result.provider_target_type, "managed-service")
             self.assertEqual(result.target_type, "application")
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
@@ -139,6 +143,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(promotion.source_health.status, "pass")
             self.assertEqual(promotion.deploy.status, "pass")
+            self.assertEqual(promotion.deploy.provider_id, "runtime-provider")
+            self.assertEqual(promotion.deploy.target_category, "service")
+            self.assertEqual(promotion.deploy.provider_target_type, "managed-service")
+            self.assertEqual(promotion.deploy.provider_deploy_mode, "service-api")
             self.assertEqual(promotion.deploy.deployment_id, "prod-app-123")
             self.assertEqual(promotion.deploy.started_at, "2026-04-21T18:20:00Z")
             self.assertEqual(promotion.deploy.finished_at, "2026-04-21T18:21:15Z")
@@ -163,6 +171,35 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     source="verireel-prod-gate",
                     status="pass",
                     evidence={"snapshot_name": "ver-predeploy-20260421T180500Z"},
+                )
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890"
+                    ),
+                    context="verireel",
+                    instance="prod",
+                    source_git_ref="abcdef1234567890",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="prod-app-123",
+                        target_name="ver-prod-app",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        provider_id="runtime-provider",
+                        target_category="service",
+                        provider_target_type="managed-service",
+                        provider_deploy_mode="service-api",
+                        deployment_id="control-plane-dokploy",
+                        status="pass",
+                        started_at="2026-04-21T18:20:00Z",
+                        finished_at="2026-04-21T18:21:15Z",
+                    ),
                 )
             )
             request = VeriReelProdPromotionRequest(
@@ -229,6 +266,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(promotion.backup_gate.status, "pass")
             self.assertEqual(promotion.deploy.status, "pass")
+            self.assertEqual(promotion.deploy.provider_id, "runtime-provider")
+            self.assertEqual(promotion.deploy.target_category, "service")
+            self.assertEqual(promotion.deploy.provider_target_type, "managed-service")
+            self.assertEqual(promotion.deploy.provider_deploy_mode, "service-api")
             self.assertEqual(promotion.post_deploy_update.status, "fail")
             self.assertEqual(promotion.destination_health.status, "skipped")
 

@@ -93,7 +93,7 @@ def ensure_target_reference_matches(
         raise ValueError("target_category does not match target_type")
     if target_category == "compose" and target_type != "compose":
         raise ValueError("target_category does not match target_type")
-    if provider_id == "dokploy" and provider_target_type != target_type:
+    if provider_target_type in {"application", "compose"} and provider_target_type != target_type:
         raise ValueError("provider_target_type does not match target_type")
     canonical_reference = DeployTargetContractReference(
         target_name=target_name,

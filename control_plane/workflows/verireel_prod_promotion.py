@@ -148,6 +148,16 @@ class VeriReelProdPromotionTargetResultFields(BaseModel):
     target_type: str
 
 
+class VeriReelProdPromotionDeployEvidenceFields(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deploy_mode: str
+    provider_id: str
+    target_category: DeployTargetCategory
+    provider_target_type: str
+    provider_deploy_mode: str
+
+
 def _default_target_name() -> str:
     return "ver-prod-app"
 
@@ -182,6 +192,49 @@ def _target_result_fields_from_deployment(
         provider_id=deployment_result.provider_id,
         provider_target_type=deployment_result.provider_target_type,
         target_type=deployment_result.target_type,
+    )
+
+
+def _target_result_fields_from_promotion_record(
+    promotion_record: PromotionRecord,
+    *,
+    fallback: VeriReelProdPromotionTargetResultFields,
+) -> VeriReelProdPromotionTargetResultFields:
+    return VeriReelProdPromotionTargetResultFields(
+        target_name=promotion_record.deploy.target_name,
+        target_id=promotion_record.deploy.deployment_id,
+        target_category=promotion_record.deploy.target_category or fallback.target_category,
+        provider_id=promotion_record.deploy.provider_id or fallback.provider_id,
+        provider_target_type=(
+            promotion_record.deploy.provider_target_type or fallback.provider_target_type
+        ),
+        target_type=promotion_record.deploy.target_type,
+    )
+
+
+def _provider_deploy_fields_from_deployment_record(
+    *,
+    deployment_record: DeploymentRecord | None,
+    fallback: VeriReelProdPromotionTargetResultFields,
+    target_type: DokployTargetType,
+) -> VeriReelProdPromotionDeployEvidenceFields:
+    deploy_mode = _default_deploy_mode()
+    provider_id = fallback.provider_id
+    target_category = fallback.target_category
+    provider_target_type = fallback.provider_target_type
+    provider_deploy_mode = deploy_mode
+    if deployment_record is not None:
+        deploy_mode = deployment_record.deploy.deploy_mode
+        provider_id = deployment_record.deploy.provider_id
+        target_category = deployment_record.deploy.target_category or target_type
+        provider_target_type = deployment_record.deploy.provider_target_type
+        provider_deploy_mode = deployment_record.deploy.provider_deploy_mode
+    return VeriReelProdPromotionDeployEvidenceFields(
+        deploy_mode=deploy_mode,
+        provider_id=provider_id,
+        target_category=target_category,
+        provider_target_type=provider_target_type,
+        provider_deploy_mode=provider_deploy_mode,
     )
 
 
@@ -296,9 +349,18 @@ def _build_promotion_record(
     migration_detail: str,
     health_result: VeriReelRolloutVerificationResult | None,
 ) -> PromotionRecord:
-    deploy_mode = _default_deploy_mode()
-    if deployment_record is not None:
-        deploy_mode = deployment_record.deploy.deploy_mode
+    provider_deploy_fields = _provider_deploy_fields_from_deployment_record(
+        deployment_record=deployment_record,
+        fallback=VeriReelProdPromotionTargetResultFields(
+            target_name=target_name,
+            target_id=target_id,
+            target_category=target_type,
+            provider_id="dokploy",
+            provider_target_type=target_type,
+            target_type=target_type,
+        ),
+        target_type=target_type,
+    )
     destination_health = _build_destination_health(
         request=request,
         health_result=health_result,
@@ -325,7 +387,11 @@ def _build_promotion_record(
         deploy=DeploymentEvidence(
             target_name=target_name,
             target_type=target_type,
-            deploy_mode=deploy_mode,
+            deploy_mode=provider_deploy_fields.deploy_mode,
+            provider_id=provider_deploy_fields.provider_id,
+            target_category=provider_deploy_fields.target_category,
+            provider_target_type=provider_deploy_fields.provider_target_type,
+            provider_deploy_mode=provider_deploy_fields.provider_deploy_mode,
             deployment_id=target_id,
             status="pass" if deploy_status == "pass" else "fail",
             started_at=deploy_started_at,
@@ -391,12 +457,27 @@ def _write_failed_promotion_record(
     target_name: str | None = None,
     target_type: DokployTargetType | None = None,
     target_id: str = "",
+    target_fields: VeriReelProdPromotionTargetResultFields | None = None,
+    deployment_record: DeploymentRecord | None = None,
     migration_status: ReleaseStatus = "skipped",
     migration_detail: str = "",
     health_result: VeriReelRolloutVerificationResult | None = None,
 ) -> None:
     resolved_target_name = target_name or _default_target_name()
     resolved_target_type = target_type or _default_target_type()
+    provider_deploy_fields = _provider_deploy_fields_from_deployment_record(
+        deployment_record=deployment_record,
+        fallback=target_fields
+        or VeriReelProdPromotionTargetResultFields(
+            target_name=resolved_target_name,
+            target_id=target_id,
+            target_category=resolved_target_type,
+            provider_id="dokploy",
+            provider_target_type=resolved_target_type,
+            target_type=resolved_target_type,
+        ),
+        target_type=resolved_target_type,
+    )
     destination_health = _build_destination_health(
         request=request,
         health_result=health_result,
@@ -423,7 +504,11 @@ def _write_failed_promotion_record(
             deploy=DeploymentEvidence(
                 target_name=resolved_target_name,
                 target_type=resolved_target_type,
-                deploy_mode=_default_deploy_mode(),
+                deploy_mode=provider_deploy_fields.deploy_mode,
+                provider_id=provider_deploy_fields.provider_id,
+                target_category=provider_deploy_fields.target_category,
+                provider_target_type=provider_deploy_fields.provider_target_type,
+                provider_deploy_mode=provider_deploy_fields.provider_deploy_mode,
                 deployment_id=target_id,
                 status=deploy_status,
                 started_at=deploy_started_at,
@@ -730,7 +815,10 @@ def execute_verireel_prod_promotion(
             health_status="skipped",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            target_fields=target_fields,
+            target_fields=_target_result_fields_from_promotion_record(
+                promotion_record,
+                fallback=target_fields,
+            ),
             error_message=deployment_result.error_message,
         )
 
@@ -755,6 +843,8 @@ def execute_verireel_prod_promotion(
             target_name=deployment_result.target_name,
             target_type=legacy_target_type,
             target_id=deployment_result.target_id,
+            target_fields=target_fields,
+            deployment_record=deployment_record,
             health_result=failed_rollout_result,
         )
         return _build_result(
@@ -799,6 +889,8 @@ def execute_verireel_prod_promotion(
             target_name=deployment_result.target_name,
             target_type=legacy_target_type,
             target_id=deployment_result.target_id,
+            target_fields=target_fields,
+            deployment_record=deployment_record,
             migration_status="fail",
             migration_detail=error_message,
             health_result=None,
@@ -849,6 +941,8 @@ def execute_verireel_prod_promotion(
             target_name=deployment_result.target_name,
             target_type=legacy_target_type,
             target_id=deployment_result.target_id,
+            target_fields=target_fields,
+            deployment_record=deployment_record,
             migration_status="pass",
             migration_detail="",
             health_result=failed_health_result,
@@ -893,6 +987,9 @@ def execute_verireel_prod_promotion(
         health_status=health_result.status,
         deploy_started_at=deployment_result.deploy_started_at,
         deploy_finished_at=deployment_result.deploy_finished_at,
-        target_fields=target_fields,
+        target_fields=_target_result_fields_from_promotion_record(
+            promotion_record,
+            fallback=target_fields,
+        ),
         error_message=deployment_result.error_message,
     )

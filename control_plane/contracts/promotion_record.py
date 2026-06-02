@@ -1,9 +1,10 @@
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import (
     DeployTargetCategory,
+    DeployTargetCompatibilityType,
     DeployTargetContractReference,
     apply_target_reference_defaults,
     ensure_target_reference_matches,
@@ -55,12 +56,12 @@ class BackupGateEvidence(BaseModel):
 class DeploymentEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_name: str
-    target_type: Literal["compose", "application"]
-    deploy_mode: str
-    target_reference: DeployTargetContractReference | None = Field(
-        default=None, exclude=True
+    target_name: str = ""
+    target_type: DeployTargetCompatibilityType = Field(
+        default=cast(DeployTargetCompatibilityType, "")
     )
+    deploy_mode: str
+    target_reference: DeployTargetContractReference | None = Field(default=None, exclude=True)
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
     provider_target_type: str = ""
@@ -78,10 +79,15 @@ class DeploymentEvidence(BaseModel):
     @model_validator(mode="after")
     def _validate_provider_evidence(self) -> "DeploymentEvidence":
         self.provider_id = self.provider_id.strip().lower()
+        self.target_name = self.target_name.strip()
         self.provider_target_type = self.provider_target_type.strip().lower()
         self.provider_deploy_mode = self.provider_deploy_mode.strip()
         if not self.provider_id:
             raise ValueError("deployment evidence requires provider_id")
+        if not self.target_name:
+            raise ValueError("deployment evidence requires target_name")
+        if not self.target_type:
+            raise ValueError("deployment evidence requires target_type")
         if self.target_category is None:
             self.target_category = self.target_type
         if not self.provider_target_type:
@@ -207,11 +213,11 @@ class PromotionRequest(BaseModel):
     context: str
     from_instance: str
     to_instance: str
-    target_name: str
-    target_type: Literal["compose", "application"]
-    target_reference: DeployTargetContractReference | None = Field(
-        default=None, exclude=True
+    target_name: str = ""
+    target_type: DeployTargetCompatibilityType = Field(
+        default=cast(DeployTargetCompatibilityType, "")
     )
+    target_reference: DeployTargetContractReference | None = Field(default=None, exclude=True)
     provider_id: str = "dokploy"
     target_category: DeployTargetCategory | None = None
     provider_target_type: str = ""
@@ -241,8 +247,11 @@ class PromotionRequest(BaseModel):
             raise ValueError("promotion request requires source_git_ref")
         if not self.context.strip():
             raise ValueError("promotion request requires context")
+        self.target_name = self.target_name.strip()
         if not self.target_name.strip():
             raise ValueError("promotion request requires target_name")
+        if not self.target_type:
+            raise ValueError("promotion request requires target_type")
         if not self.deploy_mode.strip():
             raise ValueError("promotion request requires deploy_mode")
         self.provider_id = self.provider_id.strip().lower()
