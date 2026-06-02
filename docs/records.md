@@ -131,12 +131,11 @@ an ORM column/table or remains only in the evidence payload.
 - Provider target records define the neutral target inventory contract:
   `context`, `instance`, `provider_id`, `target_category`, `target_id`,
   `display_name`, `provider_target_type`, `updated_at`, and payload-only
-  provider evidence. DB-backed storage uses `launchplane_provider_targets` for
-  explicit provider-neutral target rows, and read models can still project these
-  neutral records from paired Dokploy target and target-id records when no
-  explicit provider-target row exists. Existing Dokploy target and target-id
-  records remain the active live write/execution path until a later dual-write
-  or cutover migration.
+  provider evidence. DB-backed storage uses `launchplane_provider_targets` as
+  the explicit provider-neutral target authority for current reads. Paired
+  Dokploy target and target-id records still provide audit/backfill comparison
+  material and provider execution configuration, but they no longer synthesize
+  steady-state provider-target authority when an explicit row is missing.
 - Product onboarding, Dokploy target adoption/creation, product context cutover,
   and tracked Dokploy target metadata commands now dual-write explicit
   provider-target rows when a complete Dokploy target and target-id pair exists.
@@ -599,11 +598,12 @@ state/
 - Live `target_id` values remain a sibling DB-backed record so operators can
   update route metadata and route identity independently when needed.
 - Paired Dokploy target and target-id records project to the neutral
-  `ProviderTargetRecord` read model. Missing halves remain missing; Launchplane
-  does not fabricate provider-neutral target identity from only route metadata or
-  only a live id. Explicit `launchplane_provider_targets` rows take precedence in
-  provider-target read models, but Dokploy records remain the live execution
-  authority until the write path is migrated.
+  `ProviderTargetRecord` shape for audit and backfill comparison only. Missing
+  halves remain missing; Launchplane does not fabricate provider-neutral target
+  identity from only route metadata or only a live id. Explicit
+  `launchplane_provider_targets` rows are the provider-target read authority.
+  Dokploy records remain provider-specific execution configuration and cannot
+  override provider-target identity after cutover.
 - Shopify guard values such as protected store keys now belong in
   `policies.shopify.protected_store_keys` on this record instead of a route map
   hardcoded in Python.

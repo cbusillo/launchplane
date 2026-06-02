@@ -3144,7 +3144,7 @@ class PostgresRecordStore(HumanSessionStore):
     def read_provider_target_record(
         self, *, context_name: str, instance_name: str
     ) -> ProviderTargetRecord:
-        record = self._read_optional_model(
+        return self._read_model(
             model_type=ProviderTargetRecord,
             orm_model=LaunchplaneProviderTargetRow,
             filters=(
@@ -3152,65 +3152,23 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneProviderTargetRow.instance == instance_name,
             ),
         )
-        if record is not None:
-            return record
-        target_record = self.read_dokploy_target_record(
-            context_name=context_name,
-            instance_name=instance_name,
-        )
-        target_id_record = self.read_dokploy_target_id_record(
-            context_name=context_name,
-            instance_name=instance_name,
-        )
-        return ProviderTargetRecord.from_dokploy_records(
-            target_record=target_record,
-            target_id_record=target_id_record,
-        )
 
     def list_provider_target_records(
         self, *, provider_id: str = ""
     ) -> tuple[ProviderTargetRecord, ...]:
         normalized_provider_id = provider_id.strip().lower()
-        all_physical_records = list(
-            self._list_models(
-                model_type=ProviderTargetRecord,
-                orm_model=LaunchplaneProviderTargetRow,
-                order_by=(
-                    LaunchplaneProviderTargetRow.context.asc(),
-                    LaunchplaneProviderTargetRow.instance.asc(),
-                ),
-            )
+        filters: Sequence[object] = ()
+        if normalized_provider_id:
+            filters = (LaunchplaneProviderTargetRow.provider_id == normalized_provider_id,)
+        return self._list_models(
+            model_type=ProviderTargetRecord,
+            orm_model=LaunchplaneProviderTargetRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneProviderTargetRow.context.asc(),
+                LaunchplaneProviderTargetRow.instance.asc(),
+            ),
         )
-        physical_record_keys = {
-            (record.context, record.instance) for record in all_physical_records
-        }
-        physical_records = list(
-            record
-            for record in all_physical_records
-            if not normalized_provider_id or record.provider_id == normalized_provider_id
-        )
-        target_id_records = {
-            (record.context, record.instance): record
-            for record in self.list_dokploy_target_id_records()
-        }
-        provider_records: list[ProviderTargetRecord] = [*physical_records]
-        for target_record in self.list_dokploy_target_records():
-            if (target_record.context, target_record.instance) in physical_record_keys:
-                continue
-            target_id_record = target_id_records.get(
-                (target_record.context, target_record.instance)
-            )
-            if target_id_record is None:
-                continue
-            provider_record = ProviderTargetRecord.from_dokploy_records(
-                target_record=target_record,
-                target_id_record=target_id_record,
-            )
-            if normalized_provider_id and provider_record.provider_id != normalized_provider_id:
-                continue
-            provider_records.append(provider_record)
-        provider_records.sort(key=lambda record: (record.context, record.instance))
-        return tuple(provider_records)
 
     def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]:
         return self._list_models(

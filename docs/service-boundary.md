@@ -877,11 +877,14 @@ runtime, and audit sanitized key/count evidence.
 Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
 Launchplane resolves the context from the DB-backed product profile lane and the
-runtime target from DB-backed Dokploy target records.
-Product environment reads expose a neutral provider-target projection when a
-lane has paired DB-backed Dokploy target and target-id records, but generic-web
-deploy and live runtime apply still resolve and mutate through those Dokploy
-records until the provider-neutral write path exists.
+runtime target identity from DB-backed provider-target records. Dokploy target
+records remain provider execution configuration for Dokploy-backed lanes and
+must agree with the provider-target identity before deploy proceeds.
+Product environment reads expose neutral provider-target identity only from
+explicit provider-target rows. Paired DB-backed Dokploy target and target-id
+records remain visible as provider-specific execution/history metadata and as
+audit/backfill comparison material; they no longer synthesize current
+provider-target authority when an explicit row is missing.
 
 Generic web prod promotion can be exercised directly with
 `POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only use this

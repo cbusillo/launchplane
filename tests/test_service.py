@@ -12319,9 +12319,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(dry_run_payload["result"]["report"]["counts"], {"would-create": 1})
         self.assertEqual(dry_run_rerun_status, 202)
         self.assertNotIn("replayed", dry_run_rerun_payload)
-        self.assertEqual(
-            dry_run_rerun_payload["result"]["report"]["counts"], {"would-create": 1}
-        )
+        self.assertEqual(dry_run_rerun_payload["result"]["report"]["counts"], {"would-create": 1})
         self.assertEqual(apply_status, 202)
         self.assertEqual(apply_payload["result"]["report"]["counts"], {"created": 1})
         self.assertEqual(audit_status, 202)
@@ -12691,6 +12689,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     instance="prod",
                     target_id="app-prod-123",
                     updated_at="2026-05-02T22:31:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="example-site",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="application",
+                    target_id="app-prod-123",
+                    display_name="example-site-prod",
+                    provider_target_type="application",
+                    updated_at="2026-05-02T22:32:00Z",
                     source_label="test",
                 )
             )

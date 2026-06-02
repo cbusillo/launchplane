@@ -126,9 +126,7 @@ class GenericWebPostDeployContext(BaseModel):
             raise ValueError("generic web post-deploy context requires instance")
         if not self.deployment_record_id.strip():
             raise ValueError("generic web post-deploy context requires deployment_record_id")
-        self.target_category = cast(
-            DeployTargetCategory, self.target_category.strip().lower()
-        )
+        self.target_category = cast(DeployTargetCategory, self.target_category.strip().lower())
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
         self.target_type = self.target_type.strip().lower()
@@ -326,6 +324,7 @@ def _fallback_ship_request(
 def _resolve_deploy_target(
     *,
     control_plane_root: Path,
+    record_store: GenericWebDeployStore,
     request: GenericWebDeployRequest,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
@@ -337,6 +336,7 @@ def _resolve_deploy_target(
         request_source_git_ref=request.source_git_ref,
         request_timeout_seconds=request.timeout_seconds,
         request_no_cache=request.no_cache,
+        record_store=record_store,
         profile=profile,
         lane=lane,
         normalized_artifact_id=normalize_generic_web_artifact_id(
@@ -381,6 +381,7 @@ def execute_generic_web_deploy(
     try:
         resolved_deploy_target = _resolve_deploy_target(
             control_plane_root=control_plane_root,
+            record_store=record_store,
             request=request,
             profile=resolved_profile,
             lane=resolved_lane,
@@ -486,9 +487,7 @@ def execute_generic_web_deploy(
                     updated_at=finished_at,
                 )
             )
-        target_fields = _deploy_result_target_fields(
-            resolved_deploy_target=resolved_deploy_target
-        )
+        target_fields = _deploy_result_target_fields(resolved_deploy_target=resolved_deploy_target)
         return GenericWebDeployResult(
             deployment_record_id=record_id,
             deploy_status=deployment_status,
