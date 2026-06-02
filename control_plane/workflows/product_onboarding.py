@@ -27,6 +27,8 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 class ProductOnboardingRecordStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None: ...
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
@@ -78,8 +80,15 @@ class ProductOnboardingSecretBindingPlan(BaseModel):
 
 
 def build_product_profile_record(
-    *, manifest: ProductOnboardingManifest, updated_at: str
+    *,
+    manifest: ProductOnboardingManifest,
+    updated_at: str,
+    existing_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> LaunchplaneProductProfileRecord:
+    historical_contexts = _merged_historical_contexts(
+        manifest_contexts=manifest.historical_contexts,
+        existing_profile=existing_profile,
+    )
     return LaunchplaneProductProfileRecord(
         product=manifest.product,
         display_name=manifest.display_name,
@@ -101,12 +110,38 @@ def build_product_profile_record(
             )
             for lane in manifest.lanes
         ),
+        historical_contexts=historical_contexts,
         preview=ProductPreviewProfile.model_validate(manifest.preview.model_dump(mode="json")),
         promotion_workflow=manifest.promotion_workflow,
         expected_config=manifest.product_expected_config_profile(),
         updated_at=updated_at,
         source=manifest.source_label,
     )
+
+
+def _merged_historical_contexts(
+    *,
+    manifest_contexts: tuple[str, ...],
+    existing_profile: LaunchplaneProductProfileRecord | None,
+) -> tuple[str, ...]:
+    historical_contexts: list[str] = []
+    for raw_context in (
+        *(existing_profile.historical_contexts if existing_profile else ()),
+        *manifest_contexts,
+    ):
+        context = raw_context.strip()
+        if context and context not in historical_contexts:
+            historical_contexts.append(context)
+    return tuple(historical_contexts)
+
+
+def _read_existing_product_profile(
+    *, record_store: ProductOnboardingRecordStore, product: str
+) -> LaunchplaneProductProfileRecord | None:
+    try:
+        return record_store.read_product_profile_record(product)
+    except (FileNotFoundError, KeyError):
+        return None
 
 
 def build_provider_target_records(
@@ -279,7 +314,15 @@ def apply_product_onboarding_manifest(
     updated_at: str = "",
 ) -> ProductOnboardingApplyResult:
     recorded_at = updated_at.strip() or manifest.updated_at.strip() or utc_now_timestamp()
-    product_profile = build_product_profile_record(manifest=manifest, updated_at=recorded_at)
+    existing_product_profile = _read_existing_product_profile(
+        record_store=record_store,
+        product=manifest.product,
+    )
+    product_profile = build_product_profile_record(
+        manifest=manifest,
+        updated_at=recorded_at,
+        existing_profile=existing_product_profile,
+    )
     provider_targets = build_provider_target_records(manifest=manifest, updated_at=recorded_at)
     provider_target_ids = build_provider_target_id_records(
         manifest=manifest, updated_at=recorded_at

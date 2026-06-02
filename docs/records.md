@@ -271,6 +271,11 @@ The same redacted audit is exposed through the Launchplane service at
 `source_context`, `target_context`, and optional `preview_context` query
 parameters. The manual `Product Context Cutover Audit` GitHub workflow calls
 that service route through GitHub OIDC and uploads the redacted JSON artifact.
+After cutover, the source context is historical evidence rather than a current
+product boundary, so this pre-cutover audit will reject the legacy context. Use
+the `Product Legacy Context Cleanup` workflow in `dry_run=true` mode for
+post-cutover SYO evidence, then validate live runtime against the canonical
+`sellyouroutboard` testing and prod lanes.
 The manual `Product Legacy Context Cleanup` GitHub workflow calls the matching
 write route through GitHub OIDC. It defaults to `dry_run=true`, refuses cleanup
 while the source context is still product-owned, blocks individual mutable
