@@ -1692,6 +1692,70 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
         self.assertEqual(secret_bindings[0].status, "configured")
 
+    def test_apply_product_onboarding_manifest_retires_placeholder_when_context_binding_satisfies_instance(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+            first_result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T00:20:00Z",
+            )
+            placeholder_binding_id = first_result.secret_bindings[0].binding_id
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-runtime-environment-smtp-password-example-site-prod-binding-smtp-password",
+                    secret_id="secret-runtime-environment-smtp-password-example-site-prod",
+                    integration="runtime_environment",
+                    binding_key="SMTP_PASSWORD",
+                    context="example-site-prod",
+                    instance="",
+                    status="configured",
+                    created_at="2026-05-03T00:30:00Z",
+                    updated_at="2026-05-03T00:30:00Z",
+                )
+            )
+
+            result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-05-03T02:30:00Z",
+            )
+
+            all_secret_bindings = store.list_secret_bindings(limit=None)
+            active_secret_bindings = store.list_secret_bindings(
+                integration="runtime_environment",
+                context_name="example-site-prod",
+                instance_name="prod",
+            )
+            store.close()
+
+        retired_placeholder = next(
+            binding
+            for binding in all_secret_bindings
+            if binding.binding_id == placeholder_binding_id
+        )
+        self.assertEqual(result.secret_bindings, ())
+        self.assertEqual(retired_placeholder.integration, "retired:runtime_environment")
+        self.assertEqual(retired_placeholder.status, "disabled")
+        self.assertEqual(retired_placeholder.updated_at, "2026-05-03T02:30:00Z")
+        self.assertEqual(active_secret_bindings, ())
+        configured_bindings = [
+            binding
+            for binding in all_secret_bindings
+            if binding.integration == "runtime_environment"
+            and binding.binding_key == "SMTP_PASSWORD"
+            and binding.context == "example-site-prod"
+            and binding.instance == ""
+        ]
+        self.assertEqual(len(configured_bindings), 1)
+        self.assertEqual(configured_bindings[0].status, "configured")
+
     def test_apply_product_onboarding_manifest_blocks_conflicting_provider_target(
         self,
     ) -> None:
