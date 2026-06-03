@@ -11,6 +11,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.protected_artifacts import build_protected_artifact_set
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -138,6 +139,34 @@ def artifacts_ingest(
         input_file=input_file,
         command_label="artifacts ingest",
     )
+
+
+@artifacts.command("protected")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--database-url", default="", show_default=False)
+@click.option("--local-rehearsal", is_flag=True, default=False)
+@click.option("--product", "product_name", default="", show_default=False)
+@click.option("--context", "context_name", default="", show_default=False)
+def artifacts_protected(
+    state_dir: Path,
+    database_url: str,
+    local_rehearsal: bool,
+    product_name: str,
+    context_name: str,
+) -> None:
+    execution_database_url = _resolve_record_mutation_database_url(
+        database_url=database_url,
+        local_rehearsal=local_rehearsal,
+        command_label="artifacts protected",
+    )
+    protected = build_protected_artifact_set(
+        _store(state_dir, database_url=execution_database_url),
+        product=product_name,
+        context_name=context_name,
+    )
+    click.echo(json.dumps(protected.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 def _write_artifact_manifest_command(

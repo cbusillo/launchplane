@@ -37,6 +37,8 @@ VeriReel product paths:
 
 - CLI: `uv run launchplane service serve`
 - health route: `GET /v1/health`
+- protected artifact inventory route:
+  - `GET /v1/artifacts/protected`
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates`
   - `POST /v1/evidence/deployments`
@@ -943,6 +945,7 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/inventory/{context}/{instance}`
 - `GET /v1/promotions/{record_id}`
 - `GET /v1/deployments/{record_id}`
+- `GET /v1/artifacts/protected`
 - `GET /v1/contexts/{context}/secrets`
 - `GET /v1/contexts/{context}/instances/{instance}/secrets`
 - `GET /v1/secrets/{secret_id}`

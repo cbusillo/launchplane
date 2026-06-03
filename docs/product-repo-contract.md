@@ -30,8 +30,9 @@ Launchplane
   - driver descriptors and driver routes
   - provider credentials and managed secrets
   - preview/deploy/promotion/rollback orchestration
-- health, readiness, inventory, cleanup, and feedback records or driver
-  responses
+  - health, readiness, inventory, cleanup, and feedback records or driver
+    responses
+  - protected artifact inventory for registry cleanup
   - PR feedback rendering and delivery
 ```
 
@@ -82,6 +83,8 @@ profile data.
 - PR feedback records, markdown rendering, comment delivery, and stale feedback
   cleanup.
 - Promotion, rollback, deployment, preview, inventory, and cleanup records.
+- Protected artifact inventory used by registry cleanup to identify live
+  testing, production, release-tuple, and active-preview image references.
 
 ## Minimal Trigger Inputs
 
@@ -205,6 +208,24 @@ Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
 runtime health, or cleanup safety gates until Launchplane owns the equivalent
 behavior and tests.
+
+Registry artifact cleanup is a Launchplane-owned liveness question. Product
+repos may still perform provider-specific registry deletion, but they must first
+load Launchplane's protected artifact inventory, validate the response, and
+abort without deleting anything when the inventory is unavailable, unauthorized,
+or has unresolved live-artifact warnings for the registry being cleaned. Product
+cleanup jobs should treat Launchplane-protected image references and artifact
+ids as a deny set; they must not infer that testing, production, or active
+preview artifacts are deletable from local tag shape alone.
+
+Cleanup consumers must check both `artifact_ids` and `image_references` from the
+protected inventory. Some active-preview protections come from ready PR feedback
+records that carry immutable and refresh image references but no artifact id, so
+an artifact-id-only cleanup filter can still delete a live preview tag. Whole-
+product cleanup callers should request `GET /v1/artifacts/protected?product=...`
+with an `artifact_protection.read` grant that allows wildcard context for that
+product; context-specific cleanup may pass `context=` and use a matching scoped
+grant.
 
 ## Reusable Launchplane Request Action
 

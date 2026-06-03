@@ -15,7 +15,8 @@ deployed service API with GitHub OIDC or the operator UI that calls it. If a liv
 mutation still exists only as a local CLI command, stop and add or use a service
 API path instead of running the local command from an arbitrary checkout.
 
-- `artifacts`: write, ingest, and inspect artifact manifests.
+- `artifacts`: write, ingest, inspect artifact manifests, and emit protected
+  artifact inventories for registry cleanup deny sets.
 - `backup-gates`: write and inspect backup-gate records.
 - `deployments`: write and inspect deployment records.
 - `environments`: write, list, and resolve DB-backed runtime environment
@@ -151,6 +152,7 @@ as authority.
 Current implementation scope:
 
 - `GET /v1/health`
+- `GET /v1/artifacts/protected`
 - `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/deployments`
 - `POST /v1/evidence/promotions`
@@ -569,6 +571,17 @@ Current derived-state behavior:
   linkage to the deployment record that established the promoted state.
 - The same promotion evidence can also mint the destination stable-lane tuple
   when Launchplane already has the source tuple state for the promoted-from lane.
+- `artifacts protected` and `GET /v1/artifacts/protected` compose Launchplane's
+  current protected artifact inventory from stable environment inventory,
+  release tuples, active preview generations, and ready preview feedback.
+  Registry cleanup jobs for every product must consume this inventory before
+  deleting package versions and fail closed when the read fails or warns about a
+  live artifact without a stored manifest. Service callers must include
+  `product=`; callers that request a whole product without `context=` need an
+  `artifact_protection.read` grant with wildcard context. The CLI requires
+  `--database-url` or
+  `LAUNCHPLANE_DATABASE_URL` unless `--local-rehearsal` is explicitly passed for
+  non-authoritative local rehearsal.
 - The tracked Dokploy route catalog is only for stable remote lanes. If a pull
   request needs runtime state, Launchplane models that through preview records and
   preview generations instead of adding another long-lived route.
