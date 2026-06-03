@@ -446,6 +446,19 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         store = _FakeProductConfigStore()
         store.write_secret_binding(
             SecretBinding(
+                binding_id="binding-global-placeholder",
+                secret_id="secret-global-placeholder",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="",
+                instance="",
+                status="disabled",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+        store.write_secret_binding(
+            SecretBinding(
                 binding_id="binding-unrelated-placeholder",
                 secret_id="secret-unrelated-placeholder",
                 integration="runtime_environment",
@@ -474,9 +487,64 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             updated_at="2026-05-02T00:00:00Z",
         )
 
+        exact_placeholder = store.secret_bindings["binding-global-placeholder"]
+        self.assertEqual(exact_placeholder.integration, "retired:runtime_environment")
+        self.assertEqual(exact_placeholder.status, "disabled")
         unrelated_placeholder = store.secret_bindings["binding-unrelated-placeholder"]
         self.assertEqual(unrelated_placeholder.integration, "runtime_environment")
         self.assertEqual(unrelated_placeholder.status, "disabled")
+
+    def test_runtime_secret_placeholder_retirement_supports_context_route(self) -> None:
+        store = _FakeProductConfigStore()
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="binding-context-placeholder",
+                secret_id="secret-context-placeholder",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="",
+                status="disabled",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="binding-instance-placeholder",
+                secret_id="secret-instance-placeholder",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="prod",
+                status="disabled",
+                created_at="2026-05-01T00:00:00Z",
+                updated_at="2026-05-01T00:00:00Z",
+            )
+        )
+
+        control_plane_product_config._retire_disabled_runtime_secret_placeholders(
+            record_store=store,
+            configured_binding=SecretBinding(
+                binding_id="binding-context-discord-token",
+                secret_id="secret-context-discord-token",
+                integration="runtime_environment",
+                binding_key="DISCORD_TOKEN",
+                context="discord-blue",
+                instance="",
+                status="configured",
+                created_at="2026-05-02T00:00:00Z",
+                updated_at="2026-05-02T00:00:00Z",
+            ),
+            updated_at="2026-05-02T00:00:00Z",
+        )
+
+        context_placeholder = store.secret_bindings["binding-context-placeholder"]
+        self.assertEqual(context_placeholder.integration, "retired:runtime_environment")
+        self.assertEqual(context_placeholder.status, "disabled")
+        instance_placeholder = store.secret_bindings["binding-instance-placeholder"]
+        self.assertEqual(instance_placeholder.integration, "runtime_environment")
+        self.assertEqual(instance_placeholder.status, "disabled")
 
     def test_product_config_rejects_existing_configured_runtime_secret_duplicate(
         self,
