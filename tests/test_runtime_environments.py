@@ -123,6 +123,7 @@ class _FakeProductConfigStore:
         self.secret_records: dict[str, SecretRecord] = {}
         self.secret_versions: dict[str, SecretVersion] = {}
         self.secret_bindings: dict[str, SecretBinding] = {}
+        self.secret_binding_list_calls: list[dict[str, object]] = []
         self.secret_audit_events: list[SecretAuditEvent] = []
         self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = (
             RuntimeKeySafetyPolicyRecord(
@@ -216,6 +217,14 @@ class _FakeProductConfigStore:
         instance_name: str = "",
         limit: int | None = None,
     ) -> tuple[SecretBinding, ...]:
+        self.secret_binding_list_calls.append(
+            {
+                "integration": integration,
+                "context_name": context_name,
+                "instance_name": instance_name,
+                "limit": limit,
+            }
+        )
         bindings = tuple(
             binding
             for binding in self.secret_bindings.values()
@@ -437,6 +446,11 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(len(active_bindings), 1)
         self.assertEqual(active_bindings[0].binding_key, "DISCORD_TOKEN")
         self.assertEqual(active_bindings[0].status, "configured")
+        retirement_lookup = store.secret_binding_list_calls[-1]
+        self.assertEqual(retirement_lookup["integration"], "runtime_environment")
+        self.assertEqual(retirement_lookup["context_name"], "discord-blue")
+        self.assertEqual(retirement_lookup["instance_name"], "prod")
+        self.assertIsNone(retirement_lookup["limit"])
         retired_placeholder = store.secret_bindings["binding-discord-blue-placeholder"]
         self.assertEqual(retired_placeholder.integration, "retired:runtime_environment")
         self.assertEqual(retired_placeholder.binding_key, "DISCORD_TOKEN")
@@ -490,6 +504,11 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         exact_placeholder = store.secret_bindings["binding-global-placeholder"]
         self.assertEqual(exact_placeholder.integration, "retired:runtime_environment")
         self.assertEqual(exact_placeholder.status, "disabled")
+        retirement_lookup = store.secret_binding_list_calls[-1]
+        self.assertEqual(retirement_lookup["integration"], "runtime_environment")
+        self.assertEqual(retirement_lookup["context_name"], "")
+        self.assertEqual(retirement_lookup["instance_name"], "")
+        self.assertIsNone(retirement_lookup["limit"])
         unrelated_placeholder = store.secret_bindings["binding-unrelated-placeholder"]
         self.assertEqual(unrelated_placeholder.integration, "runtime_environment")
         self.assertEqual(unrelated_placeholder.status, "disabled")
@@ -542,6 +561,11 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         context_placeholder = store.secret_bindings["binding-context-placeholder"]
         self.assertEqual(context_placeholder.integration, "retired:runtime_environment")
         self.assertEqual(context_placeholder.status, "disabled")
+        retirement_lookup = store.secret_binding_list_calls[-1]
+        self.assertEqual(retirement_lookup["integration"], "runtime_environment")
+        self.assertEqual(retirement_lookup["context_name"], "discord-blue")
+        self.assertEqual(retirement_lookup["instance_name"], "")
+        self.assertIsNone(retirement_lookup["limit"])
         instance_placeholder = store.secret_bindings["binding-instance-placeholder"]
         self.assertEqual(instance_placeholder.integration, "runtime_environment")
         self.assertEqual(instance_placeholder.status, "disabled")

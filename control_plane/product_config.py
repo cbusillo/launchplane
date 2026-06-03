@@ -4,7 +4,7 @@ import json
 import os
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, TypedDict, cast
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -43,6 +43,13 @@ class ProductConfigStore(control_plane_secrets.SecretWriteStore, Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
+
+class _SecretBindingLookupKwargs(TypedDict, total=False):
+    integration: str
+    context_name: str
+    instance_name: str
+    limit: int | None
 
 
 class ProductConfigError(ValueError):
@@ -602,9 +609,16 @@ def _retire_disabled_runtime_secret_placeholders(
         return
     context_name = configured_binding.context.strip()
     instance_name = configured_binding.instance.strip()
+    lookup_kwargs: _SecretBindingLookupKwargs = {
+        "integration": configured_binding.integration,
+        "limit": None,
+    }
+    if context_name:
+        lookup_kwargs["context_name"] = context_name
+    if instance_name:
+        lookup_kwargs["instance_name"] = instance_name
     for binding in record_store.list_secret_bindings(
-        integration=configured_binding.integration,
-        limit=None,
+        **lookup_kwargs,
     ):
         if binding.binding_id == configured_binding.binding_id:
             continue
