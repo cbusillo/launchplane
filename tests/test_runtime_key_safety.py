@@ -244,6 +244,67 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertEqual(evaluation.findings[0].code, "binding_missing")
         self.assertEqual(evaluation.findings[0].binding_key, "ODOO_ADMIN_PASSWORD")
 
+    def test_global_binding_satisfies_allowed_shared_target(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="cm",
+                instance="prod",
+                environment_class="prod",
+            ),
+            required_binding_keys=("ODOO_DB_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="ODOO_DB_PASSWORD",
+                    binding_id="binding-global-db-password",
+                    secret_id="secret-global-db-password",
+                ).model_copy(update={"context": "", "instance": ""}),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="ODOO_DB_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("cm", "opw"),
+                    allowed_instances=("testing", "prod"),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+
+    def test_context_binding_takes_precedence_over_global_binding(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="cm",
+                instance="prod",
+                environment_class="prod",
+            ),
+            required_binding_keys=("ODOO_DB_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="ODOO_DB_PASSWORD",
+                    binding_id="binding-global-db-password",
+                    secret_id="secret-global-db-password",
+                ).model_copy(update={"context": "", "instance": ""}),
+                _binding(
+                    binding_key="ODOO_DB_PASSWORD",
+                    binding_id="binding-context-db-password",
+                    secret_id="secret-context-db-password",
+                ).model_copy(update={"context": "cm", "instance": ""}),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="ODOO_DB_PASSWORD",
+                    secret_class="prod_only",
+                    allowed_contexts=("cm",),
+                    allowed_instances=("prod",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+
     def test_equally_specific_duplicate_bindings_remain_ambiguous(self) -> None:
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(
