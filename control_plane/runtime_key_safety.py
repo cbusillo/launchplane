@@ -77,8 +77,6 @@ def evaluate_runtime_key_safety_from_store(
         required_binding_keys=required_binding_keys,
         secret_bindings=record_store.list_secret_bindings(
             integration="runtime_environment",
-            context_name=target.context,
-            instance_name=target.instance,
             limit=None,
         ),
         secret_rules=policy.rules,

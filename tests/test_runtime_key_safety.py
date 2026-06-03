@@ -439,8 +439,49 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         )
 
         self.assertEqual(evaluation.status, "pass")
-        self.assertEqual(store.requested_context, "opw")
-        self.assertEqual(store.requested_instance, "testing")
+        self.assertEqual(store.requested_context, "")
+        self.assertEqual(store.requested_instance, "")
+
+    def test_evaluate_from_store_allows_global_binding_candidates(self) -> None:
+        policy = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-20260505T200000Z-test",
+            status="active",
+            source="test",
+            updated_at="2026-05-05T20:00:00Z",
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="ODOO_DB_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("cm", "opw"),
+                    allowed_instances=("testing", "prod"),
+                ),
+            ),
+        )
+        store = _FakeRuntimeKeySafetyStore(
+            policies=(policy,),
+            bindings=(
+                _binding(
+                    binding_key="ODOO_DB_PASSWORD",
+                    binding_id="binding-global-db-password",
+                    secret_id="secret-global-db-password",
+                ).model_copy(update={"context": "", "instance": ""}),
+            ),
+        )
+
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=store,
+            target=RuntimeKeySafetyTarget(
+                context="cm",
+                instance="prod",
+                environment_class="prod",
+            ),
+            required_binding_keys=("ODOO_DB_PASSWORD",),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+        self.assertEqual(store.requested_context, "")
+        self.assertEqual(store.requested_instance, "")
 
     def test_missing_active_policy_fails_closed(self) -> None:
         store = _FakeRuntimeKeySafetyStore(policies=(), bindings=())
