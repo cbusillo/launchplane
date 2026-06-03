@@ -117,6 +117,15 @@ def evaluate_runtime_key_safety(
             )
             continue
         effective_bindings = _effective_bindings_for_target(bindings, target=target)
+        if not effective_bindings:
+            findings.append(
+                RuntimeKeySafetyFinding(
+                    code="binding_missing",
+                    binding_key=binding_key,
+                    detail=f"Required managed secret binding {binding_key!r} is missing.",
+                )
+            )
+            continue
         if len(effective_bindings) > 1:
             findings.append(
                 RuntimeKeySafetyFinding(
@@ -197,11 +206,16 @@ def _bindings_by_binding_key(
 def _effective_bindings_for_target(
     bindings: tuple[SecretBinding, ...], *, target: RuntimeKeySafetyTarget
 ) -> tuple[SecretBinding, ...]:
-    highest_rank = max(_binding_route_rank(binding=binding, target=target) for binding in bindings)
+    ranked_bindings = tuple(
+        (binding, _binding_route_rank(binding=binding, target=target)) for binding in bindings
+    )
+    highest_rank = max(rank for _, rank in ranked_bindings)
+    if highest_rank == 0:
+        return ()
     return tuple(
         binding
-        for binding in bindings
-        if _binding_route_rank(binding=binding, target=target) == highest_rank
+        for binding, rank in ranked_bindings
+        if rank == highest_rank
     )
 
 
