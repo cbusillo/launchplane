@@ -220,10 +220,12 @@ def _effective_bindings_for_target(
 
 
 def _binding_route_rank(*, binding: SecretBinding, target: RuntimeKeySafetyTarget) -> int:
-    if binding.context == target.context and binding.instance == target.instance:
-        return 2
-    if binding.context == target.context and not binding.instance:
+    if not binding.context and not binding.instance:
         return 1
+    if binding.context == target.context and binding.instance == target.instance:
+        return 3
+    if binding.context == target.context and not binding.instance:
+        return 2
     return 0
 
 
