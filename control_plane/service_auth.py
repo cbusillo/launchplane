@@ -181,9 +181,9 @@ class GitHubActionsPolicyRule(BaseModel):
             return False
         if self.environments and identity.environment not in self.environments:
             return False
-        if self.products and product not in self.products:
+        if self.products and not self._matches_claim(product, self.products):
             return False
-        if self.contexts and context not in self.contexts:
+        if self.contexts and not self._matches_claim(context, self.contexts):
             return False
         if self.actions and action not in self.actions:
             return False

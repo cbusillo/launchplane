@@ -561,6 +561,23 @@ post_odoo_stable_grant() {
     "$job_workflow_ref"
 }
 
+post_product_artifact_protection_grant() {
+  local repository="$1"
+  local workflow_file="$2"
+  local product_name="$3"
+  local idempotency_suffix="$4"
+  local event_name="${5:-workflow_dispatch}"
+  post_grant \
+    "$repository" \
+    "$workflow_file" \
+    "$product_name" \
+    '*' \
+    artifact_protection.read \
+    "deploy:${idempotency_suffix}-artifact-protection-grant" \
+    "${idempotency_suffix}-artifact-protection" \
+    "$event_name"
+}
+
 post_launchplane_service_grant \
   public-ingress-monitor.yml \
   public_ingress_monitor.run_once \
@@ -845,6 +862,50 @@ post_launchplane_live_target_runtime_grants \
   odoo-tenant-opw \
   opw \
   odoo-opw
+post_product_artifact_protection_grant \
+  cbusillo/verireel \
+  cleanup-ghcr.yml \
+  verireel \
+  verireel-ghcr-cleanup-manual
+post_product_artifact_protection_grant \
+  cbusillo/verireel \
+  cleanup-ghcr.yml \
+  verireel \
+  verireel-ghcr-cleanup-schedule \
+  schedule
+post_product_artifact_protection_grant \
+  cbusillo/sellyouroutboard \
+  cleanup-ghcr.yml \
+  sellyouroutboard \
+  sellyouroutboard-ghcr-cleanup-manual
+post_product_artifact_protection_grant \
+  cbusillo/sellyouroutboard \
+  cleanup-ghcr.yml \
+  sellyouroutboard \
+  sellyouroutboard-ghcr-cleanup-schedule \
+  schedule
+post_product_artifact_protection_grant \
+  cbusillo/odoo-tenant-cm \
+  cleanup-ghcr.yml \
+  odoo-tenant-cm \
+  odoo-tenant-cm-ghcr-cleanup-manual
+post_product_artifact_protection_grant \
+  cbusillo/odoo-tenant-cm \
+  cleanup-ghcr.yml \
+  odoo-tenant-cm \
+  odoo-tenant-cm-ghcr-cleanup-schedule \
+  schedule
+post_product_artifact_protection_grant \
+  cbusillo/odoo-tenant-opw \
+  cleanup-ghcr.yml \
+  odoo-tenant-opw \
+  odoo-tenant-opw-ghcr-cleanup-manual
+post_product_artifact_protection_grant \
+  cbusillo/odoo-tenant-opw \
+  cleanup-ghcr.yml \
+  odoo-tenant-opw \
+  odoo-tenant-opw-ghcr-cleanup-schedule \
+  schedule
 post_grant \
   "$GITHUB_REPOSITORY" \
   odoo-target-replacement-plan.yml \

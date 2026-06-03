@@ -1146,6 +1146,51 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             )
         )
 
+    def test_actions_policy_matches_product_and_context_patterns(self) -> None:
+        rule = GitHubActionsPolicyRule(
+            repository="cbusillo/verireel",
+            workflow_refs=(
+                "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml@refs/heads/main",
+            ),
+            event_names=("schedule",),
+            products=("verireel",),
+            contexts=("*",),
+            actions=("artifact_protection.read",),
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=_actions_identity(
+                    workflow_ref=(
+                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml"
+                        "@refs/heads/main"
+                    ),
+                    event_name="schedule",
+                    ref="refs/heads/main",
+                    subject="repo:cbusillo/verireel:ref:refs/heads/main",
+                ),
+                action="artifact_protection.read",
+                product="verireel",
+                context="launchplane",
+            )
+        )
+        self.assertFalse(
+            rule.allows(
+                identity=_actions_identity(
+                    workflow_ref=(
+                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml"
+                        "@refs/heads/main"
+                    ),
+                    event_name="schedule",
+                    ref="refs/heads/main",
+                    subject="repo:cbusillo/verireel:ref:refs/heads/main",
+                ),
+                action="artifact_protection.read",
+                product="sellyouroutboard",
+                context="launchplane",
+            )
+        )
+
     def test_human_policy_matches_team_and_role_scope(self) -> None:
         rule = GitHubHumanPolicyRule(
             organizations=("cbusillo",),
