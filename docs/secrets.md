@@ -71,12 +71,12 @@ title: Secrets
   runtime managed-secret binding keys for the selected lane. Shared/global
   runtime records can provide values, but they are not synced to an unrelated
   product target unless that product profile declares the key.
-- Odoo testing lanes declare only their stable compose runtime contract in
-  product onboarding seed material: `ODOO_DB_NAME`, `ODOO_DB_USER`,
-  `ODOO_DATA_VOLUME`, `ODOO_LOG_VOLUME`, `ODOO_DB_VOLUME`, and managed
-  testing-secret bindings for `ODOO_ADMIN_PASSWORD`, `ODOO_DB_PASSWORD`, and
-  `ODOO_MASTER_PASSWORD`. Odoo prod lanes stay undeclared until their production
-  runtime-secret ownership is validated explicitly.
+- Odoo stable lanes declare their compose runtime contract in product onboarding
+  seed material: `ODOO_DB_NAME`, `ODOO_DB_USER`, `ODOO_DATA_VOLUME`,
+  `ODOO_LOG_VOLUME`, `ODOO_DB_VOLUME`, and managed secret bindings for
+  `ODOO_ADMIN_PASSWORD`, `ODOO_DB_PASSWORD`, and `ODOO_MASTER_PASSWORD`. CM prod
+  uses DB `cm` with `cm_prod_odoo_*` volumes; OPW prod uses DB `opw_prod` with
+  `opw_prod_odoo_*` volumes.
 - Gates fail closed when a required binding is missing, disabled, ambiguous,
   unclassified, or scoped outside the target context/instance. A target with an
   unknown environment class also fails closed.
