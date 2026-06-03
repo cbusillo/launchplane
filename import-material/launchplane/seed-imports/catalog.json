@@ -391,6 +391,18 @@
               "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
               "ODOO_DB_VOLUME": "cm_testing_odoo_db"
             }
+          },
+          {
+            "scope": "instance",
+            "context": "cm",
+            "instance": "prod",
+            "env": {
+              "ODOO_DB_NAME": "cm",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "cm_prod_odoo_data",
+              "ODOO_LOG_VOLUME": "cm_prod_odoo_logs",
+              "ODOO_DB_VOLUME": "cm_prod_odoo_db"
+            }
           }
         ],
         "secret_bindings": [
@@ -408,6 +420,21 @@
             "binding_key": "ODOO_MASTER_PASSWORD",
             "context": "cm",
             "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "cm",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "cm",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "cm",
+            "instance": "prod"
           }
         ],
         "expected_config": {
@@ -436,6 +463,31 @@
               "key": "ODOO_DB_VOLUME",
               "context": "cm",
               "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "cm",
+              "instance": "prod"
             }
           ],
           "managed_secret_bindings": [
@@ -453,6 +505,21 @@
               "binding_key": "ODOO_MASTER_PASSWORD",
               "context": "cm",
               "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "cm",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "cm",
+              "instance": "prod"
             }
           ]
         },
@@ -577,6 +644,18 @@
               "ODOO_LOG_VOLUME": "opw_testing_odoo_logs",
               "ODOO_DB_VOLUME": "opw_testing_odoo_db"
             }
+          },
+          {
+            "scope": "instance",
+            "context": "opw",
+            "instance": "prod",
+            "env": {
+              "ODOO_DB_NAME": "opw_prod",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "opw_prod_odoo_data",
+              "ODOO_LOG_VOLUME": "opw_prod_odoo_logs",
+              "ODOO_DB_VOLUME": "opw_prod_odoo_db"
+            }
           }
         ],
         "secret_bindings": [
@@ -594,6 +673,21 @@
             "binding_key": "ODOO_MASTER_PASSWORD",
             "context": "opw",
             "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "opw",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "opw",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "opw",
+            "instance": "prod"
           }
         ],
         "expected_config": {
@@ -622,6 +716,31 @@
               "key": "ODOO_DB_VOLUME",
               "context": "opw",
               "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "opw",
+              "instance": "prod"
             }
           ],
           "managed_secret_bindings": [
@@ -639,6 +758,21 @@
               "binding_key": "ODOO_MASTER_PASSWORD",
               "context": "opw",
               "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "opw",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "opw",
+              "instance": "prod"
             }
           ]
         },
