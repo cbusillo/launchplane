@@ -323,6 +323,17 @@ class ProductOnboardingTests(unittest.TestCase):
                         "ODOO_MASTER_PASSWORD",
                     ],
                 )
+                odoo_rules = {
+                    rule["binding_key"]: rule
+                    for rule in entry["rules"]
+                    if rule["binding_key"].startswith("ODOO_")
+                }
+                for binding_key in ODOO_SECRET_KEYS:
+                    self.assertEqual(odoo_rules[binding_key]["secret_class"], "shared_safe")
+                    self.assertEqual(odoo_rules[binding_key]["allowed_contexts"], ["cm", "opw"])
+                    self.assertEqual(
+                        odoo_rules[binding_key]["allowed_instances"], ["testing", "prod"]
+                    )
             else:
                 self.fail(f"Unexpected seed import kind: {entry['kind']}")
 
