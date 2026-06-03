@@ -602,12 +602,8 @@ def _retire_disabled_runtime_secret_placeholders(
         return
     context_name = configured_binding.context.strip()
     instance_name = configured_binding.instance.strip()
-    if not context_name or not instance_name:
-        return
     for binding in record_store.list_secret_bindings(
         integration=configured_binding.integration,
-        context_name=context_name,
-        instance_name=instance_name,
         limit=None,
     ):
         if binding.binding_id == configured_binding.binding_id:
