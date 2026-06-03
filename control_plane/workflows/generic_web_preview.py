@@ -824,6 +824,23 @@ def _copied_secret_shaped_runtime_keys(
     return tuple(dict.fromkeys(copied_keys))
 
 
+def _retarget_secret_bindings_for_preview_safety(
+    *,
+    secret_bindings: tuple[SecretBinding, ...],
+    preview_context: str,
+    preview_slug: str,
+) -> tuple[SecretBinding, ...]:
+    return tuple(
+        binding.model_copy(
+            update={
+                "context": preview_context,
+                "instance": preview_slug,
+            }
+        )
+        for binding in secret_bindings
+    )
+
+
 def _enforce_preview_copied_runtime_key_safety(
     *,
     record_store: GenericWebPreviewProfileStore,
@@ -859,11 +876,15 @@ def _enforce_preview_copied_runtime_key_safety(
             environment_class="preview",
         ),
         required_binding_keys=required_binding_keys,
-        secret_bindings=record_store.list_secret_bindings(
-            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            context_name=template_lane.context,
-            instance_name=template_lane.instance,
-            limit=None,
+        secret_bindings=_retarget_secret_bindings_for_preview_safety(
+            secret_bindings=record_store.list_secret_bindings(
+                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                context_name=template_lane.context,
+                instance_name=template_lane.instance,
+                limit=None,
+            ),
+            preview_context=profile.preview.context,
+            preview_slug=preview_slug,
         ),
         secret_rules=policy_record.rules,
     )
