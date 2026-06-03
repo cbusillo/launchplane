@@ -834,21 +834,21 @@
         },
         {
           "binding_key": "ODOO_ADMIN_PASSWORD",
-          "secret_class": "testing",
+          "secret_class": "shared_safe",
           "allowed_contexts": ["cm", "opw"],
-          "allowed_instances": ["testing"]
+          "allowed_instances": ["testing", "prod"]
         },
         {
           "binding_key": "ODOO_DB_PASSWORD",
-          "secret_class": "testing",
+          "secret_class": "shared_safe",
           "allowed_contexts": ["cm", "opw"],
-          "allowed_instances": ["testing"]
+          "allowed_instances": ["testing", "prod"]
         },
         {
           "binding_key": "ODOO_MASTER_PASSWORD",
-          "secret_class": "testing",
+          "secret_class": "shared_safe",
           "allowed_contexts": ["cm", "opw"],
-          "allowed_instances": ["testing"]
+          "allowed_instances": ["testing", "prod"]
         }
       ]
     }
