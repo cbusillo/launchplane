@@ -20,6 +20,7 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.dokploy import JsonObject
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
@@ -357,6 +358,23 @@ def _verireel_template_runtime_secret_keys(
     return tuple(dict.fromkeys(required_keys))
 
 
+def _retarget_secret_bindings_for_preview_safety(
+    *,
+    secret_bindings: tuple[SecretBinding, ...],
+    preview_context: str,
+    preview_slug: str,
+) -> tuple[SecretBinding, ...]:
+    return tuple(
+        binding.model_copy(
+            update={
+                "context": preview_context,
+                "instance": preview_slug,
+            }
+        )
+        for binding in secret_bindings
+    )
+
+
 def _enforce_verireel_preview_runtime_key_safety(
     *,
     record_store: RuntimeKeySafetyPolicyReadStore | None,
@@ -385,11 +403,15 @@ def _enforce_verireel_preview_runtime_key_safety(
             environment_class="preview",
         ),
         required_binding_keys=required_binding_keys,
-        secret_bindings=record_store.list_secret_bindings(
-            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            context_name=template_target.context,
-            instance_name=template_target.instance,
-            limit=None,
+        secret_bindings=_retarget_secret_bindings_for_preview_safety(
+            secret_bindings=record_store.list_secret_bindings(
+                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                context_name=template_target.context,
+                instance_name=template_target.instance,
+                limit=None,
+            ),
+            preview_context=request.context,
+            preview_slug=request.preview_slug,
         ),
         secret_rules=policy_record.rules,
     )

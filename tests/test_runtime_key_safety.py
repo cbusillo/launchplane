@@ -215,6 +215,35 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertEqual(evaluation.status, "pass")
         self.assertEqual(evaluation.findings, ())
 
+    def test_unrelated_context_binding_does_not_satisfy_target(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="opw",
+                instance="prod",
+                environment_class="prod",
+            ),
+            required_binding_keys=("ODOO_ADMIN_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="ODOO_ADMIN_PASSWORD",
+                    binding_id="binding-cm-admin-password",
+                    secret_id="secret-cm-admin-password",
+                ).model_copy(update={"context": "cm", "instance": "prod"}),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="ODOO_ADMIN_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("cm", "opw"),
+                    allowed_instances=("testing", "prod"),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(evaluation.findings[0].code, "binding_missing")
+        self.assertEqual(evaluation.findings[0].binding_key, "ODOO_ADMIN_PASSWORD")
+
     def test_equally_specific_duplicate_bindings_remain_ambiguous(self) -> None:
         evaluation = evaluate_runtime_key_safety(
             target=RuntimeKeySafetyTarget(
