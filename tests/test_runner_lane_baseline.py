@@ -14,6 +14,7 @@ from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObser
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
 from control_plane.contracts.runner_lane_baseline import RunnerLaneDockerToolchainObservation
 from control_plane.contracts.runner_lane_baseline import evaluate_runner_lane_baseline
+from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 
 
@@ -434,7 +435,7 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             (
                 "sh",
                 "-c",
-                'command -v docker-buildx 2>/dev/null || for path in /usr/libexec/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx $HOME/.docker/cli-plugins/docker-buildx; do [ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; done',
+                DOCKER_BUILDX_PLUGIN_PATH_COMMAND,
             ): "/usr/libexec/docker/cli-plugins/docker-buildx\n",
             (
                 "sh",
@@ -489,6 +490,68 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
             payload["observation"]["docker_toolchain"]["docker_buildx_source"], "system package"
         )
         self.assertEqual(payload["observation"]["docker_toolchain"]["buildkit_version"], "0.30.0")
+
+    def test_cli_reports_active_managed_buildx_plugin_path(self) -> None:
+        outputs: dict[tuple[str, ...], str] = {
+            ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "buildx", "version"): "github.com/docker/buildx v0.23.0 abcdef\n",
+            ("docker", "buildx", "inspect"): "Driver: docker-container\nBuildKit: v0.30.0\n",
+            (
+                "sh",
+                "-c",
+                DOCKER_BUILDX_PLUGIN_PATH_COMMAND,
+            ): "/usr/local/lib/docker/cli-plugins/docker-buildx\n",
+            (
+                "sh",
+                "-c",
+                "dpkg-query -W -f='${Package} ${Version}' docker-buildx 2>/dev/null",
+            ): "docker-buildx 0.13.1+ds1-3",
+            ("sh", "-c", "rpm -q docker-buildx 2>/dev/null"): "",
+        }
+
+        def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
+            return RemoteCommandResult(returncode=0, stdout=outputs.get(tuple(command), ""))
+
+        with patch(
+            "control_plane.cli_runner_lanes.build_local_command_runner", return_value=runner
+        ):
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-baseline-observe",
+                    "--runner-name",
+                    "chris-testing-ops-gate",
+                    "--label",
+                    "self-hosted",
+                    "--label",
+                    "launchplane",
+                    "--docker-config-isolated",
+                    "--observe-docker-toolchain",
+                    "--require-docker-toolchain-observation",
+                    "--minimum-docker-buildx-version",
+                    "0.23.0",
+                    "--observed-at",
+                    "2026-06-04T18:40:00Z",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["readiness"]["ready"])
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_plugin_path"],
+            "/usr/local/lib/docker/cli-plugins/docker-buildx",
+        )
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_source"],
+            "managed plugin",
+        )
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_package"],
+            "docker-buildx 0.13.1+ds1-3",
+        )
 
     def test_cli_fails_closed_without_docker_isolation_evidence(self) -> None:
         with TemporaryDirectory() as temp_dir:

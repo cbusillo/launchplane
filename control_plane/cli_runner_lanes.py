@@ -40,6 +40,7 @@ from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
 from control_plane.workflows.runner_host_hygiene_executor import (
@@ -1175,12 +1176,7 @@ def _runner_baseline_docker_toolchain(
             (
                 "sh",
                 "-c",
-                "command -v docker-buildx 2>/dev/null || "
-                "for path in /usr/libexec/docker/cli-plugins/docker-buildx "
-                "/usr/local/lib/docker/cli-plugins/docker-buildx "
-                "$HOME/.docker/cli-plugins/docker-buildx; do "
-                '[ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; '
-                "done",
+                DOCKER_BUILDX_PLUGIN_PATH_COMMAND,
             ),
             timeout_seconds=docker_toolchain_timeout_seconds,
         )
