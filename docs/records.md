@@ -151,6 +151,11 @@ an ORM column/table or remains only in the evidence payload.
   The dual-write is identity-only: Dokploy route/runtime execution metadata such
   as domains, health policy, source metadata, env keys, and product policies
   remains in the Dokploy target record.
+- Product context audit, cutover, and legacy cleanup responses expose target
+  copy/delete summaries under provider-neutral `provider_targets` and
+  `provider_target_ids` keys. Dokploy target and target-id records can still be
+  the provider-specific source records copied or deleted by those workflows, but
+  they are not exposed as Dokploy-named response buckets.
 - `uv run launchplane storage provider-target-audit` is the read-only Phase Two
   preflight for this record family. It compares explicit provider-target rows
   with the neutral projection from paired Dokploy target and target-id records,

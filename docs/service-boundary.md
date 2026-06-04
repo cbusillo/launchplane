@@ -843,6 +843,12 @@ returns only sanitized `provider_target*` summaries, and exists so the
 Launchplane seed import workflow can seed product records without product repos
 storing live lifecycle truth.
 
+Product context audit, cutover, and legacy cleanup routes expose copied or
+deleted runtime identity records under neutral `provider_targets` and
+`provider_target_ids` response groups. Dokploy target records remain
+provider-specific execution/config storage where needed, but service responses
+must not reintroduce Dokploy-named target buckets for these workflows.
+
 Provider-target Phase Two operations use `POST /v1/provider-targets/operations`.
 The route accepts one Launchplane-owned route at a time with mode `audit`,
 `backfill-dry-run`, or `backfill-apply`, `provider_id`, `context`, `instance`,

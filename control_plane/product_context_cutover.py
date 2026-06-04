@@ -431,7 +431,7 @@ def plan_product_context_cutover(
         for record in record_store.list_dokploy_target_records()
         if record.context == request.target_context
     }
-    dokploy_targets: list[dict[str, object]] = [
+    provider_targets: list[dict[str, object]] = [
         {
             "instance": record.instance,
             "target_type": record.target_type,
@@ -454,7 +454,7 @@ def plan_product_context_cutover(
         for record in record_store.list_dokploy_target_id_records()
         if record.context == request.target_context
     }
-    dokploy_target_ids: list[dict[str, object]] = [
+    provider_target_ids: list[dict[str, object]] = [
         {
             "instance": record.instance,
             "target_id": record.target_id,
@@ -550,8 +550,8 @@ def plan_product_context_cutover(
     groups: dict[str, list[dict[str, object]]] = {
         "runtime_environment_records": runtime_records,
         "managed_secret_records": managed_secrets,
-        "dokploy_targets": dokploy_targets,
-        "dokploy_target_ids": dokploy_target_ids,
+        "provider_targets": provider_targets,
+        "provider_target_ids": provider_target_ids,
         "inventory_records": inventory_records,
         "release_tuple_records": release_tuples,
     }
@@ -633,9 +633,7 @@ def apply_product_context_cutover(
     }
     final_target_records = {**target_target_records, **planned_target_records}
     final_target_id_records = {**target_id_records, **planned_target_id_records}
-    affected_target_instances = sorted(
-        set(planned_target_records) | set(planned_target_id_records)
-    )
+    affected_target_instances = sorted(set(planned_target_records) | set(planned_target_id_records))
     planned_provider_target_records: dict[str, ProviderTargetRecord] = {}
     for instance in affected_target_instances:
         target_record = final_target_records.get(instance)
@@ -890,7 +888,7 @@ def plan_legacy_context_cleanup(
         )
 
     target_records = record_store.list_dokploy_target_records()
-    dokploy_targets: list[dict[str, object]] = [
+    provider_targets: list[dict[str, object]] = [
         {
             "instance": record.instance,
             "target_type": record.target_type,
@@ -911,7 +909,7 @@ def plan_legacy_context_cleanup(
     ]
 
     target_id_records = record_store.list_dokploy_target_id_records()
-    dokploy_target_ids: list[dict[str, object]] = [
+    provider_target_ids: list[dict[str, object]] = [
         {
             "instance": record.instance,
             "target_id": record.target_id,
@@ -940,8 +938,8 @@ def plan_legacy_context_cleanup(
     groups: dict[str, list[dict[str, object]]] = {
         "runtime_environment_records": runtime_records,
         "managed_secret_records": secret_records,
-        "dokploy_targets": dokploy_targets,
-        "dokploy_target_ids": dokploy_target_ids,
+        "provider_targets": provider_targets,
+        "provider_target_ids": provider_target_ids,
     }
     blocked = any(
         str(item.get("action") or "").startswith("blocked")

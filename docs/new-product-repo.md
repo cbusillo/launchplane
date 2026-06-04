@@ -68,6 +68,9 @@ Each onboarding target entry must include the live provider `target_id`.
 Manifests must use the neutral `provider_targets` input name. Launchplane
 rejects obsolete `dokploy_targets` input with a validation error and fails
 closed instead of seeding a target record that a later deploy cannot resolve.
+Product onboarding and context cutover evidence uses provider-neutral response
+keys (`provider_targets` and `provider_target_ids`) even when Dokploy remains
+the runtime execution provider.
 
 When the Dokploy application or compose target already exists, adopt it into
 Launchplane before or after onboarding instead of hand-editing target ids into
