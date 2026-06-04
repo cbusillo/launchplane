@@ -12,9 +12,23 @@ from control_plane.workflows.verireel_app_maintenance import (
 )
 
 
+def _stable_migration_request() -> VeriReelAppMaintenanceRequest:
+    return VeriReelAppMaintenanceRequest(
+        action="migrate",
+        intent="stable-testing-migration",
+    )
+
+
+def _stable_reset_request() -> VeriReelAppMaintenanceRequest:
+    return VeriReelAppMaintenanceRequest(
+        action="reset-testing",
+        intent="stable-testing-reset",
+    )
+
+
 class VeriReelAppMaintenanceTests(unittest.TestCase):
     def test_builds_allow_listed_prisma_migration_command(self) -> None:
-        request = VeriReelAppMaintenanceRequest(action="migrate")
+        request = _stable_migration_request()
 
         schedule_name, command = _command_for_request(request)
 
@@ -23,8 +37,12 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
 
     def test_builds_shell_quoted_remote_owner_command(self) -> None:
         request = VeriReelAppMaintenanceRequest(
+            context="verireel-testing",
+            instance="preview",
             action="grant-sponsored",
+            intent="remote-e2e-grant-sponsored",
             email="creator+e2e@example.com",
+            preview_slug="pr-42",
         )
 
         schedule_name, command = _command_for_request(request)
@@ -41,9 +59,14 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
                 context="verireel-testing",
                 instance="preview",
                 action="grant-sponsored",
+                intent="remote-e2e-grant-sponsored",
                 email="creator@example.com",
                 application_name="ver-testing-app",
             )
+
+    def test_rejects_action_only_request_without_intent(self) -> None:
+        with self.assertRaisesRegex(ValueError, "intent"):
+            VeriReelAppMaintenanceRequest.model_validate({"action": "migrate"})
 
     def test_rejects_migration_for_preview_context(self) -> None:
         with self.assertRaises(ValueError):
@@ -51,6 +74,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
                 context="verireel-testing",
                 instance="preview",
                 action="migrate",
+                intent="stable-testing-migration",
                 preview_slug="pr-42",
             )
 
@@ -59,6 +83,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             context="verireel-testing",
             instance="preview",
             action="grant-sponsored",
+            intent="remote-e2e-grant-sponsored",
             email="creator@example.com",
             preview_slug="pr-42",
         )
@@ -89,7 +114,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             )
 
     def test_builds_testing_reset_command(self) -> None:
-        request = VeriReelAppMaintenanceRequest(action="reset-testing")
+        request = _stable_reset_request()
 
         schedule_name, command = _command_for_request(request)
 
@@ -100,7 +125,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         )
 
     def test_executes_stable_testing_command_through_launchplane_dokploy_config(self) -> None:
-        request = VeriReelAppMaintenanceRequest(action="migrate")
+        request = _stable_migration_request()
 
         with TemporaryDirectory() as temporary_directory_name:
             with (
@@ -126,7 +151,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
 
         self.assertEqual(result.maintenance_status, "pass")
         self.assertEqual(result.application_id, "app-123")
-        self.assertEqual(result.intent, "")
+        self.assertEqual(result.intent, "stable-testing-migration")
         resolve_mock.assert_called_once()
         run_mock.assert_called_once_with(
             host="https://dokploy.example.test",
@@ -139,7 +164,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         deploy_mock.assert_not_called()
 
     def test_redeploys_after_testing_reset(self) -> None:
-        request = VeriReelAppMaintenanceRequest(action="reset-testing")
+        request = _stable_reset_request()
 
         with TemporaryDirectory() as temporary_directory_name:
             with (
@@ -172,7 +197,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         )
 
     def test_reports_failed_command_without_throwing(self) -> None:
-        request = VeriReelAppMaintenanceRequest(action="migrate")
+        request = _stable_migration_request()
 
         with TemporaryDirectory() as temporary_directory_name:
             with (

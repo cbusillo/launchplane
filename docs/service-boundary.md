@@ -1100,13 +1100,13 @@ evidence so product workflows and PR feedback can surface the actionable reason
 instead of a generic `invalid_request` rejection. Malformed request payloads and
 unauthorized calls still fail closed before provider mutation.
 
-VeriReel app maintenance accepts an optional `intent` alongside the allow-listed
-action. Smoke/E2E helpers should set the narrow intent, such as
+VeriReel app maintenance requires an `intent` alongside the allow-listed
+action. Smoke/E2E helpers set the narrow intent, such as
 `remote-e2e-grant-sponsored`, `remote-e2e-delete-user`,
 `owner-route-promote-owner`, or `owner-route-delete-user`, so Launchplane can
 validate the requested action against the expected stable or preview lane before
-it touches Dokploy schedules. The legacy action-only payload remains accepted
-for compatibility, but new product calls should prefer the intent-based contract.
+it touches Dokploy schedules. Legacy action-only maintenance payloads are
+retired and fail request validation.
 
 The first Odoo driver cuts are intentionally narrow as well: Launchplane owns the
 artifact publish handoff, remote post-deploy data-workflow trigger, and prod

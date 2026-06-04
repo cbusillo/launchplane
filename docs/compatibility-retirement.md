@@ -62,6 +62,9 @@ Keep a compatibility surface only when it is one of these:
   `preview-apply-inputs` and `preview-apply` for isolated provider mutation,
   and common preview read/planning/evidence callers use the inherited
   generic-web routes.
+- VeriReel app-maintenance action-only payload compatibility is retired. Product
+  workflows must pass the scoped `intent` matching the requested maintenance
+  action and stable or preview lane.
 - The Odoo-shaped stable verification alias is retired. Odoo stable smoke
   follow-ups use `POST /v1/drivers/generic-web/stable-verification`.
 - The Odoo-shaped rollback-plan alias is retired. Odoo rollback planning uses

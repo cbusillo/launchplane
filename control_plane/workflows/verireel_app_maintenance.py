@@ -22,7 +22,6 @@ VeriReelAppMaintenanceAction = Literal[
     "reset-testing",
 ]
 VeriReelAppMaintenanceIntent = Literal[
-    "",
     "stable-testing-migration",
     "stable-testing-reset",
     "remote-e2e-grant-sponsored",
@@ -57,7 +56,7 @@ class VeriReelAppMaintenanceRequest(BaseModel):
     context: Literal["verireel", "verireel-testing"] = "verireel"
     instance: Literal["testing", "preview"] = "testing"
     action: VeriReelAppMaintenanceAction
-    intent: VeriReelAppMaintenanceIntent = ""
+    intent: VeriReelAppMaintenanceIntent
     email: str = ""
     application_name: str = ""
     preview_slug: str = ""
@@ -107,14 +106,13 @@ class VeriReelAppMaintenanceRequest(BaseModel):
             )
         if self.action not in {"migrate", "reset-testing"} and not self.email:
             raise ValueError(f"VeriReel app maintenance action '{self.action}' requires email.")
-        if self.intent:
-            required_action, required_context = APP_MAINTENANCE_INTENT_REQUIREMENTS[self.intent]
-            if self.action != required_action or self.context != required_context:
-                raise ValueError(
-                    "VeriReel app maintenance intent "
-                    f"'{self.intent}' requires action '{required_action}' "
-                    f"in context '{required_context}'."
-                )
+        required_action, required_context = APP_MAINTENANCE_INTENT_REQUIREMENTS[self.intent]
+        if self.action != required_action or self.context != required_context:
+            raise ValueError(
+                "VeriReel app maintenance intent "
+                f"'{self.intent}' requires action '{required_action}' "
+                f"in context '{required_context}'."
+            )
         return self
 
 
