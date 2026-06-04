@@ -58,8 +58,9 @@ authorized through DB-backed `provider_target.audit` and
 first in `audit` or `backfill-dry-run` mode, review the artifact, then run
 `backfill-apply` only with the exact confirmation phrase and an operator reason.
 The initial Phase Two target set is ordered from the lower-risk proof lane into
-live production lanes: `discord-blue/prod`, `verireel/testing`,
-`verireel/prod`, `cm/testing`, `cm/prod`, `opw/testing`, and `opw/prod`.
+live production lanes: `discord-blue/prod`, `sellyouroutboard/testing`,
+`sellyouroutboard/prod`, `verireel/testing`, `verireel/prod`, `cm/testing`,
+`cm/prod`, `opw/testing`, and `opw/prod`.
 
 The local CLI remains a DB-backed inspection and rehearsal helper. Local
 provider-target data changes must start with a read-only audit:
