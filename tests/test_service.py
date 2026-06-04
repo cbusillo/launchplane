@@ -15792,6 +15792,116 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(second_payload["replayed"])
         deploy.assert_called_once()
 
+    def test_generic_web_deploy_route_replay_scrubs_retired_target_type_alias(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            identity = _identity()
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebDeployResult(
+                deployment_record_id="deployment-syo-testing-retired-alias",
+                deploy_status="pass",
+                deploy_started_at="2026-05-26T02:00:00Z",
+                deploy_finished_at="2026-05-26T02:05:00Z",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_name="syo-testing",
+                target_id="app-syo-testing",
+                target_category="application",
+                provider_id="dokploy",
+                provider_target_type="application",
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "deploy": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "instance": "testing",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    "source_git_ref": "abc123",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-retired-alias"},
+                )
+                idempotency_record = store.read_idempotency_record(
+                    scope="|".join(
+                        (
+                            identity.repository,
+                            identity.workflow_ref or identity.job_workflow_ref,
+                            identity.subject,
+                        )
+                    ),
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="generic-web-deploy-retired-alias",
+                )
+                self.assertIsNotNone(idempotency_record)
+                assert idempotency_record is not None
+                legacy_response_payload = idempotency_record.response_payload
+                legacy_result_payload = legacy_response_payload.get("result")
+                self.assertIsInstance(legacy_result_payload, dict)
+                assert isinstance(legacy_result_payload, dict)
+                legacy_result_payload["target_type"] = "application"
+                store.write_idempotency_record(
+                    idempotency_record.model_copy(
+                        update={"response_payload": legacy_response_payload}, deep=True
+                    )
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-retired-alias"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertNotIn("target_type", first_payload["result"])
+        self.assertEqual(second_status_code, 202)
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["result"]["target_category"], "application")
+        self.assertEqual(second_payload["result"]["provider_target_type"], "application")
+        self.assertNotIn("target_type", second_payload["result"])
+        deploy.assert_called_once()
+
     def test_generic_web_deploy_route_rejects_unknown_base_driver_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
