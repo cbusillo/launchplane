@@ -168,12 +168,15 @@ an ORM column/table or remains only in the evidence payload.
   dry-run, or apply evidence as artifacts and uses DB-backed
   `provider_target.audit` or `provider_target.backfill` authz grants instead of
   local checkout writes.
-- Shared ship and promotion request/evidence contracts accept a neutral
-  `target_reference` compatibility input for target name, provider id,
-  category, and provider target type. Persisted records still write the flat
-  compatibility fields until the record schema migration has explicit
-  retirement criteria; mixed neutral and legacy target facts fail closed when
-  they disagree.
+- Shared ship and promotion request contracts require canonical flat target
+  fields (`target_name`, `target_type`, `provider_id`, `target_category`, and
+  `provider_target_type`) and reject `target_reference` compatibility input.
+  Persisted deployment and promotion evidence still accepts `target_reference`
+  while loading historical records, but writes flat compatibility fields. Full
+  retirement of evidence compatibility remains blocked on explicit record schema
+  migration criteria and evidence that existing shared-service payloads have
+  been migrated; mixed neutral and legacy target facts fail closed when they
+  disagree.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
   `updated_at`. Individual key/value settings stay payload-only until GUI
   filtering or editing requires a setting table.

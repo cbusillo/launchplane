@@ -43,6 +43,9 @@ def _ship_request() -> ShipRequest:
         source_git_ref="abc123",
         target_name="opw-prod",
         target_type="compose",
+        provider_id="dokploy",
+        target_category="compose",
+        provider_target_type="compose",
         deploy_mode="dokploy-compose-api",
     )
 

@@ -308,6 +308,7 @@ def _fallback_ship_request(
         deploy_mode=deploy_mode,
         provider_id=provider_id,
         target_category="application",
+        provider_target_type="application",
         provider_deploy_mode=deploy_mode,
         wait=True,
         timeout_seconds=request.timeout_seconds,

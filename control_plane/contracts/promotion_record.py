@@ -213,14 +213,11 @@ class PromotionRequest(BaseModel):
     context: str
     from_instance: str
     to_instance: str
-    target_name: str = ""
-    target_type: DeployTargetCompatibilityType = Field(
-        default=cast(DeployTargetCompatibilityType, "")
-    )
-    target_reference: DeployTargetContractReference | None = Field(default=None, exclude=True)
-    provider_id: str = "dokploy"
-    target_category: DeployTargetCategory | None = None
-    provider_target_type: str = ""
+    target_name: str
+    target_type: DeployTargetCompatibilityType
+    provider_id: str
+    target_category: DeployTargetCategory
+    provider_target_type: str
     deploy_mode: str
     provider_deploy_mode: str = ""
     wait: bool = True
@@ -234,11 +231,6 @@ class PromotionRequest(BaseModel):
     backup_gate: BackupGateEvidence = Field(default_factory=BackupGateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _apply_target_reference_defaults(cls, data: object) -> object:
-        return apply_target_reference_defaults(data)
-
     @model_validator(mode="after")
     def _validate_request(self) -> "PromotionRequest":
         if not self.artifact_id.strip():
@@ -248,7 +240,7 @@ class PromotionRequest(BaseModel):
         if not self.context.strip():
             raise ValueError("promotion request requires context")
         self.target_name = self.target_name.strip()
-        if not self.target_name.strip():
+        if not self.target_name:
             raise ValueError("promotion request requires target_name")
         if not self.target_type:
             raise ValueError("promotion request requires target_type")
@@ -259,14 +251,12 @@ class PromotionRequest(BaseModel):
         self.provider_deploy_mode = self.provider_deploy_mode.strip()
         if not self.provider_id:
             raise ValueError("promotion request requires provider_id")
-        if self.target_category is None:
-            self.target_category = self.target_type
         if not self.provider_target_type:
-            self.provider_target_type = self.target_type
+            raise ValueError("promotion request requires provider_target_type")
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
-        self.target_reference = ensure_target_reference_matches(
-            self.target_reference,
+        ensure_target_reference_matches(
+            None,
             target_name=self.target_name,
             target_type=self.target_type,
             provider_id=self.provider_id,
