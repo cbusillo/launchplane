@@ -244,7 +244,7 @@ def _context_cutover_route_payload(
             )
             for record in secret_records
         ],
-        "dokploy_targets": [
+        "provider_targets": [
             _summarize_dokploy_target_record(
                 record,
                 target_id=target_ids_by_route.get(_dokploy_target_route(record), ""),

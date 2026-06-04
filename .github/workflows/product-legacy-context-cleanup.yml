@@ -151,10 +151,10 @@ jobs:
             jq -c '.result.counts.managed_secret_records' "$result_file"
           })"
           target_counts="$({
-            jq -c '.result.counts.dokploy_targets' "$result_file"
+            jq -c '.result.counts.provider_targets' "$result_file"
           })"
           target_id_counts="$({
-            jq -c '.result.counts.dokploy_target_ids' "$result_file"
+            jq -c '.result.counts.provider_target_ids' "$result_file"
           })"
           preserved="$(jq -c '.result.preserved_records' "$result_file")"
           {
@@ -167,7 +167,7 @@ jobs:
             echo "- Blocked: ${blocked}"
             echo "- Runtime records: ${runtime_counts}"
             echo "- Managed secrets: ${secret_counts}"
-            echo "- Dokploy targets: ${target_counts}"
-            echo "- Dokploy target IDs: ${target_id_counts}"
+            echo "- Provider targets: ${target_counts}"
+            echo "- Provider target IDs: ${target_id_counts}"
             echo "- Preserved records: ${preserved}"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -39,6 +39,10 @@ def _payload_counts(payload: dict[str, object]) -> dict[str, dict[str, int]]:
     return cast("dict[str, dict[str, int]]", payload["counts"])
 
 
+def _payload_groups(payload: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    return cast("dict[str, list[dict[str, object]]]", payload["groups"])
+
+
 def _seed_syo_source_records(store: PostgresRecordStore) -> None:
     store.write_product_profile_record(
         LaunchplaneProductProfileRecord(
@@ -365,6 +369,20 @@ class ProductContextCutoverTests(unittest.TestCase):
             {"created": 2, "skipped": 0},
         )
         self.assertEqual(counts["managed_secret_records"], {"created": 1, "skipped": 0})
+        self.assertEqual(counts["provider_targets"], {"created": 1, "skipped": 0})
+        self.assertEqual(counts["provider_target_ids"], {"created": 1, "skipped": 0})
+        self.assertNotIn("dokploy_targets", counts)
+        self.assertNotIn("dokploy_target_ids", counts)
+        self.assertEqual(
+            _payload_groups(payload)["provider_targets"][0]["target_name"],
+            "syo-prod-app",
+        )
+        self.assertEqual(
+            _payload_groups(payload)["provider_target_ids"][0]["target_id"],
+            "target-prod-123",
+        )
+        self.assertNotIn("dokploy_targets", _payload_groups(payload))
+        self.assertNotIn("dokploy_target_ids", _payload_groups(payload))
         self.assertNotIn("encrypted-value", str(payload))
         self.assertEqual(target_runtime_records, ())
 
@@ -455,6 +473,16 @@ class ProductContextCutoverTests(unittest.TestCase):
             _payload_counts(repeated_payload)["managed_secret_records"],
             {"created": 0, "skipped": 1},
         )
+        self.assertEqual(
+            _payload_counts(repeated_payload)["provider_targets"],
+            {"created": 0, "skipped": 1},
+        )
+        self.assertEqual(
+            _payload_counts(repeated_payload)["provider_target_ids"],
+            {"created": 0, "skipped": 1},
+        )
+        self.assertNotIn("dokploy_targets", _payload_counts(repeated_payload))
+        self.assertNotIn("dokploy_target_ids", _payload_counts(repeated_payload))
         self.assertEqual(_payload_section(repeated_payload, "profile")["action"], "unchanged")
 
     def test_apply_context_cutover_blocks_conflicting_provider_target_before_writes(
@@ -788,6 +816,20 @@ class ProductContextCutoverTests(unittest.TestCase):
         self.assertFalse(dry_run["blocked"])
         self.assertEqual(_payload_counts(dry_run)["runtime_environment_records"], {"deleted": 2})
         self.assertEqual(_payload_counts(dry_run)["managed_secret_records"], {"disabled": 1})
+        self.assertEqual(_payload_counts(dry_run)["provider_targets"], {"deleted": 1})
+        self.assertEqual(_payload_counts(dry_run)["provider_target_ids"], {"deleted": 1})
+        self.assertNotIn("dokploy_targets", _payload_counts(dry_run))
+        self.assertNotIn("dokploy_target_ids", _payload_counts(dry_run))
+        self.assertEqual(
+            _payload_groups(dry_run)["provider_targets"][0]["target_name"],
+            "syo-prod-app",
+        )
+        self.assertEqual(
+            _payload_groups(dry_run)["provider_target_ids"][0]["target_id"],
+            "target-prod-123",
+        )
+        self.assertNotIn("dokploy_targets", _payload_groups(dry_run))
+        self.assertNotIn("dokploy_target_ids", _payload_groups(dry_run))
         self.assertEqual(payload["mode"], "apply")
         self.assertTrue(payload["applied"])
         self.assertEqual(source_runtime_records, ())

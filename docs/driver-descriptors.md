@@ -137,8 +137,12 @@ not need tenant-local monitor workflows.
 
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
-runtime target bindings from DB-backed Dokploy target records. Generic-web deploy
-records post-deploy evidence as `skipped` unless a based driver explicitly
+runtime target bindings from explicit provider-target rows, while Dokploy target
+records continue to hold provider-specific execution configuration. Generic-web
+deploy validates that the provider-target row and Dokploy execution record agree
+before mutating the provider, so stale or divergent runtime identity fails
+closed. Generic-web
+deploy records post-deploy evidence as `skipped` unless a based driver explicitly
 provides a product post-deploy extension. That extension point is the boundary
 for product-only work after a provider deploy succeeds; it must return terminal
 post-deploy evidence and must keep deploy status distinct from post-deploy

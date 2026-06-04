@@ -362,9 +362,10 @@ class ProductProfileContextAuditTests(unittest.TestCase):
             "SMTP_PASSWORD",
         )
         self.assertEqual(
-            _payload_list(source_payload, "dokploy_targets")[0]["target_id"],
+            _payload_list(source_payload, "provider_targets")[0]["target_id"],
             "target-syo-prod",
         )
+        self.assertNotIn("dokploy_targets", source_payload)
         evidence_counts = cast("dict[str, object]", source_payload["append_only_evidence_counts"])
         self.assertEqual(evidence_counts["deployments"], 1)
 
@@ -411,9 +412,10 @@ class ProductProfileContextAuditTests(unittest.TestCase):
             "SMTP_PASSWORD",
         )
         self.assertEqual(
-            payload["contexts"]["source"]["dokploy_targets"][0]["target_id"],
+            payload["contexts"]["source"]["provider_targets"][0]["target_id"],
             "target-syo-prod",
         )
+        self.assertNotIn("dokploy_targets", payload["contexts"]["source"])
         self.assertEqual(
             payload["contexts"]["source"]["append_only_evidence_counts"]["deployments"],
             1,
