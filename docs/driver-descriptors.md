@@ -226,8 +226,10 @@ Odoo declares `base_driver_id="generic-web"` and inherits generic-web preview
 actions as its advertised lifecycle surface. The Odoo-specific preview mutation
 surface is the isolated compose planner/apply pair, not Odoo-shaped
 `preview-refresh` or `preview-destroy` compatibility aliases. Odoo preview
-desired-state, inventory, readiness, and verification remain non-operator route
-aliases where they preserve typed Odoo evidence without mutating provider state.
+desired-state, inventory, and readiness aliases are retired; callers should use
+the inherited generic-web routes for common read/planning actions. Odoo preview
+verification remains a non-operator route alias while it preserves typed Odoo
+evidence without mutating provider state.
 New tenant workflows should call `POST /v1/drivers/odoo/preview-apply-inputs`
 and then `POST /v1/drivers/odoo/preview-apply` for refresh and destroy. The
 lower-level `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview

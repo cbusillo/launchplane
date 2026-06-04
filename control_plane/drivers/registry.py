@@ -701,21 +701,6 @@ ODOO_DRIVER = DriverDescriptor(
     ),
     route_aliases=(
         _route_alias(
-            "preview_desired_state",
-            "/v1/drivers/odoo/preview-desired-state",
-            "preview_desired_state.discover",
-        ),
-        _route_alias(
-            "preview_inventory",
-            "/v1/drivers/odoo/preview-inventory",
-            "preview_inventory.read",
-        ),
-        _route_alias(
-            "preview_readiness",
-            "/v1/drivers/odoo/preview-readiness",
-            "preview_readiness.evaluate",
-        ),
-        _route_alias(
             "preview_verification",
             "/v1/drivers/odoo/preview-verification",
             "preview_generation.write",
