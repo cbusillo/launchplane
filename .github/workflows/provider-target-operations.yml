@@ -130,6 +130,8 @@ jobs:
               cat > "$routes_file" <<'JSON'
           [
             {"context":"discord-blue","instance":"prod"},
+            {"context":"sellyouroutboard","instance":"testing"},
+            {"context":"sellyouroutboard","instance":"prod"},
             {"context":"verireel","instance":"testing"},
             {"context":"verireel","instance":"prod"},
             {"context":"cm","instance":"testing"},
