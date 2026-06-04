@@ -1267,29 +1267,6 @@ _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_ODOO_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-desired-state",
-    envelope_model=GenericWebPreviewDesiredStateEnvelope,
-    denial_message=(
-        "Workflow cannot discover Odoo preview desired state for the requested product/context."
-    ),
-)
-
-
-_ODOO_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-inventory",
-    envelope_model=GenericWebPreviewInventoryEnvelope,
-    denial_message="Workflow cannot read Odoo preview inventory for the requested product/context.",
-)
-
-
-_ODOO_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-readiness",
-    envelope_model=GenericWebPreviewReadinessEnvelope,
-    denial_message="Workflow cannot evaluate Odoo preview readiness for the requested product/context.",
-)
-
-
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     apply: OdooPreviewDokployApplyRequest
@@ -1414,18 +1391,11 @@ _ODOO_PREVIEW_APPLY_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
 
 
 _PREVIEW_DESIRED_STATE_ROUTE_PATHS = frozenset(
-    {
-        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
-        _ODOO_PREVIEW_DESIRED_STATE_ROUTE.route_path,
-    }
+    {_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path}
 )
-_PREVIEW_INVENTORY_ROUTE_PATHS = frozenset(
-    {_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path, _ODOO_PREVIEW_INVENTORY_ROUTE.route_path}
-)
+_PREVIEW_INVENTORY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path})
 _PREVIEW_REFRESH_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path})
-_PREVIEW_READINESS_ROUTE_PATHS = frozenset(
-    {_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path, _ODOO_PREVIEW_READINESS_ROUTE.route_path}
-)
+_PREVIEW_READINESS_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path})
 _PREVIEW_DESTROY_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path})
 _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
     {
@@ -2799,16 +2769,12 @@ def _authorize_generic_web_preview_route(
 def _generic_web_preview_desired_state_route_metadata(
     path: str,
 ) -> _DriverRouteExecutionMetadata[GenericWebPreviewDesiredStateEnvelope]:
-    if path == _ODOO_PREVIEW_DESIRED_STATE_ROUTE.route_path:
-        return _ODOO_PREVIEW_DESIRED_STATE_ROUTE
     return _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE
 
 
 def _generic_web_preview_inventory_route_metadata(
     path: str,
 ) -> _DriverRouteExecutionMetadata[GenericWebPreviewInventoryEnvelope]:
-    if path == _ODOO_PREVIEW_INVENTORY_ROUTE.route_path:
-        return _ODOO_PREVIEW_INVENTORY_ROUTE
     return _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE
 
 
@@ -2821,8 +2787,6 @@ def _generic_web_preview_refresh_route_metadata(
 def _generic_web_preview_readiness_route_metadata(
     path: str,
 ) -> _DriverRouteExecutionMetadata[GenericWebPreviewReadinessEnvelope]:
-    if path == _ODOO_PREVIEW_READINESS_ROUTE.route_path:
-        return _ODOO_PREVIEW_READINESS_ROUTE
     return _GENERIC_WEB_PREVIEW_READINESS_ROUTE
 
 

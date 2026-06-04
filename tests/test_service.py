@@ -18208,6 +18208,33 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             self.assertEqual(payload["error"]["code"], "not_found")
 
+    def test_odoo_preview_read_planning_alias_routes_are_retired(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            for route_path in (
+                "/v1/drivers/odoo/preview-desired-state",
+                "/v1/drivers/odoo/preview-inventory",
+                "/v1/drivers/odoo/preview-readiness",
+                "/v1/drivers/odoo/preview-destroy",
+            ):
+                with self.subTest(route_path=route_path):
+                    status_code, payload = _invoke_app(
+                        app,
+                        method="POST",
+                        path=route_path,
+                        payload={},
+                    )
+
+                    self.assertEqual(status_code, 404)
+                    self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_odoo_preview_verification_driver_marks_latest_generation_ready(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

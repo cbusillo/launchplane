@@ -165,6 +165,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn("preview_refresh", actions)
         self.assertNotIn("preview_refresh", route_aliases)
         self.assertNotIn("preview_destroy", route_aliases)
+        self.assertNotIn("preview_desired_state", route_aliases)
+        self.assertNotIn("preview_inventory", route_aliases)
+        self.assertNotIn("preview_readiness", route_aliases)
         self.assertNotIn("preview_verification", actions)
         self.assertEqual(
             route_aliases["preview_verification"].route_path,
@@ -517,6 +520,18 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertNotIn(
             "/v1/drivers/odoo/preview-destroy",
+            control_plane_service._driver_route_metadata_from_descriptors(),
+        )
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-desired-state",
+            control_plane_service._driver_route_metadata_from_descriptors(),
+        )
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-inventory",
+            control_plane_service._driver_route_metadata_from_descriptors(),
+        )
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-readiness",
             control_plane_service._driver_route_metadata_from_descriptors(),
         )
         self.assertEqual(
