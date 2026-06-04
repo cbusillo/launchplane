@@ -62,6 +62,15 @@ live production lanes: `discord-blue/prod`, `sellyouroutboard/testing`,
 `sellyouroutboard/prod`, `verireel/testing`, `verireel/prod`, `cm/testing`,
 `cm/prod`, `opw/testing`, and `opw/prod`.
 
+After the provider-target audit is clean, use the manual
+`Product Environment Evidence` workflow to collect read-model evidence through
+the deployed service. The workflow calls `GET
+/v1/products/{product}/environments/{environment}` with GitHub OIDC, records
+only sanitized provider, target-type, trust-state, and count summaries, and
+fails closed if any Phase Two lane lacks recorded provider-target authority.
+Raw product environment responses are not uploaded; the artifact contains only
+the route list and sanitized summaries.
+
 The local CLI remains a DB-backed inspection and rehearsal helper. Local
 provider-target data changes must start with a read-only audit:
 

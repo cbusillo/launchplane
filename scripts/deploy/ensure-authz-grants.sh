@@ -704,6 +704,39 @@ post_grant \
   provider_target.backfill \
   deploy:provider-target-operations-backfill-grant \
   provider-target-operations-backfill
+post_phase_two_product_environment_evidence_grant() {
+  local product_name="$1"
+  local context_name="$2"
+  local suffix="$3"
+  post_grant \
+    "$GITHUB_REPOSITORY" \
+    product-environment-evidence.yml \
+    "$product_name" \
+    "$context_name" \
+    product_environment.read \
+    "deploy:${suffix}-product-environment-evidence-read-grant" \
+    "${suffix}-product-environment-evidence-read"
+}
+post_phase_two_product_environment_evidence_grant \
+  discord-blue \
+  discord-blue \
+  discord-blue
+post_phase_two_product_environment_evidence_grant \
+  sellyouroutboard \
+  sellyouroutboard \
+  syo
+post_phase_two_product_environment_evidence_grant \
+  verireel \
+  verireel \
+  verireel
+post_phase_two_product_environment_evidence_grant \
+  odoo-tenant-cm \
+  cm \
+  odoo-cm
+post_phase_two_product_environment_evidence_grant \
+  odoo-tenant-opw \
+  opw \
+  odoo-opw
 post_syo_grant \
   promote-prod.yml \
   launchplane \
