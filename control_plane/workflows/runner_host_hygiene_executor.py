@@ -55,6 +55,20 @@ _DOCKER_SIZE_UNITS = {
     "gib": Decimal(1024**3),
     "tib": Decimal(1024**4),
 }
+DOCKER_BUILDX_PLUGIN_PATH_COMMAND = (
+    "docker info --format "
+    '\'{{range .ClientInfo.Plugins}}{{if eq .Name "buildx"}}'
+    '{{.Path}}{{"\\n"}}{{end}}{{end}}\' 2>/dev/null | '
+    "awk 'NF { print; found=1; exit } END { exit found ? 0 : 1 }' || "
+    "command -v docker-buildx 2>/dev/null || "
+    "for path in $HOME/.docker/cli-plugins/docker-buildx "
+    "/usr/local/lib/docker/cli-plugins/docker-buildx "
+    "/usr/local/libexec/docker/cli-plugins/docker-buildx "
+    "/usr/lib/docker/cli-plugins/docker-buildx "
+    "/usr/libexec/docker/cli-plugins/docker-buildx; do "
+    '[ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; '
+    "done"
+)
 
 
 @dataclass(frozen=True)
@@ -532,12 +546,7 @@ def _collect_docker_toolchain(
             (
                 "sh",
                 "-c",
-                "command -v docker-buildx 2>/dev/null || "
-                "for path in /usr/libexec/docker/cli-plugins/docker-buildx "
-                "/usr/local/lib/docker/cli-plugins/docker-buildx "
-                "$HOME/.docker/cli-plugins/docker-buildx; do "
-                '[ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; '
-                "done",
+                DOCKER_BUILDX_PLUGIN_PATH_COMMAND,
             ),
             request.timeout_seconds,
         ).stdout
