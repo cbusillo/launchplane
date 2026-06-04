@@ -391,64 +391,35 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(request.target_category, "compose")
         self.assertEqual(request.provider_target_type, "compose")
         self.assertEqual(request.provider_deploy_mode, "dokploy-compose-api")
-        self.assertIsNotNone(request.target_reference)
-        assert request.target_reference is not None
-        self.assertEqual(request.target_reference.target_name, "opw-prod")
-        self.assertEqual(request.target_reference.provider_id, "dokploy")
-
-    def test_ship_request_accepts_target_reference_input(self) -> None:
-        request = ShipRequest.model_validate(
-            {
-                "artifact_id": "artifact-sha256-image456",
-                "context": "opw",
-                "instance": "prod",
-                "source_git_ref": "abc123",
-                "target_reference": {
-                    "target_name": "opw-prod",
-                    "provider_id": "dokploy",
-                    "target_category": "compose",
-                    "provider_target_type": "compose",
-                },
-                "deploy_mode": "dokploy-compose-api",
-            }
-        )
-
-        self.assertEqual(request.target_name, "opw-prod")
-        self.assertEqual(request.target_type, "compose")
-        self.assertEqual(request.provider_id, "dokploy")
-        self.assertEqual(request.target_category, "compose")
-        self.assertEqual(request.provider_target_type, "compose")
         self.assertNotIn("target_reference", request.model_dump())
 
-    def test_ship_request_accepts_minimal_legacy_target_reference_input(self) -> None:
-        request = ShipRequest.model_validate(
-            {
-                "artifact_id": "artifact-sha256-image456",
-                "context": "opw",
-                "instance": "prod",
-                "source_git_ref": "abc123",
-                "target_reference": {
-                    "target_name": "opw-prod",
-                    "provider_id": "dokploy",
-                    "target_category": "compose",
-                },
-                "deploy_mode": "dokploy-compose-api",
-            }
-        )
+    def test_ship_request_rejects_target_reference_input(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference"):
+            ShipRequest.model_validate(
+                {
+                    "artifact_id": "artifact-sha256-image456",
+                    "context": "opw",
+                    "instance": "prod",
+                    "source_git_ref": "abc123",
+                    "target_reference": {
+                        "target_name": "opw-prod",
+                        "provider_id": "dokploy",
+                        "target_category": "compose",
+                        "provider_target_type": "compose",
+                    },
+                    "deploy_mode": "dokploy-compose-api",
+                }
+            )
 
-        self.assertEqual(request.target_name, "opw-prod")
-        self.assertEqual(request.target_type, "compose")
-        self.assertEqual(request.provider_target_type, "compose")
-
-    def test_ship_request_schema_prefers_target_reference_over_legacy_fields(self) -> None:
+    def test_ship_request_schema_requires_canonical_target_fields(self) -> None:
         required_fields = set(ShipRequest.model_json_schema()["required"])
 
-        self.assertIn("target_reference", ShipRequest.model_fields)
-        self.assertNotIn("target_name", required_fields)
-        self.assertNotIn("target_type", required_fields)
+        self.assertNotIn("target_reference", ShipRequest.model_fields)
+        self.assertIn("target_name", required_fields)
+        self.assertIn("target_type", required_fields)
 
     def test_ship_request_requires_resolved_target_identity(self) -> None:
-        with self.assertRaisesRegex(ValueError, "ship request requires target_name"):
+        with self.assertRaisesRegex(ValueError, "target_name\n  Field required"):
             ShipRequest.model_validate(
                 {
                     "artifact_id": "artifact-sha256-image456",
@@ -459,8 +430,8 @@ class PromoteWorkflowTests(unittest.TestCase):
                 }
             )
 
-    def test_ship_request_rejects_conflicting_target_reference(self) -> None:
-        with self.assertRaisesRegex(ValueError, "target_reference provider_id"):
+    def test_ship_request_rejects_target_reference_even_with_canonical_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference"):
             ShipRequest.model_validate(
                 {
                     "artifact_id": "artifact-sha256-image456",
@@ -518,69 +489,37 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(request.target_category, "service")
         self.assertEqual(request.provider_target_type, "managed-service")
         self.assertEqual(request.provider_deploy_mode, "service-api")
-        self.assertIsNotNone(request.target_reference)
-        assert request.target_reference is not None
-        self.assertEqual(request.target_reference.provider_id, "fake-cloud")
-
-    def test_promotion_request_accepts_target_reference_input(self) -> None:
-        request = PromotionRequest.model_validate(
-            {
-                "artifact_id": "artifact-sha256-image456",
-                "backup_record_id": "backup-opw-prod-20260410T182231Z",
-                "source_git_ref": "abc123",
-                "context": "opw",
-                "from_instance": "testing",
-                "to_instance": "prod",
-                "target_reference": {
-                    "target_name": "opw-prod",
-                    "provider_id": "dokploy",
-                    "target_category": "application",
-                    "provider_target_type": "application",
-                },
-                "deploy_mode": "dokploy-application-api",
-            }
-        )
-
-        self.assertEqual(request.target_name, "opw-prod")
-        self.assertEqual(request.target_type, "application")
-        self.assertEqual(request.provider_id, "dokploy")
-        self.assertEqual(request.target_category, "application")
-        self.assertEqual(request.provider_target_type, "application")
         self.assertNotIn("target_reference", request.model_dump())
 
-    def test_promotion_request_accepts_minimal_legacy_target_reference_input(self) -> None:
-        request = PromotionRequest.model_validate(
-            {
-                "artifact_id": "artifact-sha256-image456",
-                "backup_record_id": "backup-opw-prod-20260410T182231Z",
-                "source_git_ref": "abc123",
-                "context": "opw",
-                "from_instance": "testing",
-                "to_instance": "prod",
-                "target_reference": {
-                    "target_name": "opw-prod",
-                    "provider_id": "dokploy",
-                    "target_category": "application",
-                },
-                "deploy_mode": "dokploy-application-api",
-            }
-        )
+    def test_promotion_request_rejects_target_reference_input(self) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference"):
+            PromotionRequest.model_validate(
+                {
+                    "artifact_id": "artifact-sha256-image456",
+                    "backup_record_id": "backup-opw-prod-20260410T182231Z",
+                    "source_git_ref": "abc123",
+                    "context": "opw",
+                    "from_instance": "testing",
+                    "to_instance": "prod",
+                    "target_reference": {
+                        "target_name": "opw-prod",
+                        "provider_id": "dokploy",
+                        "target_category": "application",
+                        "provider_target_type": "application",
+                    },
+                    "deploy_mode": "dokploy-application-api",
+                }
+            )
 
-        self.assertEqual(request.target_name, "opw-prod")
-        self.assertEqual(request.target_type, "application")
-        self.assertEqual(request.provider_target_type, "application")
-
-    def test_promotion_request_schema_prefers_target_reference_over_legacy_fields(
-        self,
-    ) -> None:
+    def test_promotion_request_schema_requires_canonical_target_fields(self) -> None:
         required_fields = set(PromotionRequest.model_json_schema()["required"])
 
-        self.assertIn("target_reference", PromotionRequest.model_fields)
-        self.assertNotIn("target_name", required_fields)
-        self.assertNotIn("target_type", required_fields)
+        self.assertNotIn("target_reference", PromotionRequest.model_fields)
+        self.assertIn("target_name", required_fields)
+        self.assertIn("target_type", required_fields)
 
     def test_promotion_request_requires_resolved_target_identity(self) -> None:
-        with self.assertRaisesRegex(ValueError, "promotion request requires target_name"):
+        with self.assertRaisesRegex(ValueError, "target_name\n  Field required"):
             PromotionRequest.model_validate(
                 {
                     "artifact_id": "artifact-sha256-image456",
@@ -680,8 +619,10 @@ class PromoteWorkflowTests(unittest.TestCase):
                 request=request,
             )
 
-    def test_promotion_request_rejects_provider_reference_without_type(self) -> None:
-        with self.assertRaisesRegex(ValueError, "target_reference provider_target_type"):
+    def test_promotion_request_rejects_target_reference_even_with_canonical_type(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "target_reference"):
             PromotionRequest.model_validate(
                 {
                     "artifact_id": "artifact-sha256-image456",
@@ -695,13 +636,14 @@ class PromoteWorkflowTests(unittest.TestCase):
                         "provider_id": "fake-cloud",
                         "target_category": "service",
                     },
+                    "target_name": "opw-prod-service",
                     "target_type": "application",
                     "deploy_mode": "fake-cloud-service-api",
                 }
             )
 
     def test_promotion_request_rejects_conflicting_target_reference(self) -> None:
-        with self.assertRaisesRegex(ValueError, "target_category does not match target_type"):
+        with self.assertRaisesRegex(ValueError, "target_reference"):
             PromotionRequest.model_validate(
                 {
                     "artifact_id": "artifact-sha256-image456",
