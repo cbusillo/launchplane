@@ -2109,6 +2109,129 @@ class LaunchplaneServiceTests(unittest.TestCase):
             protected_artifacts["image_references"],
         )
 
+    def test_protected_artifacts_endpoint_requires_wildcard_context_for_whole_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir)
+            seed_protected_artifact_store(record_store)
+            policy = _local_operator_policy(
+                actions=("artifact_protection.read",),
+                products=("verireel",),
+                contexts=("verireel",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/artifacts/protected",
+                    query_string="product=verireel",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_protected_artifacts_endpoint_allows_scoped_context_read(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir)
+            seed_protected_artifact_store(record_store)
+            policy = _local_operator_policy(
+                actions=("artifact_protection.read",),
+                products=("verireel",),
+                contexts=("verireel",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/artifacts/protected",
+                    query_string="product=verireel&context=verireel",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 200)
+        protected_artifacts = payload["protected_artifacts"]
+        self.assertEqual(protected_artifacts["product"], "verireel")
+        self.assertEqual(protected_artifacts["context"], "verireel")
+
+    def test_protected_artifacts_endpoint_allows_human_wildcard_context_whole_product_read(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir)
+            seed_protected_artifact_store(record_store)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["read_only"],
+                            "products": ["verireel"],
+                            "contexts": ["*"],
+                            "actions": ["artifact_protection.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity()),
+            )
+            cookie = _signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/artifacts/protected",
+                query_string="product=verireel",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        protected_artifacts = payload["protected_artifacts"]
+        self.assertEqual(protected_artifacts["product"], "verireel")
+        self.assertEqual(protected_artifacts["context"], "")
+
     def test_protected_artifacts_endpoint_rejects_wrong_product_scope(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

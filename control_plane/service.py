@@ -477,6 +477,7 @@ from control_plane.workflows.verireel_preview_driver import (
 
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+_WHOLE_PRODUCT_CONTEXT = "*"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
 _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE = "/v1/work-graph/merge-train/controller/status"
@@ -1946,9 +1947,7 @@ _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset(
-    {_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path}
-)
+_PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset({_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path})
 _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
     | _PREVIEW_VERIFICATION_ROUTE_PATHS
@@ -7749,6 +7748,7 @@ def _apply_generic_web_stable_verification_records(
 
     return result
 
+
 def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
     if status == "pass":
         return "Prisma migrations completed on testing."
@@ -8460,7 +8460,7 @@ def create_launchplane_service_app(
                             },
                         )
                     authz_product = requested_product
-                    authz_context = requested_context or _LAUNCHPLANE_SERVICE_CONTEXT
+                    authz_context = requested_context or _WHOLE_PRODUCT_CONTEXT
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
