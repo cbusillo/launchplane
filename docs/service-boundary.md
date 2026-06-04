@@ -116,10 +116,8 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/preview-apply-inputs`
   - `POST /v1/drivers/odoo/preview-apply`
-  - `POST /v1/drivers/odoo/stable-verification`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
-  - `POST /v1/drivers/odoo/prod-rollback-plan`
   - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/testing-verification`
@@ -1327,26 +1325,25 @@ secret material.
 The route is idempotency-keyed and intended for approved non-production Odoo
 preview targets while the isolated runtime migration is being exercised.
 
-For
-Odoo preview smoke follow-ups, `POST /v1/drivers/odoo/preview-verification`
-remains a compatibility alias for the generic-web preview verification action.
-It accepts the product, context, anchor repo/PR, `verification_status`,
-`verified_at`, optional checked URLs as an explicit list plus
-`timeout_seconds`, and an optional failure summary, then marks the latest preview
-generation ready or failed. Scalar or object-shaped `checked_urls` payloads are
-rejected. The accepted response includes an `odoo_preview_verification` result
-with the generation identity, final states, status, checked URLs, timeout, and
-failure summary. The route is safe-write evidence ingestion only; it does not
-mutate provider state.
+For Odoo preview smoke follow-ups,
+`POST /v1/drivers/generic-web/preview-verification` accepts the product,
+context, anchor repo/PR, `verification_status`, `verified_at`, optional checked
+URLs as an explicit list plus `timeout_seconds`, and an optional failure
+summary, then marks the latest preview generation ready or failed. Scalar or
+object-shaped `checked_urls` payloads are rejected. The accepted response
+includes a `generic_web_preview_verification` result with the generation
+identity, final states, status, checked URLs, timeout, and failure summary. The
+Odoo-shaped preview verification alias is retired. The route is safe-write
+evidence ingestion only; it does not mutate provider state.
 
 For stable smoke follow-ups,
 `POST /v1/drivers/generic-web/stable-verification` accepts the product, context,
 instance, deployment record, optional promotion record, checked URLs,
 `verification_status`, `verified_at`, and optional failure summary. Launchplane
 updates deployment health evidence and, when a promotion record is supplied,
-promotion/inventory evidence. Product-shaped routes such as
-`POST /v1/drivers/odoo/stable-verification` remain compatibility aliases. The
-route is safe-write evidence ingestion only; it does not mutate provider state.
+promotion/inventory evidence. The former Odoo-shaped stable verification alias
+is retired. The route is safe-write evidence ingestion only; it does not mutate
+provider state.
 
 `POST /v1/evidence/previews/generations`
 

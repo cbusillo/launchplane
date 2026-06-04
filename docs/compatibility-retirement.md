@@ -57,10 +57,15 @@ Keep a compatibility surface only when it is one of these:
   `provider_id`, and `provider_target_type`; internal Dokploy execution config
   keeps target-type fields only where application-vs-compose behavior is still
   required.
-- Odoo-shaped preview desired-state, inventory, readiness, refresh, and destroy
-  aliases are retired. Odoo preview workflows use `preview-apply-inputs` and
-  `preview-apply` for isolated provider mutation, and common preview
-  read/planning callers use the inherited generic-web routes.
+- Odoo-shaped preview desired-state, inventory, readiness, verification,
+  refresh, and destroy aliases are retired. Odoo preview workflows use
+  `preview-apply-inputs` and `preview-apply` for isolated provider mutation,
+  and common preview read/planning/evidence callers use the inherited
+  generic-web routes.
+- The Odoo-shaped stable verification alias is retired. Odoo stable smoke
+  follow-ups use `POST /v1/drivers/generic-web/stable-verification`.
+- The Odoo-shaped rollback-plan alias is retired. Odoo rollback planning uses
+  `POST /v1/drivers/generic-web/prod-rollback-plan`.
 - `control_plane` remains the Python package name for now. Do not add public
   `odoo-control-plane` names, env vars, or docs; prefer Launchplane wording for
   product/operator surfaces.
