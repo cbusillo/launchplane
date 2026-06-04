@@ -193,8 +193,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         "base": "feature/root",
                         "head": "child-head",
                         "commit_message": (
-                            "Launchplane stack collapse collapse-123: merge PR "
-                            "#11 into PR #10"
+                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
                         ),
                     },
                 ),
@@ -374,6 +373,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -381,9 +381,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             landing_plan=landing_plan
         )
 
-        self.assertEqual(
-            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
-        )
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
         self.assertEqual(
             [entry.merge_commit_sha for entry in landed_plan.entries],
             ["merge-sha-1", "merge-sha-2"],
@@ -404,12 +402,65 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
+    def test_land_batch_candidate_tolerates_already_deleted_candidate_ref(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                {"sha": "merge-sha-1"},
+                _github_branch(sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+                _github_branch(sha="merge-sha-2"),
+                MergeTrainGitHubError("candidate ref missing", status_code=404),
+            )
+        )
+
+        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
+        self.assertEqual(
+            [entry.merge_commit_sha for entry in landed_plan.entries],
+            ["merge-sha-1", "merge-sha-2"],
+        )
+        self.assertEqual(
+            (transport.requests[-1].method, transport.requests[-1].path),
+            ("DELETE", _candidate_ref_path(landing_plan)),
+        )
+
+    def test_land_batch_candidate_fails_closed_on_candidate_ref_delete_error(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                {"sha": "merge-sha-1"},
+                _github_branch(sha="merge-sha-1"),
+                {"sha": "merge-sha-2"},
+                _github_branch(sha="merge-sha-2"),
+                MergeTrainGitHubError("candidate ref delete failed", status_code=500),
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubError, "delete failed"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual(
+            (transport.requests[-1].method, transport.requests[-1].path),
+            ("DELETE", _candidate_ref_path(landing_plan)),
+        )
+
     def test_land_batch_candidate_skips_persisted_merged_entries_on_retry(self) -> None:
-        first_entry = _landing_plan().entries[0].model_copy(
-            update={"status": "merged", "merge_commit_sha": "merge-sha-1"}
+        first_entry = (
+            _landing_plan()
+            .entries[0]
+            .model_copy(update={"status": "merged", "merge_commit_sha": "merge-sha-1"})
         )
         landing_plan = _landing_plan().model_copy(
             update={"entries": (first_entry, _landing_plan().entries[1])}
@@ -420,6 +471,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -442,19 +494,22 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
     def test_land_batch_candidate_reconciles_all_already_merged_entries(self) -> None:
-        first_entry = _landing_plan().entries[0].model_copy(
-            update={"status": "merged", "merge_commit_sha": "merge-sha-1"}
+        first_entry = (
+            _landing_plan()
+            .entries[0]
+            .model_copy(update={"status": "merged", "merge_commit_sha": "merge-sha-1"})
         )
-        second_entry = _landing_plan().entries[1].model_copy(
-            update={"status": "merged", "merge_commit_sha": "merge-sha-2"}
+        second_entry = (
+            _landing_plan()
+            .entries[1]
+            .model_copy(update={"status": "merged", "merge_commit_sha": "merge-sha-2"})
         )
-        landing_plan = _landing_plan().model_copy(
-            update={"entries": (first_entry, second_entry)}
-        )
+        landing_plan = _landing_plan().model_copy(update={"entries": (first_entry, second_entry)})
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(sha="merge-sha-2"),
@@ -466,6 +521,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ),
                 _github_branch(sha="merge-sha-2"),
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -484,12 +540,15 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
     def test_land_batch_candidate_revalidates_persisted_merged_entry_base(self) -> None:
-        first_entry = _landing_plan().entries[0].model_copy(
-            update={"status": "merged", "merge_commit_sha": "merge-sha-1"}
+        first_entry = (
+            _landing_plan()
+            .entries[0]
+            .model_copy(update={"status": "merged", "merge_commit_sha": "merge-sha-1"})
         )
         landing_plan = _landing_plan().model_copy(
             update={"entries": (first_entry, _landing_plan().entries[1])}
@@ -526,8 +585,10 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
     def test_land_batch_candidate_reconciles_partially_persisted_plan_at_final_base(
         self,
     ) -> None:
-        first_entry = _landing_plan().entries[0].model_copy(
-            update={"status": "merged", "merge_commit_sha": "merge-sha-1"}
+        first_entry = (
+            _landing_plan()
+            .entries[0]
+            .model_copy(update={"status": "merged", "merge_commit_sha": "merge-sha-1"})
         )
         landing_plan = _landing_plan().model_copy(
             update={"entries": (first_entry, _landing_plan().entries[1])}
@@ -549,6 +610,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     merge_commit_sha="merge-sha-2",
                 ),
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -556,9 +618,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             landing_plan=landing_plan
         )
 
-        self.assertEqual(
-            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
-        )
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
         self.assertEqual(
             [entry.merge_commit_sha for entry in landed_plan.entries],
             ["merge-sha-1", "merge-sha-2"],
@@ -571,6 +631,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -590,6 +651,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -597,9 +659,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             landing_plan=landing_plan
         )
 
-        self.assertEqual(
-            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
-        )
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
         self.assertEqual(
             [entry.merge_commit_sha for entry in landed_plan.entries],
             ["merge-sha-1", "merge-sha-2"],
@@ -616,6 +676,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -640,6 +701,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     merge_commit_sha="merge-sha-2",
                 ),
                 _github_branch(sha="merge-sha-2"),
+                {},
             )
         )
 
@@ -647,9 +709,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             landing_plan=landing_plan
         )
 
-        self.assertEqual(
-            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
-        )
+        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
         self.assertEqual(
             [entry.merge_commit_sha for entry in landed_plan.entries],
             ["merge-sha-1", "merge-sha-2"],
@@ -662,6 +722,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -708,6 +769,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(
             [request.method for request in transport.requests], ["GET", "PUT", "GET", "GET"]
         )
+        self.assertNotIn("DELETE", [request.method for request in transport.requests])
 
     def test_land_batch_candidate_rejects_moved_base_branch(self) -> None:
         landing_plan = _landing_plan()
@@ -1048,6 +1110,13 @@ def _landing_plan() -> MergeTrainBatchLandingPlan:
         candidate=candidate,
         merge_method="merge",
         created_at="2026-05-14T01:10:00Z",
+    )
+
+
+def _candidate_ref_path(landing_plan: MergeTrainBatchLandingPlan) -> str:
+    return (
+        "/repos/example/merge-train-repo/git/refs/heads/launchplane/train/"
+        f"example/merge-train-repo/main/{landing_plan.batch_id}"
     )
 
 
