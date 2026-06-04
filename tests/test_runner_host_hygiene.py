@@ -325,19 +325,34 @@ class RunnerHostHygieneTests(unittest.TestCase):
         self,
     ) -> None:
         with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            bin_dir = temp_path / "bin"
+            bin_dir.mkdir()
+            docker_path = bin_dir / "docker"
+            docker_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            docker_path.chmod(0o755)
             plugin_path = Path(temp_dir) / "docker-buildx"
             plugin_path.write_text("#!/bin/sh\n", encoding="utf-8")
             plugin_path.chmod(0o755)
-            probe = DOCKER_BUILDX_PLUGIN_PATH_COMMAND.replace(
+            missing_path = str(Path(temp_dir) / "missing-docker-buildx")
+            probe = DOCKER_BUILDX_PLUGIN_PATH_COMMAND
+            for fallback_path in (
                 "$HOME/.docker/cli-plugins/docker-buildx",
-                str(plugin_path),
-            )
+                "/usr/local/lib/docker/cli-plugins/docker-buildx",
+                "/usr/local/libexec/docker/cli-plugins/docker-buildx",
+                "/usr/lib/docker/cli-plugins/docker-buildx",
+                "/usr/libexec/docker/cli-plugins/docker-buildx",
+            ):
+                probe = probe.replace(
+                    fallback_path,
+                    str(plugin_path) if fallback_path.startswith("$HOME") else missing_path,
+                )
             result = subprocess.run(
                 ["sh", "-c", probe],
                 check=False,
                 capture_output=True,
                 text=True,
-                env={"PATH": "/usr/bin:/bin", "HOME": temp_dir},
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": temp_dir},
             )
 
         self.assertEqual(result.returncode, 0, result.stderr)

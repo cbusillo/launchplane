@@ -24,6 +24,7 @@ VeriReelAppMaintenanceAction = Literal[
 VeriReelAppMaintenanceIntent = Literal[
     "stable-testing-migration",
     "stable-testing-reset",
+    "stable-testing-remote-e2e-grant-sponsored",
     "remote-e2e-grant-sponsored",
     "remote-e2e-delete-user",
     "owner-route-promote-owner",
@@ -36,6 +37,7 @@ APP_MAINTENANCE_INTENT_REQUIREMENTS: dict[
 ] = {
     "stable-testing-migration": ("migrate", "verireel"),
     "stable-testing-reset": ("reset-testing", "verireel"),
+    "stable-testing-remote-e2e-grant-sponsored": ("grant-sponsored", "verireel"),
     "remote-e2e-grant-sponsored": ("grant-sponsored", "verireel-testing"),
     "remote-e2e-delete-user": ("delete-user", "verireel-testing"),
     "owner-route-promote-owner": ("promote-owner", "verireel"),

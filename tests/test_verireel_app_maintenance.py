@@ -103,6 +103,67 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
 
         self.assertEqual(request.intent, "remote-e2e-grant-sponsored")
 
+    def test_accepts_stable_testing_remote_e2e_grant_intent(self) -> None:
+        request = VeriReelAppMaintenanceRequest(
+            context="verireel",
+            instance="testing",
+            action="grant-sponsored",
+            intent="stable-testing-remote-e2e-grant-sponsored",
+            email="creator@example.com",
+        )
+
+        self.assertEqual(request.intent, "stable-testing-remote-e2e-grant-sponsored")
+
+    def test_executes_stable_testing_remote_e2e_grant_through_stable_app(self) -> None:
+        request = VeriReelAppMaintenanceRequest(
+            context="verireel",
+            instance="testing",
+            action="grant-sponsored",
+            intent="stable-testing-remote-e2e-grant-sponsored",
+            email="creator+e2e@example.com",
+        )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            with (
+                patch(
+                    "control_plane.workflows.verireel_app_maintenance.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.test", "managed-token"),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_app_maintenance._resolve_stable_testing_application",
+                    return_value=("ver-testing-app", "app-123"),
+                ) as stable_resolve_mock,
+                patch(
+                    "control_plane.workflows.verireel_app_maintenance._resolve_preview_application",
+                    return_value=("ver-preview-pr-42-app", "app-preview-42"),
+                ) as preview_resolve_mock,
+                patch(
+                    "control_plane.workflows.verireel_app_maintenance._run_application_command_with_retries"
+                ) as run_mock,
+                patch(
+                    "control_plane.workflows.verireel_app_maintenance._trigger_application_deploy"
+                ) as deploy_mock,
+            ):
+                result = execute_verireel_app_maintenance(
+                    control_plane_root=Path(temporary_directory_name),
+                    request=request,
+                )
+
+        self.assertEqual(result.maintenance_status, "pass")
+        self.assertEqual(result.application_id, "app-123")
+        self.assertEqual(result.intent, "stable-testing-remote-e2e-grant-sponsored")
+        stable_resolve_mock.assert_called_once()
+        preview_resolve_mock.assert_not_called()
+        run_mock.assert_called_once_with(
+            host="https://dokploy.example.test",
+            token="managed-token",
+            application_id="app-123",
+            schedule_name="ver-remote-e2e-grant-sponsored",
+            command="node scripts/ops/remote-owner-admin.mjs --action grant-sponsored --email creator+e2e@example.com",
+            timeout_seconds=300,
+        )
+        deploy_mock.assert_not_called()
+
     def test_rejects_intent_that_does_not_match_action_and_context(self) -> None:
         with self.assertRaises(ValueError):
             VeriReelAppMaintenanceRequest(
