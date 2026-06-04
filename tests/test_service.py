@@ -12164,7 +12164,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "context": "discord-blue",
                             }
                         ],
-                        "dokploy_targets": [
+                        "provider_targets": [
                             {
                                 "context": "discord-blue",
                                 "instance": "prod",
@@ -12211,8 +12211,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["records"]["product_profile"], "discord-blue")
-        self.assertEqual(payload["records"]["dokploy_target_count"], "1")
-        self.assertEqual(payload["records"]["dokploy_target_id_count"], "1")
+        self.assertEqual(payload["records"]["provider_target_count"], "1")
+        self.assertEqual(payload["records"]["provider_target_id_count"], "1")
         self.assertEqual(profile.driver_id, "generic-web")
         self.assertEqual(profile.runtime_port, 8787)
         self.assertEqual(target.target_type, "application")

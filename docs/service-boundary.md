@@ -837,14 +837,13 @@ Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
 and writes the full Launchplane-owned bundle: product profile, existing
 Dokploy-backed target records, target-id records, runtime-environment records,
-and managed secret binding placeholders. Manifests should use neutral
-`provider_targets`; legacy `dokploy_targets` remains accepted as compatibility
-input. The route is restricted to `product_onboarding.apply` authority for
-product/context `launchplane`, requires DB-backed storage, returns only
-sanitized summaries, and exists so the Launchplane seed import workflow can seed
-product records without product repos storing live lifecycle truth. Responses
-include neutral `provider_target*` summary keys while retaining `dokploy_*`
-compatibility keys until the target-record write path is migrated.
+and managed secret binding placeholders. Manifests must use neutral
+`provider_targets`; obsolete `dokploy_targets` input is rejected with a clear
+validation error. The route is restricted to `product_onboarding.apply`
+authority for product/context `launchplane`, requires DB-backed storage,
+returns only sanitized `provider_target*` summaries, and exists so the
+Launchplane seed import workflow can seed product records without product repos
+storing live lifecycle truth.
 
 Provider-target Phase Two operations use `POST /v1/provider-targets/operations`.
 The route accepts one Launchplane-owned route at a time with mode `audit`,

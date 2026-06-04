@@ -79,7 +79,7 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                 "runtime_port": 8787,
                 "health_path": "/health",
                 "lanes": [{"instance": "prod", "context": "discord-blue"}],
-                "dokploy_targets": [
+                "provider_targets": [
                     {
                         "context": "discord-blue",
                         "instance": "prod",
@@ -116,14 +116,16 @@ class ProductOnboardingServiceTests(unittest.TestCase):
         self.assertEqual(result["product_profile"], "discord-blue")
         self.assertEqual(result["provider_target_count"], 1)
         self.assertEqual(result["provider_target_id_count"], 1)
-        self.assertEqual(result["dokploy_target_count"], 1)
-        self.assertEqual(result["dokploy_target_id_count"], 1)
+        self.assertNotIn("dokploy_target_count", result)
+        self.assertNotIn("dokploy_target_id_count", result)
         self.assertEqual(result["runtime_environment_record_count"], 1)
         self.assertEqual(result["secret_binding_count"], 1)
         self.assertEqual(len(store.provider_targets), 1)
         self.assertEqual(driver_result["product"], "discord-blue")
-        self.assertEqual(driver_result["provider_targets"], driver_result["dokploy_targets"])
-        self.assertEqual(driver_result["provider_target_ids"], driver_result["dokploy_target_ids"])
+        self.assertIn("provider_targets", driver_result)
+        self.assertIn("provider_target_ids", driver_result)
+        self.assertNotIn("dokploy_targets", driver_result)
+        self.assertNotIn("dokploy_target_ids", driver_result)
         self.assertNotIn("secret_id", str(driver_result))
 
 

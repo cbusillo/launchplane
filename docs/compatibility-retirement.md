@@ -46,6 +46,12 @@ Keep a compatibility surface only when it is one of these:
   shared store.
 - File-backed JSON state is local-dev/test scaffolding. Production truth is
   Launchplane service-owned persistence.
+- Provider-target manifest input and product-onboarding service response aliases
+  are retired. Manifests must use `provider_targets`; obsolete
+  `dokploy_targets` input raises a validation error. Product-onboarding service
+  responses expose only neutral `provider_target*` summary keys. Seed import
+  material must use `provider_targets`; the import helper no longer falls back
+  to `dokploy_targets`.
 - `control_plane` remains the Python package name for now. Do not add public
   `odoo-control-plane` names, env vars, or docs; prefer Launchplane wording for
   product/operator surfaces.

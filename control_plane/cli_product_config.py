@@ -156,8 +156,6 @@ def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at:
                 ),
                 "provider_target_count": len(result.provider_targets),
                 "provider_targets": provider_targets,
-                "dokploy_target_count": len(result.provider_targets),
-                "dokploy_targets": provider_targets,
                 "runtime_environment_record_count": len(result.runtime_environments),
                 "runtime_environment_records": [
                     callbacks.summarize_runtime_environment_record(record)

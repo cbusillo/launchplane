@@ -63,14 +63,6 @@ class ProductOnboardingApplyResult(BaseModel):
     runtime_environments: tuple[RuntimeEnvironmentRecord, ...] = ()
     secret_bindings: tuple[SecretBinding, ...] = ()
 
-    @property
-    def dokploy_targets(self) -> tuple[DokployTargetRecord, ...]:
-        return self.provider_targets
-
-    @property
-    def dokploy_target_ids(self) -> tuple[DokployTargetIdRecord, ...]:
-        return self.provider_target_ids
-
 
 class ProductOnboardingSecretBindingPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
