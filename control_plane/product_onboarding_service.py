@@ -10,8 +10,6 @@ def build_product_onboarding_service_result(
         "product_profile": onboarding_result.product_profile.product,
         "provider_target_count": len(onboarding_result.provider_targets),
         "provider_target_id_count": len(onboarding_result.provider_target_ids),
-        "dokploy_target_count": len(onboarding_result.provider_targets),
-        "dokploy_target_id_count": len(onboarding_result.provider_target_ids),
         "runtime_environment_record_count": len(onboarding_result.runtime_environments),
         "secret_binding_count": len(onboarding_result.secret_bindings),
     }
@@ -33,8 +31,6 @@ def build_product_onboarding_service_result(
         "product_profile": onboarding_result.product_profile.model_dump(mode="json"),
         "provider_targets": provider_targets,
         "provider_target_ids": provider_target_ids,
-        "dokploy_targets": provider_targets,
-        "dokploy_target_ids": provider_target_ids,
         "runtime_environment_records": [
             {
                 "scope": record.scope,

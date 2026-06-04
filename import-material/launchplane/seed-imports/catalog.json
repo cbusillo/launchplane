@@ -25,7 +25,7 @@
             "context": "discord-blue"
           }
         ],
-        "dokploy_targets": [
+        "provider_targets": [
           {
             "context": "discord-blue",
             "instance": "prod",
@@ -355,7 +355,7 @@
           "preview_url_env_keys": ["WEB_BASE_URL"],
           "data_transport_mode": "driver"
         },
-        "dokploy_targets": [
+        "provider_targets": [
           {
             "context": "cm",
             "instance": "testing",
@@ -608,7 +608,7 @@
           "preview_url_env_keys": ["WEB_BASE_URL"],
           "data_transport_mode": "driver"
         },
-        "dokploy_targets": [
+        "provider_targets": [
           {
             "context": "opw",
             "instance": "testing",

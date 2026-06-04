@@ -104,7 +104,7 @@ def _manifest_payload() -> dict[str, object]:
             "enable_label": "preview-requested",
             "slug_template": "pr-{number}",
         },
-        "dokploy_targets": [
+        "provider_targets": [
             {
                 "context": "example-site-testing",
                 "instance": "testing",
@@ -169,9 +169,7 @@ def _seed_import_manifest(
     manifest_payload = json.loads(json.dumps(entry["manifest"]))
     target_ids = target_ids_by_env or {}
     for mapping in entry.get("target_id_env", []):
-        targets = manifest_payload.get("provider_targets")
-        if targets is None:
-            targets = manifest_payload.get("dokploy_targets", [])
+        targets = manifest_payload.get("provider_targets", [])
         for target in targets:
             if (
                 target["context"] == mapping["context"]
@@ -296,9 +294,7 @@ class ProductOnboardingTests(unittest.TestCase):
             if entry["kind"] == "product_onboarding":
                 manifest_payload = json.loads(json.dumps(entry["manifest"]))
                 for mapping in entry.get("target_id_env", []):
-                    targets = manifest_payload.get("provider_targets")
-                    if targets is None:
-                        targets = manifest_payload.get("dokploy_targets", [])
+                    targets = manifest_payload.get("provider_targets", [])
                     for target in targets:
                         if (
                             target["context"] == mapping["context"]
@@ -370,14 +366,7 @@ class ProductOnboardingTests(unittest.TestCase):
             output_dir = temporary_directory / "seed-import"
             catalog_path = temporary_directory / "catalog.json"
             manifest_payload = _manifest_payload()
-            manifest_payload["provider_targets"] = manifest_payload.pop("dokploy_targets")
-            manifest_payload["dokploy_targets"] = json.loads(
-                json.dumps(manifest_payload["provider_targets"])
-            )
             for target in cast(list[dict[str, object]], manifest_payload["provider_targets"]):
-                if target["instance"] == "prod":
-                    target["target_id"] = ""
-            for target in cast(list[dict[str, object]], manifest_payload["dokploy_targets"]):
                 if target["instance"] == "prod":
                     target["target_id"] = ""
             catalog_path.write_text(
@@ -1462,7 +1451,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             manifest.preview.preview_domain_env_keys,
             ("LAUNCHPLANE_PREVIEW_BASE_URL",),
         )
-        self.assertEqual(len(manifest.dokploy_targets), 0)
+        self.assertEqual(len(manifest.provider_targets), 0)
         self.assertEqual(len(manifest.secret_bindings), 0)
         self.assertEqual(len(manifest.runtime_environments), 1)
         preview_runtime = manifest.runtime_environments[0]
@@ -1573,7 +1562,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(policies["prod"].expected_target_name, "cm-prod")
         self.assertEqual(policies["prod"].expected_domains, ("cellmechanic.com",))
         self.assertEqual(
-            [tuple(target.domains) for target in manifest.dokploy_targets],
+            [tuple(target.domains) for target in manifest.provider_targets],
             [
                 ("cm-testing.shinycomputers.com",),
                 ("cm-prod.shinycomputers.com",),
@@ -1582,7 +1571,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(
             [
                 (target.context, target.instance, target.target_type, target.target_id)
-                for target in manifest.dokploy_targets
+                for target in manifest.provider_targets
             ],
             [
                 ("cm", "testing", "compose", "compose-cm-testing"),
@@ -1932,12 +1921,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
     def test_product_onboarding_manifest_prefers_provider_targets(self) -> None:
         payload = _manifest_payload()
-        payload["provider_targets"] = payload.pop("dokploy_targets")
 
         manifest = ProductOnboardingManifest.model_validate(payload)
 
         self.assertEqual(len(manifest.provider_targets), 2)
-        self.assertEqual(len(manifest.dokploy_targets), 2)
         self.assertEqual(
             [
                 (target.context, target.instance, target.target_type, target.target_id)
@@ -1951,39 +1938,24 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("provider_targets", manifest.model_dump())
         self.assertNotIn("dokploy_targets", manifest.model_dump())
 
-    def test_product_onboarding_manifest_accepts_dokploy_targets_compat_input(
+    def test_product_onboarding_manifest_rejects_dokploy_targets_compat_input(
         self,
     ) -> None:
         payload = _manifest_payload()
+        payload["dokploy_targets"] = json.loads(json.dumps(payload.pop("provider_targets")))
 
-        manifest = ProductOnboardingManifest.model_validate(payload)
+        with self.assertRaisesRegex(ValueError, "obsolete dokploy_targets"):
+            ProductOnboardingManifest.model_validate(payload)
 
-        self.assertEqual(len(manifest.provider_targets), 2)
-        self.assertEqual(manifest.dokploy_targets, manifest.provider_targets)
-        self.assertIn("provider_targets", manifest.model_dump())
-        self.assertNotIn("dokploy_targets", manifest.model_dump())
-
-    def test_product_onboarding_manifest_accepts_null_provider_targets_compat_input(
+    def test_product_onboarding_manifest_accepts_missing_provider_targets_as_empty(
         self,
     ) -> None:
         payload = _manifest_payload()
-        payload["provider_targets"] = None
+        payload.pop("provider_targets")
 
         manifest = ProductOnboardingManifest.model_validate(payload)
 
-        self.assertEqual(len(manifest.provider_targets), 2)
-        self.assertEqual(manifest.dokploy_targets, manifest.provider_targets)
-
-    def test_product_onboarding_manifest_accepts_matching_provider_targets_input(
-        self,
-    ) -> None:
-        payload = _manifest_payload()
-        payload["provider_targets"] = json.loads(json.dumps(payload["dokploy_targets"]))
-
-        manifest = ProductOnboardingManifest.model_validate(payload)
-
-        self.assertEqual(len(manifest.provider_targets), 2)
-        self.assertEqual(len(manifest.dokploy_targets), 2)
+        self.assertEqual(manifest.provider_targets, ())
 
     def test_product_onboarding_manifest_keeps_empty_provider_targets_intentional(
         self,
@@ -1994,22 +1966,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         manifest = ProductOnboardingManifest.model_validate(payload)
 
         self.assertEqual(manifest.provider_targets, ())
-        self.assertEqual(manifest.dokploy_targets, ())
-
-    def test_product_onboarding_manifest_rejects_conflicting_provider_targets_input(
-        self,
-    ) -> None:
-        payload = _manifest_payload()
-        provider_targets = json.loads(json.dumps(payload["dokploy_targets"]))
-        provider_targets[0]["target_id"] = "app-other-123"
-        payload["provider_targets"] = provider_targets
-
-        with self.assertRaisesRegex(ValueError, "provider_targets must match dokploy_targets"):
-            ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_manifest_rejects_unowned_target_route(self) -> None:
         payload = _manifest_payload()
-        payload["dokploy_targets"] = [
+        payload["provider_targets"] = [
             {
                 "context": "other-product-prod",
                 "instance": "prod",
@@ -2023,7 +1983,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
     def test_product_onboarding_manifest_rejects_missing_target_id(self) -> None:
         payload = _manifest_payload()
-        payload["dokploy_targets"] = [
+        payload["provider_targets"] = [
             {
                 "context": "example-site-prod",
                 "instance": "prod",

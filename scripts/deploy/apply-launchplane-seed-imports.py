@@ -65,28 +65,16 @@ def _patch_target_ids(entry: dict[str, Any], manifest_payload: dict[str, Any]) -
     raw_mappings = entry.get("target_id_env", [])
     if not isinstance(raw_mappings, list):
         raise SystemExit(f"{entry['import_id']} target_id_env must be an array.")
-    raw_target_lists = [
-        targets
-        for targets in (
-            manifest_payload.get("provider_targets"),
-            manifest_payload.get("dokploy_targets"),
-        )
-        if targets is not None
-    ]
-    if not raw_target_lists:
-        raw_target_lists = [[]]
-    if not all(isinstance(targets, list) for targets in raw_target_lists):
-        raise SystemExit(
-            f"{entry['import_id']} manifest provider_targets/dokploy_targets must be an array."
-        )
+    raw_targets = manifest_payload.get("provider_targets", [])
+    if not isinstance(raw_targets, list):
+        raise SystemExit(f"{entry['import_id']} manifest provider_targets must be an array.")
 
     targets_by_route: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for raw_targets in raw_target_lists:
-        for target in raw_targets:
-            if not isinstance(target, dict):
-                continue
-            route = (str(target.get("context", "")), str(target.get("instance", "")))
-            targets_by_route.setdefault(route, []).append(target)
+    for target in raw_targets:
+        if not isinstance(target, dict):
+            continue
+        route = (str(target.get("context", "")), str(target.get("instance", "")))
+        targets_by_route.setdefault(route, []).append(target)
     for raw_mapping in raw_mappings:
         if not isinstance(raw_mapping, dict):
             raise SystemExit(f"{entry['import_id']} target_id_env entries must be objects.")
