@@ -854,6 +854,15 @@ projections; existing rows and conflicts are reported rather than overwritten.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
 
+The manual `Product Environment Evidence` workflow is the supported read-only
+Phase Two caller for product environment read-model evidence. It uses GitHub
+OIDC and `product_environment.read` to call `GET
+/v1/products/{product}/environments/{environment}` for the same Phase Two target
+set, then uploads sanitized summaries only. It must not upload raw product
+environment responses because those responses can include provider target
+identifiers, runtime key names, managed-secret binding keys, and operational
+metadata.
+
 Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
 accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
 optional apply-only deploy controls. Dry-run requires `live_target_runtime.plan`;
