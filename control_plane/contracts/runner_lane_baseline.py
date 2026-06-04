@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 RunnerLaneBaselineViolationCode = Literal[
     "docker_config_isolation_missing",
+    "docker_toolchain_missing",
+    "docker_buildx_version_below_minimum",
+    "docker_buildx_version_invalid",
     "home_directory_outside_allowed_roots",
     "required_label_missing",
     "service_user_not_allowed",
@@ -21,15 +24,59 @@ class RunnerLaneBaselinePolicy(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     required_labels: tuple[str, ...] = ("self-hosted", "launchplane")
     require_docker_config_isolation: bool = True
+    require_docker_toolchain_observation: bool = False
+    minimum_docker_buildx_version: str = ""
     allowed_service_users: tuple[str, ...] = ()
     allowed_home_roots: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _normalize_policy(self) -> "RunnerLaneBaselinePolicy":
         self.required_labels = _normalized_tokens(self.required_labels)
+        self.minimum_docker_buildx_version = _normalized_version_text(
+            self.minimum_docker_buildx_version
+        )
         self.allowed_service_users = _normalized_tokens(self.allowed_service_users)
         self.allowed_home_roots = _normalized_paths(self.allowed_home_roots)
         return self
+
+
+class RunnerLaneDockerToolchainObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    docker_engine_version: str = ""
+    docker_cli_version: str = ""
+    docker_buildx_version: str = ""
+    docker_buildx_plugin_path: str = ""
+    docker_buildx_package: str = ""
+    docker_buildx_source: str = ""
+    buildkit_version: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_toolchain(self) -> "RunnerLaneDockerToolchainObservation":
+        self.docker_engine_version = _normalized_version_text(self.docker_engine_version)
+        self.docker_cli_version = _normalized_version_text(self.docker_cli_version)
+        self.docker_buildx_version = _normalized_version_text(self.docker_buildx_version)
+        self.docker_buildx_plugin_path = self.docker_buildx_plugin_path.strip()
+        self.docker_buildx_package = self.docker_buildx_package.strip()
+        self.docker_buildx_source = self.docker_buildx_source.strip()
+        self.buildkit_version = _normalized_version_text(self.buildkit_version)
+        return self
+
+    def has_evidence(self) -> bool:
+        return any(
+            (
+                self.docker_engine_version,
+                self.docker_cli_version,
+                self.docker_buildx_version,
+                self.docker_buildx_plugin_path,
+                self.docker_buildx_package,
+                self.docker_buildx_source,
+                self.buildkit_version,
+            )
+        )
+
+    def has_buildx_version(self) -> bool:
+        return bool(self.docker_buildx_version)
 
 
 class RunnerLaneBaselineObservation(BaseModel):
@@ -38,6 +85,7 @@ class RunnerLaneBaselineObservation(BaseModel):
     runner_name: str
     labels: tuple[str, ...] = ()
     docker_config_isolated: bool | None = None
+    docker_toolchain: RunnerLaneDockerToolchainObservation | None = None
     service_user: str = ""
     home_directory: str = ""
     observed_at: str
@@ -145,6 +193,52 @@ def _evaluate_observation(
                 message="runner lane lacks verified per-job Docker credential isolation",
             )
         )
+    minimum_buildx_version = policy.minimum_docker_buildx_version
+    if policy.require_docker_toolchain_observation or minimum_buildx_version:
+        if observation.docker_toolchain is None or not observation.docker_toolchain.has_evidence():
+            violations.append(
+                RunnerLaneBaselineViolation(
+                    runner_name=observation.runner_name,
+                    code="docker_toolchain_missing",
+                    message="runner lane lacks Docker toolchain observation evidence",
+                )
+            )
+        elif (
+            policy.require_docker_toolchain_observation
+            and not observation.docker_toolchain.has_buildx_version()
+        ):
+            violations.append(
+                RunnerLaneBaselineViolation(
+                    runner_name=observation.runner_name,
+                    code="docker_buildx_version_invalid",
+                    message="runner lane Docker Buildx version was not observed",
+                )
+            )
+        elif minimum_buildx_version:
+            buildx_version = observation.docker_toolchain.docker_buildx_version
+            comparison = _compare_versions(buildx_version, minimum_buildx_version)
+            if comparison is None:
+                violations.append(
+                    RunnerLaneBaselineViolation(
+                        runner_name=observation.runner_name,
+                        code="docker_buildx_version_invalid",
+                        message=(
+                            "runner lane Docker Buildx version could not be compared: "
+                            f"{buildx_version or '<missing>'}"
+                        ),
+                    )
+                )
+            elif comparison < 0:
+                violations.append(
+                    RunnerLaneBaselineViolation(
+                        runner_name=observation.runner_name,
+                        code="docker_buildx_version_below_minimum",
+                        message=(
+                            "runner lane Docker Buildx version is below the configured "
+                            f"minimum: {buildx_version} < {minimum_buildx_version}"
+                        ),
+                    )
+                )
     if (
         policy.allowed_service_users
         and observation.service_user not in policy.allowed_service_users
@@ -206,11 +300,55 @@ def _resolved_path(value: str) -> str:
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(sorted({normalized for value in values if (normalized := _normalized_token(value))}))
+    return tuple(
+        sorted({normalized for value in values if (normalized := _normalized_token(value))})
+    )
 
 
 def _normalized_token(value: str) -> str:
     return value.strip().lower()
+
+
+def _normalized_version_text(value: str) -> str:
+    return value.strip().removeprefix("v")
+
+
+def _compare_versions(left: str, right: str) -> int | None:
+    left_parts = _version_parts(left)
+    right_parts = _version_parts(right)
+    if left_parts is None or right_parts is None:
+        return None
+    if left_parts < right_parts:
+        return -1
+    if left_parts > right_parts:
+        return 1
+    return 0
+
+
+def _version_parts(value: str) -> tuple[int, int, int] | None:
+    normalized_value = _normalized_version_text(value)
+    parts: list[int] = []
+    current = ""
+    for character in normalized_value:
+        if character.isdigit():
+            current += character
+            continue
+        if current:
+            parts.append(int(current))
+            current = ""
+            if len(parts) == 3:
+                break
+        elif character in {".", "-", "_", "+"}:
+            continue
+        else:
+            continue
+    if current and len(parts) < 3:
+        parts.append(int(current))
+    if not parts:
+        return None
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
 
 
 def _required_text(value: str, message: str) -> str:

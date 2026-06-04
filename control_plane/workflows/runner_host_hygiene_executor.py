@@ -20,6 +20,7 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyPlan
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyRequest
+from control_plane.contracts.runner_host_hygiene import RunnerHostDockerToolchainObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneImageInventoryItem
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
@@ -357,6 +358,10 @@ def collect_runner_host_hygiene_report(
             request=request,
             remote_runner=remote_runner,
         ),
+        docker_toolchain=_collect_docker_toolchain(
+            request=request,
+            remote_runner=remote_runner,
+        ),
         warm_builders=warm_builders,
         image_inventory=image_inventory,
         volume_inventory=volume_inventory,
@@ -515,6 +520,113 @@ def _parse_df_available_bytes(output: str) -> int:
     if not available.isdigit():
         raise click.ClickException("runner host hygiene df available bytes was not numeric")
     return int(available)
+
+
+def _collect_docker_toolchain(
+    *,
+    request: RunnerHostHygieneExecutorRequest,
+    remote_runner: RemoteCommandRunner,
+) -> RunnerHostDockerToolchainObservation | None:
+    buildx_plugin_path = _first_existing_path(
+        remote_runner(
+            (
+                "sh",
+                "-c",
+                "command -v docker-buildx 2>/dev/null || "
+                "for path in /usr/libexec/docker/cli-plugins/docker-buildx "
+                "/usr/local/lib/docker/cli-plugins/docker-buildx "
+                "$HOME/.docker/cli-plugins/docker-buildx; do "
+                '[ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; '
+                "done",
+            ),
+            request.timeout_seconds,
+        ).stdout
+    )
+    toolchain = RunnerHostDockerToolchainObservation(
+        docker_engine_version=_command_output(
+            remote_runner,
+            ("docker", "version", "--format", "{{.Server.Version}}"),
+            request.timeout_seconds,
+        ),
+        docker_cli_version=_command_output(
+            remote_runner,
+            ("docker", "version", "--format", "{{.Client.Version}}"),
+            request.timeout_seconds,
+        ),
+        docker_buildx_version=_first_version(
+            _command_output(
+                remote_runner,
+                ("docker", "buildx", "version"),
+                request.timeout_seconds,
+            )
+        ),
+        docker_buildx_plugin_path=buildx_plugin_path,
+        docker_buildx_package=_docker_buildx_package(
+            remote_runner=remote_runner,
+            timeout_seconds=request.timeout_seconds,
+        ),
+        docker_buildx_source=_docker_buildx_source(buildx_plugin_path),
+        buildkit_version=_first_version(
+            _command_output(
+                remote_runner,
+                ("docker", "buildx", "inspect"),
+                request.timeout_seconds,
+            )
+        ),
+    )
+    return toolchain if toolchain.has_evidence() else None
+
+
+def _command_output(
+    remote_runner: RemoteCommandRunner,
+    command_args: tuple[str, ...],
+    timeout_seconds: int,
+) -> str:
+    result = remote_runner(command_args, timeout_seconds)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _first_existing_path(output: str) -> str:
+    for line in output.splitlines():
+        value = line.strip()
+        if value:
+            return value
+    return ""
+
+
+def _docker_buildx_package(*, remote_runner: RemoteCommandRunner, timeout_seconds: int) -> str:
+    package = _command_output(
+        remote_runner,
+        ("sh", "-c", "dpkg-query -W -f='${Package} ${Version}' docker-buildx 2>/dev/null"),
+        timeout_seconds,
+    )
+    if package:
+        return package
+    return _command_output(
+        remote_runner,
+        ("sh", "-c", "rpm -q docker-buildx 2>/dev/null"),
+        timeout_seconds,
+    )
+
+
+def _docker_buildx_source(plugin_path: str) -> str:
+    if plugin_path.startswith("/usr/libexec/") or plugin_path.startswith("/usr/lib/"):
+        return "system package"
+    if plugin_path.startswith("/usr/local/"):
+        return "managed plugin"
+    if "/.docker/cli-plugins/" in plugin_path:
+        return "user plugin"
+    return ""
+
+
+def _first_version(value: str) -> str:
+    for token in value.replace(",", " ").split():
+        normalized = token.strip().removeprefix("v")
+        if normalized and normalized[0].isdigit() and "." in normalized:
+            return normalized
+    return ""
 
 
 def _collect_image_inventory(

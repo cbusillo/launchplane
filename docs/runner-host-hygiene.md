@@ -33,8 +33,9 @@ policy from observation:
   whether orphan BuildKit artifacts are tolerated.
 - `RunnerHostHygieneObservation` records facts collected by an approved
   read-only probe, including host name, free disk, Docker reclaimable bytes,
-  runner work-directory bytes, warm builders, read-only image and volume
-  inventory, and orphan BuildKit counts.
+  runner work-directory bytes, Docker Engine/CLI/Buildx/BuildKit toolchain
+  evidence, warm builders, read-only image and volume inventory, and orphan
+  BuildKit counts.
 - `evaluate_runner_host_hygiene(...)` returns a structured report with
   `healthy` or `attention` status, findings, and non-mutating next steps.
 
@@ -44,8 +45,9 @@ budget, and orphan BuildKit artifacts all produce `attention` unless policy
 explicitly permits that condition.
 Reports also carry the typed observation counters used for evaluation, so audit
 records preserve free disk, Docker reclaimable bytes, runner work-directory
-bytes, warm builders, and orphan BuildKit counts instead of relying only on raw
-operator notes. Executor-written reports also include read-only resource
+bytes, Docker toolchain evidence, warm builders, and orphan BuildKit counts
+instead of relying only on raw operator notes. Executor-written reports also
+include read-only resource
 inventory for Docker images and volumes. Image rows preserve repository, tag,
 image ID, size, creation timestamp, dangling status, in-use hints, and whether
 the image is one of the retained warm builders. Volume rows preserve name,
@@ -53,6 +55,13 @@ driver, mountpoint, labels, size when Docker exposes it, reference count when
 Docker exposes it, and dangling status. These inventory fields are evidence for
 operator review only; aggregate reclaimable totals are not enough to approve
 destructive volume or image pruning.
+
+Docker toolchain evidence is preserved for operator review and runner-readiness
+follow-up. The hygiene report records Docker Engine version, Docker CLI version,
+Docker Buildx CLI plugin version, plugin path/package/source, and BuildKit
+version when the read-only probe can observe them. Hygiene does not decide lane
+admission from those versions; [runner-lane-baseline.md](runner-lane-baseline.md)
+owns the fail-closed Buildx minimum policy.
 
 ## CLI
 
@@ -198,8 +207,9 @@ Use this sequence when replacing `chris-testing` or standing up a parallel host:
    receive the ops-gate label.
 4. Run `runner-baseline-observe` from a job on the replacement host and evaluate
    the baseline readiness. The result must show required labels, the expected
-   service user/home-root constraints when configured, and positive isolated
-   Docker credential evidence.
+   service user/home-root constraints when configured, positive isolated Docker
+   credential evidence, and Docker toolchain evidence that satisfies the
+   configured Buildx minimum.
 5. Run the runner-host hygiene workflow manually with `mutate=false`, no target
    volumes, and a replacement-specific audit key. The run must write an
    accepted planned audit, block only on `mutate_not_requested`, observe the

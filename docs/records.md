@@ -196,8 +196,9 @@ an ORM column/table or remains only in the evidence payload.
 - Runner host hygiene audit: modeled fields are `audit_record_key`,
   `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and
-  operator message. Host-command output, Docker summaries, and rollout notes stay
-  payload-only until they need queryable operational views.
+  operator message. Docker toolchain evidence, host-command output, Docker
+  summaries, and rollout notes stay payload-only until they need queryable
+  operational views.
 - Ingress route audit: modeled fields are `record_id`, `product`, `context`,
   `mode`, `status`, `provider_host_id`, and `recorded_at`. The payload carries
   the typed requested domains, expected provider host id, dry-run/apply mode,
@@ -950,7 +951,8 @@ preflights.
 - Runner lane baseline readiness is represented by typed policy, observation,
   violation, and readiness contracts in
   `control_plane.contracts.runner_lane_baseline`. These contracts are evidence
-  about whether a self-hosted runner lane satisfies Launchplane's host baseline;
+  about whether a self-hosted runner lane satisfies Launchplane's host baseline,
+  including Docker credential isolation and Docker toolchain/version policy;
   they are not product deploy authority and they do not replace route-specific
   authorization, promotion, backup-gate, or provider safety checks.
 - Scoped agent write-intent evaluation is exposed at

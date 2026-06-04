@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from collections.abc import Sequence
 from typing import cast
 import unittest
 from unittest.mock import patch
@@ -26,6 +27,9 @@ from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hyg
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_adapter_boundary
 from control_plane.cli_runner_lanes import _runner_host_hygiene_bearer_token
+from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
+from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import collect_runner_host_hygiene_report
 
 
 CLI_MAIN = cast(Command, main)
@@ -142,6 +146,154 @@ class RunnerHostHygieneTests(unittest.TestCase):
         )
 
         self.assertEqual(report.status, "healthy")
+
+    def test_executor_report_preserves_docker_toolchain_evidence(self) -> None:
+        outputs: dict[tuple[str, ...], str] = {
+            (
+                "df",
+                "-B1",
+                "-P",
+                "/",
+            ): "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/root 1000 100 900 10% /\n",
+            (
+                "docker",
+                "system",
+                "df",
+                "--format",
+                "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
+            ): "Images 1 10MB 0B\nBuild Cache 1 10MB 0B\n",
+            ("docker", "system", "df", "-v"): "",
+            ("docker", "image", "inspect", "odoo-docker-chris-testing"): "{}",
+            (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ): "",
+            ("docker", "ps", "--all", "--no-trunc", "--format", "{{json .}}"): "",
+            (
+                "bash",
+                "-lc",
+                "docker volume ls -q | xargs -r docker volume inspect",
+            ): "",
+            (
+                "bash",
+                "-lc",
+                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
+            ): "0\n",
+            ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "buildx", "version"): "github.com/docker/buildx 0.13.1+ds1 0.13.1+ds1-3\n",
+            ("docker", "buildx", "inspect"): "Driver: docker-container\nBuildKit: v0.30.0\n",
+            (
+                "sh",
+                "-c",
+                'command -v docker-buildx 2>/dev/null || for path in /usr/libexec/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx $HOME/.docker/cli-plugins/docker-buildx; do [ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; done',
+            ): "/usr/libexec/docker/cli-plugins/docker-buildx\n",
+            (
+                "sh",
+                "-c",
+                "dpkg-query -W -f='${Package} ${Version}' docker-buildx 2>/dev/null",
+            ): "docker-buildx 0.13.1+ds1-3",
+            ("sh", "-c", "rpm -q docker-buildx 2>/dev/null"): "",
+        }
+
+        def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
+            command_tuple = tuple(command)
+            if command_tuple[:3] == ("docker", "volume", "inspect"):
+                return RemoteCommandResult(returncode=1)
+            return RemoteCommandResult(returncode=0, stdout=outputs.get(command_tuple, ""))
+
+        report = collect_runner_host_hygiene_report(
+            request=RunnerHostHygieneExecutorRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                execution_lane="chris-testing-ops-gate",
+                service_user="gha",
+                repository_scope="cbusillo/launchplane",
+                audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
+                retained_warm_builders=("odoo-docker-chris-testing",),
+            ),
+            remote_runner=runner,
+        )
+
+        self.assertIsNotNone(report.docker_toolchain)
+        assert report.docker_toolchain is not None
+        self.assertEqual(report.docker_toolchain.docker_buildx_version, "0.13.1+ds1")
+        self.assertEqual(
+            report.docker_toolchain.docker_buildx_plugin_path,
+            "/usr/libexec/docker/cli-plugins/docker-buildx",
+        )
+        self.assertEqual(
+            report.docker_toolchain.docker_buildx_package, "docker-buildx 0.13.1+ds1-3"
+        )
+        self.assertEqual(report.docker_toolchain.docker_buildx_source, "system package")
+        self.assertEqual(report.docker_toolchain.buildkit_version, "0.30.0")
+
+    def test_executor_report_omits_empty_docker_toolchain_evidence(self) -> None:
+        outputs: dict[tuple[str, ...], str] = {
+            (
+                "df",
+                "-B1",
+                "-P",
+                "/",
+            ): "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/root 1000 100 900 10% /\n",
+            (
+                "docker",
+                "system",
+                "df",
+                "--format",
+                "{{.Type}} {{.TotalCount}} {{.Size}} {{.Reclaimable}}",
+            ): "Images 1 10MB 0B\nBuild Cache 1 10MB 0B\n",
+            ("docker", "system", "df", "-v"): "",
+            ("docker", "image", "inspect", "odoo-docker-chris-testing"): "{}",
+            (
+                "docker",
+                "image",
+                "ls",
+                "--all",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+            ): "",
+            ("docker", "ps", "--all", "--no-trunc", "--format", "{{json .}}"): "",
+            (
+                "bash",
+                "-lc",
+                "docker volume ls -q | xargs -r docker volume inspect",
+            ): "",
+            (
+                "bash",
+                "-lc",
+                "find /opt/actions-runners -mindepth 2 -maxdepth 2 -type d -name _work -exec du -sb {} + 2>/dev/null | awk '{ total += $1 } END { print total + 0 }'",
+            ): "0\n",
+        }
+
+        def runner(command: Sequence[str], _timeout: int) -> RemoteCommandResult:
+            command_tuple = tuple(command)
+            if command_tuple[:3] == ("docker", "volume", "inspect"):
+                return RemoteCommandResult(returncode=1)
+            if command_tuple in outputs:
+                return RemoteCommandResult(returncode=0, stdout=outputs[command_tuple])
+            return RemoteCommandResult(returncode=1, stderr="not installed")
+
+        report = collect_runner_host_hygiene_report(
+            request=RunnerHostHygieneExecutorRequest(
+                action="prune_docker_cache",
+                host_name="chris-testing",
+                execution_lane="chris-testing-ops-gate",
+                service_user="gha",
+                repository_scope="cbusillo/launchplane",
+                audit_record_key="runner-host-hygiene/2026-06-04/chris-testing",
+                retained_warm_builders=("odoo-docker-chris-testing",),
+            ),
+            remote_runner=runner,
+        )
+
+        self.assertIsNone(report.docker_toolchain)
 
 
 class RunnerHostHygieneCliTests(unittest.TestCase):
