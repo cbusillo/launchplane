@@ -941,8 +941,10 @@ preflights.
   `launchplane_merge_train_batch_candidates` records. Each record stores the
   repository/base branch, observed base SHA, ordered PR entries, candidate ref,
   candidate SHA when available, policy key and digest, candidate status, check
-  status summary, source, and update timestamp. These records are the durable
-  evidence for a speculative batch candidate, not checked-in configuration.
+  status summary, source, and update timestamp. Successful landing deletes the
+  generated GitHub candidate ref after final base-sha validation; the record
+  remains as durable evidence for the speculative batch candidate, not
+  checked-in configuration.
 - Full batch train landing plans are persisted as
   `launchplane_merge_train_batch_landing_plans` records. Each record stores the
   candidate identity, repository/base branch, candidate SHA, policy key and

@@ -135,7 +135,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             update={"required_checks_status": check_status, "status": candidate_status}
         )
 
-    def land_batch_candidate(self, *, landing_plan: MergeTrainBatchLandingPlan) -> MergeTrainBatchLandingPlan:
+    def land_batch_candidate(
+        self, *, landing_plan: MergeTrainBatchLandingPlan
+    ) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
         merged_entries = []
@@ -186,9 +188,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 merge_method=entry.merge_method,
             )
             merged_entries.append(
-                entry.model_copy(
-                    update={"status": "merged", "merge_commit_sha": merge_commit_sha}
-                )
+                entry.model_copy(update={"status": "merged", "merge_commit_sha": merge_commit_sha})
             )
             expected_base_sha = merge_commit_sha
         current_base_sha = _base_branch_sha(
@@ -200,6 +200,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Base branch moved outside the batch landing plan.", status_code=409
             )
+        self._delete_reference_if_present(
+            repository_path=repository_path,
+            reference=landing_plan.candidate_ref,
+        )
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def _already_merged_landing_entry(
@@ -282,9 +286,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         return merge_commit_sha
 
-    def comment_pull_request(
-        self, *, repository: str, pull_request_number: int, body: str
-    ) -> str:
+    def comment_pull_request(self, *, repository: str, pull_request_number: int, body: str) -> str:
         repository_path = _repository_path(repository)
         payload = self.transport.request(
             method="POST",
@@ -303,9 +305,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_sha = _required_value(
             expected_head_sha, "Expected pull request head SHA is required."
         )
-        current_head_sha = self._pull_request_head_sha(
-            pull_request_path=pull_request_path
-        )
+        current_head_sha = self._pull_request_head_sha(pull_request_path=pull_request_path)
         if current_head_sha != _required_value(
             expected_head_sha, "Expected pull request head SHA is required."
         ):
@@ -390,6 +390,17 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 path=f"/repos/{repository_path}/git/refs/{reference_path}",
                 body={"sha": normalized_sha, "force": True},
             )
+
+    def _delete_reference_if_present(self, *, repository_path: str, reference: str) -> None:
+        try:
+            self.transport.request(
+                method="DELETE",
+                path=f"/repos/{repository_path}/git/refs/{_reference_path(reference)}",
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code == 404:
+                return
+            raise
 
     def _pull_request_head_sha(self, *, pull_request_path: str) -> str:
         pull_request = _json_object(
@@ -486,12 +497,8 @@ class GitHubMergeTrainSnapshotReader:
         head = _json_object(source.get("head"), "GitHub pull request head")
         base = _json_object(source.get("base"), "GitHub pull request base")
         head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
-        head_repository = _repository_full_name(
-            head.get("repo"), "GitHub pull request head repo"
-        )
-        base_repository = _repository_full_name(
-            base.get("repo"), "GitHub pull request base repo"
-        )
+        head_repository = _repository_full_name(head.get("repo"), "GitHub pull request head repo")
+        base_repository = _repository_full_name(base.get("repo"), "GitHub pull request base repo")
         user = _json_object(source.get("user"), "GitHub pull request user")
         actor_role = self._actor_role_for_pull_request(
             repository_path=repository_path,
@@ -635,9 +642,7 @@ def _base_rooted_pull_requests(
     relevant_numbers: set[int] = set()
     for pull_request in pull_requests:
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
-        base_repository = _repository_full_name(
-            base.get("repo"), "GitHub pull request base repo"
-        )
+        base_repository = _repository_full_name(base.get("repo"), "GitHub pull request base repo")
         if base_repository != repository:
             continue
         base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
@@ -669,9 +674,7 @@ def _base_rooted_pull_requests(
     return tuple(
         pull_request
         for pull_request in pull_requests
-        if _required_int(
-            pull_request.get("number"), "GitHub pull request entry requires number."
-        )
+        if _required_int(pull_request.get("number"), "GitHub pull request entry requires number.")
         in relevant_numbers
     )
 
