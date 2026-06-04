@@ -215,9 +215,9 @@ class PromotionRequest(BaseModel):
     to_instance: str
     target_name: str
     target_type: DeployTargetCompatibilityType
-    provider_id: str = "dokploy"
-    target_category: DeployTargetCategory | None = None
-    provider_target_type: str = ""
+    provider_id: str
+    target_category: DeployTargetCategory
+    provider_target_type: str
     deploy_mode: str
     provider_deploy_mode: str = ""
     wait: bool = True
@@ -240,7 +240,7 @@ class PromotionRequest(BaseModel):
         if not self.context.strip():
             raise ValueError("promotion request requires context")
         self.target_name = self.target_name.strip()
-        if not self.target_name.strip():
+        if not self.target_name:
             raise ValueError("promotion request requires target_name")
         if not self.target_type:
             raise ValueError("promotion request requires target_type")
@@ -251,10 +251,8 @@ class PromotionRequest(BaseModel):
         self.provider_deploy_mode = self.provider_deploy_mode.strip()
         if not self.provider_id:
             raise ValueError("promotion request requires provider_id")
-        if self.target_category is None:
-            self.target_category = self.target_type
         if not self.provider_target_type:
-            self.provider_target_type = self.target_type
+            raise ValueError("promotion request requires provider_target_type")
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
         ensure_target_reference_matches(

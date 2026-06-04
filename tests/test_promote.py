@@ -5,7 +5,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import patch
 
 import click
@@ -50,6 +50,28 @@ from control_plane.workflows.promote import build_executed_promotion_record
 from control_plane.workflows.promotion_ship_resolution import (
     resolve_ship_request_for_promotion,
 )
+
+
+def _dokploy_ship_request(**overrides: Any) -> ShipRequest:
+    target_type = overrides.get("target_type", "compose")
+    payload = {
+        "provider_id": "dokploy",
+        "target_category": target_type,
+        "provider_target_type": target_type,
+    }
+    payload.update(overrides)
+    return ShipRequest(**payload)
+
+
+def _dokploy_promotion_request(**overrides: Any) -> PromotionRequest:
+    target_type = overrides.get("target_type", "compose")
+    payload = {
+        "provider_id": "dokploy",
+        "target_category": target_type,
+        "provider_target_type": target_type,
+    }
+    payload.update(overrides)
+    return PromotionRequest(**payload)
 
 
 def _write_artifact_manifest(
@@ -340,7 +362,7 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.from_instance, "testing")
 
     def test_build_executed_promotion_record_marks_success_after_waited_ship(self) -> None:
-        request = PromotionRequest(
+        request = _dokploy_promotion_request(
             artifact_id="artifact-sha256-image456",
             backup_record_id="backup-opw-prod-20260410T182231Z",
             source_git_ref="abc123",
@@ -377,7 +399,7 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.post_deploy_update.status, "pass")
 
     def test_ship_request_defaults_provider_target_type_from_legacy_target_type(self) -> None:
-        request = ShipRequest(
+        request = _dokploy_ship_request(
             artifact_id="artifact-sha256-image456",
             context="opw",
             instance="prod",
@@ -455,7 +477,7 @@ class PromoteWorkflowTests(unittest.TestCase):
         self,
     ) -> None:
         with self.assertRaisesRegex(ValueError, "provider_target_type does not match target_type"):
-            ShipRequest(
+            _dokploy_ship_request(
                 artifact_id="artifact-sha256-image456",
                 context="syo",
                 instance="prod",
@@ -469,7 +491,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             )
 
     def test_promotion_request_accepts_provider_target_type(self) -> None:
-        request = PromotionRequest(
+        request = _dokploy_promotion_request(
             artifact_id="artifact-sha256-image456",
             backup_record_id="backup-opw-prod-20260410T182231Z",
             source_git_ref="abc123",
@@ -535,7 +557,7 @@ class PromoteWorkflowTests(unittest.TestCase):
     def test_promotion_ship_resolution_accepts_matching_provider_target_facts(
         self,
     ) -> None:
-        request = PromotionRequest(
+        request = _dokploy_promotion_request(
             artifact_id="artifact-sha256-image456",
             backup_record_id="backup-opw-prod-20260410T182231Z",
             source_git_ref="abc123",
@@ -550,7 +572,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             deploy_mode="fake-cloud-service-api",
             provider_deploy_mode="service-api",
         )
-        ship_request = ShipRequest(
+        ship_request = _dokploy_ship_request(
             artifact_id="artifact-sha256-image456",
             context="syo",
             instance="prod",
@@ -578,7 +600,7 @@ class PromoteWorkflowTests(unittest.TestCase):
     def test_promotion_ship_resolution_rejects_provider_target_fact_drift(
         self,
     ) -> None:
-        request = PromotionRequest(
+        request = _dokploy_promotion_request(
             artifact_id="artifact-sha256-image456",
             backup_record_id="backup-opw-prod-20260410T182231Z",
             source_git_ref="abc123",
@@ -593,7 +615,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             deploy_mode="fake-cloud-service-api",
             provider_deploy_mode="service-api",
         )
-        ship_request = ShipRequest(
+        ship_request = _dokploy_ship_request(
             artifact_id="artifact-sha256-image456",
             context="syo",
             instance="prod",
@@ -775,7 +797,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             )
 
     def test_build_executed_promotion_record_preserves_provider_target_type(self) -> None:
-        request = PromotionRequest(
+        request = _dokploy_promotion_request(
             artifact_id="artifact-sha256-image456",
             backup_record_id="backup-opw-prod-20260410T182231Z",
             source_git_ref="abc123",
@@ -820,7 +842,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             )
 
     def test_build_deployment_record_marks_pending_health_for_async_ship(self) -> None:
-        request = ShipRequest(
+        request = _dokploy_ship_request(
             context="opw",
             instance="prod",
             source_git_ref="abc123",
@@ -853,7 +875,7 @@ class PromoteWorkflowTests(unittest.TestCase):
     def test_build_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(
         self,
     ) -> None:
-        request = ShipRequest(
+        request = _dokploy_ship_request(
             context="opw",
             instance="prod",
             source_git_ref="abc123",
@@ -1368,7 +1390,7 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -1431,7 +1453,7 @@ class PromoteCliTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -1465,7 +1487,7 @@ class PromoteCliTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -1501,7 +1523,7 @@ class PromoteCliTests(unittest.TestCase):
             _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -1526,7 +1548,7 @@ class PromoteCliTests(unittest.TestCase):
             with (
                 patch(
                     "control_plane.cli._resolve_ship_request_for_promotion",
-                    return_value=ShipRequest(
+                    return_value=_dokploy_ship_request(
                         artifact_id="artifact-sha256-image456",
                         context="opw",
                         instance="prod",
@@ -2090,7 +2112,7 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -2766,7 +2788,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_backup_gate_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-missing",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -2807,7 +2829,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-missing",
                     source_git_ref="abc123",
@@ -2847,7 +2869,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_backup_gate_record(state_dir, instance="staging")
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -2887,7 +2909,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_backup_gate_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -2926,7 +2948,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3002,7 +3024,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -3028,7 +3050,7 @@ DOKPLOY_SHIP_MODE = "auto"
             with (
                 patch(
                     "control_plane.cli._resolve_ship_request_for_promotion",
-                    return_value=ShipRequest(
+                    return_value=_dokploy_ship_request(
                         context="opw",
                         instance="prod",
                         source_git_ref="abc123",
@@ -3091,7 +3113,7 @@ DOKPLOY_SHIP_MODE = "auto"
             repo_root = Path(temporary_directory_name)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3142,7 +3164,7 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3193,7 +3215,7 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3290,7 +3312,7 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3373,7 +3395,7 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3437,7 +3459,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3508,7 +3530,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3593,7 +3615,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3673,7 +3695,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3742,7 +3764,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3801,7 +3823,7 @@ target_id = "compose-123"
             state_dir = repo_root / "state"
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-missing",
                     context="opw",
                     instance="prod",
@@ -3838,7 +3860,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3903,7 +3925,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -3972,7 +3994,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -4040,7 +4062,7 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(
+                _dokploy_ship_request(
                     artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
@@ -4102,7 +4124,7 @@ target_id = "compose-123"
                 },
             ):
                 resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
-                    request=ShipRequest(
+                    request=_dokploy_ship_request(
                         artifact_id="artifact-sha256-image456",
                         context="opw",
                         instance="prod",
@@ -4408,7 +4430,7 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",
@@ -4481,7 +4503,7 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(
+                _dokploy_promotion_request(
                     artifact_id="artifact-sha256-image456",
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     source_git_ref="abc123",

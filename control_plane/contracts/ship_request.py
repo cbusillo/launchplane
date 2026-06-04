@@ -18,9 +18,9 @@ class ShipRequest(BaseModel):
     source_git_ref: str
     target_name: str
     target_type: DeployTargetCompatibilityType
-    provider_id: str = "dokploy"
-    target_category: DeployTargetCategory | None = None
-    provider_target_type: str = ""
+    provider_id: str
+    target_category: DeployTargetCategory
+    provider_target_type: str
     deploy_mode: str
     provider_deploy_mode: str = ""
     wait: bool = True
@@ -52,10 +52,8 @@ class ShipRequest(BaseModel):
         self.provider_deploy_mode = self.provider_deploy_mode.strip()
         if not self.provider_id:
             raise ValueError("ship request requires provider_id")
-        if self.target_category is None:
-            self.target_category = self.target_type
         if not self.provider_target_type:
-            self.provider_target_type = self.target_type
+            raise ValueError("ship request requires provider_target_type")
         if not self.provider_deploy_mode:
             self.provider_deploy_mode = self.deploy_mode
         ensure_target_reference_matches(
