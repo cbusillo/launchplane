@@ -151,8 +151,9 @@ live authority across DB, files, and process env:
   inventory routes resolve Dokploy host, token, preview URL shape, app identity,
   and target identity from Launchplane-managed secrets plus DB-backed runtime
   and target records. `LAUNCHPLANE_PREVIEW_BASE_URL` is a context-level runtime
-  value. Product-repo workflows may pass operation intent, preview slug, and
-  GitHub OIDC identity, but not Dokploy credentials or preview domain topology.
+  value. Product-repo app-maintenance workflows must pass operation intent;
+  product-repo workflows may pass preview slug and GitHub OIDC identity, but not
+  Dokploy credentials or preview domain topology.
 - VeriReel stable environment metadata, including testing/prod target names,
   target ids, base URLs, and health URLs, is served by Launchplane from
   DB-backed target/runtime records. Product-repo workflows should ask

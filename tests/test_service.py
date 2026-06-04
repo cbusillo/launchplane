@@ -24088,6 +24088,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 return_value=VeriReelAppMaintenanceResult(
                     maintenance_status="pass",
                     action="migrate",
+                    intent="stable-testing-migration",
                     context="verireel",
                     instance="testing",
                     application_name="ver-testing-app",
@@ -24107,6 +24108,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "context": "verireel",
                             "instance": "testing",
                             "action": "migrate",
+                            "intent": "stable-testing-migration",
                         },
                     },
                 )
@@ -24160,12 +24162,64 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "context": "verireel",
                         "instance": "testing",
                         "action": "migrate",
+                        "intent": "stable-testing-migration",
                     },
                 },
             )
 
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_app_maintenance_driver_rejects_action_only_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_app_maintenance.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/app-maintenance",
+                payload={
+                    "product": "verireel",
+                    "maintenance": {
+                        "context": "verireel",
+                        "instance": "testing",
+                        "action": "migrate",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
+            self.assertEqual(payload["error"]["message"], "Request payload failed validation.")
 
     def test_verireel_preview_inventory_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
