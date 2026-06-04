@@ -110,7 +110,7 @@ from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train import discover_merge_train_stack
 from control_plane.service import (
-    OdooPreviewVerificationRequest,
+    GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
 )
 from control_plane.service_auth import (
@@ -16164,70 +16164,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_odoo_rollback_plan_alias_writes_generic_plan_record(self) -> None:
+    def test_odoo_rollback_plan_alias_is_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _odoo_profile_payload_with_prod_lane()
-                )
-            )
-            deployment_record = DeploymentRecord(
-                record_id="deployment-cm-prod-previous",
-                artifact_identity=ArtifactIdentityReference(
-                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
-                ),
-                context="cm",
-                instance="prod",
-                source_git_ref="abc123",
-                destination_health=HealthcheckEvidence(status="pass"),
-                resolved_target=ResolvedTargetEvidence(
-                    target_type="application",
-                    target_id="app-cm-prod",
-                    target_name="cm-prod-app",
-                ),
-                deploy=DeploymentEvidence(
-                    target_name="cm-prod-app",
-                    target_type="application",
-                    deploy_mode="dokploy-application-api",
-                    deployment_id="deployment-provider-1",
-                    status="pass",
-                    started_at="2026-05-25T12:00:00Z",
-                    finished_at="2026-05-25T12:01:00Z",
-                ),
-            )
-            store.write_deployment_record(deployment_record)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["generic_web_prod_rollback.plan"],
-                        }
-                    ]
-                }
-            )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
             )
 
             status_code, payload = _invoke_app(
@@ -16247,79 +16190,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={"Idempotency-Key": "odoo-rollback-plan-cm-prod"},
             )
 
-            plans = store.list_generic_web_rollback_plan_records(
-                context_name="cm",
-                instance_name="prod",
-                limit=1,
-            )
-            plan = plans[0]
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["records"]["generic_web_rollback_plan_id"], plan.plan_id)
-        self.assertEqual(plan.status, "ready")
-        self.assertEqual(plan.product, "odoo-tenant-cm")
-        self.assertEqual(plan.context, "cm")
-        self.assertEqual(plan.rollback_deployment_record_id, "deployment-cm-prod-previous")
-
-    def test_odoo_rollback_plan_alias_rejects_unauthorized_context(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _odoo_profile_payload_with_prod_lane()
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["other-context"],
-                            "actions": ["generic_web_prod_rollback.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/prod-rollback-plan",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "rollback_plan": {
-                        "schema_version": 1,
-                        "product": "odoo-tenant-cm",
-                        "instance": "prod",
-                        "rollback_deployment_record_id": "deployment-cm-prod-previous",
-                    },
-                },
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_rollback_route_applies_ready_plan(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -18235,82 +18107,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     self.assertEqual(status_code, 404)
                     self.assertEqual(payload["error"]["code"], "not_found")
 
-    def test_odoo_preview_verification_driver_marks_latest_generation_ready(self) -> None:
+    def test_odoo_preview_verification_route_is_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            store.write_preview_record(
-                PreviewRecord(
-                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
-                    context="cm",
-                    anchor_repo="odoo-tenant-cm",
-                    anchor_pr_number=42,
-                    anchor_pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
-                    preview_label="preview",
-                    canonical_url="https://pr-42.cm-preview.example.test",
-                    state="pending",
-                    created_at="2026-05-09T15:00:00Z",
-                    updated_at="2026-05-09T15:05:00Z",
-                    eligible_at="2026-05-09T15:00:00Z",
-                    active_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    latest_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    latest_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
-                )
-            )
-            store.write_preview_generation_record(
-                PreviewGenerationRecord(
-                    generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
-                    sequence=1,
-                    state="verifying",
-                    requested_reason="external_preview_refresh",
-                    requested_at="2026-05-09T15:00:00Z",
-                    started_at="2026-05-09T15:00:00Z",
-                    resolved_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
-                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm:sha",
-                    anchor_summary=PreviewPullRequestSummary(
-                        repo="odoo-tenant-cm",
-                        pr_number=42,
-                        head_sha="abc123",
-                        pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
-                    ),
-                    deploy_status="pass",
-                    verify_status="pending",
-                    overall_health_status="pending",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["preview_generation.write"],
-                        }
-                    ]
-                }
-            )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
             )
 
             status_code, payload = _invoke_app(
@@ -18337,33 +18140,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
             )
 
-            self.assertEqual(status_code, 202)
-            self.assertEqual(payload["records"]["transition"], "ready")
-            self.assertEqual(payload["records"]["preview_state"], "active")
-            self.assertEqual(
-                payload["records"]["preview_generation_id"],
-                "preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-            )
-            self.assertEqual(payload["records"]["verification_status"], "pass")
-            self.assertEqual(payload["records"]["verified_at"], "2026-05-09T15:08:00Z")
-            self.assertEqual(
-                payload["records"]["odoo_preview_verification"]["checked_urls"],
-                [
-                    "https://pr-42.cm-preview.example.test/web/health",
-                    "https://pr-42.cm-preview.example.test/cell-mechanic",
-                ],
-            )
-            self.assertEqual(payload["records"]["odoo_preview_verification"]["timeout_seconds"], 30)
-            preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
-            generation = store.read_preview_generation_record(
-                "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
-            )
-            self.assertEqual(preview.state, "active")
-            self.assertEqual(preview.serving_generation_id, generation.generation_id)
-            self.assertEqual(generation.state, "ready")
-            self.assertEqual(generation.verify_status, "pass")
-            self.assertEqual(generation.overall_health_status, "pass")
-            self.assertEqual(generation.ready_at, "2026-05-09T15:08:00Z")
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_preview_verification_route_accepts_odoo_base_driver_profile(
         self,
@@ -18484,316 +18262,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(generation.verify_status, "pass")
             self.assertEqual(generation.overall_health_status, "pass")
 
-    def test_odoo_preview_verification_driver_marks_latest_generation_failed(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _odoo_profile_payload_with_prod_lane()
-                )
-            )
-            store.write_preview_record(
-                PreviewRecord(
-                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
-                    context="cm",
-                    anchor_repo="odoo-tenant-cm",
-                    anchor_pr_number=42,
-                    anchor_pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
-                    preview_label="preview",
-                    canonical_url="https://pr-42.cm-preview.example.test",
-                    state="active",
-                    created_at="2026-05-09T15:00:00Z",
-                    updated_at="2026-05-09T15:05:00Z",
-                    eligible_at="2026-05-09T15:00:00Z",
-                    active_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    serving_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    latest_generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    latest_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
-                )
-            )
-            store.write_preview_generation_record(
-                PreviewGenerationRecord(
-                    generation_id="preview-cm-odoo-tenant-cm-pr-42-generation-0001",
-                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
-                    sequence=1,
-                    state="verifying",
-                    requested_reason="external_preview_refresh",
-                    requested_at="2026-05-09T15:00:00Z",
-                    started_at="2026-05-09T15:00:00Z",
-                    resolved_manifest_fingerprint="odoo-preview-manifest-pr-42-abc123",
-                    artifact_id="ghcr.io/cbusillo/odoo-tenant-cm:sha",
-                    anchor_summary=PreviewPullRequestSummary(
-                        repo="odoo-tenant-cm",
-                        pr_number=42,
-                        head_sha="abc123",
-                        pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
-                    ),
-                    deploy_status="pass",
-                    verify_status="pending",
-                    overall_health_status="pending",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["preview_generation.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "anchor_repo": "odoo-tenant-cm",
-                        "anchor_pr_number": 42,
-                        "verification_status": "fail",
-                        "verified_at": "2026-05-09T15:08:00Z",
-                        "checked_urls": ["https://pr-42.cm-preview.example.test/cell-mechanic"],
-                        "timeout_seconds": 20,
-                        "failure_summary": "Odoo preview page did not include Cell Mechanic.",
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
-            )
-
-            self.assertEqual(status_code, 202)
-            self.assertEqual(payload["records"]["transition"], "failed")
-            self.assertEqual(payload["records"]["preview_state"], "failed")
-            self.assertEqual(payload["records"]["verification_status"], "fail")
-            self.assertEqual(
-                payload["records"]["odoo_preview_verification"]["failure_summary"],
-                "Odoo preview page did not include Cell Mechanic.",
-            )
-            preview = store.read_preview_record("preview-cm-odoo-tenant-cm-pr-42")
-            generation = store.read_preview_generation_record(
-                "preview-cm-odoo-tenant-cm-pr-42-generation-0001"
-            )
-            self.assertEqual(preview.state, "failed")
-            self.assertEqual(generation.state, "failed")
-            self.assertEqual(generation.verify_status, "fail")
-            self.assertEqual(generation.overall_health_status, "fail")
-            self.assertEqual(generation.failure_stage, "verify")
-            self.assertIn("Cell Mechanic", generation.failure_summary)
-
-    def test_odoo_preview_verification_driver_rejects_checked_urls_without_timeout(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["preview_generation.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "anchor_repo": "odoo-tenant-cm",
-                        "anchor_pr_number": 42,
-                        "verification_status": "pass",
-                        "verified_at": "2026-05-09T15:08:00Z",
-                        "checked_urls": ["https://pr-42.cm-preview.example.test/web/health"],
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:missing-timeout"},
-            )
-
-            self.assertEqual(status_code, 400)
-            self.assertEqual(payload["error"]["code"], "invalid_request")
-
-    def test_odoo_preview_verification_driver_rejects_checked_url_mapping(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["preview_generation.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "anchor_repo": "odoo-tenant-cm",
-                        "anchor_pr_number": 42,
-                        "verification_status": "pass",
-                        "verified_at": "2026-05-09T15:08:00Z",
-                        "checked_urls": {
-                            "health": "https://pr-42.cm-preview.example.test/web/health"
-                        },
-                        "timeout_seconds": 30,
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:mapping"},
-            )
-
-            self.assertEqual(status_code, 400)
-            self.assertEqual(payload["error"]["code"], "invalid_request")
-
-    def test_odoo_preview_verification_driver_rejects_scalar_checked_url(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/odoo-tenant-cm",
-                            "workflow_refs": [
-                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["preview_generation.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=policy,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "anchor_repo": "odoo-tenant-cm",
-                        "anchor_pr_number": 42,
-                        "verification_status": "pass",
-                        "verified_at": "2026-05-09T15:08:00Z",
-                        "checked_urls": "https://pr-42.cm-preview.example.test/web/health",
-                        "timeout_seconds": 30,
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:scalar"},
-            )
-
-            self.assertEqual(status_code, 400)
-            self.assertEqual(payload["error"]["code"], "invalid_request")
-
-    def test_odoo_preview_verification_request_accepts_explicit_url_collections(
+    def test_generic_web_preview_verification_request_accepts_explicit_url_collections(
         self,
     ) -> None:
         base_payload = {
@@ -18806,13 +18275,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "timeout_seconds": 30,
         }
 
-        list_request = OdooPreviewVerificationRequest.model_validate(
+        list_request = GenericWebPreviewVerificationRequest.model_validate(
             {
                 **base_payload,
                 "checked_urls": [" https://pr-42.cm-preview.example.test/web/health "],
             }
         )
-        tuple_request = OdooPreviewVerificationRequest.model_validate(
+        tuple_request = GenericWebPreviewVerificationRequest.model_validate(
             {
                 **base_payload,
                 "checked_urls": ("https://pr-42.cm-preview.example.test/cell-mechanic",),
@@ -19537,63 +19006,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={
                     "Idempotency-Key": "odoo-preview-apply:odoo-tenant-cm:pr-42:refresh:abc123"
                 },
-            )
-
-            self.assertEqual(status_code, 403)
-            self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_odoo_preview_verification_driver_rejects_unauthorized_workflow(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/odoo-tenant-cm",
-                        workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                        ),
-                    )
-                ),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                    {
-                        "github_actions": [
-                            {
-                                "repository": "cbusillo/odoo-tenant-cm",
-                                "workflow_refs": [
-                                    "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
-                                ],
-                                "event_names": ["pull_request"],
-                                "products": ["odoo-tenant-cm"],
-                                "contexts": ["cm"],
-                                "actions": ["preview_refresh.execute"],
-                            }
-                        ]
-                    }
-                ),
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/preview-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "anchor_repo": "odoo-tenant-cm",
-                        "anchor_pr_number": 42,
-                        "verification_status": "pass",
-                        "verified_at": "2026-05-09T15:08:00Z",
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-preview-verification:cm:42:run-1"},
             )
 
             self.assertEqual(status_code, 403)
@@ -23335,62 +22747,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(inventory.deployment_record_id, deployment.record_id)
             self.assertEqual(inventory.promotion_record_id, "")
 
-    def test_odoo_stable_verification_driver_updates_testing_deployment_record(self) -> None:
+    def test_odoo_stable_verification_route_is_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
-            )
-            store.write_deployment_record(
-                DeploymentRecord(
-                    record_id="deployment-20260420T153000Z-cm-testing",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    context="cm",
-                    instance="testing",
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    deploy=DeploymentEvidence(
-                        target_name="cm-testing",
-                        target_type="compose",
-                        deploy_mode="dokploy-compose-api",
-                        deployment_id="delegated-compose-ship",
-                        status="pass",
-                    ),
-                    destination_health=HealthcheckEvidence(status="pending"),
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/tenant-cm",
-                            "workflow_refs": [
-                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["deployment.write"],
-                        }
-                    ]
-                }
-            )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="every/tenant-cm",
-                        workflow_ref=(
-                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
             )
 
             status_code, payload = _invoke_app(
@@ -23414,48 +22777,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={"Idempotency-Key": "odoo-stable-verification:cm:testing:1"},
             )
 
-            self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
-            self.assertEqual(payload["status"], "accepted")
-            self.assertEqual(
-                payload["records"],
-                {
-                    "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
-                    "inventory_record_id": "cm-testing",
-                },
-            )
-            deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")
-            inventory = store.read_environment_inventory(context_name="cm", instance_name="testing")
-            self.assertEqual(deployment.destination_health.status, "pass")
-            self.assertEqual(
-                deployment.destination_health.urls,
-                ("https://cm-testing.example.com/web/health",),
-            )
-            self.assertEqual(inventory.deployment_record_id, deployment.record_id)
-
-            replay_status, replay_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/stable-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "instance": "testing",
-                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
-                        "verification_status": "success",
-                        "verified_at": "2026-04-20T15:35:00Z",
-                        "checked_urls": ["https://cm-testing.example.com/web/health"],
-                        "timeout_seconds": 45,
-                    },
-                },
-                headers={"Idempotency-Key": "odoo-stable-verification:cm:testing:1"},
-            )
-
-            self.assertEqual(replay_status, 202, msg=json.dumps(replay_payload, indent=2))
-            self.assertTrue(replay_payload["replayed"])
-            self.assertEqual(replay_payload["records"], payload["records"])
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_stable_verification_route_accepts_odoo_base_driver_profile(
         self,
@@ -23555,211 +22878,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ("https://cm-testing.example.com/web/health",),
             )
             self.assertEqual(inventory.deployment_record_id, deployment.record_id)
-
-    def test_odoo_stable_verification_driver_updates_prod_promotion_record(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            profile_payload = _odoo_preview_profile_payload("odoo-tenant-cm")
-            lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
-            lanes.append(
-                {
-                    "instance": "prod",
-                    "context": "cm",
-                    "base_url": "https://cm.example.com",
-                    "health_url": "https://cm.example.com/web/health",
-                }
-            )
-            profile_payload["lanes"] = tuple(lanes)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(profile_payload)
-            )
-            store.write_deployment_record(
-                DeploymentRecord(
-                    record_id="deployment-20260420T160500Z-cm-prod",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    context="cm",
-                    instance="prod",
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    deploy=DeploymentEvidence(
-                        target_name="cm-prod",
-                        target_type="compose",
-                        deploy_mode="dokploy-compose-api",
-                        deployment_id="delegated-compose-ship",
-                        status="pass",
-                    ),
-                    destination_health=HealthcheckEvidence(status="pending"),
-                )
-            )
-            store.write_promotion_record(
-                PromotionRecord(
-                    record_id="promotion-20260420T160500Z-cm-testing-to-prod",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    deployment_record_id="deployment-20260420T160500Z-cm-prod",
-                    backup_record_id="backup-cm-prod-20260420T155000Z",
-                    context="cm",
-                    from_instance="testing",
-                    to_instance="prod",
-                    deploy=DeploymentEvidence(
-                        target_name="cm-prod",
-                        target_type="compose",
-                        deploy_mode="dokploy-compose-api",
-                        deployment_id="delegated-compose-ship",
-                        status="pass",
-                    ),
-                    destination_health=HealthcheckEvidence(status="pending"),
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/tenant-cm",
-                            "workflow_refs": [
-                                "every/tenant-cm/.github/workflows/prod-smoke.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["deployment.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="every/tenant-cm",
-                        workflow_ref=(
-                            "every/tenant-cm/.github/workflows/prod-smoke.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/stable-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "instance": "prod",
-                        "deployment_record_id": "deployment-20260420T160500Z-cm-prod",
-                        "promotion_record_id": "promotion-20260420T160500Z-cm-testing-to-prod",
-                        "verification_status": "failure",
-                        "verified_at": "2026-04-20T16:12:00Z",
-                        "checked_urls": ["https://cm.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "failure_summary": "Prod smoke failed.",
-                    },
-                },
-            )
-
-            self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
-            self.assertEqual(
-                payload["records"]["deployment_record_id"],
-                "deployment-20260420T160500Z-cm-prod",
-            )
-            self.assertEqual(
-                payload["records"]["promotion_record_id"],
-                "promotion-20260420T160500Z-cm-testing-to-prod",
-            )
-            deployment = store.read_deployment_record("deployment-20260420T160500Z-cm-prod")
-            promotion = store.read_promotion_record("promotion-20260420T160500Z-cm-testing-to-prod")
-            inventory = store.read_environment_inventory(context_name="cm", instance_name="prod")
-            self.assertEqual(deployment.destination_health.status, "fail")
-            self.assertEqual(promotion.destination_health.status, "fail")
-            self.assertEqual(inventory.promotion_record_id, promotion.record_id)
-            self.assertEqual(inventory.promoted_from_instance, "testing")
-
-    def test_odoo_stable_verification_driver_rejects_mismatched_deployment(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(
-                    _odoo_profile_payload_with_prod_lane()
-                )
-            )
-            store.write_deployment_record(
-                DeploymentRecord(
-                    record_id="deployment-20260420T153000Z-cm-testing",
-                    context="cm",
-                    instance="testing",
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    deploy=DeploymentEvidence(
-                        target_name="cm-testing",
-                        target_type="compose",
-                        deploy_mode="dokploy-compose-api",
-                        status="pass",
-                    ),
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/tenant-cm",
-                            "workflow_refs": [
-                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["odoo-tenant-cm"],
-                            "contexts": ["cm"],
-                            "actions": ["deployment.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="every/tenant-cm",
-                        workflow_ref=(
-                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/odoo/stable-verification",
-                payload={
-                    "schema_version": 1,
-                    "product": "odoo-tenant-cm",
-                    "verification": {
-                        "schema_version": 1,
-                        "context": "cm",
-                        "instance": "prod",
-                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
-                        "verification_status": "success",
-                        "verified_at": "2026-04-20T16:12:00Z",
-                    },
-                },
-            )
-
-            self.assertEqual(status_code, 400)
-            self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_deployment_endpoint_replays_idempotent_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

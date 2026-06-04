@@ -140,9 +140,8 @@ timeout, and optional failure summary. Launchplane resolves generic-web base
 driver compatibility from the product profile, updates the latest preview
 generation, and returns a typed `generic_web_preview_verification` result while
 preserving durable status/failure evidence in the same preview records used by
-refresh. Product-specific preview verification routes, such as
-`POST /v1/drivers/odoo/preview-verification`, are compatibility aliases unless a
-driver document names additional product-specific evidence.
+refresh. Odoo preview verification uses this generic-web route; the former
+Odoo-shaped preview verification alias is retired.
 
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,

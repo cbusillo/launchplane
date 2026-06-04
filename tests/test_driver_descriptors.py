@@ -169,16 +169,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertNotIn("preview_inventory", route_aliases)
         self.assertNotIn("preview_readiness", route_aliases)
         self.assertNotIn("preview_verification", actions)
-        self.assertEqual(
-            route_aliases["preview_verification"].route_path,
-            "/v1/drivers/odoo/preview-verification",
-        )
-        self.assertFalse(route_aliases["preview_verification"].operator_visible)
-        self.assertEqual(
-            route_aliases["prod_rollback_plan"].route_path,
-            "/v1/drivers/odoo/prod-rollback-plan",
-        )
-        self.assertFalse(route_aliases["prod_rollback_plan"].operator_visible)
+        self.assertNotIn("preview_verification", route_aliases)
+        self.assertNotIn("stable_verification", route_aliases)
+        self.assertNotIn("prod_rollback_plan", route_aliases)
         self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
         self.assertEqual(
             actions["stable_bootstrap"].route_path,
@@ -335,16 +328,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertFalse(
             route_actions["/v1/drivers/generic-web/stable-verification"].operator_visible
         )
-        self.assertEqual(
-            route_actions["/v1/drivers/odoo/preview-verification"].authz_action,
-            "preview_generation.write",
-        )
-        self.assertFalse(route_actions["/v1/drivers/odoo/preview-verification"].operator_visible)
-        self.assertEqual(
-            route_actions["/v1/drivers/odoo/stable-verification"].authz_action,
-            "deployment.write",
-        )
-        self.assertFalse(route_actions["/v1/drivers/odoo/stable-verification"].operator_visible)
+        self.assertNotIn("/v1/drivers/odoo/preview-verification", route_actions)
+        self.assertNotIn("/v1/drivers/odoo/stable-verification", route_actions)
 
     def test_service_accepts_descriptor_post_driver_routes(self) -> None:
         descriptor_post_route_metadata = {
@@ -534,25 +519,17 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/odoo/preview-readiness",
             control_plane_service._driver_route_metadata_from_descriptors(),
         )
-        self.assertEqual(
-            control_plane_service._driver_route_metadata_from_descriptors()[
-                "/v1/drivers/odoo/preview-verification"
-            ].action_id,
-            "preview_verification",
+        self.assertNotIn(
+            "/v1/drivers/odoo/preview-verification",
+            control_plane_service._driver_route_metadata_from_descriptors(),
         )
-        self.assertEqual(
-            control_plane_service._driver_route_metadata_from_descriptors()[
-                "/v1/drivers/odoo/prod-rollback-plan"
-            ].action_id,
-            "prod_rollback_plan",
+        self.assertNotIn(
+            "/v1/drivers/odoo/prod-rollback-plan",
+            control_plane_service._driver_route_metadata_from_descriptors(),
         )
-        self.assertIn(
+        self.assertNotIn(
             "/v1/drivers/odoo/prod-rollback-plan",
             control_plane_service._build_write_routes(),
-        )
-        self.assertIs(
-            control_plane_service._ODOO_PREVIEW_VERIFICATION_ROUTE.envelope_model,
-            control_plane_service.OdooPreviewVerificationEnvelope,
         )
         self.assert_route_metadata_matches_descriptor(
             driver_id="odoo",

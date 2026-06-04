@@ -699,23 +699,6 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("deployment", "inventory", "release_tuple"),
         ),
     ),
-    route_aliases=(
-        _route_alias(
-            "preview_verification",
-            "/v1/drivers/odoo/preview-verification",
-            "preview_generation.write",
-        ),
-        _route_alias(
-            "stable_verification",
-            "/v1/drivers/odoo/stable-verification",
-            "deployment.write",
-        ),
-        _route_alias(
-            "prod_rollback_plan",
-            "/v1/drivers/odoo/prod-rollback-plan",
-            "generic_web_prod_rollback.plan",
-        ),
-    ),
     setting_groups=(
         DriverSettingGroupDescriptor(
             group_id="runtime_environment",

@@ -1001,13 +1001,6 @@ _GENERIC_WEB_ROLLBACK_PLAN_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-_ODOO_ROLLBACK_PLAN_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/prod-rollback-plan",
-    envelope_model=GenericWebRollbackPlanEnvelope,
-    denial_message="Workflow cannot plan the Odoo prod rollback for the requested product/context.",
-)
-
-
 class GenericWebRollbackEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     rollback: GenericWebRollbackPlanRequest
@@ -1403,7 +1396,6 @@ _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
-        _ODOO_ROLLBACK_PLAN_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
     }
@@ -1954,81 +1946,8 @@ _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class OdooPreviewVerificationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    anchor_repo: str
-    anchor_pr_number: int = Field(ge=1)
-    verification_status: ReleaseStatus
-    verified_at: str
-    checked_urls: tuple[str, ...] = ()
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    failure_summary: str = ""
-
-    @field_validator("verification_status", mode="before")
-    @classmethod
-    def _normalize_status(cls, value: object) -> ReleaseStatus:
-        return _normalize_release_status(value, label="Odoo preview verification status")
-
-    @field_validator("checked_urls", mode="before")
-    @classmethod
-    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
-        return _normalize_preview_verification_checked_urls(
-            value, label="Odoo preview verification"
-        )
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooPreviewVerificationRequest":
-        if not self.context.strip():
-            raise ValueError("Odoo preview verification requires context.")
-        if not self.anchor_repo.strip():
-            raise ValueError("Odoo preview verification requires anchor_repo.")
-        if self.verification_status not in {"pass", "fail"}:
-            raise ValueError("Odoo preview verification status must be pass or fail.")
-        if not self.verified_at.strip():
-            raise ValueError("Odoo preview verification requires verified_at.")
-        if self.checked_urls and self.timeout_seconds is None:
-            raise ValueError("Odoo preview verification checked_urls require timeout_seconds.")
-        return self
-
-
-class OdooPreviewVerificationResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    preview_id: str
-    preview_generation_id: str
-    preview_state: str
-    generation_state: str
-    verification_status: ReleaseStatus
-    verified_at: str
-    checked_urls: tuple[str, ...] = ()
-    timeout_seconds: int | None = None
-    failure_summary: str = ""
-
-
-class OdooPreviewVerificationEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    verification: OdooPreviewVerificationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooPreviewVerificationEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo preview verification")
-        return self
-
-
-_ODOO_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/preview-verification",
-    envelope_model=OdooPreviewVerificationEnvelope,
-    denial_message="Workflow cannot write Odoo preview verification for the requested product/context.",
-)
-
 _PREVIEW_VERIFICATION_ROUTE_PATHS = frozenset(
-    {
-        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-        _ODOO_PREVIEW_VERIFICATION_ROUTE.route_path,
-    }
+    {_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path}
 )
 _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
@@ -2039,53 +1958,6 @@ _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS
     | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
     | {_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path}
-)
-
-
-class OdooStableVerificationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    instance: Literal["testing", "prod"]
-    deployment_record_id: str
-    promotion_record_id: str = ""
-    verification_status: ReleaseStatus
-    verified_at: str
-    checked_urls: tuple[str, ...] = ()
-    timeout_seconds: int | None = Field(default=None, ge=1)
-    failure_summary: str = ""
-
-    @field_validator("verification_status", mode="before")
-    @classmethod
-    def _normalize_status(cls, value: object) -> ReleaseStatus:
-        return _normalize_release_status(value, label="Odoo stable verification status")
-
-    @field_validator("checked_urls", mode="before")
-    @classmethod
-    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
-        return _normalize_preview_verification_checked_urls(value, label="Odoo stable verification")
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "OdooStableVerificationRequest":
-        _validate_stable_verification_request(self, label="Odoo stable verification")
-        return self
-
-
-class OdooStableVerificationEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    verification: OdooStableVerificationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "OdooStableVerificationEnvelope":
-        _validate_driver_envelope_product(self.product, label="Odoo stable verification")
-        return self
-
-
-_ODOO_STABLE_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/odoo/stable-verification",
-    envelope_model=OdooStableVerificationEnvelope,
-    denial_message="Workflow cannot write Odoo stable verification for the requested product/context.",
 )
 
 
@@ -2130,7 +2002,7 @@ def _normalize_preview_verification_checked_urls(value: object, *, label: str) -
 
 
 def _validate_stable_verification_request(
-    request: GenericWebStableVerificationRequest | OdooStableVerificationRequest,
+    request: GenericWebStableVerificationRequest,
     *,
     label: str,
 ) -> None:
@@ -5078,7 +4950,6 @@ def _accepted_payload(
         "verification_status",
         "verified_at",
         "generic_web_preview_verification",
-        "odoo_preview_verification",
         "request_id",
         "feedback_id",
         "state",
@@ -7803,55 +7674,8 @@ def _apply_generic_web_preview_verification_records(
     return result
 
 
-def _apply_odoo_preview_verification_records(
-    *,
-    control_plane_root_path: Path,
-    record_store: object,
-    request: OdooPreviewVerificationRequest,
-) -> dict[str, object]:
-    generic_request = GenericWebPreviewVerificationRequest(
-        context=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
-        verification_status=request.verification_status,
-        verified_at=request.verified_at,
-        checked_urls=request.checked_urls,
-        timeout_seconds=request.timeout_seconds,
-        failure_summary=request.failure_summary,
-    )
-    result = _apply_generic_web_preview_verification_records(
-        control_plane_root_path=control_plane_root_path,
-        record_store=record_store,
-        request=generic_request,
-        result_key="odoo_preview_verification",
-        default_failure_summary="Odoo preview verification failed.",
-    )
-    preview_generation_id = str(result["preview_generation_id"])
-    preview_state = str(result["preview_state"])
-    generation_state = "ready" if request.verification_status == "pass" else "failed"
-    verification_result = OdooPreviewVerificationResult(
-        preview_id=str(result["preview_id"]),
-        preview_generation_id=preview_generation_id,
-        preview_state=preview_state,
-        generation_state=generation_state,
-        verification_status=request.verification_status,
-        verified_at=request.verified_at.strip(),
-        checked_urls=request.checked_urls,
-        timeout_seconds=request.timeout_seconds if request.checked_urls else None,
-        failure_summary=(
-            ""
-            if request.verification_status == "pass"
-            else str(
-                cast(dict[str, object], result["odoo_preview_verification"])["failure_summary"]
-            )
-        ),
-    )
-    result["odoo_preview_verification"] = verification_result.model_dump(mode="json")
-    return result
-
-
 def _stable_verification_health_evidence(
-    *, request: GenericWebStableVerificationRequest | OdooStableVerificationRequest
+    *, request: GenericWebStableVerificationRequest
 ) -> HealthcheckEvidence:
     return HealthcheckEvidence(
         verified=bool(request.checked_urls),
@@ -7864,7 +7688,7 @@ def _stable_verification_health_evidence(
 def _apply_generic_web_stable_verification_records(
     *,
     record_store: object,
-    request: GenericWebStableVerificationRequest | OdooStableVerificationRequest,
+    request: GenericWebStableVerificationRequest,
     label: str = "Generic web stable verification",
 ) -> dict[str, object]:
     evidence_store = cast(EvidenceIngestionStore, record_store)
@@ -7924,19 +7748,6 @@ def _apply_generic_web_stable_verification_records(
         result["promotion_health_status"] = request.verification_status
 
     return result
-
-
-def _apply_odoo_stable_verification_records(
-    *,
-    record_store: object,
-    request: OdooStableVerificationRequest,
-) -> dict[str, object]:
-    return _apply_generic_web_stable_verification_records(
-        record_store=record_store,
-        request=request,
-        label="Odoo stable verification",
-    )
-
 
 def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
     if status == "pass":
@@ -12960,16 +12771,10 @@ def create_launchplane_service_app(
                     request=generic_web_workflow_request.workflow,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path in {
-                _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
-                _ODOO_ROLLBACK_PLAN_ROUTE.route_path,
-            }:
-                route_metadata = (
-                    _ODOO_ROLLBACK_PLAN_ROUTE
-                    if path == _ODOO_ROLLBACK_PLAN_ROUTE.route_path
-                    else _GENERIC_WEB_ROLLBACK_PLAN_ROUTE
+            elif path == _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path:
+                generic_web_rollback_request = (
+                    _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.envelope_model.model_validate(payload)
                 )
-                generic_web_rollback_request = route_metadata.envelope_model.model_validate(payload)
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -12987,7 +12792,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=resolved_driver_context.profile.product,
                     context=resolved_driver_context.lane.context,
-                    denial_message=route_metadata.denial_message,
+                    denial_message=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -14492,43 +14297,6 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=verireel_preview_verification_request.verification,
                 )
-            elif path == _ODOO_PREVIEW_VERIFICATION_ROUTE.route_path:
-                odoo_preview_verification_request = (
-                    _ODOO_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=odoo_preview_verification_request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=odoo_preview_verification_request.product,
-                    context=odoo_preview_verification_request.verification.context,
-                    denial_message=_ODOO_PREVIEW_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = _apply_odoo_preview_verification_records(
-                    control_plane_root_path=resolved_root,
-                    record_store=record_store,
-                    request=odoo_preview_verification_request.verification,
-                )
             elif path == _ODOO_PREVIEW_APPLY_ROUTE.route_path:
                 odoo_preview_apply_request = (
                     _ODOO_PREVIEW_APPLY_ROUTE.envelope_model.model_validate(payload)
@@ -14629,44 +14397,6 @@ def create_launchplane_service_app(
                     database_url=database_url,
                 )
                 result = driver_result
-            elif path == _ODOO_STABLE_VERIFICATION_ROUTE.route_path:
-                odoo_stable_verification_request = (
-                    _ODOO_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=odoo_stable_verification_request.product,
-                    context=odoo_stable_verification_request.verification.context,
-                    instance=odoo_stable_verification_request.verification.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=odoo_stable_verification_request.product,
-                    context=odoo_stable_verification_request.verification.context,
-                    denial_message=_ODOO_STABLE_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = _apply_odoo_stable_verification_records(
-                    record_store=record_store,
-                    request=odoo_stable_verification_request.verification,
-                )
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
                     payload

@@ -158,10 +158,9 @@ The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
 Launchplane reads the product profile, destination lane, selected deployment
 record, and optional backup gate evidence, then writes a
-`GenericWebRollbackPlanRecord`. It does not mutate the provider. Odoo also
-accepts `POST /v1/drivers/odoo/prod-rollback-plan` as a non-operator
-compatibility alias for existing Odoo-shaped automation; the canonical action
-and persisted record remain generic-web-owned.
+`GenericWebRollbackPlanRecord`. It does not mutate the provider. Odoo rollback
+planning uses this generic-web route; the former Odoo-shaped rollback-plan alias
+is retired.
 
 The `prod_rollback` action routes to
 `POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
@@ -183,9 +182,8 @@ The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
 deployment record, optional promotion record, checked URLs, and pass/fail status;
 Launchplane updates deployment, promotion, and inventory evidence without
-mutating provider state. Product-shaped stable verification paths, such as
-`POST /v1/drivers/odoo/stable-verification`, are compatibility aliases unless a
-driver documents additional product-specific evidence.
+mutating provider state. Odoo stable smoke follow-ups use this generic-web route;
+the former Odoo-shaped stable verification alias is retired.
 
 The `preview_desired_state` action routes to
 `POST /v1/drivers/generic-web/preview-desired-state`. Product workflows provide
@@ -226,10 +224,9 @@ Odoo declares `base_driver_id="generic-web"` and inherits generic-web preview
 actions as its advertised lifecycle surface. The Odoo-specific preview mutation
 surface is the isolated compose planner/apply pair, not Odoo-shaped
 `preview-refresh` or `preview-destroy` compatibility aliases. Odoo preview
-desired-state, inventory, and readiness aliases are retired; callers should use
-the inherited generic-web routes for common read/planning actions. Odoo preview
-verification remains a non-operator route alias while it preserves typed Odoo
-evidence without mutating provider state.
+desired-state, inventory, readiness, and verification aliases are retired;
+callers should use the inherited generic-web routes for common
+read/planning/evidence actions.
 New tenant workflows should call `POST /v1/drivers/odoo/preview-apply-inputs`
 and then `POST /v1/drivers/odoo/preview-apply` for refresh and destroy. The
 lower-level `POST /v1/drivers/odoo/preview-apply` route applies a ready isolated-preview
@@ -264,9 +261,10 @@ The
 standard refresh/destroy routes use the generic-web preview request schema, live
 URL derivation, and record writer so Odoo PR previews land in the same
 Launchplane preview and preview-generation records as generic-web previews.
-The compatibility preview-verification route accepts optional checked URL
-evidence and returns a typed `odoo_preview_verification` result while delegating
-the durable record mutation to the same generic-web preview verification writer.
+Preview smoke follow-ups use
+`POST /v1/drivers/generic-web/preview-verification`, which accepts optional
+checked URL evidence and returns a typed `generic_web_preview_verification`
+result while writing durable status to the shared preview records.
 Odoo's staged compose preview MVP is now retired. Generic-web preview readiness
 blocks compose template lanes, including historical Odoo bootstrap-mode compose
 profiles; Odoo PR previews must enter through `plan_odoo_preview_runtime` and
@@ -324,7 +322,7 @@ failed through the same preview-generation records without mutating provider
 state.
 Stable smoke follow-ups should use
 `POST /v1/drivers/generic-web/stable-verification`; the Odoo-shaped stable
-verification route remains a compatibility alias for existing workflows.
+verification route is retired.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
 instance-scoped action. It is enabled per product-profile lane through
