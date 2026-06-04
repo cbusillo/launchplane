@@ -5163,6 +5163,22 @@ def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
     return frozenset()
 
 
+def _driver_result_payload_for_idempotency_replay(
+    *, route_path: str, driver_result: dict[str, object]
+) -> dict[str, object]:
+    replay_payload = dict(driver_result)
+    if route_path in {
+        _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+        _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
+        _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
+        _VERIREEL_PROD_PROMOTION_ROUTE.route_path,
+    }:
+        replay_payload.pop("target_type", None)
+    return replay_payload
+
+
 def _operation_payload(
     operation: OdooStableBootstrapOperationRecord,
 ) -> dict[str, object]:
@@ -5589,7 +5605,14 @@ def _replay_idempotent_response(
     result_payload = _accepted_payload(
         trace_id=trace_id,
         result=dict(stored_payload.get("records") or {}),
-        driver_result=stored_driver_result if isinstance(stored_driver_result, dict) else None,
+        driver_result=(
+            _driver_result_payload_for_idempotency_replay(
+                route_path=stored_record.route_path,
+                driver_result=stored_driver_result,
+            )
+            if isinstance(stored_driver_result, dict)
+            else None
+        ),
         extra_record_keys=_accepted_payload_extra_record_keys(route_path=stored_record.route_path),
         replayed=True,
         original_trace_id=stored_record.response_trace_id,

@@ -78,7 +78,6 @@ class VeriReelStableDeployResult(BaseModel):
     target_category: DeployTargetCategory = "unknown"
     provider_id: str = "dokploy"
     provider_target_type: str = ""
-    target_type: str = ""
     rollout_status: ReleaseStatus = "skipped"
     rollout_base_url: str = ""
     rollout_health_urls: tuple[str, ...] = ()
@@ -90,16 +89,11 @@ class VeriReelStableDeployResult(BaseModel):
     def _validate_result(self) -> "VeriReelStableDeployResult":
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_type = self.target_type.strip().lower()
-        if not self.provider_target_type and self.target_type:
-            self.provider_target_type = self.target_type
         if self.target_category == "unknown":
-            if self.provider_target_type == "application" or self.target_type == "application":
+            if self.provider_target_type == "application":
                 self.target_category = "application"
-            elif self.provider_target_type == "compose" or self.target_type == "compose":
+            elif self.provider_target_type == "compose":
                 self.target_category = "compose"
-        if not self.target_type:
-            self.target_type = self.provider_target_type or self.target_category
         return self
 
 
@@ -216,7 +210,6 @@ def _build_result(
         target_category=target_fields.target_category,
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
-        target_type=target_fields.target_type,
         rollout_status=rollout_status,
         rollout_base_url=rollout_base_url,
         rollout_health_urls=rollout_health_urls,

@@ -899,9 +899,9 @@ observation.
 
 Generic web deploy and prod-promotion responses expose provider-neutral target
 metadata with `target_category`, `provider_id`, and `provider_target_type`.
-The legacy `target_type` response field remains as a compatibility alias for
-older workflow callers, but provider-neutral callers should read
-`target_category` first.
+The legacy response-only `target_type` alias is retired; Dokploy execution
+configuration still uses provider-specific target type fields internally where
+application-vs-compose behavior is required.
 
 Generic web preview desired-state discovery uses
 `POST /v1/drivers/generic-web/preview-desired-state`. The request names the
@@ -1271,9 +1271,9 @@ rendered promotion evidence payload for fields the driver can derive.
 
 VeriReel deploy and prod-promotion responses expose provider-neutral target
 metadata with `target_category`, `provider_id`, and `provider_target_type`.
-The legacy `target_type` response field remains as a compatibility alias for
-older workflow callers, but provider-neutral callers should read
-`target_category` first.
+The legacy response-only `target_type` alias is retired; Dokploy execution
+configuration still uses provider-specific target type fields internally where
+application-vs-compose behavior is required.
 
 Recommended first success shape:
 

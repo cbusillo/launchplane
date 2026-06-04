@@ -136,7 +136,6 @@ class GenericWebProdPromotionResult(BaseModel):
     target_category: DeployTargetCategory = "unknown"
     provider_id: str = ""
     provider_target_type: str = ""
-    target_type: str = ""
     dry_run: bool = False
     error_message: str = ""
 
@@ -144,18 +143,13 @@ class GenericWebProdPromotionResult(BaseModel):
     def _validate_result(self) -> "GenericWebProdPromotionResult":
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_type = self.target_type.strip().lower()
-        if not self.provider_target_type and self.target_type:
-            self.provider_target_type = self.target_type
         if self.target_category == "unknown":
-            if self.provider_target_type == "application" or self.target_type == "application":
+            if self.provider_target_type == "application":
                 self.target_category = "application"
-            elif self.provider_target_type == "compose" or self.target_type == "compose":
+            elif self.provider_target_type == "compose":
                 self.target_category = "compose"
         if not self.provider_id and self.target_category in {"application", "compose"}:
             self.provider_id = "dokploy"
-        if not self.target_type:
-            self.target_type = self.provider_target_type or self.target_category
         return self
 
 
@@ -334,7 +328,9 @@ def execute_generic_web_prod_promotion(
                 deployment_status="fail",
                 target_name=deploy_result.target_name,
                 target_type=_promotion_target_type(
-                    deploy_result_target_type=deploy_result.target_type,
+                    deploy_result_target_type=(
+                        deploy_result.provider_target_type or deploy_result.target_category
+                    ),
                     deployment_record=deployment_record,
                 ),
                 deployment_record_id=deploy_result.deployment_record_id,
@@ -368,7 +364,8 @@ def execute_generic_web_prod_promotion(
         deployment_status=deploy_result.deploy_status,
         target_name=deploy_result.target_name,
         target_type=_promotion_target_type(
-            deploy_result_target_type=deploy_result.target_type,
+            deploy_result_target_type=deploy_result.provider_target_type
+            or deploy_result.target_category,
             deployment_record=deployment_record,
         ),
         deployment_record_id=deploy_result.deployment_record_id,
@@ -989,7 +986,6 @@ def _result_from_record(
         target_category=target_fields.target_category,
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
-        target_type=target_fields.target_type,
         dry_run=dry_run,
         error_message=error_message,
     )

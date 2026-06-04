@@ -210,8 +210,10 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
         context="sellyouroutboard-testing",
         instance="prod",
         target_name="syo-prod-app",
-        target_type="application",
         target_id="app-123",
+        target_category="application",
+        provider_id="dokploy",
+        provider_target_type="application",
         error_message="provider failed" if deploy_status == "fail" else "",
     )
 
@@ -289,7 +291,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.target_category, "application")
         self.assertEqual(result.provider_id, "dokploy")
         self.assertEqual(result.provider_target_type, "application")
-        self.assertEqual(result.target_type, "application")
+        self.assertFalse(hasattr(result, "target_type"))
         self.assertEqual(len(store.promotions), 1)
         promotion = next(iter(store.promotions.values()))
         self.assertEqual(promotion.backup_gate.status, "skipped")

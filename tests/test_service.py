@@ -15745,8 +15745,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 context="sellyouroutboard-testing",
                 instance="testing",
                 target_name="syo-testing",
-                target_type="application",
                 target_id="app-syo-testing",
+                target_category="application",
+                provider_id="dokploy",
+                provider_target_type="application",
                 post_deploy_status="fail",
                 error_message="post-deploy failed after deploy passed",
             )
@@ -15788,6 +15790,116 @@ class LaunchplaneServiceTests(unittest.TestCase):
             second_payload["records"]["deployment_record_id"], driver_result.deployment_record_id
         )
         self.assertTrue(second_payload["replayed"])
+        deploy.assert_called_once()
+
+    def test_generic_web_deploy_route_replay_scrubs_retired_target_type_alias(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            identity = _identity()
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = GenericWebDeployResult(
+                deployment_record_id="deployment-syo-testing-retired-alias",
+                deploy_status="pass",
+                deploy_started_at="2026-05-26T02:00:00Z",
+                deploy_finished_at="2026-05-26T02:05:00Z",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_name="syo-testing",
+                target_id="app-syo-testing",
+                target_category="application",
+                provider_id="dokploy",
+                provider_target_type="application",
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "deploy": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "instance": "testing",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    "source_git_ref": "abc123",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-retired-alias"},
+                )
+                idempotency_record = store.read_idempotency_record(
+                    scope="|".join(
+                        (
+                            identity.repository,
+                            identity.workflow_ref or identity.job_workflow_ref,
+                            identity.subject,
+                        )
+                    ),
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="generic-web-deploy-retired-alias",
+                )
+                self.assertIsNotNone(idempotency_record)
+                assert idempotency_record is not None
+                legacy_response_payload = idempotency_record.response_payload
+                legacy_result_payload = legacy_response_payload.get("result")
+                self.assertIsInstance(legacy_result_payload, dict)
+                assert isinstance(legacy_result_payload, dict)
+                legacy_result_payload["target_type"] = "application"
+                store.write_idempotency_record(
+                    idempotency_record.model_copy(
+                        update={"response_payload": legacy_response_payload}, deep=True
+                    )
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-deploy-retired-alias"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertNotIn("target_type", first_payload["result"])
+        self.assertEqual(second_status_code, 202)
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["result"]["target_category"], "application")
+        self.assertEqual(second_payload["result"]["provider_target_type"], "application")
+        self.assertNotIn("target_type", second_payload["result"])
         deploy.assert_called_once()
 
     def test_generic_web_deploy_route_rejects_unknown_base_driver_product(self) -> None:
@@ -16667,8 +16779,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     source_health_status="pass",
                     destination_health_status="pass",
                     target_name="syo-prod-app",
-                    target_type="application",
                     target_id="app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -16698,7 +16812,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["target_category"], "application")
         self.assertEqual(payload["result"]["provider_id"], "dokploy")
         self.assertEqual(payload["result"]["provider_target_type"], "application")
-        self.assertEqual(payload["result"]["target_type"], "application")
+        self.assertNotIn("target_type", payload["result"])
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_rejects_wrong_product_context(self) -> None:
@@ -16819,8 +16933,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     source_health_status="pass",
                     destination_health_status="pass",
                     target_name="odoo-prod-app",
-                    target_type="application",
                     target_id="app-odoo",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -16848,7 +16964,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["target_category"], "application")
         self.assertEqual(payload["result"]["provider_id"], "dokploy")
         self.assertEqual(payload["result"]["provider_target_type"], "application")
-        self.assertEqual(payload["result"]["target_type"], "application")
+        self.assertNotIn("target_type", payload["result"])
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_accepts_padded_lane_context(self) -> None:
@@ -16913,8 +17029,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     source_health_status="pass",
                     destination_health_status="pass",
                     target_name="syo-prod-app",
-                    target_type="application",
                     target_id="app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -16940,7 +17058,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["target_category"], "application")
         self.assertEqual(payload["result"]["provider_id"], "dokploy")
         self.assertEqual(payload["result"]["provider_target_type"], "application")
-        self.assertEqual(payload["result"]["target_type"], "application")
+        self.assertNotIn("target_type", payload["result"])
         execute_mock.assert_called_once()
 
     def test_human_session_can_dry_run_generic_web_prod_promotion(self) -> None:
@@ -24403,8 +24521,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     deploy_started_at="2026-04-20T18:20:00Z",
                     deploy_finished_at="2026-04-20T18:21:15Z",
                     target_name="ver-testing-app",
-                    target_type="application",
                     target_id="testing-app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -24431,7 +24551,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["target_category"], "application")
             self.assertEqual(payload["result"]["provider_id"], "dokploy")
             self.assertEqual(payload["result"]["provider_target_type"], "application")
-            self.assertEqual(payload["result"]["target_type"], "application")
+            self.assertNotIn("target_type", payload["result"])
             execute_mock.assert_called_once()
 
     def test_verireel_testing_verification_driver_updates_deployment_record(self) -> None:
@@ -26596,8 +26716,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     deploy_started_at="2026-04-20T19:20:00Z",
                     deploy_finished_at="2026-04-20T19:21:15Z",
                     target_name="ver-prod-app",
-                    target_type="application",
                     target_id="prod-app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -26625,7 +26747,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["target_category"], "application")
             self.assertEqual(payload["result"]["provider_id"], "dokploy")
             self.assertEqual(payload["result"]["provider_target_type"], "application")
-            self.assertEqual(payload["result"]["target_type"], "application")
+            self.assertNotIn("target_type", payload["result"])
             execute_mock.assert_called_once()
 
     def test_verireel_prod_deploy_driver_rejects_unauthorized_workflow(self) -> None:
@@ -26722,8 +26844,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     deploy_started_at="2026-04-21T18:20:00Z",
                     deploy_finished_at="2026-04-21T18:21:15Z",
                     target_name="ver-prod-app",
-                    target_type="application",
                     target_id="prod-app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -26759,7 +26883,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["target_category"], "application")
             self.assertEqual(payload["result"]["provider_id"], "dokploy")
             self.assertEqual(payload["result"]["provider_target_type"], "application")
-            self.assertEqual(payload["result"]["target_type"], "application")
+            self.assertNotIn("target_type", payload["result"])
             execute_mock.assert_called_once()
             request = execute_mock.call_args.kwargs["request"]
             self.assertEqual(request.source_health_status, "pass")
