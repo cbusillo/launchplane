@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from collections.abc import Sequence
 from typing import cast
 import unittest
+from unittest.mock import patch
 
 from click import Command
 from click.testing import CliRunner
@@ -10,7 +12,9 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
+from control_plane.contracts.runner_lane_baseline import RunnerLaneDockerToolchainObservation
 from control_plane.contracts.runner_lane_baseline import evaluate_runner_lane_baseline
+from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandResult
 
 
 CLI_MAIN = cast(Command, main)
@@ -108,6 +112,127 @@ class RunnerLaneBaselineTests(unittest.TestCase):
         self.assertEqual(
             [violation.code for violation in readiness.violations],
             ["home_directory_outside_allowed_roots", "service_user_not_allowed"],
+        )
+
+    def test_readiness_rejects_stale_docker_buildx_toolchain(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(minimum_docker_buildx_version="0.23.0"),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="chris-testing-runtime-smoke",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    docker_toolchain=RunnerLaneDockerToolchainObservation(
+                        docker_engine_version="26.1.5+dfsg1",
+                        docker_cli_version="26.1.5+dfsg1",
+                        docker_buildx_version="0.13.1+ds1",
+                        docker_buildx_plugin_path="/usr/libexec/docker/cli-plugins/docker-buildx",
+                        docker_buildx_package="docker-buildx 0.13.1+ds1-3",
+                        docker_buildx_source="Debian trixie",
+                        buildkit_version="0.30.0",
+                    ),
+                    observed_at="2026-06-04T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(readiness.compliant_lanes, 0)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["docker_buildx_version_below_minimum"],
+        )
+        self.assertIn("0.13.1+ds1 < 0.23.0", readiness.violations[0].message)
+
+    def test_readiness_accepts_current_docker_buildx_toolchain(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(
+                require_docker_toolchain_observation=True,
+                minimum_docker_buildx_version="0.23.0",
+            ),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    docker_toolchain=RunnerLaneDockerToolchainObservation(
+                        docker_engine_version="27.5.1",
+                        docker_cli_version="27.5.1",
+                        docker_buildx_version="0.23.0",
+                        docker_buildx_plugin_path="/usr/local/lib/docker/cli-plugins/docker-buildx",
+                        docker_buildx_source="managed plugin",
+                        buildkit_version="0.23.2",
+                    ),
+                    observed_at="2026-06-04T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertTrue(readiness.ready)
+        self.assertEqual(readiness.violations, ())
+
+    def test_readiness_requires_docker_toolchain_when_policy_requests_it(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(require_docker_toolchain_observation=True),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    observed_at="2026-06-04T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["docker_toolchain_missing"],
+        )
+
+    def test_readiness_requires_buildx_version_when_toolchain_is_required(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(require_docker_toolchain_observation=True),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    docker_toolchain=RunnerLaneDockerToolchainObservation(
+                        docker_engine_version="27.5.1",
+                    ),
+                    observed_at="2026-06-04T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["docker_buildx_version_invalid"],
+        )
+
+    def test_readiness_rejects_invalid_buildx_version_for_minimum_policy(self) -> None:
+        readiness = evaluate_runner_lane_baseline(
+            policy=RunnerLaneBaselinePolicy(minimum_docker_buildx_version="0.23.0"),
+            observations=(
+                RunnerLaneBaselineObservation(
+                    runner_name="launchplane-runner-1",
+                    labels=("self-hosted", "launchplane"),
+                    docker_config_isolated=True,
+                    docker_toolchain=RunnerLaneDockerToolchainObservation(
+                        docker_buildx_version="unknown",
+                        docker_buildx_plugin_path="/usr/local/lib/docker/cli-plugins/docker-buildx",
+                    ),
+                    observed_at="2026-06-04T12:00:00Z",
+                ),
+            ),
+        )
+
+        self.assertFalse(readiness.ready)
+        self.assertEqual(
+            [violation.code for violation in readiness.violations],
+            ["docker_buildx_version_invalid"],
         )
 
     def test_readiness_rejects_home_directory_traversal_outside_allowed_roots(
@@ -248,6 +373,122 @@ class RunnerLaneBaselineCliTests(unittest.TestCase):
         self.assertTrue(payload["observation"]["docker_config_isolated"])
         self.assertTrue(payload["readiness"]["ready"])
         self.assertEqual(payload["readiness"]["violations"], [])
+
+    def test_cli_enforces_minimum_docker_buildx_version_from_explicit_evidence(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-baseline-observe",
+                    "--runner-name",
+                    "chris-testing-runtime-smoke",
+                    "--label",
+                    "self-hosted",
+                    "--label",
+                    "launchplane",
+                    "--docker-config-isolated",
+                    "--docker-engine-version",
+                    "26.1.5+dfsg1",
+                    "--docker-cli-version",
+                    "26.1.5+dfsg1",
+                    "--docker-buildx-version",
+                    "0.13.1+ds1",
+                    "--docker-buildx-plugin-path",
+                    "/usr/libexec/docker/cli-plugins/docker-buildx",
+                    "--docker-buildx-package",
+                    "docker-buildx 0.13.1+ds1-3",
+                    "--docker-buildx-source",
+                    "Debian trixie",
+                    "--buildkit-version",
+                    "0.30.0",
+                    "--minimum-docker-buildx-version",
+                    "0.23.0",
+                    "--home-directory",
+                    temp_dir,
+                    "--observed-at",
+                    "2026-06-04T12:00:00Z",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["readiness"]["ready"])
+        self.assertEqual(
+            [violation["code"] for violation in payload["readiness"]["violations"]],
+            ["docker_buildx_version_below_minimum"],
+        )
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_plugin_path"],
+            "/usr/libexec/docker/cli-plugins/docker-buildx",
+        )
+
+    def test_cli_observes_docker_toolchain_with_read_only_probe(self) -> None:
+        outputs: dict[tuple[str, ...], str] = {
+            ("docker", "version", "--format", "{{.Server.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "version", "--format", "{{.Client.Version}}"): "26.1.5+dfsg1\n",
+            ("docker", "buildx", "version"): "github.com/docker/buildx 0.13.1+ds1 0.13.1+ds1-3\n",
+            ("docker", "buildx", "inspect"): "Driver: docker-container\nBuildKit: v0.30.0\n",
+            (
+                "sh",
+                "-c",
+                'command -v docker-buildx 2>/dev/null || for path in /usr/libexec/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx $HOME/.docker/cli-plugins/docker-buildx; do [ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; done',
+            ): "/usr/libexec/docker/cli-plugins/docker-buildx\n",
+            (
+                "sh",
+                "-c",
+                "dpkg-query -W -f='${Package} ${Version}' docker-buildx 2>/dev/null",
+            ): "docker-buildx 0.13.1+ds1-3",
+            ("sh", "-c", "rpm -q docker-buildx 2>/dev/null"): "",
+        }
+
+        observed_timeouts: list[int] = []
+
+        def runner(command: Sequence[str], timeout: int) -> RemoteCommandResult:
+            observed_timeouts.append(timeout)
+            return RemoteCommandResult(returncode=0, stdout=outputs.get(tuple(command), ""))
+
+        with patch(
+            "control_plane.cli_runner_lanes.build_local_command_runner", return_value=runner
+        ):
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-baseline-observe",
+                    "--runner-name",
+                    "chris-testing-runtime-smoke",
+                    "--label",
+                    "self-hosted",
+                    "--label",
+                    "launchplane",
+                    "--docker-config-isolated",
+                    "--observe-docker-toolchain",
+                    "--docker-toolchain-timeout-seconds",
+                    "30",
+                    "--minimum-docker-buildx-version",
+                    "0.23.0",
+                    "--observed-at",
+                    "2026-06-04T12:00:00Z",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(set(observed_timeouts), {30})
+        self.assertFalse(payload["readiness"]["ready"])
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_engine_version"], "26.1.5+dfsg1"
+        )
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_version"], "0.13.1+ds1"
+        )
+        self.assertEqual(
+            payload["observation"]["docker_toolchain"]["docker_buildx_source"], "system package"
+        )
+        self.assertEqual(payload["observation"]["docker_toolchain"]["buildkit_version"], "0.30.0")
 
     def test_cli_fails_closed_without_docker_isolation_evidence(self) -> None:
         with TemporaryDirectory() as temp_dir:

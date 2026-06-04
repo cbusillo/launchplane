@@ -94,6 +94,7 @@ class RunnerHostHygieneObservation(BaseModel):
     free_disk_bytes: int = Field(ge=0)
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
     runner_workdir_bytes: int = Field(default=0, ge=0)
+    docker_toolchain: "RunnerHostDockerToolchainObservation | None" = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple["RunnerHostHygieneImageInventoryItem", ...] = ()
     volume_inventory: tuple["RunnerHostHygieneVolumeInventoryItem", ...] = ()
@@ -114,6 +115,42 @@ class RunnerHostHygieneObservation(BaseModel):
         self.volume_inventory = _sorted_volume_inventory(self.volume_inventory)
         self.notes = tuple(note.strip() for note in self.notes if note.strip())
         return self
+
+
+class RunnerHostDockerToolchainObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    docker_engine_version: str = ""
+    docker_cli_version: str = ""
+    docker_buildx_version: str = ""
+    docker_buildx_plugin_path: str = ""
+    docker_buildx_package: str = ""
+    docker_buildx_source: str = ""
+    buildkit_version: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_toolchain(self) -> "RunnerHostDockerToolchainObservation":
+        self.docker_engine_version = self.docker_engine_version.strip().removeprefix("v")
+        self.docker_cli_version = self.docker_cli_version.strip().removeprefix("v")
+        self.docker_buildx_version = self.docker_buildx_version.strip().removeprefix("v")
+        self.docker_buildx_plugin_path = self.docker_buildx_plugin_path.strip()
+        self.docker_buildx_package = self.docker_buildx_package.strip()
+        self.docker_buildx_source = self.docker_buildx_source.strip()
+        self.buildkit_version = self.buildkit_version.strip().removeprefix("v")
+        return self
+
+    def has_evidence(self) -> bool:
+        return any(
+            (
+                self.docker_engine_version,
+                self.docker_cli_version,
+                self.docker_buildx_version,
+                self.docker_buildx_plugin_path,
+                self.docker_buildx_package,
+                self.docker_buildx_source,
+                self.buildkit_version,
+            )
+        )
 
 
 class RunnerHostHygieneImageInventoryItem(BaseModel):
@@ -184,6 +221,7 @@ class RunnerHostHygieneReport(BaseModel):
     free_disk_bytes: int = Field(default=0, ge=0)
     docker_reclaimable_bytes: int = Field(default=0, ge=0)
     runner_workdir_bytes: int = Field(default=0, ge=0)
+    docker_toolchain: RunnerHostDockerToolchainObservation | None = None
     warm_builders: tuple[str, ...] = ()
     image_inventory: tuple[RunnerHostHygieneImageInventoryItem, ...] = ()
     volume_inventory: tuple[RunnerHostHygieneVolumeInventoryItem, ...] = ()
@@ -567,6 +605,7 @@ def evaluate_runner_host_hygiene(
         free_disk_bytes=observation.free_disk_bytes,
         docker_reclaimable_bytes=observation.docker_reclaimable_bytes,
         runner_workdir_bytes=observation.runner_workdir_bytes,
+        docker_toolchain=observation.docker_toolchain,
         warm_builders=observation.warm_builders,
         image_inventory=observation.image_inventory,
         volume_inventory=observation.volume_inventory,

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineObservation
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselinePolicy
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineReadiness
+from control_plane.contracts.runner_lane_baseline import RunnerLaneDockerToolchainObservation
 from control_plane.contracts.runner_lane_baseline import evaluate_runner_lane_baseline
 from control_plane.contracts.runner_lane_control import RunnerLaneControlAction
 from control_plane.contracts.runner_lane_control import RunnerLaneControlPolicy
@@ -39,6 +40,7 @@ from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
+from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
 from control_plane.workflows.runner_host_hygiene_executor import build_local_command_runner
 from control_plane.workflows.runner_host_hygiene_executor import (
     build_refreshing_service_audit_poster,
@@ -207,6 +209,30 @@ def runner_queue_wait(
     ),
 )
 @click.option(
+    "--observe-docker-toolchain/--skip-docker-toolchain-observation",
+    default=False,
+    show_default=True,
+    help="Collect read-only Docker Engine, CLI, Buildx, and BuildKit version evidence.",
+)
+@click.option(
+    "--docker-toolchain-timeout-seconds",
+    default=10,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Timeout for each Docker toolchain observation command.",
+)
+@click.option("--docker-engine-version", default="", help="Observed Docker Engine version.")
+@click.option("--docker-cli-version", default="", help="Observed Docker CLI version.")
+@click.option("--docker-buildx-version", default="", help="Observed Docker Buildx version.")
+@click.option(
+    "--docker-buildx-plugin-path", default="", help="Observed Docker Buildx CLI plugin path."
+)
+@click.option(
+    "--docker-buildx-package", default="", help="Observed Docker Buildx package name/version."
+)
+@click.option("--docker-buildx-source", default="", help="Observed Docker Buildx source.")
+@click.option("--buildkit-version", default="", help="Observed BuildKit version.")
+@click.option(
     "--service-user",
     default="",
     help="Observed service user. Defaults to USER, LOGNAME, or GITHUB_ACTOR.",
@@ -239,28 +265,63 @@ def runner_queue_wait(
     multiple=True,
     help="Allowed home directory root. Repeat for each allowed root.",
 )
+@click.option(
+    "--require-docker-toolchain-observation/--allow-missing-docker-toolchain-observation",
+    default=False,
+    show_default=True,
+    help="Require Docker toolchain observation evidence in baseline readiness.",
+)
+@click.option(
+    "--minimum-docker-buildx-version",
+    default="",
+    help="Minimum Docker Buildx CLI plugin version accepted by baseline readiness.",
+)
 def runner_baseline_observe(
     runner_name: str,
     labels: tuple[str, ...],
     docker_config_isolated: bool | None,
+    observe_docker_toolchain: bool,
+    docker_toolchain_timeout_seconds: int,
+    docker_engine_version: str,
+    docker_cli_version: str,
+    docker_buildx_version: str,
+    docker_buildx_plugin_path: str,
+    docker_buildx_package: str,
+    docker_buildx_source: str,
+    buildkit_version: str,
     service_user: str,
     home_directory: str,
     observed_at: str,
     required_labels: tuple[str, ...],
     allowed_service_users: tuple[str, ...],
     allowed_home_roots: tuple[str, ...],
+    require_docker_toolchain_observation: bool,
+    minimum_docker_buildx_version: str,
 ) -> None:
     try:
         observation = RunnerLaneBaselineObservation(
             runner_name=_runner_baseline_runner_name(runner_name),
             labels=_runner_baseline_labels(labels),
             docker_config_isolated=_runner_baseline_docker_config_isolated(docker_config_isolated),
+            docker_toolchain=_runner_baseline_docker_toolchain(
+                observe_docker_toolchain=observe_docker_toolchain,
+                docker_toolchain_timeout_seconds=docker_toolchain_timeout_seconds,
+                docker_engine_version=docker_engine_version,
+                docker_cli_version=docker_cli_version,
+                docker_buildx_version=docker_buildx_version,
+                docker_buildx_plugin_path=docker_buildx_plugin_path,
+                docker_buildx_package=docker_buildx_package,
+                docker_buildx_source=docker_buildx_source,
+                buildkit_version=buildkit_version,
+            ),
             service_user=_runner_baseline_service_user(service_user),
             home_directory=_runner_baseline_home_directory(home_directory),
             observed_at=observed_at.strip() or utc_now_timestamp(),
         )
         policy = RunnerLaneBaselinePolicy(
             required_labels=required_labels or ("self-hosted", "launchplane"),
+            require_docker_toolchain_observation=require_docker_toolchain_observation,
+            minimum_docker_buildx_version=minimum_docker_buildx_version,
             allowed_service_users=allowed_service_users,
             allowed_home_roots=allowed_home_roots,
         )
@@ -1081,6 +1142,146 @@ def _runner_baseline_docker_config_isolated(value: bool | None) -> bool | None:
     if docker_config and isolated_config and docker_config == isolated_config:
         return True
     return None
+
+
+def _runner_baseline_docker_toolchain(
+    *,
+    observe_docker_toolchain: bool,
+    docker_toolchain_timeout_seconds: int,
+    docker_engine_version: str,
+    docker_cli_version: str,
+    docker_buildx_version: str,
+    docker_buildx_plugin_path: str,
+    docker_buildx_package: str,
+    docker_buildx_source: str,
+    buildkit_version: str,
+) -> RunnerLaneDockerToolchainObservation | None:
+    explicit = RunnerLaneDockerToolchainObservation(
+        docker_engine_version=docker_engine_version,
+        docker_cli_version=docker_cli_version,
+        docker_buildx_version=docker_buildx_version,
+        docker_buildx_plugin_path=docker_buildx_plugin_path,
+        docker_buildx_package=docker_buildx_package,
+        docker_buildx_source=docker_buildx_source,
+        buildkit_version=buildkit_version,
+    )
+    if not observe_docker_toolchain:
+        return explicit if explicit.has_evidence() else None
+
+    runner = build_local_command_runner()
+    observed_buildx_plugin_path = _first_line(
+        _docker_command_output(
+            runner,
+            (
+                "sh",
+                "-c",
+                "command -v docker-buildx 2>/dev/null || "
+                "for path in /usr/libexec/docker/cli-plugins/docker-buildx "
+                "/usr/local/lib/docker/cli-plugins/docker-buildx "
+                "$HOME/.docker/cli-plugins/docker-buildx; do "
+                '[ -x "$path" ] && { printf \'%s\\n\' "$path"; break; }; '
+                "done",
+            ),
+            timeout_seconds=docker_toolchain_timeout_seconds,
+        )
+    )
+    observed = RunnerLaneDockerToolchainObservation(
+        docker_engine_version=_docker_command_output(
+            runner,
+            ("docker", "version", "--format", "{{.Server.Version}}"),
+            timeout_seconds=docker_toolchain_timeout_seconds,
+        ),
+        docker_cli_version=_docker_command_output(
+            runner,
+            ("docker", "version", "--format", "{{.Client.Version}}"),
+            timeout_seconds=docker_toolchain_timeout_seconds,
+        ),
+        docker_buildx_version=_first_version(
+            _docker_command_output(
+                runner,
+                ("docker", "buildx", "version"),
+                timeout_seconds=docker_toolchain_timeout_seconds,
+            )
+        ),
+        docker_buildx_plugin_path=observed_buildx_plugin_path,
+        docker_buildx_package=_docker_buildx_package(
+            runner=runner, timeout_seconds=docker_toolchain_timeout_seconds
+        ),
+        docker_buildx_source=_docker_buildx_source(observed_buildx_plugin_path),
+        buildkit_version=_first_version(
+            _docker_command_output(
+                runner,
+                ("docker", "buildx", "inspect"),
+                timeout_seconds=docker_toolchain_timeout_seconds,
+            )
+        ),
+    )
+    if not explicit.has_evidence():
+        return observed if observed.has_evidence() else None
+    return RunnerLaneDockerToolchainObservation(
+        docker_engine_version=explicit.docker_engine_version or observed.docker_engine_version,
+        docker_cli_version=explicit.docker_cli_version or observed.docker_cli_version,
+        docker_buildx_version=explicit.docker_buildx_version or observed.docker_buildx_version,
+        docker_buildx_plugin_path=(
+            explicit.docker_buildx_plugin_path or observed.docker_buildx_plugin_path
+        ),
+        docker_buildx_package=explicit.docker_buildx_package or observed.docker_buildx_package,
+        docker_buildx_source=explicit.docker_buildx_source or observed.docker_buildx_source,
+        buildkit_version=explicit.buildkit_version or observed.buildkit_version,
+    )
+
+
+def _docker_command_output(
+    runner: RemoteCommandRunner,
+    command_args: tuple[str, ...],
+    *,
+    timeout_seconds: int,
+) -> str:
+    result = runner(command_args, timeout_seconds)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _docker_buildx_package(*, runner: RemoteCommandRunner, timeout_seconds: int) -> str:
+    package = _docker_command_output(
+        runner,
+        ("sh", "-c", "dpkg-query -W -f='${Package} ${Version}' docker-buildx 2>/dev/null"),
+        timeout_seconds=timeout_seconds,
+    )
+    if package:
+        return package
+    return _docker_command_output(
+        runner,
+        ("sh", "-c", "rpm -q docker-buildx 2>/dev/null"),
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _docker_buildx_source(plugin_path: str) -> str:
+    if plugin_path.startswith("/usr/libexec/") or plugin_path.startswith("/usr/lib/"):
+        return "system package"
+    if plugin_path.startswith("/usr/local/"):
+        return "managed plugin"
+    if "/.docker/cli-plugins/" in plugin_path:
+        return "user plugin"
+    return ""
+
+
+def _first_line(value: str) -> str:
+    for line in value.splitlines():
+        stripped_line = line.strip()
+        if stripped_line:
+            return stripped_line
+    return ""
+
+
+def _first_version(value: str) -> str:
+    for token in value.replace(",", " ").split():
+        normalized = token.strip().removeprefix("v")
+        if normalized and normalized[0].isdigit() and "." in normalized:
+            return normalized
+    return ""
 
 
 def _runner_baseline_service_user(value: str) -> str:
