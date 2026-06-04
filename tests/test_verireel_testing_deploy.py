@@ -90,7 +90,7 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             deployment = store.read_deployment_record(
                 "deployment-verireel-testing-run-12345-attempt-1"
             )

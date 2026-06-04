@@ -52,6 +52,11 @@ Keep a compatibility surface only when it is one of these:
   responses expose only neutral `provider_target*` summary keys. Seed import
   material must use `provider_targets`; the import helper no longer falls back
   to `dokploy_targets`.
+- Generic-web and VeriReel driver result payloads no longer expose the
+  response-only `target_type` alias. Responses use `target_category`,
+  `provider_id`, and `provider_target_type`; internal Dokploy execution config
+  keeps target-type fields only where application-vs-compose behavior is still
+  required.
 - `control_plane` remains the Python package name for now. Do not add public
   `odoo-control-plane` names, env vars, or docs; prefer Launchplane wording for
   product/operator surfaces.

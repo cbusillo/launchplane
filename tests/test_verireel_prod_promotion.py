@@ -87,8 +87,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         deploy_started_at="2026-04-21T18:20:00Z",
                         deploy_finished_at="2026-04-21T18:21:15Z",
                         target_name="ver-prod-app",
-                        target_type="application",
                         target_id="prod-app-123",
+                        target_category="application",
+                        provider_id="dokploy",
+                        provider_target_type="application",
                         rollout_status="pass",
                         rollout_base_url="https://ver-prod.shinycomputers.com",
                         rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
@@ -134,7 +136,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "service")
             self.assertEqual(result.provider_id, "runtime-provider")
             self.assertEqual(result.provider_target_type, "managed-service")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
@@ -227,7 +229,6 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         target_category="service",
                         provider_id="runtime-provider",
                         provider_target_type="managed-service",
-                        target_type="application",
                         rollout_status="pass",
                         rollout_base_url="https://ver-prod.shinycomputers.com",
                         rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
@@ -328,8 +329,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         deploy_started_at="2026-04-21T18:20:00Z",
                         deploy_finished_at="2026-04-21T18:21:15Z",
                         target_name="ver-prod-app",
-                        target_type="application",
                         target_id="prod-app-123",
+                        target_category="application",
+                        provider_id="dokploy",
+                        provider_target_type="application",
                         rollout_status="pass",
                         rollout_base_url="https://ver-prod.shinycomputers.com",
                         rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
@@ -367,7 +370,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             self.assertIn("Prisma migration", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
@@ -415,8 +418,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         deploy_started_at="2026-04-21T18:20:00Z",
                         deploy_finished_at="2026-04-21T18:21:15Z",
                         target_name="ver-prod-app",
-                        target_type="application",
                         target_id="prod-app-123",
+                        target_category="application",
+                        provider_id="dokploy",
+                        provider_target_type="application",
                         rollout_status="pass",
                         rollout_base_url="https://ver-prod.shinycomputers.com",
                         rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
@@ -454,7 +459,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
@@ -495,8 +500,10 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                         deploy_started_at="2026-04-21T18:20:00Z",
                         deploy_finished_at="2026-04-21T18:21:15Z",
                         target_name="ver-prod-app",
-                        target_type="application",
                         target_id="prod-app-123",
+                        target_category="application",
+                        provider_id="dokploy",
+                        provider_target_type="application",
                         rollout_status="fail",
                         rollout_base_url="https://ver-prod.shinycomputers.com",
                         rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
@@ -522,7 +529,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             self.assertIn("rollout page verification", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
@@ -557,7 +564,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(result.target_category, "application")
             self.assertEqual(result.provider_id, "dokploy")
             self.assertEqual(result.provider_target_type, "application")
-            self.assertEqual(result.target_type, "application")
+            self.assertFalse(hasattr(result, "target_type"))
             self.assertIn("requires stored backup gate record", result.error_message)
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"

@@ -230,7 +230,9 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
             context="sellyouroutboard-testing",
             instance="prod",
             target_name="syo-prod-app",
-            target_type="application",
+            target_category="application",
+            provider_id="dokploy",
+            provider_target_type="application",
             target_id="app-prod",
         )
 
@@ -272,7 +274,9 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
             context="sellyouroutboard-testing",
             instance="prod",
             target_name="syo-prod-app",
-            target_type="application",
+            target_category="application",
+            provider_id="dokploy",
+            provider_target_type="application",
             target_id="app-prod",
             post_deploy_status="pass",
         )
@@ -307,7 +311,9 @@ class GenericWebRollbackPlanTests(unittest.TestCase):
             context="sellyouroutboard-testing",
             instance="prod",
             target_name="syo-prod-app",
-            target_type="application",
+            target_category="application",
+            provider_id="dokploy",
+            provider_target_type="application",
             target_id="app-prod",
             post_deploy_status="fail",
             error_message="post deploy failed",

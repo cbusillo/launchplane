@@ -276,7 +276,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_category, "service")
         self.assertEqual(result.provider_id, "fake-cloud")
         self.assertEqual(result.provider_target_type, "managed-service")
-        self.assertEqual(result.target_type, "managed-service")
+        self.assertFalse(hasattr(result, "target_type"))
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
         self.assertEqual(store.deployments[0].post_deploy_update.status, "skipped")

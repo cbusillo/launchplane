@@ -75,7 +75,6 @@ class GenericWebDeployResult(BaseModel):
     target_category: DeployTargetCategory = "unknown"
     provider_id: str = ""
     provider_target_type: str = ""
-    target_type: str = ""
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     error_message: str = ""
 
@@ -83,9 +82,6 @@ class GenericWebDeployResult(BaseModel):
     def _validate_result(self) -> "GenericWebDeployResult":
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_type = self.target_type.strip().lower()
-        if not self.target_type:
-            self.target_type = self.provider_target_type or self.target_category
         return self
 
 
@@ -501,7 +497,6 @@ def execute_generic_web_deploy(
             target_category=target_fields.target_category,
             provider_id=target_fields.provider_id,
             provider_target_type=target_fields.provider_target_type,
-            target_type=target_fields.target_type,
             post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
             error_message=str(exc),
         )
@@ -547,7 +542,6 @@ def execute_generic_web_deploy(
         target_category=target_fields.target_category,
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
-        target_type=target_fields.target_type,
         post_deploy_status=_generic_web_deploy_post_deploy_status(post_deploy_update),
     )
 

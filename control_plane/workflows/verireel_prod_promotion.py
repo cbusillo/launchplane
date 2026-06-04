@@ -117,23 +117,17 @@ class VeriReelProdPromotionResult(BaseModel):
     target_category: DeployTargetCategory = "unknown"
     provider_id: str = "dokploy"
     provider_target_type: str = ""
-    target_type: str = ""
     error_message: str = ""
 
     @model_validator(mode="after")
     def _validate_result(self) -> "VeriReelProdPromotionResult":
         self.provider_id = self.provider_id.strip().lower()
         self.provider_target_type = self.provider_target_type.strip().lower()
-        self.target_type = self.target_type.strip().lower()
-        if not self.provider_target_type and self.target_type:
-            self.provider_target_type = self.target_type
         if self.target_category == "unknown":
-            if self.provider_target_type == "application" or self.target_type == "application":
+            if self.provider_target_type == "application":
                 self.target_category = "application"
-            elif self.provider_target_type == "compose" or self.target_type == "compose":
+            elif self.provider_target_type == "compose":
                 self.target_category = "compose"
-        if not self.target_type:
-            self.target_type = self.provider_target_type or self.target_category
         return self
 
 
@@ -191,7 +185,7 @@ def _target_result_fields_from_deployment(
         target_category=deployment_result.target_category,
         provider_id=deployment_result.provider_id,
         provider_target_type=deployment_result.provider_target_type,
-        target_type=deployment_result.target_type,
+        target_type=deployment_result.provider_target_type or deployment_result.target_category,
     )
 
 
@@ -275,8 +269,8 @@ def _legacy_dokploy_target_type(
 ) -> DokployTargetType:
     if deployment_result.target_category in {"application", "compose"}:
         return cast(DokployTargetType, deployment_result.target_category)
-    if deployment_result.target_type in {"application", "compose"}:
-        return cast(DokployTargetType, deployment_result.target_type)
+    if deployment_result.provider_target_type in {"application", "compose"}:
+        return cast(DokployTargetType, deployment_result.provider_target_type)
     return _default_target_type()
 
 
@@ -309,7 +303,6 @@ def _build_result(
         target_category=target_fields.target_category,
         provider_id=target_fields.provider_id,
         provider_target_type=target_fields.provider_target_type,
-        target_type=target_fields.target_type,
         error_message=error_message,
     )
 
