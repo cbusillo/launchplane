@@ -24242,6 +24242,75 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["application_id"], "testing-app-123")
             execute_mock.assert_called_once()
 
+    def test_verireel_app_maintenance_driver_accepts_stable_e2e_grant_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_app_maintenance.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_app_maintenance",
+                return_value=VeriReelAppMaintenanceResult(
+                    maintenance_status="pass",
+                    action="grant-sponsored",
+                    intent="stable-testing-remote-e2e-grant-sponsored",
+                    context="verireel",
+                    instance="testing",
+                    application_name="ver-testing-app",
+                    application_id="testing-app-123",
+                    schedule_name="ver-remote-e2e-grant-sponsored",
+                    started_at="2026-04-25T19:00:00Z",
+                    finished_at="2026-04-25T19:01:00Z",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/app-maintenance",
+                    payload={
+                        "product": "verireel",
+                        "maintenance": {
+                            "context": "verireel",
+                            "instance": "testing",
+                            "action": "grant-sponsored",
+                            "intent": "stable-testing-remote-e2e-grant-sponsored",
+                            "email": "creator@example.com",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["maintenance_status"], "pass")
+            execute_mock.assert_called_once()
+
     def test_verireel_app_maintenance_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
