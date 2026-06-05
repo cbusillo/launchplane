@@ -2736,6 +2736,28 @@ def _handle_generic_web_deploy(
     )
 
 
+def _handle_generic_web_promotion_workflow(
+    request: GenericWebPromotionWorkflowEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del record_store
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web promotion workflow requires a product profile lane."
+        )
+    driver_result = dispatch_generic_web_promotion_workflow(
+        control_plane_root=control_plane_root_path,
+        profile=resolved_context.profile,
+        request=request.workflow,
+    )
+    return _DescriptorDriverDispatchResult(
+        result=driver_result.model_dump(mode="json"),
+        driver_result=driver_result,
+    )
+
+
 def _handle_generic_web_rollback(
     request: GenericWebRollbackEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3318,6 +3340,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_generic_web_deploy,
         ),
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.workflow.context,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_promotion_workflow,
+        ),
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3568,6 +3599,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
     return frozenset(
         (
             _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+            _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
@@ -13847,54 +13879,6 @@ def create_launchplane_service_app(
                     "release_url": driver_result.release_url,
                     "dry_run": driver_result.dry_run,
                 }
-            elif path == _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path:
-                generic_web_workflow_request = (
-                    _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
-                        payload
-                    )
-                )
-                resolved_driver_context = _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=generic_web_workflow_request.product,
-                    context=generic_web_workflow_request.workflow.context,
-                    require_profile=True,
-                )
-                if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
-                    raise ProductDriverMismatchError(
-                        "Generic web promotion workflow requires a product profile lane."
-                    )
-                profile = resolved_driver_context.profile
-                lane = resolved_driver_context.lane
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=lane.context,
-                    denial_message=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = dispatch_generic_web_promotion_workflow(
-                    control_plane_root=resolved_root,
-                    profile=profile,
-                    request=generic_web_workflow_request.workflow,
-                )
-                result = driver_result.model_dump(mode="json")
             elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
                 generic_web_desired_state_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
