@@ -830,6 +830,7 @@ _DescriptorDriverDispatchHandler = Callable[
     [
         _DriverRouteEnvelopeT,
         _ResolvedProductDriverContext,
+        object,
     ],
     _DescriptorDriverDispatchResult,
 ]
@@ -2642,8 +2643,39 @@ def _resolve_and_authorize_descriptor_route(
     return resolved_driver_context, authorization_response
 
 
+def _handle_generic_web_stable_verification(
+    request: GenericWebStableVerificationEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+) -> _DescriptorDriverDispatchResult:
+    if resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web stable verification requires a product profile lane."
+        )
+    return _DescriptorDriverDispatchResult(
+        result=_apply_generic_web_stable_verification_records(
+            record_store=record_store,
+            request=request.verification,
+        )
+    )
+
+
 def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
-    return {}
+    return {
+        _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.verification.context,
+                instance=request.verification.instance,
+            ),
+            handler=_handle_generic_web_stable_verification,
+        ),
+    }
+
+
+def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
+    return frozenset((_GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,))
 
 
 def _dispatch_descriptor_driver_route(
@@ -2708,7 +2740,11 @@ def _dispatch_descriptor_driver_route(
     )
     if idempotent_response is not None:
         return idempotent_response
-    dispatch_result = dispatch_route.handler(request, resolved_driver_context)
+    dispatch_result = dispatch_route.handler(
+        request,
+        resolved_driver_context,
+        record_store,
+    )
     return dispatch_result.result, dispatch_result.driver_result
 
 
@@ -3013,6 +3049,14 @@ def _validate_descriptor_driver_dispatch_routes(
     dispatch_routes: dict[str, _DescriptorDriverDispatchRoute[Any]],
 ) -> None:
     descriptor_routes = _driver_route_metadata_from_descriptors()
+    missing_required_routes = sorted(
+        _required_descriptor_driver_dispatch_route_paths() - dispatch_routes.keys()
+    )
+    if missing_required_routes:
+        raise ValueError(
+            "Descriptor-backed dispatch routes must be registered by the service: "
+            f"{', '.join(missing_required_routes)}"
+        )
     for route_path, dispatch_route in dispatch_routes.items():
         if route_path != dispatch_route.execution_metadata.route_path:
             raise ValueError(
@@ -13251,48 +13295,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
                     request=generic_web_preview_verification_request.verification,
-                )
-            elif path == _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path:
-                generic_web_stable_verification_request = (
-                    _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                resolved_driver_context = _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=generic_web_stable_verification_request.product,
-                    context=generic_web_stable_verification_request.verification.context,
-                    instance=generic_web_stable_verification_request.verification.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=generic_web_stable_verification_request.product,
-                    context=generic_web_stable_verification_request.verification.context,
-                    denial_message=_GENERIC_WEB_STABLE_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if resolved_driver_context.lane is None:
-                    raise ProductDriverMismatchError(
-                        "Generic web stable verification requires a product profile lane."
-                    )
-                result = _apply_generic_web_stable_verification_records(
-                    record_store=record_store,
-                    request=generic_web_stable_verification_request.verification,
                 )
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
                 odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(
