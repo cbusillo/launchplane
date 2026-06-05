@@ -160,6 +160,13 @@ prod inventory after successful verified deploys. Product-specific drivers such
 as VeriReel or Odoo can wrap this common action when they need additional gates
 such as backups, migrations, rollout checks, or tenant-specific validation.
 
+The `prod_promotion_workflow` action routes to
+`POST /v1/drivers/generic-web/prod-promotion-workflow`. It dispatches the
+product repository promotion workflow after resolving the requested stable lane
+from DB-backed product profile records. This route is registered through
+descriptor-backed dispatch, so descriptor/handler drift fails closed before the
+service starts.
+
 The `prod_rollback_plan` action routes to
 `POST /v1/drivers/generic-web/prod-rollback-plan`. It is a safe-write planner:
 Launchplane reads the product profile, destination lane, selected deployment
@@ -419,14 +426,14 @@ descriptor route metadata, so new drivers do not need a second hardcoded router
 allowlist or authz-action entry.
 Routes can also opt into descriptor-backed service dispatch when a backend
 handler is explicitly registered for the same descriptor route. Generic-web
-deploy, stable verification, rollback planning, preview verification, Odoo
-artifact publish inputs and evidence ingestion, Odoo prod promotion input reads,
-Odoo prod backup gate, post-deploy, config/website override hooks, Odoo preview
-apply and inputs, and the VeriReel testing and prod deploys, prod backup gate,
-prod promotion, prod rollback, app maintenance,
-preview refresh, preview inventory reads, preview destroy, plus testing and
-preview verification writebacks use descriptor-backed dispatch. This keeps
-descriptor metadata as the route/authz source of truth while preventing an
+deploy, promotion workflow dispatch, stable verification, rollback planning,
+rollback apply, preview verification, Odoo artifact publish inputs and evidence
+ingestion, Odoo prod promotion input reads, Odoo prod backup gate, post-deploy,
+config/website override hooks, Odoo preview apply and inputs, and the VeriReel
+testing and prod deploys, prod backup gate, prod promotion, prod rollback, app
+maintenance, preview refresh, preview inventory reads, preview destroy, plus
+testing and preview verification writebacks use descriptor-backed dispatch. This
+keeps descriptor metadata as the route/authz source of truth while preventing an
 advertised descriptor action from becoming executable without implementation.
 Descriptor route metadata and service compatibility policy also drive
 product-driver compatibility checks. A
