@@ -2743,6 +2743,31 @@ def _handle_odoo_artifact_publish_inputs(
     return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
 
 
+def _handle_odoo_prod_promotion_inputs(
+    request: OdooProdPromotionInputsEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, control_plane_root_path
+    driver_result = resolve_odoo_prod_promotion_inputs(
+        record_store=cast(OdooProdPromotionInputsStore, record_store),
+        request=request.inputs,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "artifact_id": driver_result.artifact_id,
+            "backup_record_id": driver_result.backup_record_id,
+            "release_tuple_id": driver_result.release_tuple_id,
+            "source_git_ref": driver_result.source_git_ref,
+            "image_repository": driver_result.image_repository,
+            "image_digest": driver_result.image_digest,
+            "input_status": driver_result.input_status,
+        },
+        driver_result=driver_result,
+    )
+
+
 def _handle_generic_web_preview_verification(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3109,6 +3134,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_artifact_publish_inputs,
         ),
+        _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PROD_PROMOTION_INPUTS_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.inputs.context,
+            ),
+            handler=_handle_odoo_prod_promotion_inputs,
+        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3238,6 +3272,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
+            _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -14065,46 +14100,6 @@ def create_launchplane_service_app(
                     "database_dump_path": driver_result.database_dump_path,
                     "filestore_archive_path": driver_result.filestore_archive_path,
                     "manifest_path": driver_result.manifest_path,
-                }
-            elif path == _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path:
-                odoo_prod_inputs_request = (
-                    _ODOO_PROD_PROMOTION_INPUTS_ROUTE.envelope_model.model_validate(payload)
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_PROD_PROMOTION_INPUTS_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_prod_inputs_request.product,
-                    authorization_context=odoo_prod_inputs_request.inputs.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = resolve_odoo_prod_promotion_inputs(
-                    record_store=cast(OdooProdPromotionInputsStore, record_store),
-                    request=odoo_prod_inputs_request.inputs,
-                )
-                result = {
-                    "artifact_id": driver_result.artifact_id,
-                    "backup_record_id": driver_result.backup_record_id,
-                    "release_tuple_id": driver_result.release_tuple_id,
-                    "source_git_ref": driver_result.source_git_ref,
-                    "image_repository": driver_result.image_repository,
-                    "image_digest": driver_result.image_digest,
-                    "input_status": driver_result.input_status,
                 }
             elif path == _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path:
                 odoo_promotion_run_request = (

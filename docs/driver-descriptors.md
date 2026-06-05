@@ -418,10 +418,11 @@ allowlist or authz-action entry.
 Routes can also opt into descriptor-backed service dispatch when a backend
 handler is explicitly registered for the same descriptor route. Generic-web
 stable verification, rollback planning, preview verification, Odoo artifact
-publish inputs and evidence ingestion, and the VeriReel testing and prod
-deploys, prod backup gate, prod promotion, prod rollback, app maintenance,
-preview refresh, preview inventory reads, preview destroy, plus testing and
-preview verification writebacks use descriptor-backed dispatch. This keeps
+publish inputs and evidence ingestion, Odoo prod promotion input reads, and the
+VeriReel testing and prod deploys, prod backup gate, prod promotion, prod
+rollback, app maintenance, preview refresh, preview inventory reads, preview
+destroy, plus testing and preview verification writebacks use descriptor-backed
+dispatch. This keeps
 descriptor metadata as the route/authz source of truth while preventing an
 advertised descriptor action from becoming executable without implementation.
 Descriptor route metadata and service compatibility policy also drive

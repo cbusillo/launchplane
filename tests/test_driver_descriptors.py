@@ -458,7 +458,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_artifact_routes_registered_in_descriptor_dispatch(self) -> None:
+    def test_odoo_low_risk_routes_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         self.assertIn(
@@ -467,6 +467,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             dispatch_routes,
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
@@ -1060,10 +1064,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_artifact_descriptor_requires_dispatch_registration(self) -> None:
+    def test_odoo_low_risk_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)

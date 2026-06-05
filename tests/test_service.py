@@ -30096,6 +30096,86 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["image_digest"], "sha256:new")
             resolve_mock.assert_called_once()
 
+    def test_odoo_prod_promotion_inputs_driver_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_promotion_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo",
+                "inputs": {
+                    "context": "cm",
+                    "from_instance": "testing",
+                    "to_instance": "prod",
+                    "request_id": "run-123-attempt-1",
+                },
+            }
+
+            with patch(
+                "control_plane.service.resolve_odoo_prod_promotion_inputs",
+                return_value=OdooProdPromotionInputsResult(
+                    context="cm",
+                    from_instance="testing",
+                    to_instance="prod",
+                    request_id="run-123-attempt-1",
+                    input_status="ready",
+                    artifact_id="artifact-cm-new",
+                    source_git_ref="848bf1b69ff3adbe9b255c61c7b8f5ca04efbcbb",
+                    backup_record_id="backup-gate-cm-prod-run-123-attempt-1",
+                    release_tuple_id="cm-testing-artifact-cm-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_digest="sha256:new",
+                ),
+            ) as resolve_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-promotion-inputs",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "odoo-prod-promotion-inputs-cm"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-promotion-inputs",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "odoo-prod-promotion-inputs-cm"},
+                )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertTrue(second_payload["replayed"])
+            resolve_mock.assert_called_once()
+
     def test_odoo_prod_promotion_inputs_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
