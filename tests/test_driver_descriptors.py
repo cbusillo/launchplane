@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from control_plane import service as control_plane_service
 from control_plane.contracts.driver_descriptor import (
+    DriverActionDescriptor,
     DriverCapabilityDescriptor,
     DriverDescriptor,
 )
@@ -371,6 +372,52 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/launchplane/self-deploy",
             control_plane_service._build_write_routes(),
         )
+
+    def test_descriptor_dispatch_registration_requires_descriptor_route(self) -> None:
+        descriptor = DriverDescriptor(
+            driver_id="fake-dispatch",
+            label="Fake dispatch",
+            product="fake-dispatch",
+            description="Test-only descriptor dispatch driver.",
+            provider_boundary="Test-only provider boundary.",
+            actions=(
+                DriverActionDescriptor(
+                    action_id="ping",
+                    label="Ping",
+                    description="Test descriptor-backed dispatch route.",
+                    safety="safe_write",
+                    scope="context",
+                    method="POST",
+                    route_path="/v1/drivers/fake-dispatch/ping",
+                    authz_action="fake_dispatch.ping",
+                ),
+            ),
+        )
+        route = control_plane_service._DescriptorDriverDispatchRoute(
+            execution_metadata=control_plane_service._DriverRouteExecutionMetadata(
+                route_path="/v1/drivers/fake-dispatch/ping",
+                envelope_model=control_plane_service.GenericWebStableVerificationEnvelope,
+                denial_message="Workflow cannot execute fake dispatch.",
+            ),
+            context_resolver=lambda request: control_plane_service._DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.verification.context,
+            ),
+            handler=lambda _request, _resolved_context: (
+                control_plane_service._DescriptorDriverDispatchResult(result={})
+            ),
+        )
+
+        with patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(
+                {"/v1/drivers/fake-dispatch/ping": route}
+            )
+
+        with patch("control_plane.service.list_driver_descriptors", return_value=()):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(
+                    {"/v1/drivers/fake-dispatch/ping": route}
+                )
 
     def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
         self.assert_route_metadata_matches_descriptor(

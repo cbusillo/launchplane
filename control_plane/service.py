@@ -804,9 +804,42 @@ class _DriverRouteExecutionMetadata(Generic[_DriverRouteEnvelopeT]):
 
 
 @dataclass(frozen=True)
+class _DescriptorDriverDispatchContext:
+    product: str
+    context: str
+    instance: str = ""
+    require_profile: bool = False
+
+
+@dataclass(frozen=True)
+class _DescriptorDriverDispatchResult:
+    result: dict[str, object]
+    driver_result: BaseModel | dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
 class _ResolvedProductDriverContext:
     profile: LaunchplaneProductProfileRecord | None
     lane: ProductLaneProfile | None = None
+
+
+_DescriptorDriverDispatchContextResolver = Callable[
+    [_DriverRouteEnvelopeT], _DescriptorDriverDispatchContext
+]
+_DescriptorDriverDispatchHandler = Callable[
+    [
+        _DriverRouteEnvelopeT,
+        _ResolvedProductDriverContext,
+    ],
+    _DescriptorDriverDispatchResult,
+]
+
+
+@dataclass(frozen=True)
+class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
+    execution_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT]
+    context_resolver: _DescriptorDriverDispatchContextResolver[_DriverRouteEnvelopeT]
+    handler: _DescriptorDriverDispatchHandler[_DriverRouteEnvelopeT]
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -2609,6 +2642,76 @@ def _resolve_and_authorize_descriptor_route(
     return resolved_driver_context, authorization_response
 
 
+def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
+    return {}
+
+
+def _dispatch_descriptor_driver_route(
+    *,
+    dispatch_route: _DescriptorDriverDispatchRoute[Any],
+    payload: dict[str, object],
+    record_store: object,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    request_scope: str,
+    request_idempotency_key: str,
+    request_fingerprint: str,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    route_metadata = dispatch_route.execution_metadata
+    descriptor_route_metadata = _driver_route_metadata_from_descriptors().get(
+        route_metadata.route_path
+    )
+    if descriptor_route_metadata is None:
+        raise ValueError(
+            f"Descriptor-backed dispatch route {route_metadata.route_path} "
+            "must be declared by a driver descriptor."
+        )
+    if descriptor_route_metadata.method != "POST":
+        raise ValueError(
+            f"Descriptor-backed dispatch route {route_metadata.route_path} must use POST."
+        )
+    request = route_metadata.envelope_model.model_validate(payload)
+    dispatch_context = dispatch_route.context_resolver(request)
+    resolved_driver_context = _resolve_descriptor_product_driver_context(
+        record_store=record_store,
+        route_path=route_metadata.route_path,
+        product=dispatch_context.product,
+        context=dispatch_context.context,
+        instance=dispatch_context.instance,
+        require_profile=dispatch_context.require_profile,
+    )
+    authorization_context = dispatch_context.context
+    if not authorization_context and resolved_driver_context.lane is not None:
+        authorization_context = resolved_driver_context.lane.context
+    authorization_response = _driver_route_authorization_response(
+        authz_policy=authz_policy,
+        identity=identity,
+        route_path=route_metadata.route_path,
+        product=dispatch_context.product,
+        context=authorization_context,
+        denial_message=route_metadata.denial_message,
+        start_response=start_response,
+        trace_id=trace_id,
+    )
+    if authorization_response is not None:
+        return authorization_response
+    idempotent_response = _check_idempotent_request(
+        record_store=record_store,
+        scope=request_scope,
+        route_path=route_metadata.route_path,
+        idempotency_key=request_idempotency_key,
+        request_fingerprint=request_fingerprint,
+        start_response=start_response,
+        trace_id=trace_id,
+    )
+    if idempotent_response is not None:
+        return idempotent_response
+    dispatch_result = dispatch_route.handler(request, resolved_driver_context)
+    return dispatch_result.result, dispatch_result.driver_result
+
+
 def _authorize_generic_web_preview_route(
     *,
     route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
@@ -2904,6 +3007,26 @@ def _descriptor_driver_authz_action(route_path: str) -> str:
         return _driver_route_metadata_from_descriptors()[route_path].authz_action
     except KeyError as exc:
         raise ValueError(f"Unknown descriptor-backed driver route: {route_path}") from exc
+
+
+def _validate_descriptor_driver_dispatch_routes(
+    dispatch_routes: dict[str, _DescriptorDriverDispatchRoute[Any]],
+) -> None:
+    descriptor_routes = _driver_route_metadata_from_descriptors()
+    for route_path, dispatch_route in dispatch_routes.items():
+        if route_path != dispatch_route.execution_metadata.route_path:
+            raise ValueError(
+                f"Descriptor-backed dispatch route {route_path} must match execution metadata."
+            )
+        descriptor_route = descriptor_routes.get(route_path)
+        if descriptor_route is None:
+            raise ValueError(
+                f"Descriptor-backed dispatch route {route_path} must be declared by a driver descriptor."
+            )
+        if descriptor_route.method != "POST":
+            raise ValueError(
+                f"Descriptor-backed dispatch route {route_path} must be declared as POST."
+            )
 
 
 def _driver_write_routes_from_descriptors() -> frozenset[str]:
@@ -7918,6 +8041,8 @@ def create_launchplane_service_app(
             else None
         )
     )
+    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes()
+    _validate_descriptor_driver_dispatch_routes(descriptor_driver_dispatch_routes)
     write_routes = _build_write_routes()
     resolved_ingress_provider_factory = ingress_provider_factory
     if resolved_ingress_provider_factory is None:
@@ -12566,6 +12691,22 @@ def create_launchplane_service_app(
                 assert isinstance(provider_target_result, ProviderTargetOperationRouteResult)
                 result = provider_target_result.result
                 driver_result = provider_target_result.driver_result
+            elif path in descriptor_driver_dispatch_routes:
+                dispatch_response = _dispatch_descriptor_driver_route(
+                    dispatch_route=descriptor_driver_dispatch_routes[path],
+                    payload=payload,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    request_scope=request_scope,
+                    request_idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if isinstance(dispatch_response, list):
+                    return dispatch_response
+                result, driver_result = dispatch_response
             elif path == "/v1/drivers/launchplane/self-deploy":
                 self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -15017,6 +15158,21 @@ def create_launchplane_service_app(
                     request=preview_lifecycle_sweep_request,
                 )
                 result = {}
+            elif path.startswith("/v1/drivers/"):
+                return _json_response(
+                    start_response=start_response,
+                    status_code=500,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "driver_route_not_registered",
+                            "message": (
+                                "Driver route is declared but has no registered service handler."
+                            ),
+                        },
+                    },
+                )
             else:
                 preview_destroyed_request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

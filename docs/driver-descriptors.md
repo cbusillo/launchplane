@@ -9,8 +9,10 @@ discovery, operator read models, and future GUI action rendering. They describe
 what a product driver can do without making the UI understand the runtime
 provider that currently executes the work.
 
-This is a read-first contract. It does not execute actions and it does not add a
-frontend plugin system.
+This is a read-first contract and does not add a frontend plugin system.
+Descriptor presence alone does not execute actions; service dispatch requires a
+matching backend handler registration, and tests must fail closed when the
+descriptor route and handler registration drift.
 
 ## Provider Boundary
 
@@ -408,6 +410,10 @@ The HTTP service admits product-driver POST routes from descriptor action and
 route-alias paths and reads product-driver handler authorization actions from
 descriptor route metadata, so new drivers do not need a second hardcoded router
 allowlist or authz-action entry.
+Routes can also opt into descriptor-backed service dispatch when a backend
+handler is explicitly registered for the same descriptor route. This keeps
+descriptor metadata as the route/authz source of truth while preventing an
+advertised descriptor action from becoming executable without implementation.
 Descriptor route metadata and service compatibility policy also drive
 product-driver compatibility checks. A
 product whose descriptor names a `base_driver_id` can use the base driver's
