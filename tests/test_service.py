@@ -37,6 +37,7 @@ from control_plane.contracts.driver_descriptor import DriverActionDescriptor, Dr
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
@@ -25797,10 +25798,47 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            request_payload = {
+            request_payload: dict[str, object] = {
                 "product": "verireel",
                 "inventory": {"context": "verireel-testing"},
             }
+            idempotency_key = "verireel-preview-inventory:verireel-testing"
+            FilesystemRecordStore(state_dir=root / "state").write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id="idempotency-stale-verireel-preview-inventory",
+                    scope="|".join(
+                        (
+                            "every/verireel",
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main",
+                            "repo:every/verireel:pull_request",
+                        )
+                    ),
+                    route_path="/v1/drivers/verireel/preview-inventory",
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=control_plane_service._idempotency_request_fingerprint(
+                        route_path="/v1/drivers/verireel/preview-inventory",
+                        payload=request_payload,
+                    ),
+                    response_status_code=202,
+                    response_trace_id="stale-verireel-preview-inventory",
+                    recorded_at="2026-04-29T19:22:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "trace_id": "stale-verireel-preview-inventory",
+                        "records": {"preview_inventory_scan_id": "stale-scan"},
+                        "result": {
+                            "context": "verireel-testing",
+                            "previews": [
+                                {
+                                    "applicationId": "stale-app",
+                                    "applicationName": "stale-preview-app",
+                                    "previewSlug": "stale",
+                                }
+                            ],
+                        },
+                    },
+                )
+            )
 
             with patch(
                 "control_plane.service.execute_verireel_preview_inventory",
@@ -25823,20 +25861,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     method="POST",
                     path="/v1/drivers/verireel/preview-inventory",
                     payload=request_payload,
-                    headers={"Idempotency-Key": "verireel-preview-inventory:verireel-testing"},
+                    headers={"Idempotency-Key": idempotency_key},
                 )
                 second_status_code, second_payload = _invoke_app(
                     app,
                     method="POST",
                     path="/v1/drivers/verireel/preview-inventory",
                     payload=request_payload,
-                    headers={"Idempotency-Key": "verireel-preview-inventory:verireel-testing"},
+                    headers={"Idempotency-Key": idempotency_key},
                 )
 
             self.assertEqual(first_status_code, 202)
             self.assertEqual(second_status_code, 202)
             self.assertEqual(first_payload["result"]["previews"][0]["previewSlug"], "pr-93")
             self.assertEqual(second_payload["result"]["previews"], [])
+            self.assertNotIn("replayed", first_payload)
+            self.assertNotIn("replayed", second_payload)
             self.assertEqual(execute_mock.call_count, 2)
 
     def test_preview_lifecycle_plan_endpoint_records_report_only_plan(self) -> None:
