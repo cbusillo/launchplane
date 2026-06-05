@@ -31192,9 +31192,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "verified_at": "2026-04-21T01:38:00Z",
                     },
                 },
+                headers={"Idempotency-Key": "verireel-preview-verification-pr-123"},
+            )
+            replay_status_code, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/preview-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "anchor_pr_number": 123,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-21T01:38:00Z",
+                    },
+                },
+                headers={"Idempotency-Key": "verireel-preview-verification-pr-123"},
             )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(payload["records"], replay_payload["records"])
             self.assertEqual(payload["records"]["transition"], "ready")
             preview = store.read_preview_record("preview-verireel-testing-verireel-pr-123")
             generation = store.read_preview_generation_record(
