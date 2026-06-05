@@ -2766,6 +2766,34 @@ def _handle_verireel_testing_deploy(
     )
 
 
+def _handle_verireel_stable_environment(
+    request: VeriReelStableEnvironmentEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, record_store
+    driver_result = resolve_verireel_stable_environment(
+        control_plane_root=control_plane_root_path,
+        request=request.environment,
+    )
+    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
+
+
+def _handle_verireel_runtime_verification(
+    request: VeriReelRuntimeVerificationEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, record_store
+    driver_result = execute_verireel_rollout_verification(
+        control_plane_root=control_plane_root_path,
+        request=request.verification,
+    )
+    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
+
+
 def _validate_generic_web_preview_verification_profile(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2852,6 +2880,24 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_verireel_testing_deploy,
         ),
+        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.environment.context,
+                instance=request.environment.instance,
+            ),
+            handler=_handle_verireel_stable_environment,
+        ),
+        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.verification.context,
+                instance=request.verification.instance,
+            ),
+            handler=_handle_verireel_runtime_verification,
+        ),
     }
 
 
@@ -2864,6 +2910,8 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
+            _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
+            _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
         )
     )
 
@@ -14075,62 +14123,6 @@ def create_launchplane_service_app(
                         and replacement_operation.result.release_tuple_id
                     ):
                         result["release_tuple_id"] = replacement_operation.result.release_tuple_id
-            elif path == _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path:
-                verireel_environment_request = (
-                    _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_environment_request.product,
-                    context=verireel_environment_request.environment.context,
-                    instance=verireel_environment_request.environment.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_environment_request.product,
-                    context=verireel_environment_request.environment.context,
-                    denial_message=_VERIREEL_STABLE_ENVIRONMENT_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = resolve_verireel_stable_environment(
-                    control_plane_root=resolved_root,
-                    request=verireel_environment_request.environment,
-                )
-                result = {}
-            elif path == _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path:
-                verireel_runtime_verification_request = (
-                    _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_runtime_verification_request.product,
-                    context=verireel_runtime_verification_request.verification.context,
-                    instance=verireel_runtime_verification_request.verification.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_runtime_verification_request.product,
-                    context=verireel_runtime_verification_request.verification.context,
-                    denial_message=_VERIREEL_RUNTIME_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = execute_verireel_rollout_verification(
-                    control_plane_root=resolved_root,
-                    request=verireel_runtime_verification_request.verification,
-                )
-                result = {}
             elif path == _VERIREEL_APP_MAINTENANCE_ROUTE.route_path:
                 verireel_maintenance_request = (
                     _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
