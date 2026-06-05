@@ -31115,6 +31115,80 @@ class LaunchplaneServiceTests(unittest.TestCase):
             execute_mock.assert_called_once()
             self.assertTrue(execute_mock.call_args.kwargs["run_async"])
 
+    def test_verireel_prod_backup_gate_retry_runs_again_after_pending_result(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_prod_backup_gate.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            backup_gate_payload = {
+                "product": "verireel",
+                "backup_gate": {
+                    "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1"
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_backup_gate",
+                return_value=VeriReelProdBackupGateResult(
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    backup_status="pending",
+                ),
+            ) as execute_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-backup-gate",
+                    payload=backup_gate_payload,
+                    headers={"Idempotency-Key": "verireel-prod-backup-gate-pending"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-backup-gate",
+                    payload=backup_gate_payload,
+                    headers={"Idempotency-Key": "verireel-prod-backup-gate-pending"},
+                )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["result"]["backup_status"], "pending")
+            self.assertEqual(second_payload["result"]["backup_status"], "pending")
+            self.assertNotIn("replayed", first_payload)
+            self.assertNotIn("replayed", second_payload)
+            self.assertEqual(execute_mock.call_count, 2)
+            for call in execute_mock.call_args_list:
+                self.assertTrue(call.kwargs["run_async"])
+
     def test_verireel_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
