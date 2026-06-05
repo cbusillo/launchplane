@@ -426,14 +426,15 @@ descriptor route metadata, so new drivers do not need a second hardcoded router
 allowlist or authz-action entry.
 Routes can also opt into descriptor-backed service dispatch when a backend
 handler is explicitly registered for the same descriptor route. Generic-web
-deploy, promotion workflow dispatch, stable verification, rollback planning,
-rollback apply, preview verification, Odoo artifact publish inputs and evidence
-ingestion, Odoo prod promotion input reads, Odoo prod backup gate, prod
-rollback, target replacement planning, target replacement apply, post-deploy,
-config/website override hooks, Odoo preview apply and inputs, and the VeriReel
-testing and prod deploys, prod backup gate, prod promotion, prod rollback, app
-maintenance, preview refresh, preview inventory reads, preview destroy, plus
-testing and preview verification use descriptor-backed dispatch. This keeps
+deploy, prod promotion, promotion workflow dispatch, stable verification,
+rollback planning, rollback apply, preview verification, Odoo artifact publish
+inputs and evidence ingestion, Odoo prod promotion input reads, Odoo prod backup
+gate, prod rollback, target replacement planning, target replacement apply,
+post-deploy, config/website override hooks, Odoo preview apply and inputs, and
+the VeriReel testing and prod deploys, prod backup gate, prod promotion, prod
+rollback, app maintenance, preview refresh, preview inventory reads, preview
+destroy, plus testing and preview verification use descriptor-backed dispatch.
+This keeps
 descriptor metadata as the route/authz source of truth while preventing an
 advertised descriptor action from becoming executable without implementation.
 Descriptor route metadata and service compatibility policy also drive

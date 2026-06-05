@@ -18037,6 +18037,82 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_human_session_cannot_replay_live_generic_web_prod_promotion(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "promotion": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    "source_git_ref": "abc123",
+                    "dry_run": False,
+                },
+            }
+            idempotency_key = "generic-web-prod-promotion-human-live"
+            store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id="idempotency-generic-web-prod-promotion-human-live",
+                    scope="|".join(("github-human", "alice", "123")),
+                    route_path="/v1/drivers/generic-web/prod-promotion",
+                    idempotency_key=idempotency_key,
+                    request_fingerprint=control_plane_service._idempotency_request_fingerprint(
+                        route_path="/v1/drivers/generic-web/prod-promotion",
+                        payload=request_payload,
+                    ),
+                    response_status_code=202,
+                    response_trace_id="generic-web-prod-promotion-human-live",
+                    recorded_at="2026-06-05T22:00:00Z",
+                    response_payload={
+                        "status": "accepted",
+                        "trace_id": "generic-web-prod-promotion-human-live",
+                        "records": {"promotion_record_id": "promotion-live"},
+                        "result": {"promotion_status": "pass", "dry_run": False},
+                    },
+                )
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion",
+                payload=request_payload,
+                authorization="",
+                headers={"Cookie": cookie, "Idempotency-Key": idempotency_key},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_human_session_can_dispatch_generic_web_promotion_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

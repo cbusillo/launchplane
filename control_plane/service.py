@@ -325,6 +325,7 @@ from control_plane.workflows.generic_web_deploy import (
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
+    GenericWebPromotionStore,
     execute_generic_web_prod_promotion,
     resolve_generic_web_promotion_lanes,
 )
@@ -850,6 +851,7 @@ _DescriptorDriverCustomDispatchHandler = Callable[
         _ResolvedProductDriverContext,
         object,
         Path,
+        LaunchplaneIdentity,
         str,
         str,
         str,
@@ -867,6 +869,16 @@ _DescriptorDriverDispatchValidator = Callable[
     ],
     None,
 ]
+_DescriptorDriverPreAuthorizationValidator = Callable[
+    [
+        _DriverRouteEnvelopeT,
+        _ResolvedProductDriverContext,
+        LaunchplaneIdentity,
+        _StartResponse,
+        str,
+    ],
+    list[bytes] | None,
+]
 
 
 @dataclass(frozen=True)
@@ -877,9 +889,13 @@ class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
     pre_idempotency_validator: _DescriptorDriverDispatchValidator[_DriverRouteEnvelopeT] | None = (
         None
     )
+    pre_authorization_validator: (
+        _DescriptorDriverPreAuthorizationValidator[_DriverRouteEnvelopeT] | None
+    ) = None
     custom_dispatch_handler: (
         _DescriptorDriverCustomDispatchHandler[_DriverRouteEnvelopeT] | None
     ) = None
+    skip_pre_idempotency_check: bool = False
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -2776,6 +2792,100 @@ def _handle_generic_web_promotion_workflow(
     )
 
 
+def _dispatch_generic_web_prod_promotion(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+    identity: LaunchplaneIdentity,
+    request_scope: str,
+    request_idempotency_key: str,
+    request_fingerprint: str,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    del identity
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web prod promotion requires a product profile lane."
+        )
+    idempotent_response = _check_idempotent_request(
+        record_store=record_store,
+        scope=request_scope,
+        route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+        idempotency_key=request_idempotency_key,
+        request_fingerprint=request_fingerprint,
+        start_response=start_response,
+        trace_id=trace_id,
+    )
+    if idempotent_response is not None:
+        return idempotent_response
+    driver_result = execute_generic_web_prod_promotion(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPromotionStore, record_store),
+        request=request.promotion,
+    )
+    return (
+        {
+            "promotion_record_id": driver_result.promotion_record_id,
+            "deployment_record_id": driver_result.deployment_record_id,
+            "backup_record_id": driver_result.backup_record_id,
+            "inventory_record_id": driver_result.inventory_record_id,
+            "promotion_status": driver_result.promotion_status,
+            "deployment_status": driver_result.deployment_status,
+            "source_health_status": driver_result.source_health_status,
+            "destination_health_status": driver_result.destination_health_status,
+            "backup_status": driver_result.backup_status,
+            "release_status": driver_result.release_status,
+            "release_tag": driver_result.release_tag,
+            "release_url": driver_result.release_url,
+            "dry_run": driver_result.dry_run,
+        },
+        driver_result,
+    )
+
+
+def _validate_generic_web_prod_promotion_lanes(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del control_plane_root_path
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web prod promotion requires a product profile lane."
+        )
+    resolve_generic_web_promotion_lanes(
+        record_store=cast(GenericWebPromotionStore, record_store),
+        request=request.promotion,
+    )
+
+
+def _reject_human_live_generic_web_prod_promotion(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    identity: LaunchplaneIdentity,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> list[bytes] | None:
+    del resolved_context
+    if not isinstance(identity, GitHubHumanIdentity) or request.promotion.dry_run:
+        return None
+    return _json_response(
+        start_response=start_response,
+        status_code=403,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "authorization_denied",
+                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
+            },
+        },
+    )
+
+
 def _handle_generic_web_rollback(
     request: GenericWebRollbackEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2940,12 +3050,14 @@ def _dispatch_odoo_target_replacement_apply(
     resolved_context: _ResolvedProductDriverContext,
     record_store: object,
     control_plane_root_path: Path,
+    identity: LaunchplaneIdentity,
     request_scope: str,
     request_idempotency_key: str,
     request_fingerprint: str,
     start_response: _StartResponse,
     trace_id: str,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    del identity
     if resolved_context.lane is None:
         raise ProductDriverMismatchError(
             "Odoo target replacement apply requires a known product lane."
@@ -3518,6 +3630,19 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_generic_web_promotion_workflow,
         ),
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                instance=request.promotion.to_instance,
+                require_profile=True,
+            ),
+            pre_idempotency_validator=_validate_generic_web_prod_promotion_lanes,
+            pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
+            custom_dispatch_handler=_dispatch_generic_web_prod_promotion,
+            skip_pre_idempotency_check=True,
+        ),
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3797,6 +3922,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
     return frozenset(
         (
             _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+            _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
             _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
@@ -3875,6 +4001,16 @@ def _dispatch_descriptor_driver_route(
             record_store,
             control_plane_root_path,
         )
+    if dispatch_route.pre_authorization_validator is not None:
+        pre_authorization_response = dispatch_route.pre_authorization_validator(
+            request,
+            resolved_driver_context,
+            identity,
+            start_response,
+            trace_id,
+        )
+        if pre_authorization_response is not None:
+            return pre_authorization_response
     authorization_product = dispatch_context.product
     if resolved_driver_context.profile is not None:
         authorization_product = resolved_driver_context.profile.product
@@ -3900,7 +4036,10 @@ def _dispatch_descriptor_driver_route(
     )
     if authorization_response is not None:
         return authorization_response
-    if route_metadata.route_path not in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
+    if (
+        route_metadata.route_path not in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES
+        and not dispatch_route.skip_pre_idempotency_check
+    ):
         idempotent_response = _check_idempotent_request(
             record_store=record_store,
             scope=request_scope,
@@ -3918,6 +4057,7 @@ def _dispatch_descriptor_driver_route(
             resolved_driver_context,
             record_store,
             control_plane_root_path,
+            identity,
             request_scope,
             request_idempotency_key,
             request_fingerprint,
@@ -14029,79 +14169,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
-                generic_web_promotion_request = (
-                    _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=generic_web_promotion_request.product,
-                    require_profile=True,
-                )
-                _profile, _source_lane, destination_lane = resolve_generic_web_promotion_lanes(
-                    record_store=record_store,
-                    request=generic_web_promotion_request.promotion,
-                )
-                if (
-                    isinstance(identity, GitHubHumanIdentity)
-                    and not generic_web_promotion_request.promotion.dry_run
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
-                            },
-                        },
-                    )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=generic_web_promotion_request.product,
-                    context=destination_lane.context,
-                    denial_message=_GENERIC_WEB_PROD_PROMOTION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_generic_web_prod_promotion(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_promotion_request.promotion,
-                )
-                result = {
-                    "promotion_record_id": driver_result.promotion_record_id,
-                    "deployment_record_id": driver_result.deployment_record_id,
-                    "backup_record_id": driver_result.backup_record_id,
-                    "inventory_record_id": driver_result.inventory_record_id,
-                    "promotion_status": driver_result.promotion_status,
-                    "deployment_status": driver_result.deployment_status,
-                    "source_health_status": driver_result.source_health_status,
-                    "destination_health_status": driver_result.destination_health_status,
-                    "backup_status": driver_result.backup_status,
-                    "release_status": driver_result.release_status,
-                    "release_tag": driver_result.release_tag,
-                    "release_url": driver_result.release_url,
-                    "dry_run": driver_result.dry_run,
-                }
             elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
                 generic_web_desired_state_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
