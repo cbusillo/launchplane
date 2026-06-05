@@ -508,6 +508,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path,
             dispatch_routes,
         )
+        self.assertIn(
+            control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
+            dispatch_routes,
+        )
         self.assertIn(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path, dispatch_routes)
         self.assertIn(
             control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
@@ -1216,6 +1220,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
@@ -1243,6 +1248,36 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "_DESCRIPTORS",
             (
                 descriptor_without_prod_rollback,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "odoo"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_target_replacement_plan_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_target_replacement_plan = registry.ODOO_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.ODOO_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_target_replacement_plan,
                 *(
                     descriptor
                     for descriptor in registry._DESCRIPTORS
@@ -1663,6 +1698,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 {
                     control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
                     control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+                    control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
                     control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
                     control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
                     control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
@@ -1672,6 +1708,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             "/v1/drivers/verireel/preview-inventory",
+            control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
+        )
+        self.assertIn(
+            "/v1/drivers/odoo/target-replacement-plan",
             control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
         )
         self.assertEqual(

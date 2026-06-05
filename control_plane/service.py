@@ -2402,6 +2402,7 @@ _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
         _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
         _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+        _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
         _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
         _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
@@ -2897,6 +2898,24 @@ def _handle_odoo_prod_rollback(
         },
         driver_result=driver_result,
     )
+
+
+def _handle_odoo_target_replacement_plan(
+    request: OdooTargetReplacementPlanEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    if resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Odoo target replacement plan requires a known product lane."
+        )
+    driver_result = build_odoo_stable_target_replacement_plan(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(OdooStableTargetReplacementStore, record_store),
+        request=request.replacement,
+    )
+    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _handle_odoo_post_deploy(
@@ -3459,6 +3478,16 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_prod_rollback,
         ),
+        _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                instance=request.replacement.instance,
+                require_profile=True,
+            ),
+            handler=_handle_odoo_target_replacement_plan,
+        ),
         _ODOO_POST_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_POST_DEPLOY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3643,6 +3672,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
             _ODOO_PROD_ROLLBACK_ROUTE.route_path,
+            _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
             _ODOO_POST_DEPLOY_ROUTE.route_path,
             _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
             _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
@@ -14249,42 +14279,6 @@ def create_launchplane_service_app(
                     "post_deploy_status": driver_result.post_deploy_status,
                     "destination_health_status": driver_result.destination_health_status,
                 }
-            elif path == _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path:
-                odoo_replacement_plan_request = (
-                    _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.envelope_model.model_validate(payload)
-                )
-                profile = record_store.read_product_profile_record(
-                    odoo_replacement_plan_request.product
-                )
-                replacement_plan_lane = _find_product_profile_lane(
-                    profile=profile,
-                    context="",
-                    instance=odoo_replacement_plan_request.replacement.instance,
-                )
-                if replacement_plan_lane is None:
-                    raise click.ClickException(
-                        "Odoo target replacement plan requires a known product lane."
-                    )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_replacement_plan_request.product,
-                    authorization_context=replacement_plan_lane.context,
-                    descriptor_context=replacement_plan_lane.context,
-                    descriptor_instance=replacement_plan_lane.instance,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = build_odoo_stable_target_replacement_plan(
-                    control_plane_root=resolved_root,
-                    record_store=cast(OdooStableTargetReplacementStore, record_store),
-                    request=odoo_replacement_plan_request.replacement,
-                )
-                result = {}
             elif path == _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path:
                 odoo_replacement_apply_request = (
                     _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.envelope_model.model_validate(payload)
