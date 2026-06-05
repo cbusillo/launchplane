@@ -25275,15 +25275,28 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "product": "verireel",
                         "environment": {"context": "verireel", "instance": "testing"},
                     },
+                    headers={"Idempotency-Key": "verireel-stable-environment-read"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/stable-environment",
+                    payload={
+                        "product": "verireel",
+                        "environment": {"context": "verireel", "instance": "testing"},
+                    },
+                    headers={"Idempotency-Key": "verireel-stable-environment-read"},
                 )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertNotIn("replayed", replay_payload)
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["result"]["target_name"], "ver-testing-app")
             self.assertEqual(
                 payload["result"]["primary_base_url"], "https://ver-testing.shinycomputers.com"
             )
-            resolve_mock.assert_called_once()
+            self.assertEqual(resolve_mock.call_count, 2)
 
     def test_verireel_runtime_verification_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -25336,15 +25349,93 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "product": "verireel",
                         "verification": {"context": "verireel", "instance": "testing"},
                     },
+                    headers={"Idempotency-Key": "verireel-runtime-verification-read"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/runtime-verification",
+                    payload={
+                        "product": "verireel",
+                        "verification": {"context": "verireel", "instance": "testing"},
+                    },
+                    headers={"Idempotency-Key": "verireel-runtime-verification-read"},
                 )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertNotIn("replayed", replay_payload)
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["result"]["status"], "pass")
             self.assertEqual(
                 payload["result"]["base_url"], "https://ver-testing.shinycomputers.com"
             )
-            verify_mock.assert_called_once()
+            self.assertEqual(verify_mock.call_count, 2)
+
+    def test_verireel_stable_read_drivers_reject_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["other-context"],
+                            "actions": ["verireel_stable_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with (
+                patch("control_plane.service.resolve_verireel_stable_environment") as resolve_mock,
+                patch("control_plane.service.execute_verireel_rollout_verification") as verify_mock,
+            ):
+                environment_status_code, environment_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/stable-environment",
+                    payload={
+                        "product": "verireel",
+                        "environment": {"context": "verireel", "instance": "testing"},
+                    },
+                )
+                runtime_status_code, runtime_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/runtime-verification",
+                    payload={
+                        "product": "verireel",
+                        "verification": {"context": "verireel", "instance": "testing"},
+                    },
+                )
+
+            self.assertEqual(environment_status_code, 403)
+            self.assertEqual(environment_payload["error"]["code"], "authorization_denied")
+            self.assertEqual(runtime_status_code, 403)
+            self.assertEqual(runtime_payload["error"]["code"], "authorization_denied")
+            resolve_mock.assert_not_called()
+            verify_mock.assert_not_called()
 
     def test_verireel_app_maintenance_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
