@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.cli import main
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -32,6 +33,7 @@ from control_plane.contracts.every_code_preview_gate_record import EveryCodePrev
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -205,6 +207,86 @@ class _StubVerifier:
         if token != "valid-token":
             raise ValueError("OIDC bearer token is required.")
         return self.identity
+
+
+_FAKE_DESCRIPTOR_DRIVER_ID = "fake-descriptor"
+_FAKE_DESCRIPTOR_ROUTE_PATH = "/v1/drivers/fake-descriptor/ping"
+
+
+class _FakeDescriptorDispatchEnvelope(control_plane_service._ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: str = ""
+    value: str = ""
+
+
+class _FakeDescriptorDispatchDriverResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    processed_value: str
+
+
+def _fake_descriptor_dispatch_descriptor() -> DriverDescriptor:
+    return DriverDescriptor(
+        driver_id=_FAKE_DESCRIPTOR_DRIVER_ID,
+        label="Fake descriptor dispatch",
+        product="fake-descriptor",
+        description="Test-only driver descriptor for descriptor dispatch coverage.",
+        context_patterns=("fake-context",),
+        provider_boundary="Test-only provider boundary.",
+        actions=(
+            DriverActionDescriptor(
+                action_id="ping",
+                label="Ping",
+                description="Test descriptor-backed dispatch route.",
+                safety="safe_write",
+                scope="instance",
+                method="POST",
+                route_path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                authz_action="fake_descriptor.ping",
+                writes_records=("fake_descriptor_result",),
+            ),
+        ),
+    )
+
+
+def _fake_descriptor_dispatch_route(
+    calls: list[tuple[_FakeDescriptorDispatchEnvelope, str]],
+) -> control_plane_service._DescriptorDriverDispatchRoute[_FakeDescriptorDispatchEnvelope]:
+    def context_resolver(
+        request: _FakeDescriptorDispatchEnvelope,
+    ) -> control_plane_service._DescriptorDriverDispatchContext:
+        return control_plane_service._DescriptorDriverDispatchContext(
+            product=request.product,
+            context=request.context,
+            instance=request.instance,
+            require_profile=True,
+        )
+
+    def handler(
+        request: _FakeDescriptorDispatchEnvelope,
+        resolved_context: control_plane_service._ResolvedProductDriverContext,
+    ) -> control_plane_service._DescriptorDriverDispatchResult:
+        lane_instance = resolved_context.lane.instance if resolved_context.lane is not None else ""
+        calls.append((request, lane_instance))
+        return control_plane_service._DescriptorDriverDispatchResult(
+            result={"request_id": f"fake-descriptor-{request.value}"},
+            driver_result=_FakeDescriptorDispatchDriverResult(
+                status="pass",
+                processed_value=f"{request.value}:{lane_instance}",
+            ),
+        )
+
+    return control_plane_service._DescriptorDriverDispatchRoute(
+        execution_metadata=control_plane_service._DriverRouteExecutionMetadata(
+            route_path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+            envelope_model=_FakeDescriptorDispatchEnvelope,
+            denial_message="Workflow cannot execute fake descriptor dispatch.",
+        ),
+        context_resolver=context_resolver,
+        handler=handler,
+    )
 
 
 class _StubGitHubOAuthClient:
@@ -12020,6 +12102,306 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_descriptor_dispatch_fake_route_executes_authorized_handler(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload("fake-product")
+            profile_payload["driver_id"] = _FAKE_DESCRIPTOR_DRIVER_ID
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "fake-context",
+                    "base_url": "https://fake.example.test",
+                    "health_url": "https://fake.example.test/health",
+                },
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["fake-product"],
+                            "contexts": ["fake-context"],
+                            "actions": ["fake_descriptor.ping"],
+                        }
+                    ]
+                }
+            )
+            calls: list[tuple[_FakeDescriptorDispatchEnvelope, str]] = []
+            with (
+                patch(
+                    "control_plane.service.list_driver_descriptors",
+                    return_value=(_fake_descriptor_dispatch_descriptor(),),
+                ),
+                patch(
+                    "control_plane.service._descriptor_driver_dispatch_routes",
+                    return_value={
+                        _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
+                    },
+                ),
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                    payload={
+                        "schema_version": 1,
+                        "product": "fake-product",
+                        "context": "fake-context",
+                        "instance": "testing",
+                        "value": "alpha",
+                    },
+                    headers={"Idempotency-Key": "fake-dispatch-alpha"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["request_id"], "fake-descriptor-alpha")
+        self.assertEqual(payload["result"], {"status": "pass", "processed_value": "alpha:testing"})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "testing")
+
+    def test_descriptor_dispatch_fake_route_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload("fake-product")
+            profile_payload["driver_id"] = _FAKE_DESCRIPTOR_DRIVER_ID
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "fake-context",
+                    "base_url": "https://fake.example.test",
+                    "health_url": "https://fake.example.test/health",
+                },
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["fake-product"],
+                            "contexts": ["other-context"],
+                            "actions": ["fake_descriptor.ping"],
+                        }
+                    ]
+                }
+            )
+            calls: list[tuple[_FakeDescriptorDispatchEnvelope, str]] = []
+            with (
+                patch(
+                    "control_plane.service.list_driver_descriptors",
+                    return_value=(_fake_descriptor_dispatch_descriptor(),),
+                ),
+                patch(
+                    "control_plane.service._descriptor_driver_dispatch_routes",
+                    return_value={
+                        _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
+                    },
+                ),
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                    payload={
+                        "schema_version": 1,
+                        "product": "fake-product",
+                        "context": "fake-context",
+                        "instance": "testing",
+                        "value": "alpha",
+                    },
+                    headers={"Idempotency-Key": "fake-dispatch-denied"},
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(calls, [])
+
+    def test_descriptor_dispatch_fake_route_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload("fake-product")
+            profile_payload["driver_id"] = _FAKE_DESCRIPTOR_DRIVER_ID
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "fake-context",
+                    "base_url": "https://fake.example.test",
+                    "health_url": "https://fake.example.test/health",
+                },
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["fake-product"],
+                            "contexts": ["fake-context"],
+                            "actions": ["fake_descriptor.ping"],
+                        }
+                    ]
+                }
+            )
+            calls: list[tuple[_FakeDescriptorDispatchEnvelope, str]] = []
+            request_payload = {
+                "schema_version": 1,
+                "product": "fake-product",
+                "context": "fake-context",
+                "instance": "testing",
+                "value": "alpha",
+            }
+            with (
+                patch(
+                    "control_plane.service.list_driver_descriptors",
+                    return_value=(_fake_descriptor_dispatch_descriptor(),),
+                ),
+                patch(
+                    "control_plane.service._descriptor_driver_dispatch_routes",
+                    return_value={
+                        _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
+                    },
+                ),
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                )
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "fake-dispatch-replay"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "fake-dispatch-replay"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"], second_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(len(calls), 1)
+
+    def test_descriptor_dispatch_route_requires_descriptor_declaration(self) -> None:
+        calls: list[tuple[_FakeDescriptorDispatchEnvelope, str]] = []
+        policy = LaunchplaneAuthzPolicy.model_validate({"github_actions": []})
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch("control_plane.service.list_driver_descriptors", return_value=()),
+            patch(
+                "control_plane.service._descriptor_driver_dispatch_routes",
+                return_value={_FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)},
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "must be declared by a driver descriptor",
+            ):
+                create_launchplane_service_app(
+                    state_dir=Path(temporary_directory_name) / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+
+    def test_unregistered_descriptor_driver_route_fails_closed(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["fake-product"],
+                        "contexts": ["fake-context"],
+                        "actions": ["fake_descriptor.ping", "preview_destroyed.write"],
+                    }
+                ]
+            }
+        )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.service.list_driver_descriptors",
+                return_value=(_fake_descriptor_dispatch_descriptor(),),
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path=_FAKE_DESCRIPTOR_ROUTE_PATH,
+                payload={
+                    "schema_version": 1,
+                    "product": "fake-product",
+                    "destroy": {
+                        "context": "fake-context",
+                        "anchor_repo": "cbusillo/fake-product",
+                        "anchor_pr_number": 1,
+                        "anchor_pr_url": "https://github.com/cbusillo/fake-product/pull/1",
+                    },
+                },
+                headers={"Idempotency-Key": "fake-unregistered-dispatch"},
+            )
+
+        self.assertEqual(status_code, 500)
+        self.assertEqual(payload["error"]["code"], "driver_route_not_registered")
 
     def test_tracked_target_logs_endpoint_returns_redacted_application_logs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
