@@ -28923,6 +28923,102 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_odoo_target_replacement_plan_recomputes_with_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-plan.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "workflow_refs": [
+                                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-plan.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_target_replacement_plan.read"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo-tenant-cm",
+                "replacement": {
+                    "product": "odoo-tenant-cm",
+                    "instance": "testing",
+                    "strategy": "recreate-in-place",
+                },
+            }
+
+            with patch(
+                "control_plane.service.build_odoo_stable_target_replacement_plan",
+                side_effect=(
+                    OdooStableTargetReplacementPlan(
+                        plan_status="ready",
+                        product="odoo-tenant-cm",
+                        context="cm",
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        target_record_found=True,
+                        target_id_record_found=True,
+                        inventory_found=True,
+                        expected_next_target_name="cm-testing-a",
+                    ),
+                    OdooStableTargetReplacementPlan(
+                        plan_status="ready",
+                        product="odoo-tenant-cm",
+                        context="cm",
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        target_record_found=True,
+                        target_id_record_found=True,
+                        inventory_found=True,
+                        expected_next_target_name="cm-testing-b",
+                    ),
+                ),
+            ) as plan_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-plan",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "replacement-plan-cm-testing"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-plan",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "replacement-plan-cm-testing"},
+                )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["result"]["expected_next_target_name"], "cm-testing-a")
+            self.assertEqual(second_payload["result"]["expected_next_target_name"], "cm-testing-b")
+            self.assertEqual(plan_mock.call_count, 2)
+
     def test_odoo_target_replacement_apply_driver_creates_operation_for_authorized_workflow(
         self,
     ) -> None:
