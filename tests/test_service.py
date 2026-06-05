@@ -20380,6 +20380,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
                                 "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
+                                "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": "public-ingress-token",
                                 "GH_TOKEN": "github-token",
                                 "LAUNCHPLANE_NPMPLUS_BASE_URL": "https://npmplus.example",
                                 "LAUNCHPLANE_NPMPLUS_IDENTITY": "automation@example.com",
@@ -20426,6 +20427,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT=200", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT=50", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_GH_BINARY=gh", updated_env_text)
+        self.assertIn(
+            "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN=public-ingress-token",
+            updated_env_text,
+        )
         self.assertIn("GH_TOKEN=github-token", updated_env_text)
         self.assertIn("LAUNCHPLANE_NPMPLUS_BASE_URL=https://npmplus.example", updated_env_text)
         self.assertIn("LAUNCHPLANE_NPMPLUS_IDENTITY=automation@example.com", updated_env_text)

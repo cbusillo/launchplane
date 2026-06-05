@@ -731,6 +731,23 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
 
+    def test_deploy_launchplane_projects_public_ingress_github_token(self) -> None:
+        workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: "
+            "${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}",
+            workflow_text,
+        )
+        self.assertIn(
+            '--arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}"',
+            workflow_text,
+        )
+        self.assertIn(
+            "{LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: $public_ingress_github_token}",
+            workflow_text,
+        )
+
     def test_deploy_launchplane_break_glass_rollback_uploads_evidence(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
@@ -958,10 +975,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 if grant_text.strip()
             ]
 
-        grant_index = {
-            (grant["products"][0], grant["contexts"][0]): grant
-            for grant in grants
-        }
+        grant_index = {(grant["products"][0], grant["contexts"][0]): grant for grant in grants}
         self.assertEqual(
             set(grant_index),
             {

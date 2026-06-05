@@ -93,6 +93,7 @@ jobs:
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
       LAUNCHPLANE_WORK_GRAPH_GH_TOKEN: ${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}
+      LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET }}
       LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
@@ -285,6 +286,7 @@ jobs:
                 --arg work_graph_issue_inbox_limit "${LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
+                --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
                 --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
                 --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
                 --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
@@ -366,6 +368,13 @@ jobs:
                   + (
                     if (($omit_npmplus_env | not) and $npmplus_secret != "") then
                       {LAUNCHPLANE_NPMPLUS_SECRET: $npmplus_secret}
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if $public_ingress_github_token != "" then
+                      {LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN: $public_ingress_github_token}
                     else
                       {}
                     end

@@ -10,10 +10,10 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener, urlopen
 import ipaddress
 import json
+import os
 import smtplib
 import socket
 import ssl
-import subprocess
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,6 +49,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
+PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 
 
 class PublicIngressMonitorStore(Protocol):
@@ -1070,54 +1071,141 @@ def _latest_external_url(attempts: tuple[PublicIngressNotificationAttemptRecord,
     )
 
 
-def _gh_issue_client(action: str, payload: dict[str, object]) -> dict[str, object]:
+def _gh_issue_client(
+    action: str, payload: dict[str, object], *, token: str | None = None
+) -> dict[str, object]:
+    resolved_token = _public_ingress_github_token(token)
     if action == "create":
-        command = [
-            "gh",
-            "issue",
-            "create",
-            "--repo",
-            str(payload["repository"]),
-            "--title",
-            str(payload["title"]),
-            "--body",
-            str(payload["body"]),
-        ]
+        repository = _github_repository_path(str(payload["repository"]))
+        body: dict[str, object] = {
+            "title": str(payload["title"]),
+            "body": str(payload["body"]),
+        }
         labels = payload.get("labels", [])
         if isinstance(labels, list):
-            for label in labels:
-                command.extend(["--label", str(label)])
+            body["labels"] = [str(label) for label in labels]
+        response = _github_api_request(
+            method="POST",
+            path=f"/repos/{repository}/issues",
+            token=resolved_token,
+            body=body,
+        )
     elif action == "comment":
-        issue_target = str(payload.get("issue_url") or payload.get("issue_number"))
-        command = [
-            "gh",
-            "issue",
-            "comment",
-            issue_target,
-            "--repo",
-            str(payload["repository"]),
-            "--body",
-            str(payload["body"]),
-        ]
+        repository, issue_number = _github_issue_reference(payload)
+        response = _github_api_request(
+            method="POST",
+            path=f"/repos/{repository}/issues/{issue_number}/comments",
+            token=resolved_token,
+            body={"body": str(payload["body"])},
+        )
     elif action == "close":
-        issue_target = str(payload["issue_url"])
-        command = [
-            "gh",
-            "issue",
-            "close",
-            issue_target,
-            "--repo",
-            str(payload["repository"]),
-            "--comment",
-            str(payload["body"]),
-        ]
+        repository, issue_number = _github_issue_reference(payload)
+        _github_api_request(
+            method="POST",
+            path=f"/repos/{repository}/issues/{issue_number}/comments",
+            token=resolved_token,
+            body={"body": str(payload["body"])},
+        )
+        response = _github_api_request(
+            method="PATCH",
+            path=f"/repos/{repository}/issues/{issue_number}",
+            token=resolved_token,
+            body={"state": "closed", "state_reason": "completed"},
+        )
     else:
         raise ValueError(f"unsupported GitHub notification action: {action}")
-    completed = subprocess.run(command, check=False, text=True, capture_output=True)
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or completed.stdout.strip() or "gh failed")
-    output = completed.stdout.strip()
-    return {"url": output, "id": output}
+    if not isinstance(response, dict):
+        raise RuntimeError("GitHub issue notification response must be a JSON object.")
+    return {
+        "url": str(response.get("html_url") or response.get("url") or "").strip(),
+        "id": str(response.get("node_id") or response.get("id") or "").strip(),
+    }
+
+
+def _public_ingress_github_token(token: str | None = None) -> str:
+    resolved = (
+        token if token is not None else os.environ.get(PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY, "")
+    ).strip()
+    if not resolved:
+        raise RuntimeError(
+            f"{PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY} is required for public ingress "
+            "GitHub notifications. Configure a managed automation token; "
+            "Launchplane does not fall back to active local gh auth."
+        )
+    return resolved
+
+
+def _github_api_request(
+    *, method: str, path: str, token: str, body: dict[str, object] | None = None
+) -> object:
+    request_body = None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if body is not None:
+        request_body = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(
+        url=f"https://api.github.com{path}",
+        method=method,
+        headers=headers,
+        data=request_body,
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            response_text = response.read().decode("utf-8")
+            return json.loads(response_text) if response_text.strip() else None
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace").strip()
+        message = detail or str(error)
+        raise RuntimeError(f"GitHub API request failed for {path}: {message}") from error
+    except (URLError, OSError) as error:
+        raise RuntimeError(f"GitHub API request failed for {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"GitHub API response for {path} was not valid JSON.") from error
+
+
+def _github_issue_reference(payload: dict[str, object]) -> tuple[str, int]:
+    repository = _github_repository_path(str(payload["repository"]))
+    issue_number = payload.get("issue_number")
+    if issue_number is not None:
+        return repository, _github_issue_number(issue_number)
+    issue_url = str(payload.get("issue_url", "")).strip()
+    if not issue_url:
+        raise ValueError("GitHub issue notification requires issue_url or issue_number.")
+    url_repository, url_issue_number = _github_issue_url_reference(issue_url)
+    if url_repository != repository:
+        raise ValueError("GitHub issue URL repository must match notification repository.")
+    return repository, url_issue_number
+
+
+def _github_issue_url_reference(issue_url: str) -> tuple[str, int]:
+    parsed = urlsplit(issue_url.strip())
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 4 or parts[2] != "issues":
+        raise ValueError("GitHub issue URL must use /owner/repo/issues/number.")
+    repository = _github_repository_path(f"{parts[0]}/{parts[1]}")
+    return repository, _github_issue_number(parts[3])
+
+
+def _github_repository_path(repository: str) -> str:
+    parts = [part.strip() for part in repository.strip().split("/") if part.strip()]
+    if len(parts) != 2:
+        raise ValueError("GitHub repository must use owner/name.")
+    return f"{parts[0]}/{parts[1]}"
+
+
+def _github_issue_number(value: object) -> int:
+    try:
+        issue_number = int(str(value))
+    except ValueError as error:
+        raise ValueError("GitHub issue number must be an integer.") from error
+    if issue_number <= 0:
+        raise ValueError("GitHub issue number must be positive.")
+    return issue_number
 
 
 def _send_email_message(
@@ -1169,8 +1257,14 @@ def public_ingress_alert_body(
 
 
 def build_github_issue_notifier(
-    *, gh_binary: str = "gh", runner: Callable[..., object] | None = None
+    *,
+    github_client: Callable[[str, dict[str, object]], dict[str, object]] | None = None,
+    token: str | None = None,
 ) -> Notifier:
+    client = github_client or (
+        lambda action, payload: _gh_issue_client(action, payload, token=token)
+    )
+
     def notify(
         record: PublicIngressObservationRecord,
         previous: PublicIngressObservationRecord | None,
@@ -1178,18 +1272,18 @@ def build_github_issue_notifier(
         issue_url = record.notification_key.strip()
         if not issue_url:
             return False
-        command = [
-            gh_binary,
-            "issue",
-            "comment",
-            issue_url,
-            "--body",
-            public_ingress_alert_body(record, previous),
-        ]
-        if runner is not None:
-            result = runner(command)
-            return getattr(result, "returncode", 0) == 0
-        completed = subprocess.run(command, check=False, text=True, capture_output=True)
-        return completed.returncode == 0
+        try:
+            repository, issue_number = _github_issue_url_reference(issue_url)
+            client(
+                "comment",
+                {
+                    "repository": repository,
+                    "issue_number": issue_number,
+                    "body": public_ingress_alert_body(record, previous),
+                },
+            )
+        except (RuntimeError, ValueError):
+            return False
+        return True
 
     return notify
