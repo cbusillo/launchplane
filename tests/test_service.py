@@ -24890,9 +24890,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "source_git_ref": "abcdef1234567890",
                         },
                     },
+                    headers={"Idempotency-Key": "verireel-testing-deploy-run-12345"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/testing-deploy",
+                    payload={
+                        "product": "verireel",
+                        "deploy": {
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                        },
+                    },
+                    headers={"Idempotency-Key": "verireel-testing-deploy-run-12345"},
                 )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(payload["records"], replay_payload["records"])
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
