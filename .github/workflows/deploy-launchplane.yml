@@ -399,16 +399,26 @@ jobs:
             })"
             service_env_removals_json="$({
               jq -n \
+                --arg public_ingress_github_token "${LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN:-}" \
                 --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
-                'if $omit_npmplus_env then
-                  [
-                    "LAUNCHPLANE_NPMPLUS_BASE_URL",
-                    "LAUNCHPLANE_NPMPLUS_IDENTITY",
-                    "LAUNCHPLANE_NPMPLUS_SECRET"
-                  ]
-                else
-                  []
-                end'
+                '(
+                  if $omit_npmplus_env then
+                    [
+                      "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                      "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                      "LAUNCHPLANE_NPMPLUS_SECRET"
+                    ]
+                  else
+                    []
+                  end
+                )
+                + (
+                  if $public_ingress_github_token == "" then
+                    ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"]
+                  else
+                    []
+                  end
+                )'
             })"
             request_payload="$({
               jq -n \
