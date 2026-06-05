@@ -29541,6 +29541,89 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["status"], "pass")
             execute_mock.assert_called_once()
 
+    def test_odoo_artifact_publish_driver_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["odoo_artifact_publish.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo",
+                "publish": {
+                    "context": "opw",
+                    "instance": "testing",
+                    "manifest": {
+                        "artifact_id": "artifact-opw-new",
+                        "source_commit": "2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                        "enterprise_base_digest": "sha256:enterprise",
+                        "image": {
+                            "repository": "ghcr.io/cbusillo/odoo-tenant-opw",
+                            "digest": "sha256:new",
+                        },
+                    },
+                },
+            }
+
+            with patch(
+                "control_plane.service.ingest_odoo_artifact_publish_evidence",
+                return_value=OdooArtifactPublishResult(
+                    status="pass",
+                    context="opw",
+                    instance="testing",
+                    artifact_id="artifact-opw-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-opw",
+                    image_digest="sha256:new",
+                    source_commit="2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                ),
+            ) as execute_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/artifact-publish",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "odoo-artifact-publish-opw"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/artifact-publish",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "odoo-artifact-publish-opw"},
+                )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertTrue(second_payload["replayed"])
+            execute_mock.assert_called_once()
+
     def test_odoo_artifact_publish_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

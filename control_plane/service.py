@@ -2705,6 +2705,44 @@ def _handle_generic_web_rollback_plan(
     )
 
 
+def _handle_odoo_artifact_publish(
+    request: OdooArtifactPublishEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, control_plane_root_path
+    driver_result = ingest_odoo_artifact_publish_evidence(
+        record_store=cast(OdooArtifactPublishEvidenceStore, record_store),
+        request=request.publish,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "artifact_id": driver_result.artifact_id,
+            "publish_status": driver_result.status,
+            "image_repository": driver_result.image_repository,
+            "image_digest": driver_result.image_digest,
+            "source_commit": driver_result.source_commit,
+        },
+        driver_result=driver_result,
+    )
+
+
+def _handle_odoo_artifact_publish_inputs(
+    request: OdooArtifactPublishInputsEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del record_store
+    driver_result = build_odoo_artifact_publish_inputs(
+        control_plane_root=control_plane_root_path,
+        request=request.inputs,
+        product_profile=resolved_context.profile,
+    )
+    return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
+
+
 def _handle_generic_web_preview_verification(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3053,6 +3091,24 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             handler=_handle_generic_web_preview_verification,
             pre_idempotency_validator=_validate_generic_web_preview_verification_profile,
         ),
+        _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.publish.context,
+            ),
+            handler=_handle_odoo_artifact_publish,
+        ),
+        _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.inputs.context,
+                instance=request.inputs.instance,
+            ),
+            handler=_handle_odoo_artifact_publish_inputs,
+        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3180,6 +3236,8 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+            _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
+            _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -13968,81 +14026,6 @@ def create_launchplane_service_app(
                     )
                     driver_result = _operation_payload(operation)
                     result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
-            elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
-                odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(
-                    payload
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_publish_request.product,
-                    authorization_context=odoo_publish_request.publish.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = ingest_odoo_artifact_publish_evidence(
-                    record_store=cast(OdooArtifactPublishEvidenceStore, record_store),
-                    request=odoo_publish_request.publish,
-                )
-                result = {
-                    "artifact_id": driver_result.artifact_id,
-                    "publish_status": driver_result.status,
-                    "image_repository": driver_result.image_repository,
-                    "image_digest": driver_result.image_digest,
-                    "source_commit": driver_result.source_commit,
-                }
-            elif path == _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path:
-                odoo_inputs_request = (
-                    _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(payload)
-                )
-                resolved_driver_context, authorization_response = (
-                    _resolve_and_authorize_descriptor_route(
-                        route_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        product=odoo_inputs_request.product,
-                        authorization_context=odoo_inputs_request.inputs.context,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        descriptor_context=odoo_inputs_request.inputs.context,
-                        descriptor_instance=odoo_inputs_request.inputs.instance,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = build_odoo_artifact_publish_inputs(
-                    control_plane_root=resolved_root,
-                    request=odoo_inputs_request.inputs,
-                    product_profile=resolved_driver_context.profile,
-                )
-                driver_result = result
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
                 odoo_backup_gate_request = (
                     _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
