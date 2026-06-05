@@ -473,6 +473,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             dispatch_routes,
         )
+        self.assertIn(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path, dispatch_routes)
+        self.assertIn(
+            control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
+            dispatch_routes,
+        )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_verireel_preview_verification_registered_in_descriptor_dispatch(
@@ -1069,6 +1078,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
