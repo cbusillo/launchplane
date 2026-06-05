@@ -166,7 +166,8 @@ Launchplane reads the product profile, destination lane, selected deployment
 record, and optional backup gate evidence, then writes a
 `GenericWebRollbackPlanRecord`. It does not mutate the provider. Odoo rollback
 planning uses this generic-web route; the former Odoo-shaped rollback-plan alias
-is retired.
+is retired. This route is registered through descriptor-backed dispatch, so
+descriptor/handler drift fails closed before the service starts.
 
 The `prod_rollback` action routes to
 `POST /v1/drivers/generic-web/prod-rollback`. It re-runs the same rollback-plan
