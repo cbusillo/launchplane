@@ -403,7 +403,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 product=request.product,
                 context=request.verification.context,
             ),
-            handler=lambda _request, _resolved_context, _record_store: (
+            handler=lambda _request, _resolved_context, _record_store, _root_path: (
                 control_plane_service._DescriptorDriverDispatchResult(result={})
             ),
         )
@@ -445,6 +445,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertIn(
             control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_preview_verification_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
             dispatch_routes,
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
@@ -505,6 +514,36 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
                 control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_preview_verification_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_preview_verification = registry.GENERIC_WEB_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.GENERIC_WEB_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_preview_verification,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "generic-web"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_stable_verification_descriptor_requires_dispatch_registration(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes({})
@@ -512,6 +551,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_rollback_plan_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path)
+
+        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_preview_verification_descriptor_requires_dispatch_registration(self) -> None:
+        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
+        dispatch_routes.pop(
+            control_plane_service._GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path
+        )
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)

@@ -215,7 +215,9 @@ product health path. Inventory and destroy scan and delete Dokploy applications
 by the product profile's preview application-name prefix. Verification records
 common post-refresh smoke evidence against the latest Launchplane preview
 generation and is available to any product profile that uses the generic-web
-base driver.
+base driver. Generic-web preview verification is registered through
+descriptor-backed dispatch, so descriptor/handler drift fails closed before the
+service starts.
 
 Preview resource cleanup uses a shared Launchplane destroy helper for Dokploy
 applications and compose previews. The generic helper owns domain lookup,

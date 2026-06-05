@@ -320,6 +320,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
+    product_profile_uses_generic_web_base,
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
@@ -808,6 +809,7 @@ class _DriverRouteExecutionMetadata(Generic[_DriverRouteEnvelopeT]):
 class _DescriptorDriverDispatchContext:
     product: str
     context: str
+    authorization_context: str = ""
     instance: str = ""
     require_profile: bool = False
 
@@ -832,8 +834,18 @@ _DescriptorDriverDispatchHandler = Callable[
         _DriverRouteEnvelopeT,
         _ResolvedProductDriverContext,
         object,
+        Path,
     ],
     _DescriptorDriverDispatchResult,
+]
+_DescriptorDriverDispatchValidator = Callable[
+    [
+        _DriverRouteEnvelopeT,
+        _ResolvedProductDriverContext,
+        object,
+        Path,
+    ],
+    None,
 ]
 
 
@@ -842,6 +854,9 @@ class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
     execution_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT]
     context_resolver: _DescriptorDriverDispatchContextResolver[_DriverRouteEnvelopeT]
     handler: _DescriptorDriverDispatchHandler[_DriverRouteEnvelopeT]
+    pre_idempotency_validator: _DescriptorDriverDispatchValidator[_DriverRouteEnvelopeT] | None = (
+        None
+    )
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -2648,7 +2663,9 @@ def _handle_generic_web_stable_verification(
     request: GenericWebStableVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
     record_store: object,
+    control_plane_root_path: Path,
 ) -> _DescriptorDriverDispatchResult:
+    del control_plane_root_path
     if resolved_context.lane is None:
         raise ProductDriverMismatchError(
             "Generic web stable verification requires a product profile lane."
@@ -2665,7 +2682,9 @@ def _handle_generic_web_rollback_plan(
     request: GenericWebRollbackPlanEnvelope,
     resolved_context: _ResolvedProductDriverContext,
     record_store: object,
+    control_plane_root_path: Path,
 ) -> _DescriptorDriverDispatchResult:
+    del control_plane_root_path
     if resolved_context.profile is None or resolved_context.lane is None:
         raise ProductDriverMismatchError(
             "Generic web rollback plan requires a product profile lane."
@@ -2678,6 +2697,49 @@ def _handle_generic_web_rollback_plan(
         result={"generic_web_rollback_plan_id": driver_result.plan_id},
         driver_result=driver_result,
     )
+
+
+def _handle_generic_web_preview_verification(
+    request: GenericWebPreviewVerificationEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    return _DescriptorDriverDispatchResult(
+        result=_apply_generic_web_preview_verification_records(
+            control_plane_root_path=control_plane_root_path,
+            record_store=record_store,
+            request=request.verification,
+        )
+    )
+
+
+def _validate_generic_web_preview_verification_profile(
+    request: GenericWebPreviewVerificationEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del request, record_store, control_plane_root_path
+    profile = resolved_context.profile
+    if profile is None:
+        raise ProductDriverMismatchError(
+            "Generic web preview verification requires a product profile."
+        )
+    if not product_profile_uses_generic_web_base(profile):
+        raise click.ClickException(
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
+        )
+    if not profile.preview.enabled:
+        raise click.ClickException(
+            f"Product {profile.product!r} does not have generic-web previews enabled."
+        )
+    if not profile.preview.context.strip():
+        raise click.ClickException(
+            f"Product {profile.product!r} does not define a preview context."
+        )
 
 
 def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
@@ -2701,6 +2763,17 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_generic_web_stable_verification,
         ),
+        _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.verification.context,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_verification,
+            pre_idempotency_validator=_validate_generic_web_preview_verification_profile,
+        ),
     }
 
 
@@ -2709,6 +2782,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
         (
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
         )
     )
 
@@ -2725,6 +2799,7 @@ def _dispatch_descriptor_driver_route(
     request_fingerprint: str,
     start_response: _StartResponse,
     trace_id: str,
+    control_plane_root_path: Path,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
     route_metadata = dispatch_route.execution_metadata
     descriptor_route_metadata = _driver_route_metadata_from_descriptors().get(
@@ -2749,14 +2824,24 @@ def _dispatch_descriptor_driver_route(
         instance=dispatch_context.instance,
         require_profile=dispatch_context.require_profile,
     )
-    authorization_context = dispatch_context.context
+    if dispatch_route.pre_idempotency_validator is not None:
+        dispatch_route.pre_idempotency_validator(
+            request,
+            resolved_driver_context,
+            record_store,
+            control_plane_root_path,
+        )
+    authorization_product = dispatch_context.product
+    if resolved_driver_context.profile is not None:
+        authorization_product = resolved_driver_context.profile.product
+    authorization_context = dispatch_context.authorization_context or dispatch_context.context
     if not authorization_context and resolved_driver_context.lane is not None:
         authorization_context = resolved_driver_context.lane.context
     authorization_response = _driver_route_authorization_response(
         authz_policy=authz_policy,
         identity=identity,
         route_path=route_metadata.route_path,
-        product=dispatch_context.product,
+        product=authorization_product,
         context=authorization_context,
         denial_message=route_metadata.denial_message,
         start_response=start_response,
@@ -2779,6 +2864,7 @@ def _dispatch_descriptor_driver_route(
         request,
         resolved_driver_context,
         record_store,
+        control_plane_root_path,
     )
     return dispatch_result.result, dispatch_result.driver_result
 
@@ -12822,6 +12908,7 @@ def create_launchplane_service_app(
                     dispatch_route=descriptor_driver_dispatch_routes[path],
                     payload=payload,
                     record_store=record_store,
+                    control_plane_root_path=resolved_root,
                     authz_policy=authz_policy,
                     identity=identity,
                     request_scope=request_scope,
@@ -13252,42 +13339,6 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path:
-                generic_web_preview_verification_request = (
-                    _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                profile = resolve_generic_web_preview_profile(
-                    record_store=record_store,
-                    product=generic_web_preview_verification_request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=generic_web_preview_verification_request.verification.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = _apply_generic_web_preview_verification_records(
-                    control_plane_root_path=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_preview_verification_request.verification,
-                )
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
                 odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(
                     payload
