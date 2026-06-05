@@ -2812,6 +2812,23 @@ def _handle_verireel_runtime_verification(
     return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
+def _handle_verireel_app_maintenance(
+    request: VeriReelAppMaintenanceEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, record_store
+    driver_result = execute_verireel_app_maintenance(
+        control_plane_root=control_plane_root_path,
+        request=request.maintenance,
+    )
+    return _DescriptorDriverDispatchResult(
+        result=driver_result.model_dump(mode="json"),
+        driver_result=driver_result,
+    )
+
+
 def _validate_generic_web_preview_verification_profile(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2925,6 +2942,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_verireel_runtime_verification,
         ),
+        _VERIREEL_APP_MAINTENANCE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_APP_MAINTENANCE_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.maintenance.context,
+            ),
+            handler=_handle_verireel_app_maintenance,
+        ),
     }
 
 
@@ -2940,6 +2966,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
             _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
             _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
+            _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
         )
     )
 
@@ -14151,43 +14178,6 @@ def create_launchplane_service_app(
                         and replacement_operation.result.release_tuple_id
                     ):
                         result["release_tuple_id"] = replacement_operation.result.release_tuple_id
-            elif path == _VERIREEL_APP_MAINTENANCE_ROUTE.route_path:
-                verireel_maintenance_request = (
-                    _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_maintenance_request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_maintenance_request.product,
-                    context=verireel_maintenance_request.maintenance.context,
-                    denial_message=_VERIREEL_APP_MAINTENANCE_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_verireel_app_maintenance(
-                    control_plane_root=resolved_root,
-                    request=verireel_maintenance_request.maintenance,
-                )
-                result = driver_result.model_dump(mode="json")
             elif path == _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path:
                 verireel_prod_backup_gate_request = (
                     _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
