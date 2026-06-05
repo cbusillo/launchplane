@@ -518,6 +518,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_verireel_prod_promotion_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_verireel_prod_rollback_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
@@ -817,6 +826,36 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
                 control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_verireel_prod_promotion_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_prod_promotion = registry.VERIREEL_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.VERIREEL_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_prod_promotion,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "verireel"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_verireel_prod_rollback_dispatch_registration_requires_descriptor_route(
         self,
     ) -> None:
@@ -980,6 +1019,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     ) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE.route_path)
+
+        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_verireel_prod_promotion_descriptor_requires_dispatch_registration(
+        self,
+    ) -> None:
+        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
+        dispatch_routes.pop(control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE.route_path)
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)

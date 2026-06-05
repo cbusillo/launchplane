@@ -27583,23 +27583,38 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     provider_target_type="application",
                 ),
             ) as execute_mock:
+                promotion_payload = {
+                    "product": "verireel",
+                    "promotion": {
+                        "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        "source_git_ref": "abcdef1234567890",
+                        "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                        "source_health_status": "success",
+                    },
+                }
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
                     path="/v1/drivers/verireel/prod-promotion",
-                    payload={
-                        "product": "verireel",
-                        "promotion": {
-                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
-                            "source_git_ref": "abcdef1234567890",
-                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
-                            "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
-                            "source_health_status": "success",
-                        },
-                    },
+                    payload=promotion_payload,
+                    headers={"Idempotency-Key": "verireel-prod-promotion-run-12345"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-promotion",
+                    payload=promotion_payload,
+                    headers={"Idempotency-Key": "verireel-prod-promotion-run-12345"},
                 )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertEqual(replay_payload["status"], "accepted")
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(replay_payload["original_trace_id"], payload["trace_id"])
+            self.assertEqual(replay_payload["records"], payload["records"])
+            self.assertEqual(replay_payload["result"], payload["result"])
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
@@ -27620,6 +27635,170 @@ class LaunchplaneServiceTests(unittest.TestCase):
             execute_mock.assert_called_once()
             request = execute_mock.call_args.kwargs["request"]
             self.assertEqual(request.source_health_status, "pass")
+
+    def test_verireel_prod_promotion_route_accepts_product_profile_driver_id(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["video-site"],
+                            "actions": ["verireel_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_promotion",
+                return_value=VeriReelProdPromotionResult(
+                    promotion_record_id="promotion-video-testing-to-prod-run-12345-attempt-1",
+                    deployment_record_id="deployment-video-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-video-prod-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-21T18:20:00Z",
+                    deploy_finished_at="2026-04-21T18:21:15Z",
+                    target_name="video-prod-app",
+                    target_id="prod-app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-promotion",
+                    payload={
+                        "product": "video-site",
+                        "promotion": {
+                            "context": "video-site",
+                            "artifact_id": "ghcr.io/every/video-site:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                            "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
+                            "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(
+                payload["records"]["promotion_record_id"],
+                "promotion-video-testing-to-prod-run-12345-attempt-1",
+            )
+            execute_mock.assert_called_once()
+
+    def test_verireel_prod_promotion_route_rejects_unowned_target_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "video-site",
+                    "base_url": "https://testing.video.example",
+                    "health_url": "https://testing.video.example/healthz",
+                },
+            )
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["video-site"],
+                            "actions": ["verireel_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_verireel_prod_promotion") as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-promotion",
+                    payload={
+                        "product": "video-site",
+                        "promotion": {
+                            "context": "video-site",
+                            "artifact_id": "ghcr.io/every/video-site:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                            "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
+                            "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+            execute_mock.assert_not_called()
 
     def test_odoo_post_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
