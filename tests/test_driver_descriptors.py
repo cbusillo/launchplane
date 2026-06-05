@@ -484,6 +484,24 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_odoo_preview_apply_inputs_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_preview_apply_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_verireel_preview_verification_registered_in_descriptor_dispatch(
         self,
     ) -> None:
@@ -1085,6 +1103,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_odoo_preview_lifecycle_descriptor_requires_dispatch_registration(
+        self,
+    ) -> None:
+        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
+        dispatch_routes.pop(control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_PREVIEW_APPLY_ROUTE.route_path)
+
+        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_verireel_preview_verification_descriptor_requires_dispatch_registration(
         self,
     ) -> None:
@@ -1484,6 +1512,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             frozenset(
                 {
                     control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
+                    control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
                     control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
                     control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
                     control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
