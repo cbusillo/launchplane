@@ -373,7 +373,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -402,52 +401,47 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
-    def test_land_batch_candidate_tolerates_already_deleted_candidate_ref(self) -> None:
+    def test_cleanup_batch_candidate_ref_deletes_candidate_ref(self) -> None:
         landing_plan = _landing_plan()
-        transport = RecordingMergeTrainGitHubTransport(
-            responses=(
-                _github_branch(sha="base-main"),
-                {"sha": "merge-sha-1"},
-                _github_branch(sha="merge-sha-1"),
-                {"sha": "merge-sha-2"},
-                _github_branch(sha="merge-sha-2"),
-                MergeTrainGitHubError("candidate ref missing", status_code=404),
-            )
-        )
+        transport = RecordingMergeTrainGitHubTransport()
 
-        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+        deleted = GitHubMergeTrainClient(transport=transport).cleanup_batch_candidate_ref(
             landing_plan=landing_plan
         )
 
-        self.assertEqual([entry.status for entry in landed_plan.entries], ["merged", "merged"])
-        self.assertEqual(
-            [entry.merge_commit_sha for entry in landed_plan.entries],
-            ["merge-sha-1", "merge-sha-2"],
-        )
+        self.assertTrue(deleted)
         self.assertEqual(
             (transport.requests[-1].method, transport.requests[-1].path),
             ("DELETE", _candidate_ref_path(landing_plan)),
         )
 
-    def test_land_batch_candidate_fails_closed_on_candidate_ref_delete_error(self) -> None:
+    def test_cleanup_batch_candidate_ref_tolerates_already_deleted_candidate_ref(self) -> None:
         landing_plan = _landing_plan()
         transport = RecordingMergeTrainGitHubTransport(
-            responses=(
-                _github_branch(sha="base-main"),
-                {"sha": "merge-sha-1"},
-                _github_branch(sha="merge-sha-1"),
-                {"sha": "merge-sha-2"},
-                _github_branch(sha="merge-sha-2"),
-                MergeTrainGitHubError("candidate ref delete failed", status_code=500),
-            )
+            responses=(MergeTrainGitHubError("candidate ref missing", status_code=404),)
+        )
+
+        deleted = GitHubMergeTrainClient(transport=transport).cleanup_batch_candidate_ref(
+            landing_plan=landing_plan
+        )
+
+        self.assertFalse(deleted)
+        self.assertEqual(
+            (transport.requests[-1].method, transport.requests[-1].path),
+            ("DELETE", _candidate_ref_path(landing_plan)),
+        )
+
+    def test_cleanup_batch_candidate_ref_fails_closed_on_delete_error(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(MergeTrainGitHubError("candidate ref delete failed", status_code=500),)
         )
 
         with self.assertRaisesRegex(MergeTrainGitHubError, "delete failed"):
-            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            GitHubMergeTrainClient(transport=transport).cleanup_batch_candidate_ref(
                 landing_plan=landing_plan
             )
 
@@ -494,7 +488,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -521,7 +514,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ),
                 _github_branch(sha="merge-sha-2"),
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -540,7 +532,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/pulls/1", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -610,7 +601,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     merge_commit_sha="merge-sha-2",
                 ),
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -631,7 +621,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -651,7 +640,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -676,7 +664,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     {"sha": "head-2", "merge_method": "merge"},
                 ),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 
@@ -701,7 +688,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     merge_commit_sha="merge-sha-2",
                 ),
                 _github_branch(sha="merge-sha-2"),
-                {},
             )
         )
 
@@ -722,7 +708,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 ("GET", "/repos/example/merge-train-repo/pulls/2", None),
                 ("GET", "/repos/example/merge-train-repo/branches/main", None),
-                ("DELETE", _candidate_ref_path(landing_plan), None),
             ],
         )
 

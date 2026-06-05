@@ -3983,6 +3983,38 @@ def _validate_stack_collapse_record_for_landing(
         raise ValueError("merge train stack collapse root PR head no longer matches")
 
 
+def _cleanup_merge_train_batch_candidate_ref(
+    *,
+    github_client: GitHubMergeTrainClient,
+    landing_plan: MergeTrainBatchLandingPlan,
+    request_trace_id: str,
+) -> dict[str, object]:
+    try:
+        deleted = github_client.cleanup_batch_candidate_ref(landing_plan=landing_plan)
+    except MergeTrainGitHubError as error:
+        message = str(error).strip() or "GitHub candidate ref cleanup failed."
+        _LOGGER.warning(
+            "Merge train candidate ref cleanup failed after landing persistence",
+            extra={
+                "trace_id": request_trace_id,
+                "repository": landing_plan.repository,
+                "base_branch": landing_plan.base_branch,
+                "candidate_ref": landing_plan.candidate_ref,
+                "github_status_code": error.status_code,
+            },
+        )
+        result: dict[str, object] = {
+            "candidate_ref_cleanup_status": "failed",
+            "candidate_ref_cleanup_message": message,
+        }
+        if error.status_code is not None:
+            result["candidate_ref_cleanup_github_status_code"] = error.status_code
+        return result
+    return {
+        "candidate_ref_cleanup_status": "deleted" if deleted else "already_missing",
+    }
+
+
 def _stack_collapse_expected_root_head_sha(plan: MergeTrainStackCollapsePlan) -> str:
     for mutation in plan.mutations:
         if mutation.parent_pull_request_number == plan.root_pull_request_number:
@@ -10144,6 +10176,7 @@ def create_launchplane_service_app(
                 recorded_at = _utc_now_timestamp()
                 collapse_record: MergeTrainStackCollapsePlanRecord | None = None
                 reconciled_collapse_plan: MergeTrainStackCollapsePlan | None = None
+                candidate_ref_cleanup_result: dict[str, object] = {}
                 if landing_request.mode == "plan":
                     candidate_record = _read_merge_train_batch_candidate_record(
                         record_store=candidate_store,
@@ -10194,6 +10227,11 @@ def create_launchplane_service_app(
                         updated_at=recorded_at,
                     )
                     landing_store.write_merge_train_batch_landing_plan_record(landing_record)
+                    candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
+                        github_client=github_client,
+                        landing_plan=landing_plan,
+                        request_trace_id=request_trace_id,
+                    )
                     if collapse_existing_record is not None:
                         root_entry = next(
                             (
@@ -10246,6 +10284,9 @@ def create_launchplane_service_app(
                     "mode": landing_request.mode,
                     "landing_plan": result["landing_plan"],
                 }
+                if landing_request.mode == "land":
+                    result.update(candidate_ref_cleanup_result)
+                    driver_result.update(candidate_ref_cleanup_result)
                 if "stack_collapse_plan" in result:
                     driver_result["stack_collapse_plan"] = result["stack_collapse_plan"]
             elif path == _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE:
@@ -10552,6 +10593,11 @@ def create_launchplane_service_app(
                                 updated_at=recorded_at,
                             )
                             landing_store.write_merge_train_batch_landing_plan_record(landed_record)
+                            candidate_ref_cleanup_result = _cleanup_merge_train_batch_candidate_ref(
+                                github_client=github_client,
+                                landing_plan=landed_plan,
+                                request_trace_id=request_trace_id,
+                            )
                             result = {
                                 "merge_train_batch_landing_plan_record_id": landed_record.record_id,
                                 "repository": landed_plan.repository,
@@ -10559,6 +10605,7 @@ def create_launchplane_service_app(
                                 "mode": "land",
                                 "controller_action": "land_batch",
                                 "landing_plan": landed_plan.model_dump(mode="json"),
+                                **candidate_ref_cleanup_result,
                             }
                             if collapse_record is not None:
                                 root_entry = next(

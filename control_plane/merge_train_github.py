@@ -200,11 +200,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             raise MergeTrainGitHubStaleHeadError(
                 "Base branch moved outside the batch landing plan.", status_code=409
             )
-        self._delete_reference_if_present(
+        return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
+
+    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+        repository_path = _repository_path(landing_plan.repository)
+        return self._delete_reference_if_present(
             repository_path=repository_path,
             reference=landing_plan.candidate_ref,
         )
-        return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def _already_merged_landing_entry(
         self, *, repository_path: str, entry: MergeTrainBatchLandingEntry
@@ -391,7 +394,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 body={"sha": normalized_sha, "force": True},
             )
 
-    def _delete_reference_if_present(self, *, repository_path: str, reference: str) -> None:
+    def _delete_reference_if_present(self, *, repository_path: str, reference: str) -> bool:
         try:
             self.transport.request(
                 method="DELETE",
@@ -399,8 +402,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         except MergeTrainGitHubError as error:
             if error.status_code == 404:
-                return
+                return False
             raise
+        return True
 
     def _pull_request_head_sha(self, *, pull_request_path: str) -> str:
         pull_request = _json_object(
