@@ -810,6 +810,7 @@ class _DescriptorDriverDispatchContext:
     product: str
     context: str
     authorization_context: str = ""
+    use_preview_context_for_authorization: bool = False
     instance: str = ""
     require_profile: bool = False
 
@@ -2395,6 +2396,7 @@ _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
         _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
+        _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
         _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
         _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
@@ -2830,6 +2832,82 @@ def _handle_odoo_website_bootstrap_override(
     return _DescriptorDriverDispatchResult(result=result, driver_result=result)
 
 
+def _validate_odoo_preview_apply_inputs_profile(
+    request: OdooPreviewApplyInputsEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del request, record_store, control_plane_root_path
+    if resolved_context.profile is None:
+        raise ProductDriverMismatchError("Odoo preview apply inputs require a product profile.")
+
+
+def _handle_odoo_preview_apply_inputs(
+    request: OdooPreviewApplyInputsEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    database_url = getattr(record_store, "database_url", None)
+    driver_result = _odoo_preview_apply_inputs_response_result(
+        control_plane_root=control_plane_root_path,
+        record_store=record_store,
+        profile=resolved_context.profile,
+        request=request.inputs,
+        database_url=database_url,
+    )
+    return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
+
+
+def _validate_odoo_preview_apply_profile(
+    request: OdooPreviewApplyEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del record_store, control_plane_root_path
+    profile = resolved_context.profile
+    if profile is None:
+        raise ProductDriverMismatchError("Odoo preview apply requires a product profile.")
+    preview_profile = profile.preview
+    if not preview_profile.enabled or not preview_profile.context.strip():
+        raise ProductDriverMismatchError(
+            "Odoo preview apply requires an enabled product preview profile."
+        )
+    if request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
+        raise ValueError("Odoo preview apply repository does not match product profile.")
+
+
+def _handle_odoo_preview_apply(
+    request: OdooPreviewApplyEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    database_url = getattr(record_store, "database_url", None)
+    resolved_environment_values = _odoo_preview_service_environment_values(
+        control_plane_root_path=control_plane_root_path,
+        profile=resolved_context.profile,
+        apply_request=request.apply,
+        database_url=database_url,
+    )
+    service_apply_request = request.apply.model_copy(
+        update={"environment_values": resolved_environment_values}
+    )
+    driver_result = execute_odoo_preview_dokploy_apply(
+        control_plane_root=control_plane_root_path,
+        request=service_apply_request,
+        database_url=database_url,
+    )
+    return _DescriptorDriverDispatchResult(
+        result=driver_result.model_dump(mode="json"),
+        driver_result=driver_result,
+    )
+
+
 def _handle_generic_web_preview_verification(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3232,6 +3310,28 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_website_bootstrap_override,
         ),
+        _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_odoo_preview_apply_inputs,
+            pre_idempotency_validator=_validate_odoo_preview_apply_inputs_profile,
+        ),
+        _ODOO_PREVIEW_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PREVIEW_APPLY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_odoo_preview_apply,
+            pre_idempotency_validator=_validate_odoo_preview_apply_profile,
+        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3365,6 +3465,8 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_POST_DEPLOY_ROUTE.route_path,
             _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
             _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
+            _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
+            _ODOO_PREVIEW_APPLY_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -3432,6 +3534,13 @@ def _dispatch_descriptor_driver_route(
     authorization_context = dispatch_context.authorization_context or dispatch_context.context
     if not authorization_context and resolved_driver_context.lane is not None:
         authorization_context = resolved_driver_context.lane.context
+    if (
+        not authorization_context
+        and dispatch_context.use_preview_context_for_authorization
+        and resolved_driver_context.profile is not None
+        and resolved_driver_context.profile.preview.context
+    ):
+        authorization_context = resolved_driver_context.profile.preview.context
     authorization_response = _driver_route_authorization_response(
         authz_policy=authz_policy,
         identity=identity,
@@ -14352,106 +14461,6 @@ def create_launchplane_service_app(
                         and replacement_operation.result.release_tuple_id
                     ):
                         result["release_tuple_id"] = replacement_operation.result.release_tuple_id
-            elif path == _ODOO_PREVIEW_APPLY_ROUTE.route_path:
-                odoo_preview_apply_request = (
-                    _ODOO_PREVIEW_APPLY_ROUTE.envelope_model.model_validate(payload)
-                )
-                resolved_driver_context = _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=odoo_preview_apply_request.product,
-                    require_profile=True,
-                )
-                if resolved_driver_context.profile is None:
-                    raise ProductDriverMismatchError(
-                        "Odoo preview apply requires a product profile."
-                    )
-                preview_profile = resolved_driver_context.profile.preview
-                if not preview_profile.enabled or not preview_profile.context.strip():
-                    raise ProductDriverMismatchError(
-                        "Odoo preview apply requires an enabled product preview profile."
-                    )
-                if (
-                    odoo_preview_apply_request.apply.dry_run_plan.repository.strip()
-                    != resolved_driver_context.profile.repository.strip()
-                ):
-                    raise ValueError(
-                        "Odoo preview apply repository does not match product profile."
-                    )
-                preview_context = preview_profile.context
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=odoo_preview_apply_request.product,
-                    context=preview_context,
-                    denial_message=_ODOO_PREVIEW_APPLY_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                resolved_environment_values = _odoo_preview_service_environment_values(
-                    control_plane_root_path=resolved_root,
-                    profile=resolved_driver_context.profile,
-                    apply_request=odoo_preview_apply_request.apply,
-                    database_url=database_url,
-                )
-                service_apply_request = odoo_preview_apply_request.apply.model_copy(
-                    update={"environment_values": resolved_environment_values}
-                )
-                driver_result = execute_odoo_preview_dokploy_apply(
-                    control_plane_root=resolved_root,
-                    request=service_apply_request,
-                    database_url=database_url,
-                )
-                result = driver_result.model_dump(mode="json")
-            elif path == _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path:
-                odoo_preview_inputs_request = (
-                    _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.envelope_model.model_validate(payload)
-                )
-                resolved_driver_context = _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=odoo_preview_inputs_request.product,
-                    require_profile=True,
-                )
-                if resolved_driver_context.profile is None:
-                    raise ProductDriverMismatchError(
-                        "Odoo preview apply inputs require a product profile."
-                    )
-                authorization_context = resolved_driver_context.profile.preview.context
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=odoo_preview_inputs_request.product,
-                    context=authorization_context,
-                    denial_message=_ODOO_PREVIEW_APPLY_INPUTS_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = _odoo_preview_apply_inputs_response_result(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    profile=resolved_driver_context.profile,
-                    request=odoo_preview_inputs_request.inputs,
-                    database_url=database_url,
-                )
-                result = driver_result
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
                     payload
