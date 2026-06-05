@@ -2768,6 +2768,68 @@ def _handle_odoo_prod_promotion_inputs(
     )
 
 
+def _handle_odoo_post_deploy(
+    request: OdooPostDeployEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    driver_result = execute_odoo_post_deploy(
+        control_plane_root=control_plane_root_path,
+        record_store=record_store,
+        request=request.post_deploy,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "transition": (
+                f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
+            )
+        },
+        driver_result=driver_result,
+    )
+
+
+def _handle_odoo_config_parameter_override(
+    request: OdooConfigParameterOverrideEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, control_plane_root_path
+    override_record = _write_odoo_config_parameter_override(
+        record_store=cast(_OdooInstanceOverrideStore, record_store),
+        request=request.override,
+    )
+    result: dict[str, object] = {
+        "context": override_record.context,
+        "instance": override_record.instance,
+        "config_parameter_keys": sorted(
+            override.key for override in override_record.config_parameters
+        ),
+    }
+    return _DescriptorDriverDispatchResult(result=result, driver_result=result)
+
+
+def _handle_odoo_website_bootstrap_override(
+    request: OdooWebsiteBootstrapOverrideEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context, control_plane_root_path
+    override_record = _write_odoo_website_bootstrap_override(
+        record_store=cast(_OdooInstanceOverrideStore, record_store),
+        request=request.override,
+    )
+    result: dict[str, object] = {
+        "context": override_record.context,
+        "instance": override_record.instance,
+        "website_bootstrap": override_record.website_bootstrap is not None,
+    }
+    return _DescriptorDriverDispatchResult(result=result, driver_result=result)
+
+
 def _handle_generic_web_preview_verification(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3143,6 +3205,33 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_prod_promotion_inputs,
         ),
+        _ODOO_POST_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_POST_DEPLOY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.post_deploy.context,
+            ),
+            handler=_handle_odoo_post_deploy,
+        ),
+        _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.override.context,
+                instance=request.override.instance,
+            ),
+            handler=_handle_odoo_config_parameter_override,
+        ),
+        _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.override.context,
+                instance=request.override.instance,
+            ),
+            handler=_handle_odoo_website_bootstrap_override,
+        ),
         _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3273,6 +3362,9 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
+            _ODOO_POST_DEPLOY_ROUTE.route_path,
+            _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
+            _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path,
@@ -13843,129 +13935,6 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
-                odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(
-                    payload
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_POST_DEPLOY_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_post_deploy_request.product,
-                    authorization_context=odoo_post_deploy_request.post_deploy.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_post_deploy(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=odoo_post_deploy_request.post_deploy,
-                )
-                result = {
-                    "transition": (
-                        f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
-                    )
-                }
-            elif path == _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path:
-                odoo_override_request = (
-                    _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.envelope_model.model_validate(payload)
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_override_request.product,
-                    authorization_context=odoo_override_request.override.context,
-                    descriptor_context=odoo_override_request.override.context,
-                    descriptor_instance=odoo_override_request.override.instance,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                override_record = _write_odoo_config_parameter_override(
-                    record_store=cast(_OdooInstanceOverrideStore, record_store),
-                    request=odoo_override_request.override,
-                )
-                driver_result = {
-                    "context": override_record.context,
-                    "instance": override_record.instance,
-                    "config_parameter_keys": sorted(
-                        override.key for override in override_record.config_parameters
-                    ),
-                }
-                result = {
-                    "context": override_record.context,
-                    "instance": override_record.instance,
-                    "config_parameter_keys": sorted(
-                        override.key for override in override_record.config_parameters
-                    ),
-                }
-            elif path == _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path:
-                odoo_website_override_request = (
-                    _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.envelope_model.model_validate(payload)
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_website_override_request.product,
-                    authorization_context=odoo_website_override_request.override.context,
-                    descriptor_context=odoo_website_override_request.override.context,
-                    descriptor_instance=odoo_website_override_request.override.instance,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                override_record = _write_odoo_website_bootstrap_override(
-                    record_store=cast(_OdooInstanceOverrideStore, record_store),
-                    request=odoo_website_override_request.override,
-                )
-                result = {
-                    "context": override_record.context,
-                    "instance": override_record.instance,
-                    "website_bootstrap": override_record.website_bootstrap is not None,
-                }
-                driver_result = result
             elif path == _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path:
                 odoo_bootstrap_request = _ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(
                     payload
