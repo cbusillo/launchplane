@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -431,6 +432,93 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     {"/v1/drivers/fake-dispatch/ping": route}
                 )
 
+    def test_descriptor_dispatch_registration_requires_exactly_one_handler(self) -> None:
+        descriptor = DriverDescriptor(
+            driver_id="fake-dispatch",
+            label="Fake dispatch",
+            product="fake-dispatch",
+            description="Test-only descriptor dispatch driver.",
+            provider_boundary="Test-only provider boundary.",
+            actions=(
+                DriverActionDescriptor(
+                    action_id="ping",
+                    label="Ping",
+                    description="Test descriptor-backed dispatch route.",
+                    safety="safe_write",
+                    scope="context",
+                    method="POST",
+                    route_path="/v1/drivers/fake-dispatch/ping",
+                    authz_action="fake_dispatch.ping",
+                ),
+            ),
+        )
+        route_metadata = control_plane_service._DriverRouteExecutionMetadata(
+            route_path="/v1/drivers/fake-dispatch/ping",
+            envelope_model=control_plane_service.GenericWebStableVerificationEnvelope,
+            denial_message="Workflow cannot execute fake dispatch.",
+        )
+
+        def context_resolver(
+            request: control_plane_service.GenericWebStableVerificationEnvelope,
+        ) -> control_plane_service._DescriptorDriverDispatchContext:
+            return control_plane_service._DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.verification.context,
+            )
+
+        def standard_handler(
+            _request: Any,
+            _resolved_context: control_plane_service._ResolvedProductDriverContext,
+            _record_store: object,
+            _root_path: Path,
+        ) -> control_plane_service._DescriptorDriverDispatchResult:
+            return control_plane_service._DescriptorDriverDispatchResult(result={})
+
+        def custom_handler(
+            _request: Any,
+            _resolved_context: control_plane_service._ResolvedProductDriverContext,
+            _record_store: object,
+            _root_path: object,
+            _request_scope: str,
+            _request_idempotency_key: str,
+            _request_fingerprint: str,
+            _start_response: control_plane_service._StartResponse,
+            _trace_id: str,
+        ) -> tuple[dict[str, object], Any] | list[bytes]:
+            return {}, None
+
+        with (
+            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must register exactly one handler"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(
+                    {
+                        "/v1/drivers/fake-dispatch/ping": (
+                            control_plane_service._DescriptorDriverDispatchRoute(
+                                execution_metadata=route_metadata,
+                                context_resolver=context_resolver,
+                            )
+                        )
+                    }
+                )
+            with self.assertRaisesRegex(ValueError, "must register exactly one handler"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(
+                    {
+                        "/v1/drivers/fake-dispatch/ping": (
+                            control_plane_service._DescriptorDriverDispatchRoute(
+                                execution_metadata=route_metadata,
+                                context_resolver=context_resolver,
+                                handler=standard_handler,
+                                custom_dispatch_handler=custom_handler,
+                            )
+                        )
+                    }
+                )
+
     def test_stable_verification_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
@@ -510,6 +598,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
             dispatch_routes,
         )
         self.assertIn(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path, dispatch_routes)
@@ -1221,6 +1313,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
@@ -1278,6 +1371,36 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "_DESCRIPTORS",
             (
                 descriptor_without_target_replacement_plan,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "odoo"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_target_replacement_apply_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_target_replacement_apply = registry.ODOO_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.ODOO_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_target_replacement_apply,
                 *(
                     descriptor
                     for descriptor in registry._DESCRIPTORS
