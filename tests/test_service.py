@@ -25498,12 +25498,32 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "intent": "stable-testing-migration",
                         },
                     },
+                    headers={"Idempotency-Key": "verireel-app-maintenance-migrate"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/app-maintenance",
+                    payload={
+                        "product": "verireel",
+                        "maintenance": {
+                            "context": "verireel",
+                            "instance": "testing",
+                            "action": "migrate",
+                            "intent": "stable-testing-migration",
+                        },
+                    },
+                    headers={"Idempotency-Key": "verireel-app-maintenance-migrate"},
                 )
 
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["result"]["maintenance_status"], "pass")
             self.assertEqual(payload["result"]["application_id"], "testing-app-123")
+            self.assertEqual(replay_status_code, 202)
+            self.assertEqual(replay_payload["status"], "accepted")
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(replay_payload["result"], payload["result"])
             execute_mock.assert_called_once()
 
     def test_verireel_app_maintenance_driver_accepts_stable_e2e_grant_intent(self) -> None:
