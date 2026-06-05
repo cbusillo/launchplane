@@ -30554,6 +30554,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
                         },
                     },
+                    headers={"Idempotency-Key": "verireel-prod-rollback"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "verireel",
+                        "rollback": {
+                            "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        },
+                    },
+                    headers={"Idempotency-Key": "verireel-prod-rollback"},
                 )
 
             self.assertEqual(status_code, 202)
@@ -30566,6 +30580,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             self.assertEqual(payload["result"]["rollback_status"], "pass")
+            self.assertEqual(replay_status_code, 202)
+            self.assertEqual(replay_payload["status"], "accepted")
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(replay_payload["original_trace_id"], payload["trace_id"])
+            self.assertEqual(replay_payload["result"], payload["result"])
             execute_mock.assert_called_once()
 
     def test_verireel_driver_route_accepts_product_profile_driver_id(self) -> None:
