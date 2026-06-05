@@ -398,6 +398,7 @@ class _FakeOAuth2Session:
 
 class _FakeMergeTrainGitHubClient:
     land_batch_candidate_calls = 0
+    cleanup_batch_candidate_ref_calls = 0
 
     def __init__(self, *, transport: object) -> None:
         self.transport = transport
@@ -452,6 +453,10 @@ class _FakeMergeTrainGitHubClient:
             }
         )
 
+    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+        type(self).cleanup_batch_candidate_ref_calls += 1
+        return True
+
     def merge_stack_child_into_parent(
         self,
         *,
@@ -497,6 +502,30 @@ class _UnavailableLandingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         raise MergeTrainGitHubError(
             "GitHub API request failed for /repos/example/repo", status_code=503
         )
+
+
+class _CleanupFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    cleanup_batch_candidate_ref_calls = 0
+
+    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+        type(self).cleanup_batch_candidate_ref_calls += 1
+        raise MergeTrainGitHubError("candidate ref cleanup unavailable", status_code=503)
+
+
+class _CleanupAlreadyMissingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    cleanup_batch_candidate_ref_calls = 0
+
+    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+        type(self).cleanup_batch_candidate_ref_calls += 1
+        return False
+
+
+class _CleanupFailingWithoutStatusMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
+    cleanup_batch_candidate_ref_calls = 0
+
+    def cleanup_batch_candidate_ref(self, *, landing_plan: MergeTrainBatchLandingPlan) -> bool:
+        type(self).cleanup_batch_candidate_ref_calls += 1
+        raise MergeTrainGitHubError("candidate ref cleanup network unavailable")
 
 
 class _FailingChildDispositionMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
@@ -4287,6 +4316,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(landing_plan_payload["result"]["controller_action"], "plan_landing")
         self.assertEqual(land_status, 202)
         self.assertEqual(land_payload["result"]["controller_action"], "land_batch")
+        self.assertEqual(land_payload["result"]["candidate_ref_cleanup_status"], "deleted")
         self.assertEqual(land_payload["result"]["landing_plan"]["entries"][0]["status"], "merged")
         self.assertEqual(
             tuple(record.record_id for record in landing_records_after_retire),
@@ -4395,6 +4425,76 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(stale_record.landing_plan.entries[0].status, "stale")
         self.assertEqual(next_status_code, 202)
         self.assertNotEqual(next_payload["result"]["controller_action"], "land_batch")
+
+    def test_merge_train_controller_persists_land_before_cleanup_failure(self) -> None:
+        _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch(
+                    "control_plane.service.GitHubMergeTrainClient",
+                    _CleanupFailingMergeTrainGitHubClient,
+                ),
+            ):
+                for _ in range(4):
+                    _invoke_app(
+                        app,
+                        method="POST",
+                        path="/v1/work-graph/merge-train/controller/run-once",
+                        payload={
+                            "schema_version": 1,
+                            "repository": "cbusillo/sellyouroutboard",
+                            "base_branch": "main",
+                            "mutate": True,
+                        },
+                    )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+            landing_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["controller_action"], "land_batch")
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_status"], "failed")
+        self.assertEqual(
+            payload["result"]["candidate_ref_cleanup_message"],
+            "candidate ref cleanup unavailable",
+        )
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_github_status_code"], 503)
+        self.assertEqual(_CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        completed_record = next(
+            record
+            for record in landing_records
+            if record.record_id == payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(completed_record.landing_plan.entries[0].status, "merged")
+        self.assertEqual(completed_record.landing_plan.entries[0].merge_commit_sha, "merge-1")
 
     def test_merge_train_controller_reports_github_failure_details(self) -> None:
         with (
@@ -6263,9 +6363,208 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "land")
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_status"], "deleted")
         self.assertEqual(payload["result"]["landing_plan"]["entries"][0]["status"], "merged")
         self.assertEqual(
             payload["result"]["landing_plan"]["entries"][0]["merge_commit_sha"], "merge-1"
+        )
+
+    def test_merge_train_batch_landing_service_persists_land_before_cleanup_failure(
+        self,
+    ) -> None:
+        _CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                _, candidate_plan_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch(
+                "control_plane.service.GitHubMergeTrainClient",
+                _CleanupFailingMergeTrainGitHubClient,
+            ):
+                _, build_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": candidate_plan_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+                _, observe_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "observe",
+                        "candidate_record_id": build_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+                _, landing_plan_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-landing/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                        "candidate_record_id": observe_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-landing/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "land",
+                        "landing_plan_record_id": landing_plan_payload["records"][
+                            "merge_train_batch_landing_plan_record_id"
+                        ],
+                    },
+                )
+            landing_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_landing_plan_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_status"], "failed")
+        self.assertEqual(
+            payload["result"]["candidate_ref_cleanup_message"],
+            "candidate ref cleanup unavailable",
+        )
+        self.assertEqual(payload["result"]["candidate_ref_cleanup_github_status_code"], 503)
+        self.assertEqual(_CleanupFailingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1)
+        completed_record = next(
+            record
+            for record in landing_records
+            if record.record_id == payload["records"]["merge_train_batch_landing_plan_record_id"]
+        )
+        self.assertEqual(completed_record.landing_plan.entries[0].status, "merged")
+        self.assertEqual(completed_record.landing_plan.entries[0].merge_commit_sha, "merge-1")
+
+    def test_merge_train_batch_landing_candidate_ref_cleanup_reports_already_missing(
+        self,
+    ) -> None:
+        landing_plan = MergeTrainBatchLandingPlan.model_validate(
+            {
+                "plan_id": "merge-train-landing-example-repo-main-batch-1",
+                "batch_id": "merge-train-batch-example-repo-main-batch-1",
+                "repository": "example/repo",
+                "base_branch": "main",
+                "candidate_ref": "refs/heads/launchplane/train/example/repo/main/batch-1",
+                "candidate_sha": "candidate-sha",
+                "policy_key": "example:repo:main",
+                "policy_sha256": "policy-sha",
+                "created_at": "2026-05-14T00:00:00Z",
+                "entries": [
+                    {
+                        "pull_request_number": 1,
+                        "position": 1,
+                        "expected_head_sha": "head-1",
+                        "expected_base_sha": "base-1",
+                        "merge_method": "merge",
+                    }
+                ],
+            }
+        )
+        _CleanupAlreadyMissingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+
+        result = control_plane_service._cleanup_merge_train_batch_candidate_ref(
+            github_client=cast(
+                Any, _CleanupAlreadyMissingMergeTrainGitHubClient(transport=object())
+            ),
+            landing_plan=landing_plan,
+            request_trace_id="test-trace",
+        )
+
+        self.assertEqual(result, {"candidate_ref_cleanup_status": "already_missing"})
+        self.assertEqual(
+            _CleanupAlreadyMissingMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls, 1
+        )
+
+    def test_merge_train_batch_landing_candidate_ref_cleanup_reports_failure_without_status(
+        self,
+    ) -> None:
+        landing_plan = MergeTrainBatchLandingPlan.model_validate(
+            {
+                "plan_id": "merge-train-landing-example-repo-main-batch-1",
+                "batch_id": "merge-train-batch-example-repo-main-batch-1",
+                "repository": "example/repo",
+                "base_branch": "main",
+                "candidate_ref": "refs/heads/launchplane/train/example/repo/main/batch-1",
+                "candidate_sha": "candidate-sha",
+                "policy_key": "example:repo:main",
+                "policy_sha256": "policy-sha",
+                "created_at": "2026-05-14T00:00:00Z",
+                "entries": [
+                    {
+                        "pull_request_number": 1,
+                        "position": 1,
+                        "expected_head_sha": "head-1",
+                        "expected_base_sha": "base-1",
+                        "merge_method": "merge",
+                    }
+                ],
+            }
+        )
+        _CleanupFailingWithoutStatusMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls = 0
+
+        result = control_plane_service._cleanup_merge_train_batch_candidate_ref(
+            github_client=cast(
+                Any, _CleanupFailingWithoutStatusMergeTrainGitHubClient(transport=object())
+            ),
+            landing_plan=landing_plan,
+            request_trace_id="test-trace",
+        )
+
+        self.assertEqual(result["candidate_ref_cleanup_status"], "failed")
+        self.assertEqual(
+            result["candidate_ref_cleanup_message"], "candidate ref cleanup network unavailable"
+        )
+        self.assertNotIn("candidate_ref_cleanup_github_status_code", result)
+        self.assertEqual(
+            _CleanupFailingWithoutStatusMergeTrainGitHubClient.cleanup_batch_candidate_ref_calls,
+            1,
         )
 
     def test_merge_train_batch_landing_service_closes_stack_children_after_root_lands(self) -> None:

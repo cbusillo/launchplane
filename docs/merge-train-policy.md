@@ -503,10 +503,12 @@ with a different head SHA than the landing plan recorded, Launchplane writes
 terminal stale landing evidence for the plan. That stale evidence does not count
 as a successful Launchplane landing, but it does retire the stale plan so a fresh
 controller pass can read current GitHub state and admit later eligible work.
-After a landing plan reaches the recorded final base SHA, Launchplane deletes
-the generated `launchplane/train/...` candidate branch ref. Missing candidate
-refs are treated as already-clean so landing retries remain idempotent; stale or
-failed landing attempts leave the ref in place for investigation.
+After Launchplane persists a landing plan at the recorded final base SHA, it
+attempts best-effort cleanup of the generated `launchplane/train/...` candidate
+branch ref. Missing candidate refs are treated as already-clean so landing
+retries remain idempotent. Cleanup failures are reported in the landing response
+without failing the persisted landing result, and stale or failed landing
+attempts leave the ref in place for investigation.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
