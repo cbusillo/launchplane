@@ -24982,9 +24982,28 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "owner_routes_status": "success",
                     },
                 },
+                headers={"Idempotency-Key": "verireel-testing-verification-run-12345"},
+            )
+            replay_status_code, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1",
+                        "migration_status": "success",
+                        "verification_status": "success",
+                        "owner_routes_status": "success",
+                    },
+                },
+                headers={"Idempotency-Key": "verireel-testing-verification-run-12345"},
             )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(payload["records"], replay_payload["records"])
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
@@ -25081,6 +25100,59 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(deployment.post_deploy_update.status, "pass")
             self.assertEqual(deployment.destination_health.status, "fail")
+
+    def test_verireel_testing_verification_driver_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["other-context"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1",
+                        "migration_status": "success",
+                        "verification_status": "success",
+                        "owner_routes_status": "success",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_verireel_testing_deploy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
