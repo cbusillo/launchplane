@@ -268,8 +268,9 @@ def _fake_descriptor_dispatch_route(
         request: _FakeDescriptorDispatchEnvelope,
         resolved_context: control_plane_service._ResolvedProductDriverContext,
         record_store: Any,
+        control_plane_root_path: Path,
     ) -> control_plane_service._DescriptorDriverDispatchResult:
-        del record_store
+        del record_store, control_plane_root_path
         lane_instance = resolved_context.lane.instance if resolved_context.lane is not None else ""
         calls.append((request, lane_instance))
         return control_plane_service._DescriptorDriverDispatchResult(
@@ -19234,6 +19235,234 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(generation.state, "ready")
             self.assertEqual(generation.verify_status, "pass")
             self.assertEqual(generation.overall_health_status, "pass")
+
+    def test_generic_web_preview_verification_route_does_not_require_lane(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            profile_payload["lanes"] = ()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service._apply_generic_web_preview_verification_records",
+                return_value={
+                    "transition": "ready",
+                    "preview_state": "active",
+                    "verification_status": "pass",
+                    "generic_web_preview_verification": {"checked_urls": ()},
+                },
+            ) as apply_records:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "verification": {
+                            "schema_version": 1,
+                            "context": "sellyouroutboard-testing",
+                            "anchor_repo": "sellyouroutboard",
+                            "anchor_pr_number": 42,
+                            "verification_status": "pass",
+                            "verified_at": "2026-05-09T15:08:00Z",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:no-lane"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["transition"], "ready")
+        apply_records.assert_called_once()
+        self.assertEqual(apply_records.call_args.kwargs["control_plane_root_path"], root)
+
+    def test_generic_web_preview_verification_route_rejects_unauthorized_context(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["other-context"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service._apply_generic_web_preview_verification_records",
+                return_value={"transition": "ready"},
+            ) as apply_records:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "verification": {
+                            "schema_version": 1,
+                            "context": "sellyouroutboard-testing",
+                            "anchor_repo": "sellyouroutboard",
+                            "anchor_pr_number": 42,
+                            "verification_status": "pass",
+                            "verified_at": "2026-05-09T15:08:00Z",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:denied"},
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        apply_records.assert_not_called()
+
+    def test_generic_web_preview_verification_replay_revalidates_preview_profile(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "verification": {
+                    "schema_version": 1,
+                    "context": "sellyouroutboard-testing",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 42,
+                    "verification_status": "pass",
+                    "verified_at": "2026-05-09T15:08:00Z",
+                },
+            }
+
+            with patch(
+                "control_plane.service._apply_generic_web_preview_verification_records",
+                return_value={"transition": "ready"},
+            ) as apply_records:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:replay"},
+                )
+                disabled_payload = dict(profile_payload)
+                disabled_payload["preview"] = {"enabled": False}
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(disabled_payload)
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-verification",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-preview-verification:syo:42:replay"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(first_payload["records"]["transition"], "ready")
+        self.assertEqual(second_status_code, 400)
+        self.assertEqual(second_payload["error"]["code"], "invalid_request")
+        apply_records.assert_called_once()
 
     def test_generic_web_preview_verification_request_accepts_explicit_url_collections(
         self,
