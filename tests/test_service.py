@@ -267,7 +267,9 @@ def _fake_descriptor_dispatch_route(
     def handler(
         request: _FakeDescriptorDispatchEnvelope,
         resolved_context: control_plane_service._ResolvedProductDriverContext,
+        record_store: Any,
     ) -> control_plane_service._DescriptorDriverDispatchResult:
+        del record_store
         lane_instance = resolved_context.lane.instance if resolved_context.lane is not None else ""
         calls.append((request, lane_instance))
         return control_plane_service._DescriptorDriverDispatchResult(
@@ -12448,6 +12450,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
                     },
                 ),
+                patch(
+                    "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                    return_value=frozenset(),
+                ),
             ):
                 app = create_launchplane_service_app(
                     state_dir=state_dir,
@@ -12520,6 +12526,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     return_value={
                         _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
                     },
+                ),
+                patch(
+                    "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                    return_value=frozenset(),
                 ),
             ):
                 app = create_launchplane_service_app(
@@ -12599,6 +12609,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         _FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)
                     },
                 ),
+                patch(
+                    "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                    return_value=frozenset(),
+                ),
             ):
                 app = create_launchplane_service_app(
                     state_dir=state_dir,
@@ -12638,6 +12652,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "control_plane.service._descriptor_driver_dispatch_routes",
                 return_value={_FAKE_DESCRIPTOR_ROUTE_PATH: _fake_descriptor_dispatch_route(calls)},
             ),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -12673,6 +12691,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
             patch(
                 "control_plane.service.list_driver_descriptors",
                 return_value=(_fake_descriptor_dispatch_descriptor(),),
+            ),
+            patch(
+                "control_plane.service._descriptor_driver_dispatch_routes",
+                return_value={},
+            ),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
             ),
         ):
             root = Path(temporary_directory_name)
