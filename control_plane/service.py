@@ -2731,6 +2731,29 @@ def _handle_verireel_preview_verification(
     )
 
 
+def _handle_verireel_preview_inventory(
+    request: VeriReelPreviewInventoryEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    driver_result = execute_verireel_preview_inventory(
+        control_plane_root=control_plane_root_path,
+        request=request.inventory,
+    )
+    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
+        record_store=record_store,
+        context=driver_result.context,
+        source="verireel-preview-inventory",
+        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
+    )
+    return _DescriptorDriverDispatchResult(
+        result={"preview_inventory_scan_id": preview_inventory_scan_id},
+        driver_result=driver_result,
+    )
+
+
 def _handle_verireel_testing_verification(
     request: VeriReelTestingVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2897,6 +2920,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_verireel_preview_verification,
         ),
+        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_PREVIEW_INVENTORY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.inventory.context,
+            ),
+            handler=_handle_verireel_preview_inventory,
+        ),
         _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_TESTING_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2961,6 +2993,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
+            _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
             _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
             _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
@@ -3033,17 +3066,18 @@ def _dispatch_descriptor_driver_route(
     )
     if authorization_response is not None:
         return authorization_response
-    idempotent_response = _check_idempotent_request(
-        record_store=record_store,
-        scope=request_scope,
-        route_path=route_metadata.route_path,
-        idempotency_key=request_idempotency_key,
-        request_fingerprint=request_fingerprint,
-        start_response=start_response,
-        trace_id=trace_id,
-    )
-    if idempotent_response is not None:
-        return idempotent_response
+    if route_metadata.route_path not in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
+        idempotent_response = _check_idempotent_request(
+            record_store=record_store,
+            scope=request_scope,
+            route_path=route_metadata.route_path,
+            idempotency_key=request_idempotency_key,
+            request_fingerprint=request_fingerprint,
+            start_response=start_response,
+            trace_id=trace_id,
+        )
+        if idempotent_response is not None:
+            return idempotent_response
     dispatch_result = dispatch_route.handler(
         request,
         resolved_driver_context,
@@ -14391,38 +14425,6 @@ def create_launchplane_service_app(
                     request=verireel_preview_refresh_request.refresh,
                     driver_result=driver_result,
                 )
-            elif path == _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path:
-                verireel_preview_inventory_request = (
-                    _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_preview_inventory_request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_preview_inventory_request.product,
-                    context=verireel_preview_inventory_request.inventory.context,
-                    denial_message=_VERIREEL_PREVIEW_INVENTORY_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = execute_verireel_preview_inventory(
-                    control_plane_root=resolved_root,
-                    request=verireel_preview_inventory_request.inventory,
-                )
-                preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-                    record_store=record_store,
-                    context=driver_result.context,
-                    source="verireel-preview-inventory",
-                    preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-                )
-                result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path:
                 verireel_preview_destroy_request = (
                     _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
