@@ -748,6 +748,55 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text,
         )
 
+        removals_block = workflow_text.split("service_env_removals_json=", 1)[1].split(
+            '            })"', 1
+        )[0]
+        jq_filter = removals_block.split("                '", 1)[1].rsplit("'", 1)[0]
+        self.assertIn("$public_ingress_github_token", jq_filter)
+        self.assertIn("LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN", jq_filter)
+
+        def evaluate_removals(
+            *, public_ingress_github_token: str, omit_npmplus_env: bool
+        ) -> list[str]:
+            result = subprocess.run(
+                [
+                    "jq",
+                    "-n",
+                    "--arg",
+                    "public_ingress_github_token",
+                    public_ingress_github_token,
+                    "--argjson",
+                    "omit_npmplus_env",
+                    json.dumps(omit_npmplus_env),
+                    jq_filter,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return cast(list[str], json.loads(result.stdout))
+
+        self.assertEqual(
+            evaluate_removals(public_ingress_github_token="", omit_npmplus_env=False),
+            ["LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"],
+        )
+        self.assertEqual(
+            evaluate_removals(
+                public_ingress_github_token="public-ingress-token",
+                omit_npmplus_env=False,
+            ),
+            [],
+        )
+        self.assertEqual(
+            evaluate_removals(public_ingress_github_token="", omit_npmplus_env=True),
+            [
+                "LAUNCHPLANE_NPMPLUS_BASE_URL",
+                "LAUNCHPLANE_NPMPLUS_IDENTITY",
+                "LAUNCHPLANE_NPMPLUS_SECRET",
+                "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN",
+            ],
+        )
+
     def test_deploy_launchplane_break_glass_rollback_uploads_evidence(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
