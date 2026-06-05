@@ -31274,24 +31274,39 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     preview_url="https://pr-123.ver-preview.shinycomputers.com",
                 ),
             ) as execute_mock:
+                refresh_payload = {
+                    "product": "verireel",
+                    "refresh": {
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+                        "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                        "preview_slug": "pr-123",
+                        "preview_url": "https://pr-123.ver-preview.shinycomputers.com",
+                        "image_reference": "ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
+                    },
+                }
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
                     path="/v1/drivers/verireel/preview-refresh",
-                    payload={
-                        "product": "verireel",
-                        "refresh": {
-                            "anchor_pr_number": 123,
-                            "anchor_pr_url": "https://github.com/every/verireel/pull/123",
-                            "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
-                            "preview_slug": "pr-123",
-                            "preview_url": "https://pr-123.ver-preview.shinycomputers.com",
-                            "image_reference": "ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
-                        },
-                    },
+                    payload=refresh_payload,
+                    headers={"Idempotency-Key": "verireel-preview-refresh-pr-123"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-refresh",
+                    payload=refresh_payload,
+                    headers={"Idempotency-Key": "verireel-preview-refresh-pr-123"},
                 )
 
             self.assertEqual(status_code, 202)
+            self.assertEqual(replay_status_code, 202)
+            self.assertEqual(replay_payload["status"], "accepted")
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(replay_payload["original_trace_id"], payload["trace_id"])
+            self.assertEqual(replay_payload["records"], payload["records"])
+            self.assertEqual(replay_payload["result"], payload["result"])
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"]["preview_id"], "preview-verireel-testing-verireel-pr-123"
