@@ -440,6 +440,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_generic_web_deploy_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_rollback_plan_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
@@ -1078,6 +1087,13 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
     def test_stable_verification_descriptor_requires_dispatch_registration(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes({})
+
+    def test_generic_web_deploy_descriptor_requires_dispatch_registration(self) -> None:
+        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
+        dispatch_routes.pop(control_plane_service._GENERIC_WEB_DEPLOY_ROUTE.route_path)
+
+        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_rollback_plan_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
