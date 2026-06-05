@@ -31578,6 +31578,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "destroy_reason": "external_preview_pull_request_closed",
                         },
                     },
+                    headers={"Idempotency-Key": "verireel-preview-destroy-pr-123"},
+                )
+                replay_status_code, replay_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-destroy",
+                    payload={
+                        "product": "verireel",
+                        "destroy": {
+                            "anchor_pr_number": 123,
+                            "preview_slug": "pr-123",
+                            "destroy_reason": "external_preview_janitor_cleanup_completed",
+                        },
+                    },
+                    headers={"Idempotency-Key": "verireel-preview-destroy-pr-123"},
                 )
 
             self.assertEqual(status_code, 202)
@@ -31588,6 +31603,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["records"]["transition"], "destroyed")
             self.assertEqual(payload["result"]["destroy_status"], "pass")
             self.assertEqual(payload["result"]["application_id"], "preview-app-123")
+            self.assertEqual(replay_status_code, 202)
+            self.assertEqual(replay_payload["status"], "accepted")
+            self.assertTrue(replay_payload["replayed"])
+            self.assertEqual(replay_payload["original_trace_id"], payload["trace_id"])
+            self.assertEqual(replay_payload["records"], payload["records"])
+            self.assertEqual(replay_payload["result"], payload["result"])
             preview = store.read_preview_record("preview-verireel-testing-verireel-pr-123")
             self.assertEqual(preview.state, "destroyed")
             self.assertEqual(preview.destroy_reason, "external_preview_pull_request_closed")
