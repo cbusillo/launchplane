@@ -2807,6 +2807,27 @@ def _handle_verireel_prod_deploy(
     )
 
 
+def _handle_verireel_prod_rollback(
+    request: VeriReelProdRollbackEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    driver_result = execute_verireel_prod_rollback(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(VeriReelProdRollbackStore, record_store),
+        request=request.rollback,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "promotion_record_id": driver_result.promotion_record_id,
+            "backup_record_id": driver_result.backup_record_id,
+        },
+        driver_result=driver_result,
+    )
+
+
 def _handle_verireel_stable_environment(
     request: VeriReelStableEnvironmentEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2956,6 +2977,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_verireel_prod_deploy,
         ),
+        _VERIREEL_PROD_ROLLBACK_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_PROD_ROLLBACK_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.rollback.context,
+                instance=request.rollback.instance,
+            ),
+            handler=_handle_verireel_prod_rollback,
+        ),
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_STABLE_ENVIRONMENT_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2997,6 +3027,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
             _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
+            _VERIREEL_PROD_ROLLBACK_ROUTE.route_path,
             _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
             _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
             _VERIREEL_APP_MAINTENANCE_ROUTE.route_path,
@@ -14302,49 +14333,6 @@ def create_launchplane_service_app(
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
                     "deployment_record_id": driver_result.deployment_record_id,
-                }
-            elif path == _VERIREEL_PROD_ROLLBACK_ROUTE.route_path:
-                verireel_prod_rollback_request = (
-                    _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_prod_rollback_request.product,
-                    context=verireel_prod_rollback_request.rollback.context,
-                    instance=verireel_prod_rollback_request.rollback.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_prod_rollback_request.product,
-                    context=verireel_prod_rollback_request.rollback.context,
-                    denial_message=_VERIREEL_PROD_ROLLBACK_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_verireel_prod_rollback(
-                    control_plane_root=resolved_root,
-                    record_store=cast(VeriReelProdRollbackStore, record_store),
-                    request=verireel_prod_rollback_request.rollback,
-                )
-                result = {
-                    "promotion_record_id": driver_result.promotion_record_id,
-                    "backup_record_id": driver_result.backup_record_id,
                 }
             elif path == _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path:
                 verireel_preview_refresh_request = (
