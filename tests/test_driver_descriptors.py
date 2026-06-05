@@ -479,6 +479,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             _resolved_context: control_plane_service._ResolvedProductDriverContext,
             _record_store: object,
             _root_path: Path,
+            _state_dir: Path,
+            _database_url: str | None,
             _identity: Any,
             _request_scope: str,
             _request_idempotency_key: str,
@@ -600,6 +602,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._ODOO_PROD_PROMOTION_ROUTE.route_path,
             dispatch_routes,
         )
         self.assertIn(
@@ -1360,6 +1370,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_ROLLBACK_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path)
@@ -1390,6 +1402,66 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "_DESCRIPTORS",
             (
                 descriptor_without_prod_rollback,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "odoo"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_prod_promotion_run_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_prod_promotion_run = registry.ODOO_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.ODOO_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._ODOO_PROD_PROMOTION_RUN_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_prod_promotion_run,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "odoo"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_prod_promotion_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_prod_promotion = registry.ODOO_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.ODOO_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._ODOO_PROD_PROMOTION_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_prod_promotion,
                 *(
                     descriptor
                     for descriptor in registry._DESCRIPTORS

@@ -851,6 +851,8 @@ _DescriptorDriverCustomDispatchHandler = Callable[
         _ResolvedProductDriverContext,
         object,
         Path,
+        Path,
+        str | None,
         LaunchplaneIdentity,
         str,
         str,
@@ -2797,6 +2799,8 @@ def _dispatch_generic_web_prod_promotion(
     resolved_context: _ResolvedProductDriverContext,
     record_store: object,
     control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
     identity: LaunchplaneIdentity,
     request_scope: str,
     request_idempotency_key: str,
@@ -2804,7 +2808,7 @@ def _dispatch_generic_web_prod_promotion(
     start_response: _StartResponse,
     trace_id: str,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del identity
+    del state_dir, database_url, identity
     if resolved_context.profile is None or resolved_context.lane is None:
         raise ProductDriverMismatchError(
             "Generic web prod promotion requires a product profile lane."
@@ -3002,6 +3006,84 @@ def _handle_odoo_prod_backup_gate(
     )
 
 
+def _dispatch_odoo_prod_promotion_run(
+    request: OdooProdPromotionRunEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
+    identity: LaunchplaneIdentity,
+    request_scope: str,
+    request_idempotency_key: str,
+    request_fingerprint: str,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    del (
+        resolved_context,
+        identity,
+        request_scope,
+        request_idempotency_key,
+        request_fingerprint,
+        start_response,
+        trace_id,
+    )
+    driver_result = execute_odoo_prod_promotion_run(
+        control_plane_root=control_plane_root_path,
+        state_dir=state_dir,
+        database_url=database_url,
+        record_store=cast(OdooProdPromotionRunStore, record_store),
+        request=request.run,
+    )
+    return driver_result.model_dump(mode="json"), driver_result
+
+
+def _dispatch_odoo_prod_promotion(
+    request: OdooProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
+    identity: LaunchplaneIdentity,
+    request_scope: str,
+    request_idempotency_key: str,
+    request_fingerprint: str,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    del (
+        resolved_context,
+        identity,
+        request_scope,
+        request_idempotency_key,
+        request_fingerprint,
+        start_response,
+        trace_id,
+    )
+    driver_result = execute_odoo_prod_promotion(
+        control_plane_root=control_plane_root_path,
+        state_dir=state_dir,
+        database_url=database_url,
+        record_store=cast(OdooProdPromotionStore, record_store),
+        request=request.promotion,
+    )
+    return (
+        {
+            "promotion_record_id": driver_result.promotion_record_id,
+            "deployment_record_id": driver_result.deployment_record_id,
+            "backup_record_id": driver_result.backup_record_id,
+            "release_tuple_id": driver_result.release_tuple_id,
+            "promotion_status": driver_result.promotion_status,
+            "deployment_status": driver_result.deployment_status,
+            "post_deploy_status": driver_result.post_deploy_status,
+            "destination_health_status": driver_result.destination_health_status,
+        },
+        driver_result,
+    )
+
+
 def _handle_odoo_prod_rollback(
     request: OdooProdRollbackEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3050,6 +3132,8 @@ def _dispatch_odoo_target_replacement_apply(
     resolved_context: _ResolvedProductDriverContext,
     record_store: object,
     control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
     identity: LaunchplaneIdentity,
     request_scope: str,
     request_idempotency_key: str,
@@ -3057,7 +3141,7 @@ def _dispatch_odoo_target_replacement_apply(
     start_response: _StartResponse,
     trace_id: str,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del identity
+    del state_dir, database_url, identity
     if resolved_context.lane is None:
         raise ProductDriverMismatchError(
             "Odoo target replacement apply requires a known product lane."
@@ -3719,6 +3803,24 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_prod_backup_gate,
         ),
+        _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PROD_PROMOTION_RUN_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.run.context,
+            ),
+            custom_dispatch_handler=_dispatch_odoo_prod_promotion_run,
+        ),
+        _ODOO_PROD_PROMOTION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PROD_PROMOTION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.promotion.context,
+            ),
+            custom_dispatch_handler=_dispatch_odoo_prod_promotion,
+        ),
         _ODOO_PROD_ROLLBACK_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_PROD_ROLLBACK_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3932,6 +4034,8 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
+            _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path,
+            _ODOO_PROD_PROMOTION_ROUTE.route_path,
             _ODOO_PROD_ROLLBACK_ROUTE.route_path,
             _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
             _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE.route_path,
@@ -3970,6 +4074,8 @@ def _dispatch_descriptor_driver_route(
     start_response: _StartResponse,
     trace_id: str,
     control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
     route_metadata = dispatch_route.execution_metadata
     descriptor_route_metadata = _driver_route_metadata_from_descriptors().get(
@@ -4057,6 +4163,8 @@ def _dispatch_descriptor_driver_route(
             resolved_driver_context,
             record_store,
             control_plane_root_path,
+            state_dir,
+            database_url,
             identity,
             request_scope,
             request_idempotency_key,
@@ -14123,6 +14231,8 @@ def create_launchplane_service_app(
                     payload=payload,
                     record_store=record_store,
                     control_plane_root_path=resolved_root,
+                    state_dir=state_dir,
+                    database_url=database_url,
                     authz_policy=authz_policy,
                     identity=identity,
                     request_scope=request_scope,
@@ -14425,85 +14535,6 @@ def create_launchplane_service_app(
                     )
                     driver_result = _operation_payload(operation)
                     result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
-            elif path == _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path:
-                odoo_promotion_run_request = (
-                    _ODOO_PROD_PROMOTION_RUN_ROUTE.envelope_model.model_validate(payload)
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_PROD_PROMOTION_RUN_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_promotion_run_request.product,
-                    authorization_context=odoo_promotion_run_request.run.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_prod_promotion_run(
-                    control_plane_root=resolved_root,
-                    state_dir=state_dir,
-                    database_url=database_url,
-                    record_store=cast(OdooProdPromotionRunStore, record_store),
-                    request=odoo_promotion_run_request.run,
-                )
-                result = driver_result.model_dump(mode="json")
-            elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
-                odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
-                    payload
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_PROD_PROMOTION_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_promotion_request.product,
-                    authorization_context=odoo_promotion_request.promotion.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_prod_promotion(
-                    control_plane_root=resolved_root,
-                    state_dir=state_dir,
-                    database_url=database_url,
-                    record_store=cast(OdooProdPromotionStore, record_store),
-                    request=odoo_promotion_request.promotion,
-                )
-                result = {
-                    "promotion_record_id": driver_result.promotion_record_id,
-                    "deployment_record_id": driver_result.deployment_record_id,
-                    "backup_record_id": driver_result.backup_record_id,
-                    "release_tuple_id": driver_result.release_tuple_id,
-                    "promotion_status": driver_result.promotion_status,
-                    "deployment_status": driver_result.deployment_status,
-                    "post_deploy_status": driver_result.post_deploy_status,
-                    "destination_health_status": driver_result.destination_health_status,
-                }
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
                     payload
