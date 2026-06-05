@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import unittest
+from unittest.mock import patch
+from urllib.request import Request
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -220,11 +223,6 @@ def _record_notification(
     return True
 
 
-def _capture_command(commands: list[list[str]], command: list[str]) -> object:
-    commands.append(command)
-    return object()
-
-
 def _capture_github_call(
     calls: list[tuple[str, dict[str, object]]], action: str, payload: dict[str, object]
 ) -> dict[str, object]:
@@ -233,6 +231,20 @@ def _capture_github_call(
         "url": "https://github.com/cbusillo/launchplane/issues/123",
         "id": f"github-{action}",
     }
+
+
+class _GitHubResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> _GitHubResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
 
 
 def _capture_request(requested_urls: list[str], url: str) -> HttpObservation:
@@ -804,9 +816,9 @@ class PublicIngressMonitorTests(unittest.TestCase):
         )
 
     def test_github_issue_notifier_comments_on_alert_issue(self) -> None:
-        commands: list[list[str]] = []
+        calls: list[tuple[str, dict[str, object]]] = []
         notifier = build_github_issue_notifier(
-            runner=lambda command: _capture_command(commands, command)
+            github_client=lambda action, payload: _capture_github_call(calls, action, payload)
         )
         record = PublicIngressObservationRecord(
             record_id="public-ingress-example-site-prod-20260529t122500z",
@@ -831,7 +843,142 @@ class PublicIngressMonitorTests(unittest.TestCase):
         )
 
         self.assertTrue(notifier(record, None))
-        self.assertEqual(commands[0][:4], ["gh", "issue", "comment", record.notification_key])
+        self.assertEqual(calls[0][0], "comment")
+        self.assertEqual(calls[0][1]["repository"], "cbusillo/launchplane")
+        self.assertEqual(calls[0][1]["issue_number"], 929)
+
+    def test_github_issue_notifier_fails_closed_without_managed_token(self) -> None:
+        notifier = build_github_issue_notifier()
+        record = PublicIngressObservationRecord(
+            record_id="public-ingress-example-site-prod-20260529t122500z",
+            product="example-site",
+            context="example-site",
+            instance="prod",
+            observed_at="2026-05-29T12:25:00Z",
+            status="fail",
+            failure_code="http_error",
+            base_url="https://example.test",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="base_url",
+                    url="https://example.test",
+                    status="fail",
+                    failure_code="http_error",
+                    summary="HTTP 503",
+                ),
+            ),
+            notification_key="https://github.com/cbusillo/launchplane/issues/929",
+            summary="Public ingress failed.",
+        )
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(notifier(record, None))
+
+    def test_github_issue_notifier_uses_managed_token_api(self) -> None:
+        requests: list[Request] = []
+
+        def fake_urlopen(request: Request, timeout: int) -> _GitHubResponse:
+            requests.append(request)
+            self.assertEqual(timeout, 15)
+            return _GitHubResponse(
+                {
+                    "html_url": "https://github.com/cbusillo/launchplane/issues/929#issuecomment-1",
+                    "id": 1,
+                }
+            )
+
+        notifier = build_github_issue_notifier(token="managed-token")
+        record = PublicIngressObservationRecord(
+            record_id="public-ingress-example-site-prod-20260529t122500z",
+            product="example-site",
+            context="example-site",
+            instance="prod",
+            observed_at="2026-05-29T12:25:00Z",
+            status="fail",
+            failure_code="http_error",
+            base_url="https://example.test",
+            targets=(
+                PublicIngressTargetObservation(
+                    target="base_url",
+                    url="https://example.test",
+                    status="fail",
+                    failure_code="http_error",
+                    summary="HTTP 503",
+                ),
+            ),
+            notification_key="https://github.com/cbusillo/launchplane/issues/929",
+            summary="Public ingress failed.",
+        )
+
+        with patch("control_plane.workflows.public_ingress_monitor.urlopen", fake_urlopen):
+            self.assertTrue(notifier(record, None))
+
+        request = requests[0]
+        self.assertEqual(
+            getattr(request, "full_url"),
+            "https://api.github.com/repos/cbusillo/launchplane/issues/929/comments",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer managed-token")
+        self.assertEqual(
+            json.loads(getattr(request, "data").decode("utf-8"))["body"].splitlines()[0],
+            "Launchplane public ingress FAILED: example-site/prod",
+        )
+
+    def test_default_github_incident_driver_uses_managed_token_api(self) -> None:
+        requests: list[Request] = []
+
+        def fake_urlopen(request: Request, timeout: int) -> _GitHubResponse:
+            requests.append(request)
+            self.assertEqual(timeout, 15)
+            return _GitHubResponse(
+                {
+                    "html_url": "https://github.com/cbusillo/launchplane/issues/123",
+                    "id": 123,
+                }
+            )
+
+        store = _Store((_profile(),))
+        store.notification_policies.append(
+            _notification_policy(
+                PublicIngressNotificationDestination(
+                    destination_id="github-main",
+                    kind="github_issue",
+                    github_repository="cbusillo/launchplane",
+                    github_label="public-ingress",
+                )
+            )
+        )
+        drivers = PublicIngressNotificationDriverSet()
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": "managed-token"},
+                clear=True,
+            ),
+            patch("control_plane.workflows.public_ingress_monitor.urlopen", fake_urlopen),
+        ):
+            result = run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at="2026-05-29T12:25:00Z",
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=503,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+                notification_drivers=drivers,
+            )
+
+        self.assertEqual(result.delivery_attempt_count, 1)
+        self.assertEqual(store.notification_attempts[0].delivery_status, "delivered")
+        request = requests[0]
+        self.assertEqual(
+            getattr(request, "full_url"),
+            "https://api.github.com/repos/cbusillo/launchplane/issues",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer managed-token")
 
 
 if __name__ == "__main__":
