@@ -418,7 +418,7 @@ allowlist or authz-action entry.
 Routes can also opt into descriptor-backed service dispatch when a backend
 handler is explicitly registered for the same descriptor route. Generic-web
 stable verification, rollback planning, preview verification, and the VeriReel
-testing deploy plus testing and preview verification writebacks use
+testing and prod deploys plus testing and preview verification writebacks use
 descriptor-backed dispatch. This keeps descriptor metadata as the route/authz
 source of truth while preventing an advertised descriptor action from becoming
 executable without implementation.

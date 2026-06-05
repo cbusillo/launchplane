@@ -2766,6 +2766,24 @@ def _handle_verireel_testing_deploy(
     )
 
 
+def _handle_verireel_prod_deploy(
+    request: VeriReelProdDeployEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    driver_result = execute_verireel_stable_deploy(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(VeriReelStableDeployStore, record_store),
+        request=request.deploy,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={"deployment_record_id": driver_result.deployment_record_id},
+        driver_result=driver_result,
+    )
+
+
 def _handle_verireel_stable_environment(
     request: VeriReelStableEnvironmentEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2880,6 +2898,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_verireel_testing_deploy,
         ),
+        _VERIREEL_PROD_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_PROD_DEPLOY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.deploy.context,
+                instance=request.deploy.instance,
+            ),
+            handler=_handle_verireel_prod_deploy,
+        ),
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_VERIREEL_STABLE_ENVIRONMENT_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -2910,6 +2937,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path,
             _VERIREEL_TESTING_DEPLOY_ROUTE.route_path,
+            _VERIREEL_PROD_DEPLOY_ROUTE.route_path,
             _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
             _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
         )
@@ -14160,46 +14188,6 @@ def create_launchplane_service_app(
                     request=verireel_maintenance_request.maintenance,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path == _VERIREEL_PROD_DEPLOY_ROUTE.route_path:
-                verireel_prod_deploy_request = (
-                    _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_prod_deploy_request.product,
-                    context=verireel_prod_deploy_request.deploy.context,
-                    instance=verireel_prod_deploy_request.deploy.instance,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_prod_deploy_request.product,
-                    context=verireel_prod_deploy_request.deploy.context,
-                    denial_message=_VERIREEL_PROD_DEPLOY_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_verireel_stable_deploy(
-                    control_plane_root=resolved_root,
-                    record_store=cast(VeriReelStableDeployStore, record_store),
-                    request=verireel_prod_deploy_request.deploy,
-                )
-                result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path:
                 verireel_prod_backup_gate_request = (
                     _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
