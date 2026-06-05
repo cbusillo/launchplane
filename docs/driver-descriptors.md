@@ -395,7 +395,7 @@ VeriReel exposes:
 - prod backup gate
 - testing-to-prod promotion
 - prod rollback
-- preview refresh/inventory/destroy
+- preview refresh/inventory/destroy/verification
 
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
@@ -416,7 +416,9 @@ route-alias paths and reads product-driver handler authorization actions from
 descriptor route metadata, so new drivers do not need a second hardcoded router
 allowlist or authz-action entry.
 Routes can also opt into descriptor-backed service dispatch when a backend
-handler is explicitly registered for the same descriptor route. This keeps
+handler is explicitly registered for the same descriptor route. Generic-web
+stable verification, rollback planning, preview verification, and the VeriReel
+preview verification writeback use descriptor-backed dispatch. This keeps
 descriptor metadata as the route/authz source of truth while preventing an
 advertised descriptor action from becoming executable without implementation.
 Descriptor route metadata and service compatibility policy also drive

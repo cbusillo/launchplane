@@ -2715,6 +2715,22 @@ def _handle_generic_web_preview_verification(
     )
 
 
+def _handle_verireel_preview_verification(
+    request: VeriReelPreviewVerificationEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    return _DescriptorDriverDispatchResult(
+        result=_apply_verireel_preview_verification_records(
+            control_plane_root_path=control_plane_root_path,
+            record_store=record_store,
+            request=request.verification,
+        )
+    )
+
+
 def _validate_generic_web_preview_verification_profile(
     request: GenericWebPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -2774,6 +2790,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             handler=_handle_generic_web_preview_verification,
             pre_idempotency_validator=_validate_generic_web_preview_verification_profile,
         ),
+        _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                authorization_context=request.verification.context,
+            ),
+            handler=_handle_verireel_preview_verification,
+        ),
     }
 
 
@@ -2783,6 +2808,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+            _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path,
         )
     )
 
@@ -14492,43 +14518,6 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=verireel_preview_destroy_request.destroy,
                     driver_result=driver_result,
-                )
-            elif path == _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path:
-                verireel_preview_verification_request = (
-                    _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
-                )
-                _resolve_descriptor_product_driver_context(
-                    record_store=record_store,
-                    route_path=path,
-                    product=verireel_preview_verification_request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    route_path=path,
-                    product=verireel_preview_verification_request.product,
-                    context=verireel_preview_verification_request.verification.context,
-                    denial_message=_VERIREEL_PREVIEW_VERIFICATION_ROUTE.denial_message,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = _apply_verireel_preview_verification_records(
-                    control_plane_root_path=resolved_root,
-                    record_store=record_store,
-                    request=verireel_preview_verification_request.verification,
                 )
             elif path == _ODOO_PREVIEW_APPLY_ROUTE.route_path:
                 odoo_preview_apply_request = (
