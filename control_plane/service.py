@@ -406,6 +406,7 @@ from control_plane.workflows.odoo_stable_bootstrap import (
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
+    OdooProdBackupGateStore,
     execute_odoo_prod_backup_gate,
 )
 from control_plane.workflows.odoo_prod_promotion import (
@@ -2770,6 +2771,31 @@ def _handle_odoo_prod_promotion_inputs(
     )
 
 
+def _handle_odoo_prod_backup_gate(
+    request: OdooProdBackupGateEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del resolved_context
+    driver_result = execute_odoo_prod_backup_gate(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(OdooProdBackupGateStore, record_store),
+        request=request.backup_gate,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "backup_record_id": driver_result.backup_record_id,
+            "backup_status": driver_result.backup_status,
+            "backup_root": driver_result.backup_root,
+            "database_dump_path": driver_result.database_dump_path,
+            "filestore_archive_path": driver_result.filestore_archive_path,
+            "manifest_path": driver_result.manifest_path,
+        },
+        driver_result=driver_result,
+    )
+
+
 def _handle_odoo_post_deploy(
     request: OdooPostDeployEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3283,6 +3309,15 @@ def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchR
             ),
             handler=_handle_odoo_prod_promotion_inputs,
         ),
+        _ODOO_PROD_BACKUP_GATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.backup_gate.context,
+                instance=request.backup_gate.instance,
+            ),
+            handler=_handle_odoo_prod_backup_gate,
+        ),
         _ODOO_POST_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_POST_DEPLOY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3462,6 +3497,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
+            _ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
             _ODOO_POST_DEPLOY_ROUTE.route_path,
             _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
             _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
@@ -14139,46 +14175,6 @@ def create_launchplane_service_app(
                     )
                     driver_result = _operation_payload(operation)
                     result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
-            elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
-                odoo_backup_gate_request = (
-                    _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
-                )
-                _, authorization_response = _resolve_and_authorize_descriptor_route(
-                    route_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    product=odoo_backup_gate_request.product,
-                    authorization_context=odoo_backup_gate_request.backup_gate.context,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_prod_backup_gate(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=odoo_backup_gate_request.backup_gate,
-                )
-                result = {
-                    "backup_record_id": driver_result.backup_record_id,
-                    "backup_status": driver_result.backup_status,
-                    "backup_root": driver_result.backup_root,
-                    "database_dump_path": driver_result.database_dump_path,
-                    "filestore_archive_path": driver_result.filestore_archive_path,
-                    "manifest_path": driver_result.manifest_path,
-                }
             elif path == _ODOO_PROD_PROMOTION_RUN_ROUTE.route_path:
                 odoo_promotion_run_request = (
                     _ODOO_PROD_PROMOTION_RUN_ROUTE.envelope_model.model_validate(payload)

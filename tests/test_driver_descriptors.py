@@ -473,6 +473,10 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
             dispatch_routes,
         )
+        self.assertIn(
+            control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path,
+            dispatch_routes,
+        )
         self.assertIn(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path, dispatch_routes)
         self.assertIn(
             control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path,
@@ -1096,6 +1100,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
