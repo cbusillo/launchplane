@@ -287,6 +287,7 @@ class ProductOnboardingTests(unittest.TestCase):
                 "verireel-product-onboarding",
                 "odoo-cm-product-onboarding",
                 "odoo-opw-product-onboarding",
+                "odoo-cm-website-product-onboarding",
                 "launchplane-runtime-key-safety-policy",
             },
         )
@@ -326,7 +327,10 @@ class ProductOnboardingTests(unittest.TestCase):
                 }
                 for binding_key in ODOO_SECRET_KEYS:
                     self.assertEqual(odoo_rules[binding_key]["secret_class"], "shared_safe")
-                    self.assertEqual(odoo_rules[binding_key]["allowed_contexts"], ["cm", "opw"])
+                    self.assertEqual(
+                        odoo_rules[binding_key]["allowed_contexts"],
+                        ["cm", "cm_website", "opw"],
+                    )
                     self.assertEqual(
                         odoo_rules[binding_key]["allowed_instances"], ["testing", "prod"]
                     )
@@ -1548,6 +1552,58 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             expected_database_names={"testing": "cm_testing", "prod": "cm"},
         )
         self.assertEqual(manifest.source_label, "import-material:odoo-cm-product-onboarding")
+
+    def test_seed_import_odoo_cm_website_onboarding_manifest_owns_preview_records(
+        self,
+    ) -> None:
+        manifest_payload = _seed_import_manifest("odoo-cm-website-product-onboarding")
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+
+        self.assertEqual(manifest.product, "odoo-tenant-cm-website")
+        self.assertEqual(manifest.display_name, "Cell Mechanic Website Odoo")
+        self.assertEqual(manifest.repository, "cbusillo/odoo-tenant-cm-website")
+        self.assertEqual(manifest.driver_id, "odoo")
+        self.assertEqual(manifest.image_repository, "ghcr.io/cbusillo/odoo-tenant-cm-website")
+        self.assertEqual(manifest.runtime_port, 8069)
+        self.assertEqual(manifest.health_path, "/cm-website/health")
+        self.assertEqual(
+            [
+                (lane.instance, lane.context, lane.base_url, lane.health_url)
+                for lane in manifest.lanes
+            ],
+            [
+                (
+                    "testing",
+                    "cm_website",
+                    "https://cm-website-testing.shinycomputers.com",
+                    "https://cm-website-testing.shinycomputers.com/cm-website/health",
+                ),
+                (
+                    "prod",
+                    "cm_website",
+                    "https://www.cellmechanic.com",
+                    "https://www.cellmechanic.com/cm-website/health",
+                ),
+            ],
+        )
+        self.assertTrue(manifest.preview.enabled)
+        self.assertEqual(manifest.preview.context, "cm_website")
+        self.assertEqual(manifest.preview.app_name_prefix, "cm-website-odoo-preview")
+        self.assertEqual(manifest.preview.template_instance, "testing")
+        self.assertEqual(manifest.preview.override_env, {"ODOO_INSTALL_MODULES": "cm_website"})
+        self.assertEqual(manifest.preview.preview_url_env_keys, ("WEB_BASE_URL",))
+        self.assertEqual(manifest.preview.data_transport_mode, "driver")
+        self.assertEqual(manifest.provider_targets, ())
+        _assert_odoo_stable_lane_runtime_contract(
+            self,
+            manifest=manifest,
+            context="cm_website",
+            expected_database_names={"testing": "cm_website_testing", "prod": "cm_website_prod"},
+        )
+        self.assertEqual(
+            manifest.source_label,
+            "import-material:odoo-cm-website-product-onboarding",
+        )
 
     def test_seed_import_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "target requires target_id"):
