@@ -12761,6 +12761,37 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             root = Path(temporary_directory_name)
+            with self.assertRaisesRegex(
+                ValueError,
+                "POST driver descriptor routes must be registered for descriptor-backed dispatch",
+            ):
+                create_launchplane_service_app(
+                    state_dir=root / "state-startup-fail",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.service.list_driver_descriptors",
+                return_value=(_fake_descriptor_dispatch_descriptor(),),
+            ),
+            patch(
+                "control_plane.service._descriptor_driver_dispatch_routes",
+                return_value={},
+            ),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
+            ),
+            patch(
+                "control_plane.service._descriptor_driver_dispatch_exempt_route_paths",
+                return_value=frozenset({_FAKE_DESCRIPTOR_ROUTE_PATH}),
+            ),
+        ):
+            root = Path(temporary_directory_name)
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),

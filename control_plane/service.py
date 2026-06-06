@@ -4521,6 +4521,10 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
     )
 
 
+def _descriptor_driver_dispatch_exempt_route_paths() -> frozenset[str]:
+    return frozenset()
+
+
 def _dispatch_descriptor_driver_route(
     *,
     dispatch_route: _DescriptorDriverDispatchRoute[Any],
@@ -4905,6 +4909,21 @@ def _validate_descriptor_driver_dispatch_routes(
         raise ValueError(
             "Descriptor-backed dispatch routes must be registered by the service: "
             f"{', '.join(missing_required_routes)}"
+        )
+    post_descriptor_routes = frozenset(
+        route_path
+        for route_path, route_metadata in descriptor_routes.items()
+        if route_metadata.method == "POST"
+    )
+    missing_post_descriptor_routes = sorted(
+        post_descriptor_routes
+        - _descriptor_driver_dispatch_exempt_route_paths()
+        - dispatch_routes.keys()
+    )
+    if missing_post_descriptor_routes:
+        raise ValueError(
+            "POST driver descriptor routes must be registered for descriptor-backed "
+            f"dispatch: {', '.join(missing_post_descriptor_routes)}"
         )
     for route_path, dispatch_route in dispatch_routes.items():
         if route_path != dispatch_route.execution_metadata.route_path:
