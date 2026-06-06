@@ -359,6 +359,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertLessEqual(
             set(descriptor_post_route_metadata), control_plane_service._build_write_routes()
         )
+        self.assertEqual(
+            set(descriptor_post_route_metadata)
+            - control_plane_service._descriptor_driver_dispatch_exempt_route_paths(),
+            set(control_plane_service._descriptor_driver_dispatch_routes()),
+        )
         for route_path, (
             driver_id,
             action_id,
@@ -373,6 +378,53 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "/v1/drivers/launchplane/self-deploy",
             control_plane_service._build_write_routes(),
         )
+
+    def test_post_descriptor_route_requires_dispatch_registration(self) -> None:
+        descriptor = DriverDescriptor(
+            driver_id="fake-dispatch",
+            label="Fake dispatch",
+            product="fake-dispatch",
+            description="Test-only descriptor dispatch driver.",
+            provider_boundary="Test-only provider boundary.",
+            actions=(
+                DriverActionDescriptor(
+                    action_id="ping",
+                    label="Ping",
+                    description="Test descriptor-backed dispatch route.",
+                    safety="safe_write",
+                    scope="context",
+                    method="POST",
+                    route_path="/v1/drivers/fake-dispatch/ping",
+                    authz_action="fake_dispatch.ping",
+                ),
+            ),
+        )
+
+        with (
+            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "POST driver descriptor routes must be registered for descriptor-backed dispatch",
+            ):
+                control_plane_service._validate_descriptor_driver_dispatch_routes({})
+
+        with (
+            patch("control_plane.service.list_driver_descriptors", return_value=(descriptor,)),
+            patch(
+                "control_plane.service._required_descriptor_driver_dispatch_route_paths",
+                return_value=frozenset(),
+            ),
+            patch(
+                "control_plane.service._descriptor_driver_dispatch_exempt_route_paths",
+                return_value=frozenset({"/v1/drivers/fake-dispatch/ping"}),
+            ),
+        ):
+            control_plane_service._validate_descriptor_driver_dispatch_routes({})
 
     def test_descriptor_dispatch_registration_requires_descriptor_route(self) -> None:
         descriptor = DriverDescriptor(
