@@ -30862,6 +30862,60 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19"},
             )
 
+    def test_odoo_artifact_publish_inputs_dependency_miss_is_not_route_missing(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm-website",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm-website"],
+                            "contexts": ["cm_website"],
+                            "actions": ["odoo_artifact_publish_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm-website",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/artifact-publish-inputs",
+                payload={
+                    "product": "odoo-tenant-cm-website",
+                    "inputs": {"context": "cm_website", "instance": "testing"},
+                },
+            )
+
+            self.assertEqual(status_code, 503)
+            self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
+            self.assertEqual(payload["details"]["route_path"], "/v1/drivers/odoo/artifact-publish-inputs")
+            self.assertNotIn("missing", payload["details"])
+            self.assertNotIn("product_profiles", json.dumps(payload))
+            self.assertNotIn("No Launchplane route", payload["error"]["message"])
+            self.assertEqual(control_plane_service._http_status_text(503), "Service Unavailable")
+
     def test_odoo_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

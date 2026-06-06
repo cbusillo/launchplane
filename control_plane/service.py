@@ -3781,6 +3781,7 @@ def _http_status_text(status_code: int) -> str:
         404: "Not Found",
         405: "Method Not Allowed",
         409: "Conflict",
+        503: "Service Unavailable",
         500: "Internal Server Error",
     }.get(status_code, "OK")
 
@@ -13246,21 +13247,41 @@ def create_launchplane_service_app(
                 result = provider_target_result.result
                 driver_result = provider_target_result.driver_result
             elif path in descriptor_driver_dispatch_routes:
-                dispatch_response = _dispatch_descriptor_driver_route(
-                    dispatch_route=descriptor_driver_dispatch_routes[path],
-                    payload=payload,
-                    record_store=record_store,
-                    control_plane_root_path=resolved_root,
-                    state_dir=state_dir,
-                    database_url=database_url,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    request_scope=request_scope,
-                    request_idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
+                try:
+                    dispatch_response = _dispatch_descriptor_driver_route(
+                        dispatch_route=descriptor_driver_dispatch_routes[path],
+                        payload=payload,
+                        record_store=record_store,
+                        control_plane_root_path=resolved_root,
+                        state_dir=state_dir,
+                        database_url=database_url,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        request_scope=request_scope,
+                        request_idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                except FileNotFoundError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "driver_route_dependency_not_found",
+                                "message": (
+                                    "Driver route is registered, but required"
+                                    " product or runtime records were not found."
+                                ),
+                            },
+                            "details": {
+                                "route_path": path,
+                            },
+                        },
+                    )
                 if isinstance(dispatch_response, list):
                     return dispatch_response
                 result, driver_result = dispatch_response

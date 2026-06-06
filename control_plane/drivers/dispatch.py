@@ -36,6 +36,7 @@ def _http_status_text(status_code: int) -> str:
         404: "Not Found",
         405: "Method Not Allowed",
         409: "Conflict",
+        503: "Service Unavailable",
         500: "Internal Server Error",
     }.get(status_code, "OK")
 
