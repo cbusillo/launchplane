@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Callable, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -61,6 +62,24 @@ def _validate_driver_envelope_product(product: str, *, label: str) -> None:
 
 class ProductDriverMismatchError(ValueError):
     pass
+
+
+def _repo_token(value: str) -> str:
+    normalized = value.strip().replace("_", "-")
+    normalized = "-".join(filter(None, re.split(r"[^A-Za-z0-9]+", normalized)))
+    if not normalized:
+        raise ValueError("repository token is required")
+    return normalized.lower()
+
+
+def _image_reference_tail(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    for separator in ("@", ":"):
+        if separator in normalized:
+            normalized = normalized.rsplit(separator, maxsplit=1)[1]
+    return normalized.strip()
 
 
 def _normalize_release_status(value: object, *, label: str) -> ReleaseStatus:
