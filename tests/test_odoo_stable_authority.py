@@ -2,7 +2,43 @@ from pathlib import Path
 from unittest import TestCase
 
 
+_PRODUCTION_MUTATION_WORKFLOW_PATHS = (
+    Path(".github/workflows/product-context-cutover.yml"),
+    Path(".github/workflows/product-context-cutover-audit.yml"),
+    Path(".github/workflows/product-legacy-context-cleanup.yml"),
+    Path(".github/workflows/odoo-config-parameter-override.yml"),
+    Path(".github/workflows/odoo-target-replacement-plan.yml"),
+    Path(".github/workflows/odoo-target-replacement-apply.yml"),
+    Path(".github/workflows/odoo-stable-bootstrap.yml"),
+    Path(".github/workflows/odoo-website-bootstrap-override.yml"),
+)
+
+
 class OdooStableAuthorityTests(TestCase):
+    def test_production_mutation_workflows_do_not_default_to_real_topology(
+        self,
+    ) -> None:
+        forbidden_tokens = (
+            "default: sellyouroutboard",
+            "default: odoo-tenant-",
+            "default: cm",
+            "default: opw",
+            "SellYourOutboard",
+            "sellyouroutboard-testing",
+            "https://cm-testing.shinycomputers.com",
+            "allowed_targets=",
+            "odoo-tenant-cm:",
+            "odoo-tenant-opw:",
+        )
+        offenders: list[str] = []
+        for workflow_path in _PRODUCTION_MUTATION_WORKFLOW_PATHS:
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            for token in forbidden_tokens:
+                if token in workflow_text:
+                    offenders.append(f"{workflow_path.as_posix()}: {token}")
+
+        self.assertEqual(offenders, [])
+
     def test_reusable_testing_deploy_uses_target_replacement_apply(self) -> None:
         workflow = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
             encoding="utf-8"

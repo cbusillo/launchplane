@@ -12166,6 +12166,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("refuses startup without --database-url", result.output)
 
+    def test_service_serve_rejects_missing_audience(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            policy_file = Path(temporary_directory_name) / "policy.toml"
+            policy_file.write_text("schema_version = 1\n", encoding="utf-8")
+
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "serve",
+                    "--state-dir",
+                    str(Path(temporary_directory_name) / "state"),
+                    "--policy-file",
+                    str(policy_file),
+                    "--database-url",
+                    f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'state.sqlite3'}",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("refuses startup without --audience", result.output)
+
     def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             policy = LaunchplaneAuthzPolicy.model_validate(
@@ -21668,6 +21691,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "--local-inspection",
                     "--state-dir",
                     str(state_dir),
+                    "--context",
+                    "verireel",
+                    "--preview-context",
+                    "verireel-testing",
                 ],
             )
 
@@ -21696,6 +21723,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "inspect-data-freshness",
                     "--state-dir",
                     str(state_dir),
+                    "--context",
+                    "verireel",
+                    "--preview-context",
+                    "verireel-testing",
                 ],
             )
 
@@ -21728,6 +21759,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "--local-inspection",
                     "--state-dir",
                     str(state_dir),
+                    "--context",
+                    "verireel",
+                    "--preview-context",
+                    "verireel-testing",
                 ],
             )
 

@@ -198,8 +198,7 @@ def service() -> None:
 @click.option("--port", type=int, default=8080, show_default=True)
 @click.option(
     "--audience",
-    default="launchplane.shinycomputers.com",
-    show_default=True,
+    envvar="LAUNCHPLANE_SERVICE_AUDIENCE",
     help="Expected GitHub OIDC audience for Launchplane service tokens.",
 )
 @click.option(
@@ -220,6 +219,12 @@ def service_serve(
         raise click.ClickException(
             "Launchplane service refuses startup without --database-url or "
             "LAUNCHPLANE_DATABASE_URL. Filesystem state is local-only."
+        )
+    if audience is None or not audience.strip():
+        raise click.ClickException(
+            "Launchplane service refuses startup without --audience or "
+            "LAUNCHPLANE_SERVICE_AUDIENCE. The service audience is explicit "
+            "operator/process wiring."
         )
     serve_launchplane_service(
         state_dir=state_dir,
@@ -527,10 +532,8 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
 )
 @click.option("--database-url", envvar=_DATABASE_URL_ENV_KEYS, default="", show_default=False)
 @click.option("--local-inspection", is_flag=True, default=False)
-@click.option("--context", "context_name", default="verireel", show_default=True)
-@click.option(
-    "--preview-context", "preview_context_name", default="verireel-testing", show_default=True
-)
+@click.option("--context", "context_name", required=True)
+@click.option("--preview-context", "preview_context_name", required=True)
 def service_inspect_data_freshness(
     state_dir: Path,
     database_url: str,

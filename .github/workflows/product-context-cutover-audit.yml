@@ -7,17 +7,14 @@ name: Product Context Cutover Audit
       product:
         description: Product profile key to audit.
         required: true
-        default: sellyouroutboard
         type: string
       source_context:
         description: Legacy context to inspect.
         required: true
-        default: sellyouroutboard-testing
         type: string
       target_context:
         description: Canonical context to inspect.
         required: true
-        default: sellyouroutboard
         type: string
       preview_context:
         description: Optional preview context override.

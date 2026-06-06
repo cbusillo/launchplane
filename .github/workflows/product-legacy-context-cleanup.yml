@@ -7,18 +7,15 @@ name: Product Legacy Context Cleanup
       product:
         description: Product profile key to clean up.
         required: true
-        default: sellyouroutboard
         type: string
       source_context:
         description: Legacy context to clean up after cutover.
         required: true
-        default: sellyouroutboard-testing
         type: string
       target_context:
         description: >-
           Canonical product context that must already hold replacement records.
         required: true
-        default: sellyouroutboard
         type: string
       dry_run:
         description: >-

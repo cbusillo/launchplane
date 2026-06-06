@@ -583,15 +583,18 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn('"instance":"testing"', workflow_text)
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
 
-    def test_odoo_website_bootstrap_override_workflow_allows_opw_targets(self) -> None:
+    def test_odoo_website_bootstrap_override_requires_explicit_target_inputs(self) -> None:
         workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn("odoo-tenant-opw:opw:testing", workflow_text)
-        self.assertIn("odoo-tenant-opw:opw:prod", workflow_text)
-        self.assertIn("          - opw", workflow_text)
+        self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
+        self.assertIn("CONTEXT_NAME: ${{ inputs.context }}", workflow_text)
+        self.assertIn("INSTANCE: ${{ inputs.instance }}", workflow_text)
         self.assertIn("          - prod", workflow_text)
+        self.assertNotIn("allowed_targets=", workflow_text)
+        self.assertNotIn("odoo-tenant-opw:opw:testing", workflow_text)
+        self.assertNotIn("odoo-tenant-opw:opw:prod", workflow_text)
         self.assertNotIn("writes only cm/testing", workflow_text)
 
     def test_launchplane_workflows_do_not_hardcode_public_service_defaults(self) -> None:
