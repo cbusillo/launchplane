@@ -13,7 +13,7 @@ import threading
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Generic, Iterable, Literal, Protocol, TypeVar, cast
+from typing import Any, BinaryIO, Callable, Iterable, Literal, Protocol, cast
 from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import WSGIApplication
@@ -202,6 +202,15 @@ from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
     read_driver_descriptor,
+)
+from control_plane.drivers.dispatch import (
+    _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
+    _DescriptorDriverDispatchRoute as _DescriptorDriverDispatchRoute,
+    _DescriptorDriverDispatchResult as _DescriptorDriverDispatchResult,
+    _DriverRouteEnvelopeT as _DriverRouteEnvelopeT,
+    _DriverRouteExecutionMetadata as _DriverRouteExecutionMetadata,
+    _ProductRouteEnvelope as _ProductRouteEnvelope,
+    _ResolvedProductDriverContext as _ResolvedProductDriverContext,
 )
 from control_plane.launchplane_mutations import (
     LaunchplaneMutationStore,
@@ -702,15 +711,6 @@ class _DriverRouteMetadata:
     operator_visible: bool
 
 
-class _ProductRouteEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    product: str
-
-
-_DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=_ProductRouteEnvelope)
-
-
 class _IdempotencyCapableStore(Protocol):
     def read_idempotency_record(
         self,
@@ -805,108 +805,6 @@ class _IngressRouteAuditRecordStore(Protocol):
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
 _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
-
-
-@dataclass(frozen=True)
-class _DriverRouteExecutionMetadata(Generic[_DriverRouteEnvelopeT]):
-    route_path: str
-    envelope_model: type[_DriverRouteEnvelopeT]
-    denial_message: str
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchContext:
-    product: str
-    context: str
-    authorization_context: str = ""
-    use_preview_context_for_authorization: bool = False
-    use_resolved_profile_product_for_authorization: bool = True
-    instance: str = ""
-    require_profile: bool = False
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchResult:
-    result: dict[str, object]
-    driver_result: BaseModel | dict[str, object] | None = None
-
-
-@dataclass(frozen=True)
-class _ResolvedProductDriverContext:
-    profile: LaunchplaneProductProfileRecord | None
-    lane: ProductLaneProfile | None = None
-
-
-_DescriptorDriverDispatchContextResolver = Callable[
-    [_DriverRouteEnvelopeT], _DescriptorDriverDispatchContext
-]
-_DescriptorDriverAuthorizationActionResolver = Callable[[_DriverRouteEnvelopeT], str]
-_DescriptorDriverDispatchHandler = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-    ],
-    _DescriptorDriverDispatchResult,
-]
-_DescriptorDriverCustomDispatchHandler = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-        Path,
-        str | None,
-        LaunchplaneIdentity,
-        str,
-        str,
-        str,
-        _StartResponse,
-        str,
-    ],
-    tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes],
-]
-_DescriptorDriverDispatchValidator = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        object,
-        Path,
-    ],
-    None,
-]
-_DescriptorDriverPreAuthorizationValidator = Callable[
-    [
-        _DriverRouteEnvelopeT,
-        _ResolvedProductDriverContext,
-        LaunchplaneIdentity,
-        _StartResponse,
-        str,
-    ],
-    list[bytes] | None,
-]
-
-
-@dataclass(frozen=True)
-class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
-    execution_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT]
-    context_resolver: _DescriptorDriverDispatchContextResolver[_DriverRouteEnvelopeT]
-    handler: _DescriptorDriverDispatchHandler[_DriverRouteEnvelopeT] | None = None
-    pre_idempotency_validator: _DescriptorDriverDispatchValidator[_DriverRouteEnvelopeT] | None = (
-        None
-    )
-    pre_authorization_validator: (
-        _DescriptorDriverPreAuthorizationValidator[_DriverRouteEnvelopeT] | None
-    ) = None
-    authorization_action_resolver: (
-        _DescriptorDriverAuthorizationActionResolver[_DriverRouteEnvelopeT] | None
-    ) = None
-    custom_dispatch_handler: (
-        _DescriptorDriverCustomDispatchHandler[_DriverRouteEnvelopeT] | None
-    ) = None
-    skip_pre_idempotency_check: bool = False
-    skip_driver_context_resolution: bool = False
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -3608,15 +3506,18 @@ def _validate_generic_web_preview_profile(
     if profile is None:
         raise ProductDriverMismatchError("Generic web preview routes require a product profile.")
     if not product_profile_uses_generic_web_base(profile):
-        raise ProductDriverMismatchError(
-            "Generic web preview routes require a generic-web compatible product profile."
+        raise click.ClickException(
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
         )
     if not profile.preview.enabled:
-        raise ProductDriverMismatchError(
-            "Generic web preview routes require previews to be enabled."
+        raise click.ClickException(
+            f"Product {profile.product!r} does not have generic-web previews enabled."
         )
     if not profile.preview.context.strip():
-        raise ProductDriverMismatchError("Generic web preview routes require a preview context.")
+        raise click.ClickException(
+            f"Product {profile.product!r} does not define a preview context."
+        )
 
 
 def _handle_generic_web_preview_desired_state(
