@@ -517,6 +517,24 @@ post_odoo_cm_preview_grant() {
     '*'
 }
 
+post_odoo_cm_website_preview_grant() {
+  local product_name="$1"
+  local action_name="$2"
+  local source_label="$3"
+  local idempotency_suffix="$4"
+  local event_name="${5:-pull_request}"
+  post_grant \
+    cbusillo/odoo-tenant-cm-website \
+    odoo-preview.yml \
+    "$product_name" \
+    cm_website \
+    "$action_name" \
+    "$source_label" \
+    "$idempotency_suffix" \
+    "$event_name" \
+    '*'
+}
+
 post_odoo_opw_preview_grant() {
   local product_name="$1"
   local action_name="$2"
@@ -1109,6 +1127,71 @@ post_odoo_cm_preview_grant \
   odoo_preview_apply.execute \
   deploy:odoo-cm-preview-apply-manual-grant \
   odoo-cm-preview-apply-manual \
+  workflow_dispatch
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-cm-website-preview-artifact-publish-inputs-grant \
+  odoo-cm-website-preview-artifact-publish-inputs
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_artifact_publish_inputs.read \
+  deploy:odoo-cm-website-preview-artifact-publish-inputs-manual-grant \
+  odoo-cm-website-preview-artifact-publish-inputs-manual \
+  workflow_dispatch
+post_odoo_cm_website_preview_grant \
+  odoo \
+  odoo_artifact_publish.write \
+  deploy:odoo-cm-website-preview-artifact-publish-grant \
+  odoo-cm-website-preview-artifact-publish
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  preview_refresh.execute \
+  deploy:odoo-cm-website-preview-refresh-grant \
+  odoo-cm-website-preview-refresh
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  preview_pr_feedback.write \
+  deploy:odoo-cm-website-preview-pr-feedback-grant \
+  odoo-cm-website-preview-pr-feedback
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  preview_pr_feedback.write \
+  deploy:odoo-cm-website-preview-unsupported-feedback-grant \
+  odoo-cm-website-preview-unsupported-feedback \
+  pull_request_target
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  preview_destroy.execute \
+  deploy:odoo-cm-website-preview-destroy-pr-grant \
+  odoo-cm-website-preview-destroy-pr
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  preview_destroy.execute \
+  deploy:odoo-cm-website-preview-destroy-manual-grant \
+  odoo-cm-website-preview-destroy-manual \
+  workflow_dispatch
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-cm-website-preview-apply-inputs-grant \
+  odoo-cm-website-preview-apply-inputs
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_preview_apply_inputs.read \
+  deploy:odoo-cm-website-preview-apply-inputs-manual-grant \
+  odoo-cm-website-preview-apply-inputs-manual \
+  workflow_dispatch
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_preview_apply.execute \
+  deploy:odoo-cm-website-preview-apply-grant \
+  odoo-cm-website-preview-apply
+post_odoo_cm_website_preview_grant \
+  odoo-tenant-cm-website \
+  odoo_preview_apply.execute \
+  deploy:odoo-cm-website-preview-apply-manual-grant \
+  odoo-cm-website-preview-apply-manual \
   workflow_dispatch
 post_odoo_stable_grant \
   cbusillo/odoo-tenant-cm \
