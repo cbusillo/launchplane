@@ -198,6 +198,7 @@ from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope as _ProductRouteEnvelope,
     _ResolvedProductDriverContext as _ResolvedProductDriverContext,
     _image_reference_tail as _image_reference_tail,
+    _json_response as _json_response,
     _normalize_preview_verification_checked_urls as _normalize_preview_verification_checked_urls,
     _normalize_release_status as _normalize_release_status,
     _repo_token as _repo_token,
@@ -206,12 +207,14 @@ from control_plane.drivers.dispatch import (
 )
 from control_plane.drivers.generic_web_dispatch import (
     GenericWebDeployEnvelope as GenericWebDeployEnvelope,
+    GenericWebProdPromotionEnvelope as GenericWebProdPromotionEnvelope,
     GenericWebPromotionWorkflowEnvelope as GenericWebPromotionWorkflowEnvelope,
     GenericWebRollbackEnvelope as GenericWebRollbackEnvelope,
     GenericWebRollbackPlanEnvelope as GenericWebRollbackPlanEnvelope,
     GenericWebStableVerificationEnvelope as GenericWebStableVerificationEnvelope,
     GenericWebStableVerificationRequest as GenericWebStableVerificationRequest,
     _GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
+    _GENERIC_WEB_PROD_PROMOTION_ROUTE as _GENERIC_WEB_PROD_PROMOTION_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     _GENERIC_WEB_ROLLBACK_PLAN_ROUTE as _GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
@@ -219,12 +222,15 @@ from control_plane.drivers.generic_web_dispatch import (
     _apply_generic_web_stable_verification_records as _apply_generic_web_stable_verification_records,
     _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
     _handle_generic_web_deploy as _handle_generic_web_deploy,
+    _handle_generic_web_prod_promotion as _handle_generic_web_prod_promotion,
     _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
     _handle_generic_web_rollback as _handle_generic_web_rollback,
     _handle_generic_web_rollback_plan as _handle_generic_web_rollback_plan,
     _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
+    _reject_human_live_generic_web_prod_promotion as _reject_human_live_generic_web_prod_promotion,
     _validate_stable_verification_request as _validate_stable_verification_request,
+    _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
 from control_plane.drivers.generic_web_preview_dispatch import (
     GenericWebPreviewDesiredStateEnvelope as GenericWebPreviewDesiredStateEnvelope,
@@ -374,12 +380,6 @@ from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
     apply_promotion_evidence,
-)
-from control_plane.workflows.generic_web_promotion import (
-    GenericWebProdPromotionRequest,
-    GenericWebPromotionStore,
-    execute_generic_web_prod_promotion,
-    resolve_generic_web_promotion_lanes,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
@@ -931,29 +931,6 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
                 "public ingress notification policy apply requires product 'launchplane'"
             )
         return self
-
-
-class GenericWebProdPromotionEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    promotion: GenericWebProdPromotionRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebProdPromotionEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web prod promotion requires product")
-        if self.product.strip() != self.promotion.product.strip():
-            raise ValueError("generic web prod promotion requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/prod-promotion",
-    envelope_model=GenericWebProdPromotionEnvelope,
-    denial_message=(
-        "Workflow cannot execute the generic web prod promotion driver"
-        " for the requested product/context."
-    ),
-)
 
 
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
@@ -2156,24 +2133,6 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
     daemon_threads = True
 
 
-def _json_response(
-    *,
-    start_response: _StartResponse,
-    status_code: int,
-    payload: dict[str, object],
-    headers: list[tuple[str, str]] | None = None,
-) -> list[bytes]:
-    encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
-    status_line = f"{status_code} {_http_status_text(status_code)}"
-    response_headers = [
-        ("Content-Type", "application/json"),
-        ("Content-Length", str(len(encoded))),
-    ]
-    response_headers.extend(headers or [])
-    start_response(status_line, response_headers)
-    return [encoded]
-
-
 def _redirect_response(
     *,
     start_response: _StartResponse,
@@ -2328,102 +2287,6 @@ def _handle_npmplus_ingress_apply(
         "ingress_dry_run": ingress_result.dry_run,
         "ingress_route_audit_record_id": ingress_audit_record.record_id,
     }, ingress_result
-
-
-def _dispatch_generic_web_prod_promotion(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del state_dir, database_url, identity
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web prod promotion requires a product profile lane."
-        )
-    idempotent_response = _check_idempotent_request(
-        record_store=record_store,
-        scope=request_scope,
-        route_path=_GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
-        idempotency_key=request_idempotency_key,
-        request_fingerprint=request_fingerprint,
-        start_response=start_response,
-        trace_id=trace_id,
-    )
-    if idempotent_response is not None:
-        return idempotent_response
-    driver_result = execute_generic_web_prod_promotion(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPromotionStore, record_store),
-        request=request.promotion,
-    )
-    return (
-        {
-            "promotion_record_id": driver_result.promotion_record_id,
-            "deployment_record_id": driver_result.deployment_record_id,
-            "backup_record_id": driver_result.backup_record_id,
-            "inventory_record_id": driver_result.inventory_record_id,
-            "promotion_status": driver_result.promotion_status,
-            "deployment_status": driver_result.deployment_status,
-            "source_health_status": driver_result.source_health_status,
-            "destination_health_status": driver_result.destination_health_status,
-            "backup_status": driver_result.backup_status,
-            "release_status": driver_result.release_status,
-            "release_tag": driver_result.release_tag,
-            "release_url": driver_result.release_url,
-            "dry_run": driver_result.dry_run,
-        },
-        driver_result,
-    )
-
-
-def _validate_generic_web_prod_promotion_lanes(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del control_plane_root_path
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web prod promotion requires a product profile lane."
-        )
-    resolve_generic_web_promotion_lanes(
-        record_store=cast(GenericWebPromotionStore, record_store),
-        request=request.promotion,
-    )
-
-
-def _reject_human_live_generic_web_prod_promotion(
-    request: GenericWebProdPromotionEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    identity: LaunchplaneIdentity,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> list[bytes] | None:
-    del resolved_context
-    if not isinstance(identity, GitHubHumanIdentity) or request.promotion.dry_run:
-        return None
-    return _json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
-            },
-        },
-    )
 
 
 def _handle_odoo_artifact_publish(
@@ -3359,8 +3222,7 @@ def _descriptor_driver_dispatch_routes(
             ),
             pre_idempotency_validator=_validate_generic_web_prod_promotion_lanes,
             pre_authorization_validator=_reject_human_live_generic_web_prod_promotion,
-            custom_dispatch_handler=_dispatch_generic_web_prod_promotion,
-            skip_pre_idempotency_check=True,
+            handler=_handle_generic_web_prod_promotion,
         ),
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_ROLLBACK_PLAN_ROUTE,

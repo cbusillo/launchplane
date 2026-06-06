@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 from typing import Callable, Generic, TypeVar, cast
@@ -23,6 +24,38 @@ class _ProductRouteEnvelope(BaseModel):
 
 _DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=_ProductRouteEnvelope)
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
+
+
+def _http_status_text(status_code: int) -> str:
+    return {
+        200: "OK",
+        202: "Accepted",
+        400: "Bad Request",
+        401: "Unauthorized",
+        403: "Forbidden",
+        404: "Not Found",
+        405: "Method Not Allowed",
+        409: "Conflict",
+        500: "Internal Server Error",
+    }.get(status_code, "OK")
+
+
+def _json_response(
+    *,
+    start_response: _StartResponse,
+    status_code: int,
+    payload: dict[str, object],
+    headers: list[tuple[str, str]] | None = None,
+) -> list[bytes]:
+    encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    status_line = f"{status_code} {_http_status_text(status_code)}"
+    response_headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", str(len(encoded))),
+    ]
+    response_headers.extend(headers or [])
+    start_response(status_line, response_headers)
+    return [encoded]
 
 
 @dataclass(frozen=True)
