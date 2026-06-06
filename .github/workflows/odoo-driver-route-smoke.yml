@@ -1,0 +1,179 @@
+---
+name: Odoo Driver Route Smoke
+
+"on":
+  workflow_call:
+    inputs:
+      product:
+        description: Launchplane product profile key to smoke.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo context to smoke.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance whose publish inputs should resolve.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source ref attached to the smoke request.
+        required: true
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product profile key to smoke.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo context to smoke.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance whose publish inputs should resolve.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+          - prod
+      source_git_ref:
+        description: Source ref attached to the smoke request.
+        required: true
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-odoo-driver-route-smoke-${{ inputs.product }}-${{
+    inputs.context }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  route-smoke:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_AUDIENCE: ${{ inputs.launchplane_audience }}
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT_NAME: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+    steps:
+      - name: Check public route registration
+        env:
+          ROUTE_PATHS: >-
+            /v1/drivers/odoo/artifact-publish-inputs
+            /v1/drivers/odoo/preview-apply-inputs
+            /v1/drivers/odoo/preview-apply
+            /v1/previews/pr-feedback
+        run: |
+          set -euo pipefail
+          if [ -z "$LAUNCHPLANE_URL" ]; then
+            echo "LAUNCHPLANE_PUBLIC_URL or launchplane_url is required." >&2
+            exit 1
+          fi
+
+          for route_path in $ROUTE_PATHS; do
+            route_slug="${route_path//\//-}"
+            response_file="$RUNNER_TEMP/route-smoke-${GITHUB_RUN_ID}"
+            response_file="${response_file}-${GITHUB_RUN_ATTEMPT}-${route_slug}.json"
+            status_code="$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H 'content-type: application/json' \
+              --data '{"schema_version":1}' \
+              "${LAUNCHPLANE_URL%/}${route_path}")"
+            echo "${route_path} returned HTTP ${status_code}"
+            if [ "$status_code" = "404" ]; then
+              echo "${route_path} is not registered on Launchplane." >&2
+              cat "$response_file" >&2
+              exit 1
+            fi
+            if [ "$status_code" -ge 500 ]; then
+              echo "${route_path} returned a Launchplane service error." >&2
+              cat "$response_file" >&2
+              exit 1
+            fi
+          done
+
+      - name: Resolve Odoo artifact publish inputs through GitHub OIDC
+        id: publish_inputs
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          audience: ${{ env.LAUNCHPLANE_AUDIENCE }}
+          route-path: /v1/drivers/odoo/artifact-publish-inputs
+          payload: >-
+            {"schema_version":1,"inputs":{"schema_version":1}}
+          payload-fields: |-
+            product=${{ env.PRODUCT }}
+            inputs.context=${{ env.CONTEXT_NAME }}
+            inputs.instance=${{ env.INSTANCE }}
+            inputs.source_git_ref=${{ env.SOURCE_GIT_REF }}
+          idempotency-key: >-
+            odoo-driver-route-smoke:${{ env.PRODUCT }}:${{
+            env.CONTEXT_NAME }}:${{ env.INSTANCE }}:run-${{
+            github.run_id }}-attempt-${{ github.run_attempt }}
+          timeout-ms: "600000"
+          output-paths: >-
+            trace_id=trace_id,
+            preview_slug=result.preview_slug,
+            image_repository=result.image_repository,
+            image_tag=result.image_tag,
+            error_message=result.error_message
+
+      - name: Report route smoke
+        env:
+          TRACE_ID: ${{ steps.publish_inputs.outputs.trace_id }}
+          PREVIEW_SLUG: ${{ steps.publish_inputs.outputs.preview_slug }}
+          IMAGE_REPOSITORY: ${{ steps.publish_inputs.outputs.image_repository }}
+          IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
+          ERROR_MESSAGE: ${{ steps.publish_inputs.outputs.error_message }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IMAGE_REPOSITORY" ] || [ -z "$IMAGE_TAG" ]; then
+            echo "Publish inputs did not include image outputs." >&2
+            if [ -n "$ERROR_MESSAGE" ]; then
+              echo "$ERROR_MESSAGE" >&2
+            fi
+            exit 1
+          fi
+          echo "trace_id=$TRACE_ID"
+          echo "preview_slug=$PREVIEW_SLUG"
+          echo "image_repository=$IMAGE_REPOSITORY"
+          echo "image_tag=$IMAGE_TAG"
