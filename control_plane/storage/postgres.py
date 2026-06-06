@@ -993,6 +993,15 @@ class LaunchplaneOdooStableBootstrapOperationRow(Base):
             "idempotency_key",
             desc("updated_at"),
         ),
+        Index(
+            "launchplane_odoo_bootstrap_active_lane_uidx",
+            "product",
+            "context",
+            "instance",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
     )
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1464,6 +1473,40 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
+        with self._session_factory() as session:
+            session.add(
+                LaunchplaneOdooStableBootstrapOperationRow(
+                    operation_id=record.operation_id,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    idempotency_key=record.idempotency_key,
+                    status=record.status,
+                    phase=record.phase,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                active_records = self.list_odoo_stable_bootstrap_operation_records(
+                    product=record.product,
+                    context_name=record.context,
+                    instance_name=record.instance,
+                    statuses=("pending", "running"),
+                    limit=1,
+                )
+                if active_records:
+                    return active_records[0], False
+                return self.create_odoo_stable_bootstrap_operation_record_if_no_active_lane(record)
+        return record, True
 
     def read_odoo_stable_bootstrap_operation_record(
         self, operation_id: str

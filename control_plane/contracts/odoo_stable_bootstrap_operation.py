@@ -25,9 +25,9 @@ _TERMINAL_OPERATION_STATUSES: tuple[OdooStableBootstrapOperationStatus, ...] = (
     "pass",
     "fail",
 )
-ODOO_STABLE_BOOTSTRAP_TERMINAL_OPERATION_STATUSES: frozenset[
-    OdooStableBootstrapOperationStatus
-] = frozenset(_TERMINAL_OPERATION_STATUSES)
+ODOO_STABLE_BOOTSTRAP_TERMINAL_OPERATION_STATUSES: frozenset[OdooStableBootstrapOperationStatus] = (
+    frozenset(_TERMINAL_OPERATION_STATUSES)
+)
 
 
 class OdooStableBootstrapOperationRecord(BaseModel):
@@ -95,19 +95,22 @@ class OdooStableBootstrapOperationRecord(BaseModel):
             if not self.finished_at:
                 raise ValueError("Terminal Odoo stable bootstrap operations require finished_at.")
             if self.status == "pass" and self.error_message:
-                raise ValueError("Passing Odoo stable bootstrap operations must not include error_message.")
+                raise ValueError(
+                    "Passing Odoo stable bootstrap operations must not include error_message."
+                )
             if self.status == "fail" and not self.error_message:
                 raise ValueError("Failed Odoo stable bootstrap operations require error_message.")
         return self
 
 
 def build_odoo_stable_bootstrap_operation_id(
-    *, product: str, context: str, instance: str, created_at: str
+    *, product: str, context: str, instance: str, created_at: str, idempotency_key: str
 ) -> str:
     normalized_product = product.strip().lower().replace("/", "-")
     normalized_context = context.strip().lower()
     normalized_instance = instance.strip().lower()
     normalized_created_at = created_at.strip().replace(":", "").replace("+", "z")
+    normalized_idempotency_key = idempotency_key.strip()
     digest = hashlib.sha256(
         "|".join(
             (
@@ -115,6 +118,7 @@ def build_odoo_stable_bootstrap_operation_id(
                 normalized_context,
                 normalized_instance,
                 normalized_created_at,
+                normalized_idempotency_key,
             )
         ).encode("utf-8")
     ).hexdigest()[:16]
