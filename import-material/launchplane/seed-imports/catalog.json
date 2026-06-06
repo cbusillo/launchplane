@@ -780,6 +780,205 @@
       }
     },
     {
+      "kind": "product_onboarding",
+      "import_id": "odoo-cm-website-product-onboarding",
+      "manifest": {
+        "product": "odoo-tenant-cm-website",
+        "display_name": "Cell Mechanic Website Odoo",
+        "repository": "cbusillo/odoo-tenant-cm-website",
+        "driver_id": "odoo",
+        "image_repository": "ghcr.io/cbusillo/odoo-tenant-cm-website",
+        "runtime_port": 8069,
+        "health_path": "/cm-website/health",
+        "lanes": [
+          {
+            "instance": "testing",
+            "context": "cm_website",
+            "base_url": "https://cm-website-testing.shinycomputers.com",
+            "health_url": "https://cm-website-testing.shinycomputers.com/cm-website/health",
+            "odoo_data_policy": {
+              "data_authority": "resettable",
+              "allowed_rebuild_sources": ["empty"],
+              "requires_backup_before_destroy": false,
+              "requires_restore_proof": false,
+              "requires_runtime_identity": true
+            }
+          },
+          {
+            "instance": "prod",
+            "context": "cm_website",
+            "base_url": "https://www.cellmechanic.com",
+            "health_url": "https://www.cellmechanic.com/cm-website/health",
+            "odoo_data_policy": {
+              "data_authority": "resettable",
+              "allowed_rebuild_sources": ["empty"],
+              "requires_backup_before_destroy": false,
+              "requires_restore_proof": false,
+              "requires_runtime_identity": true
+            }
+          }
+        ],
+        "preview": {
+          "enabled": true,
+          "context": "cm_website",
+          "enable_label": "preview",
+          "slug_template": "pr-{number}",
+          "app_name_prefix": "cm-website-odoo-preview",
+          "template_instance": "testing",
+          "override_env": {
+            "ODOO_INSTALL_MODULES": "cm_website"
+          },
+          "preview_url_env_keys": ["WEB_BASE_URL"],
+          "data_transport_mode": "driver"
+        },
+        "runtime_environments": [
+          {
+            "scope": "instance",
+            "context": "cm_website",
+            "instance": "testing",
+            "env": {
+              "ODOO_DB_NAME": "cm_website_testing",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "cm_website_testing_odoo_data",
+              "ODOO_LOG_VOLUME": "cm_website_testing_odoo_logs",
+              "ODOO_DB_VOLUME": "cm_website_testing_odoo_db"
+            }
+          },
+          {
+            "scope": "instance",
+            "context": "cm_website",
+            "instance": "prod",
+            "env": {
+              "ODOO_DB_NAME": "cm_website_prod",
+              "ODOO_DB_USER": "odoo",
+              "ODOO_DATA_VOLUME": "cm_website_prod_odoo_data",
+              "ODOO_LOG_VOLUME": "cm_website_prod_odoo_logs",
+              "ODOO_DB_VOLUME": "cm_website_prod_odoo_db"
+            }
+          }
+        ],
+        "secret_bindings": [
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "cm_website",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "cm_website",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "cm_website",
+            "instance": "testing"
+          },
+          {
+            "binding_key": "ODOO_ADMIN_PASSWORD",
+            "context": "cm_website",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_DB_PASSWORD",
+            "context": "cm_website",
+            "instance": "prod"
+          },
+          {
+            "binding_key": "ODOO_MASTER_PASSWORD",
+            "context": "cm_website",
+            "instance": "prod"
+          }
+        ],
+        "expected_config": {
+          "runtime_environment_keys": [
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "key": "ODOO_DB_NAME",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_USER",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DATA_VOLUME",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_LOG_VOLUME",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "key": "ODOO_DB_VOLUME",
+              "context": "cm_website",
+              "instance": "prod"
+            }
+          ],
+          "managed_secret_bindings": [
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "cm_website",
+              "instance": "testing"
+            },
+            {
+              "binding_key": "ODOO_ADMIN_PASSWORD",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_DB_PASSWORD",
+              "context": "cm_website",
+              "instance": "prod"
+            },
+            {
+              "binding_key": "ODOO_MASTER_PASSWORD",
+              "context": "cm_website",
+              "instance": "prod"
+            }
+          ]
+        },
+        "source_label": "import-material:odoo-cm-website-product-onboarding"
+      }
+    },
+    {
       "kind": "runtime_key_safety_policy",
       "import_id": "launchplane-runtime-key-safety-policy",
       "source_label": "import-material:runtime-key-safety-policy",
@@ -835,19 +1034,19 @@
         {
           "binding_key": "ODOO_ADMIN_PASSWORD",
           "secret_class": "shared_safe",
-          "allowed_contexts": ["cm", "opw"],
+          "allowed_contexts": ["cm", "cm_website", "opw"],
           "allowed_instances": ["testing", "prod"]
         },
         {
           "binding_key": "ODOO_DB_PASSWORD",
           "secret_class": "shared_safe",
-          "allowed_contexts": ["cm", "opw"],
+          "allowed_contexts": ["cm", "cm_website", "opw"],
           "allowed_instances": ["testing", "prod"]
         },
         {
           "binding_key": "ODOO_MASTER_PASSWORD",
           "secret_class": "shared_safe",
-          "allowed_contexts": ["cm", "opw"],
+          "allowed_contexts": ["cm", "cm_website", "opw"],
           "allowed_instances": ["testing", "prod"]
         }
       ]
