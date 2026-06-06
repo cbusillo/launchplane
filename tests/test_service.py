@@ -18236,7 +18236,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             cookie = _signed_in_cookie(app)
 
             with patch(
-                "control_plane.service.dispatch_generic_web_promotion_workflow",
+                "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow",
                 return_value=GenericWebPromotionWorkflowResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -18317,7 +18317,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             cookie = _signed_in_cookie(app)
 
             with patch(
-                "control_plane.service.dispatch_generic_web_promotion_workflow",
+                "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow",
                 return_value=GenericWebPromotionWorkflowResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -18437,7 +18437,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.dispatch_generic_web_promotion_workflow",
+                "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow",
                 return_value=GenericWebPromotionWorkflowResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -18507,7 +18507,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             cookie = _signed_in_cookie(app)
 
             with patch(
-                "control_plane.service.dispatch_generic_web_promotion_workflow"
+                "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow"
             ) as dispatch_mock:
                 status_code, payload = _invoke_app(
                     app,
@@ -18574,7 +18574,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.dispatch_generic_web_promotion_workflow"
+                "control_plane.drivers.generic_web_dispatch.dispatch_generic_web_promotion_workflow"
             ) as dispatch_mock:
                 status_code, payload = _invoke_app(
                     app,
