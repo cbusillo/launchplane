@@ -18778,6 +18778,75 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_generic_web_preview_desired_state_route_keeps_profile_errors_invalid_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "sellyouroutboard-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_desired_state.discover"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.discover_generic_web_preview_desired_state"
+            ) as discover:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-desired-state",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "desired_state": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-disabled:syo"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        discover.assert_not_called()
+
     def test_generic_web_preview_inventory_route_writes_scan_from_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
