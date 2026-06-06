@@ -585,6 +585,31 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_generic_web_preview_routes_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+            dispatch_routes,
+        )
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_npmplus_ingress_apply_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
@@ -1394,6 +1419,19 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
+    def test_generic_web_preview_descriptor_requires_dispatch_registration(self) -> None:
+        dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
+        dispatch_routes.pop(
+            control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path
+        )
+        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path)
+
+        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
+            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
     def test_npmplus_ingress_apply_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._NPMPLUS_INGRESS_APPLY_ROUTE.route_path)
@@ -2008,6 +2046,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._NON_IDEMPOTENT_DRIVER_RESULT_ROUTES,
             frozenset(
                 {
+                    control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+                    control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
                     control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
                     control_plane_service._ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
                     control_plane_service._ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
