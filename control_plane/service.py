@@ -146,11 +146,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_inventory_scan_record import (
-    PreviewInventoryScanRecord,
-    build_preview_inventory_scan_id,
-)
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
@@ -212,12 +208,28 @@ from control_plane.drivers.dispatch import (
     ProductDriverMismatchError as ProductDriverMismatchError,
 )
 from control_plane.drivers.generic_web_preview_dispatch import (
+    GenericWebPreviewDesiredStateEnvelope as GenericWebPreviewDesiredStateEnvelope,
+    GenericWebPreviewDestroyEnvelope as GenericWebPreviewDestroyEnvelope,
+    GenericWebPreviewInventoryEnvelope as GenericWebPreviewInventoryEnvelope,
+    GenericWebPreviewReadinessEnvelope as GenericWebPreviewReadinessEnvelope,
+    GenericWebPreviewRefreshEnvelope as GenericWebPreviewRefreshEnvelope,
     GenericWebPreviewVerificationEnvelope as GenericWebPreviewVerificationEnvelope,
     GenericWebPreviewVerificationRequest as GenericWebPreviewVerificationRequest,
     GenericWebPreviewVerificationResult as GenericWebPreviewVerificationResult,
+    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE as _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+    _GENERIC_WEB_PREVIEW_DESTROY_ROUTE as _GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+    _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE as _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+    _GENERIC_WEB_PREVIEW_READINESS_ROUTE as _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+    _GENERIC_WEB_PREVIEW_REFRESH_ROUTE as _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
     _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
     _apply_generic_web_preview_verification_records as _apply_generic_web_preview_verification_records,
+    _handle_generic_web_preview_desired_state as _handle_generic_web_preview_desired_state,
+    _handle_generic_web_preview_inventory as _handle_generic_web_preview_inventory,
+    _handle_generic_web_preview_readiness as _handle_generic_web_preview_readiness,
     _handle_generic_web_preview_verification as _handle_generic_web_preview_verification,
+    _validate_generic_web_preview_profile as _validate_generic_web_preview_profile,
+    _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
+    _write_preview_inventory_scan_if_supported as _write_preview_inventory_scan_if_supported,
 )
 from control_plane.launchplane_mutations import (
     LaunchplaneMutationStore,
@@ -337,7 +349,6 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
-    product_profile_uses_generic_web_base,
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
@@ -355,14 +366,11 @@ from control_plane.workflows.generic_web_rollback import (
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
-    GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
-    GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
-    evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
     execute_generic_web_preview_refresh,
@@ -1075,117 +1083,6 @@ _GENERIC_WEB_STABLE_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebStableVerificationEnvelope,
     denial_message=(
         "Workflow cannot write generic web stable verification for the requested product/context."
-    ),
-)
-
-
-class GenericWebPreviewDesiredStateEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    desired_state: GenericWebPreviewDesiredStateRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPreviewDesiredStateEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web preview desired state requires product")
-        if self.product.strip() != self.desired_state.product.strip():
-            raise ValueError("generic web preview desired state requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/preview-desired-state",
-    envelope_model=GenericWebPreviewDesiredStateEnvelope,
-    denial_message=(
-        "Workflow cannot discover generic web preview desired state"
-        " for the requested product/context."
-    ),
-)
-
-
-class GenericWebPreviewRefreshEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    refresh: GenericWebPreviewRefreshRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPreviewRefreshEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web preview refresh requires product")
-        if self.product.strip() != self.refresh.product.strip():
-            raise ValueError("generic web preview refresh requires matching product values")
-        return self
-
-
-class GenericWebPreviewInventoryEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    inventory: GenericWebPreviewInventoryRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPreviewInventoryEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web preview inventory requires product")
-        if self.product.strip() != self.inventory.product.strip():
-            raise ValueError("generic web preview inventory requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/preview-refresh",
-    envelope_model=GenericWebPreviewRefreshEnvelope,
-    denial_message=(
-        "Workflow cannot refresh generic web preview state for the requested product/context."
-    ),
-)
-
-
-_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/preview-inventory",
-    envelope_model=GenericWebPreviewInventoryEnvelope,
-    denial_message=(
-        "Workflow cannot read generic web preview inventory for the requested product/context."
-    ),
-)
-
-
-class GenericWebPreviewReadinessEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    readiness: GenericWebPreviewReadinessRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPreviewReadinessEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web preview readiness requires product")
-        if self.product.strip() != self.readiness.product.strip():
-            raise ValueError("generic web preview readiness requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/preview-readiness",
-    envelope_model=GenericWebPreviewReadinessEnvelope,
-    denial_message=(
-        "Workflow cannot evaluate generic web preview readiness for the requested product/context."
-    ),
-)
-
-
-class GenericWebPreviewDestroyEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    destroy: GenericWebPreviewDestroyRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPreviewDestroyEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web preview destroy requires product")
-        if self.product.strip() != self.destroy.product.strip():
-            raise ValueError("generic web preview destroy requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/preview-destroy",
-    envelope_model=GenericWebPreviewDestroyEnvelope,
-    denial_message=(
-        "Workflow cannot destroy generic web preview state for the requested product/context."
     ),
 )
 
@@ -3373,80 +3270,6 @@ def _handle_odoo_preview_apply(
     )
 
 
-def _validate_generic_web_preview_profile(
-    request: _ProductRouteEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del request, record_store, control_plane_root_path
-    profile = resolved_context.profile
-    if profile is None:
-        raise ProductDriverMismatchError("Generic web preview routes require a product profile.")
-    if not product_profile_uses_generic_web_base(profile):
-        raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
-            "not generic-web or a generic-web based driver."
-        )
-    if not profile.preview.enabled:
-        raise click.ClickException(
-            f"Product {profile.product!r} does not have generic-web previews enabled."
-        )
-    if not profile.preview.context.strip():
-        raise click.ClickException(
-            f"Product {profile.product!r} does not define a preview context."
-        )
-
-
-def _handle_generic_web_preview_desired_state(
-    request: GenericWebPreviewDesiredStateEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = discover_generic_web_preview_desired_state(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.desired_state,
-        discovered_at=_utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    preview_desired_state_id = _write_preview_desired_state_if_supported(
-        record_store=record_store,
-        record=driver_result,
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_desired_state_id": preview_desired_state_id},
-        driver_result=driver_result,
-    )
-
-
-def _handle_generic_web_preview_inventory(
-    request: GenericWebPreviewInventoryEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = execute_generic_web_preview_inventory(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.inventory,
-        profile=resolved_context.profile,
-    )
-    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-        record_store=record_store,
-        context=driver_result.context,
-        source=driver_result.source,
-        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-    )
-    return _DescriptorDriverDispatchResult(
-        result={"preview_inventory_scan_id": preview_inventory_scan_id},
-        driver_result=driver_result,
-    )
-
-
 def _handle_generic_web_preview_refresh(
     request: GenericWebPreviewRefreshEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -3473,23 +3296,6 @@ def _handle_generic_web_preview_refresh(
         profile=resolved_context.profile,
     )
     return _DescriptorDriverDispatchResult(result=result, driver_result=driver_result)
-
-
-def _handle_generic_web_preview_readiness(
-    request: GenericWebPreviewReadinessEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = evaluate_generic_web_preview_readiness(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.readiness,
-        checked_at=_utc_now_timestamp(),
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _handle_generic_web_preview_destroy(
@@ -3781,33 +3587,6 @@ def _handle_verireel_app_maintenance(
     )
 
 
-def _validate_generic_web_preview_verification_profile(
-    request: GenericWebPreviewVerificationEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> None:
-    del request, record_store, control_plane_root_path
-    profile = resolved_context.profile
-    if profile is None:
-        raise ProductDriverMismatchError(
-            "Generic web preview verification requires a product profile."
-        )
-    if not product_profile_uses_generic_web_base(profile):
-        raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
-            "not generic-web or a generic-web based driver."
-        )
-    if not profile.preview.enabled:
-        raise click.ClickException(
-            f"Product {profile.product!r} does not have generic-web previews enabled."
-        )
-    if not profile.preview.context.strip():
-        raise click.ClickException(
-            f"Product {profile.product!r} does not define a preview context."
-        )
-
-
 def _descriptor_driver_dispatch_routes(
     *,
     ingress_provider_factory: _IngressProviderFactory | None = None,
@@ -3986,7 +3765,7 @@ def _descriptor_driver_dispatch_routes(
                 require_profile=True,
             ),
             handler=_handle_generic_web_preview_verification,
-            pre_idempotency_validator=_validate_generic_web_preview_verification_profile,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
         ),
         _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
@@ -8814,43 +8593,6 @@ def _launchplane_runtime_payload(
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,
     }
-
-
-def _write_preview_inventory_scan_if_supported(
-    *,
-    record_store: object,
-    context: str,
-    source: str,
-    preview_slugs: tuple[str, ...],
-) -> str:
-    if not hasattr(record_store, "write_preview_inventory_scan_record"):
-        return ""
-    scanned_at = _utc_now_timestamp()
-    scan_id = build_preview_inventory_scan_id(
-        context_name=context,
-        scanned_at=scanned_at,
-    )
-    getattr(record_store, "write_preview_inventory_scan_record")(
-        PreviewInventoryScanRecord(
-            scan_id=scan_id,
-            context=context,
-            scanned_at=scanned_at,
-            source=source,
-            status="pass",
-            preview_count=len(preview_slugs),
-            preview_slugs=preview_slugs,
-        )
-    )
-    return scan_id
-
-
-def _write_preview_desired_state_if_supported(
-    *, record_store: object, record: PreviewDesiredStateRecord
-) -> str:
-    if not hasattr(record_store, "write_preview_desired_state_record"):
-        return ""
-    getattr(record_store, "write_preview_desired_state_record")(record)
-    return record.desired_state_id
 
 
 def _latest_preview_inventory_scan(

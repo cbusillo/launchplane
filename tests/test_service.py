@@ -18692,7 +18692,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.discover_generic_web_preview_desired_state",
+                "control_plane.drivers.generic_web_preview_dispatch.discover_generic_web_preview_desired_state",
                 return_value=record,
             ) as discover:
                 status_code, payload = _invoke_app(
@@ -18827,7 +18827,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.discover_generic_web_preview_desired_state"
+                "control_plane.drivers.generic_web_preview_dispatch.discover_generic_web_preview_desired_state"
             ) as discover:
                 status_code, payload = _invoke_app(
                     app,
@@ -18893,7 +18893,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_inventory",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_inventory",
                 return_value=driver_result,
             ):
                 status_code, payload = _invoke_app(
@@ -21006,7 +21006,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.evaluate_generic_web_preview_readiness",
+                "control_plane.drivers.generic_web_preview_dispatch.evaluate_generic_web_preview_readiness",
                 return_value={
                     "readiness_status": "blocked",
                     "missing_template_env_keys": ["SMTP_HOST"],
