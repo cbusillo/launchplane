@@ -7,10 +7,17 @@ name: Product Environment Evidence
       target_set:
         description: Product environment routes to inspect.
         required: true
-        default: phase-two-initial
+        default: configured-json
         type: choice
         options:
-          - phase-two-initial
+          - configured-json
+      routes_json:
+        description: >-
+          JSON array of {"product","environment"} routes when
+          target_set=configured-json.
+        required: true
+        default: "[]"
+        type: string
       provider_id:
         description: Expected provider id for recorded target authority.
         required: true
@@ -33,6 +40,7 @@ jobs:
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       TARGET_SET: ${{ inputs.target_set }}
+      ROUTES_JSON: ${{ inputs.routes_json }}
       PROVIDER_ID: ${{ inputs.provider_id }}
     steps:
       - uses: actions/checkout@v6
@@ -67,20 +75,17 @@ jobs:
           set -euo pipefail
           routes_file="product-environment-routes.json"
           case "$TARGET_SET" in
-            phase-two-initial)
-              cat > "$routes_file" <<'JSON'
-          [
-            {"product":"discord-blue","environment":"prod"},
-            {"product":"sellyouroutboard","environment":"testing"},
-            {"product":"sellyouroutboard","environment":"prod"},
-            {"product":"verireel","environment":"testing"},
-            {"product":"verireel","environment":"prod"},
-            {"product":"odoo-tenant-cm","environment":"testing"},
-            {"product":"odoo-tenant-cm","environment":"prod"},
-            {"product":"odoo-tenant-opw","environment":"testing"},
-            {"product":"odoo-tenant-opw","environment":"prod"}
-          ]
-          JSON
+            configured-json)
+              jq -e '
+                type == "array"
+                and length > 0
+                and all(.[];
+                  (.product | type == "string" and length > 0)
+                  and (.environment | type == "string" and length > 0)
+                )
+              ' <<< "$ROUTES_JSON" >/dev/null
+              jq '[.[] | {product, environment}]' <<< "$ROUTES_JSON" \
+                > "$routes_file"
               ;;
             *)
               echo "Unsupported target_set: $TARGET_SET" >&2

@@ -435,40 +435,107 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("merge-train-runner-schedule", script_text)
         self.assertIn("schedule", script_text)
 
-    def test_deploy_authz_grants_include_reusable_odoo_stable_workflows(
+    def test_deploy_authz_grants_accept_configured_github_action_grants(
         self,
     ) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        configured_grants = [
+            {
+                "repository": "example-org/example-product",
+                "workflow_file": "deploy.yml",
+                "product": "example-product",
+                "context": "example-context",
+                "action": "example_action.execute",
+                "source_label": "operator-config:example-product-deploy",
+                "idempotency_suffix": "example-product-deploy",
+                "event_name": "push",
+                "workflow_ref_suffix": "refs/heads/release",
+                "job_workflow_ref": (
+                    "example-org/launchplane/.github/workflows/reusable.yml"
+                    "@refs/heads/main"
+                ),
+            }
+        ]
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                "    request_payload=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                '        --data) shift; request_payload="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                "    if printf '%s' \"$request_payload\" | grep -q 'example-product-deploy'; then\n"
+                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
+                "    fi\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_grants = temporary_directory / "grants.jsonl"
+            captured_grants.touch()
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "LAUNCHPLANE_AUTHZ_GRANTS_JSON": json.dumps(configured_grants),
+                "CAPTURED_GRANTS": str(captured_grants),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
 
-        expected_workflows = (
-            "reusable-odoo-artifact-publish.yml",
-            "reusable-odoo-testing-deploy.yml",
-            "reusable-odoo-post-deploy.yml",
-            "reusable-odoo-prod-promotion.yml",
-            "reusable-odoo-prod-rollback.yml",
-        )
-        for workflow_file in expected_workflows:
-            self.assertIn(workflow_file, script_text)
-        for context_name in ("cm", "opw"):
-            self.assertIn(
-                f"deploy:odoo-{context_name}-artifact-publish-inputs-grant",
-                script_text,
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
             )
-            self.assertIn(f"deploy:odoo-{context_name}-artifact-publish-grant", script_text)
-            self.assertIn(
-                f"deploy:odoo-{context_name}-testing-target-replacement-grant",
-                script_text,
-            )
-            self.assertIn(f"deploy:odoo-{context_name}-post-deploy-grant", script_text)
-            self.assertIn(f"deploy:odoo-{context_name}-prod-promotion-run-grant", script_text)
-            self.assertIn(f"deploy:odoo-{context_name}-prod-rollback-grant", script_text)
-        self.assertIn("deploy:odoo-cm-website-bootstrap-override-grant", script_text)
-        self.assertIn("deploy:odoo-opw-website-bootstrap-override-grant", script_text)
-        self.assertIn("odoo-cm-website-bootstrap-override", script_text)
-        self.assertIn("odoo-opw-website-bootstrap-override", script_text)
-        self.assertNotIn('base_url: "https://opw-testing.shinycomputers.com"', script_text)
-        self.assertNotIn('health_path: "/launchplane/health"', script_text)
-        self.assertNotIn('domains: ["opw-testing.shinycomputers.com"]', script_text)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            grants = [
+                json.loads(grant_text)["grant"]
+                for grant_text in captured_grants.read_text().split("---END-GRANT---")
+                if grant_text.strip()
+            ]
+
+        self.assertEqual(len(grants), 1)
+        grant = grants[0]
+        self.assertEqual(grant["repository"], "example-org/example-product")
+        self.assertEqual(grant["workflow_refs"], ["example-org/example-product/.github/workflows/deploy.yml@refs/heads/release"])
+        self.assertEqual(grant["job_workflow_refs"], ["example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"])
+        self.assertEqual(grant["event_names"], ["push"])
+        self.assertEqual(grant["products"], ["example-product"])
+        self.assertEqual(grant["contexts"], ["example-context"])
+        self.assertEqual(grant["actions"], ["example_action.execute"])
+        self.assertEqual(grant["source_label"], "operator-config:example-product-deploy")
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
@@ -515,10 +582,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
         self.assertIn('"instance":"testing"', workflow_text)
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
-        self.assertIn(
-            "odoo_target_replacement_apply",
-            Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8"),
-        )
 
     def test_odoo_website_bootstrap_override_workflow_allows_opw_targets(self) -> None:
         workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
@@ -542,6 +605,41 @@ class ProductOnboardingTests(unittest.TestCase):
             workflow_text = workflow_path.read_text(encoding="utf-8")
             for literal in forbidden_literals:
                 with self.subTest(workflow=workflow_path.name, literal=literal):
+                    self.assertNotIn(literal, workflow_text)
+
+    def test_route_batch_workflows_require_configured_json_routes(self) -> None:
+        workflow_expectations = {
+            "provider-target-operations.yml": (
+                "target_set=configured-json",
+                "JSON array of {\"context\",\"instance\"} routes",
+            ),
+            "product-environment-evidence.yml": (
+                "target_set=configured-json",
+                "JSON array of {\"product\",\"environment\"} routes",
+            ),
+        }
+        forbidden_literals = (
+            "phase-two-initial",
+            "discord-blue",
+            "sellyouroutboard",
+            "verireel",
+            "odoo-tenant-cm",
+            "odoo-tenant-opw",
+            '"cm"',
+            '"opw"',
+        )
+
+        for workflow_name, expected_snippets in workflow_expectations.items():
+            workflow_text = Path(f".github/workflows/{workflow_name}").read_text(
+                encoding="utf-8"
+            )
+            with self.subTest(workflow=workflow_name):
+                self.assertIn("routes_json:", workflow_text)
+                self.assertIn("configured-json", workflow_text)
+                self.assertIn("ROUTES_JSON", workflow_text)
+                for snippet in expected_snippets:
+                    self.assertIn(snippet, workflow_text)
+                for literal in forbidden_literals:
                     self.assertNotIn(literal, workflow_text)
 
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
@@ -617,7 +715,6 @@ class ProductOnboardingTests(unittest.TestCase):
         workflow_text = Path(".github/workflows/ingress-route-audit-read.yml").read_text(
             encoding="utf-8"
         )
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("curl -sS", workflow_text)
         self.assertIn("-w '%{http_code}'", workflow_text)
@@ -632,9 +729,6 @@ class ProductOnboardingTests(unittest.TestCase):
         )
         self.assertIn("redacted", workflow_text)
         self.assertIn("operation_count", workflow_text)
-        self.assertIn("ingress-route-audit-read.yml", script_text)
-        self.assertIn("deploy:ingress-route-audit-read-plan-grant", script_text)
-        self.assertIn("ingress_route.plan", script_text)
         self.assertNotIn("launchplane-request", workflow_text)
         self.assertNotIn("ingress_route.apply", workflow_text)
         self.assertNotIn("provider_host_id:", workflow_text)
@@ -644,7 +738,6 @@ class ProductOnboardingTests(unittest.TestCase):
         workflow_text = Path(".github/workflows/ingress-route-canary-apply.yml").read_text(
             encoding="utf-8"
         )
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn('mode: "apply"', workflow_text)
         self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
@@ -662,9 +755,6 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("npmplus_noindex: true", workflow_text)
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertNotIn("route_options_json", workflow_text)
-        self.assertIn("ingress-route-canary-apply.yml", script_text)
-        self.assertIn("deploy:ingress-route-canary-apply-grant", script_text)
-        self.assertIn("ingress_route.apply", script_text)
 
     def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
@@ -850,201 +940,20 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("runtime_key_safety.write", script_text)
         self.assertIn("merge_train.policy_import", script_text)
 
-    def test_deploy_authz_grants_include_phase_two_live_target_runtime_scopes(
+    def test_deploy_authz_grants_do_not_carry_product_grant_catalog(
         self,
     ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q 'live-target-runtime.yml'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
-                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
-                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
-            ]
-
-        grant_index = {
-            (grant["products"][0], grant["contexts"][0], grant["actions"][0]): grant
-            for grant in grants
-        }
-        expected_scopes = {
-            ("sellyouroutboard", "sellyouroutboard"),
-            ("discord-blue", "discord-blue"),
-            ("verireel", "verireel"),
-            ("odoo-tenant-cm", "cm"),
-            ("odoo-tenant-opw", "opw"),
-        }
-        for product, context in expected_scopes:
-            for action in ("live_target_runtime.plan", "live_target_runtime.apply"):
-                grant = grant_index[(product, context, action)]
-                self.assertEqual(grant["repository"], "cbusillo/launchplane")
-                self.assertEqual(
-                    grant["workflow_refs"],
-                    [
-                        "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
-                    ],
-                )
-                self.assertEqual(grant["event_names"], ["workflow_dispatch"])
-
-    def test_deploy_authz_grants_include_product_environment_evidence_workflow(
-        self,
-    ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q 'product-environment-evidence.yml'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
-            ]
-
-        grant_index = {(grant["products"][0], grant["contexts"][0]): grant for grant in grants}
-        self.assertEqual(
-            set(grant_index),
-            {
-                ("discord-blue", "discord-blue"),
-                ("sellyouroutboard", "sellyouroutboard"),
-                ("verireel", "verireel"),
-                ("odoo-tenant-cm", "cm"),
-                ("odoo-tenant-opw", "opw"),
-            },
-        )
-        for grant in grants:
-            self.assertEqual(grant["repository"], "cbusillo/launchplane")
-            self.assertEqual(
-                grant["workflow_refs"],
-                [
-                    "cbusillo/launchplane/.github/workflows/product-environment-evidence.yml@refs/heads/main"
-                ],
-            )
-            self.assertEqual(grant["event_names"], ["workflow_dispatch"])
-            self.assertEqual(grant["actions"], ["product_environment.read"])
+        self.assertIn("LAUNCHPLANE_AUTHZ_GRANTS_JSON", script_text)
+        self.assertNotIn("discord-blue", script_text)
+        self.assertNotIn("sellyouroutboard", script_text)
+        self.assertNotIn("verireel", script_text)
+        self.assertNotIn("odoo-tenant-cm", script_text)
+        self.assertNotIn("odoo-tenant-opw", script_text)
+        self.assertNotIn("reon-prod", script_text)
+        self.assertNotIn("live-target-runtime.yml", script_text)
+        self.assertNotIn("product-environment-evidence.yml", script_text)
 
     def test_reusable_odoo_prod_promotion_fails_on_each_result_status(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-prod-promotion.yml").read_text(
@@ -1061,147 +970,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             self.assertIn(result_path, workflow_text)
 
         self.assertIn("fail-result-paths", workflow_text)
-
-    def test_deploy_authz_grants_include_opw_manual_preview_workflow(
-        self,
-    ) -> None:
-        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
-        extractor = """
-set -euo pipefail
-PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
-"""
-        with TemporaryDirectory() as temporary_directory_name:
-            temporary_directory = Path(temporary_directory_name)
-            captured_bin_directory = temporary_directory / "bin"
-            captured_bin_directory.mkdir()
-            (captured_bin_directory / "curl").write_text(
-                "#!/usr/bin/env bash\n"
-                'case "$*" in\n'
-                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
-                "  *)\n"
-                "    output_file=''\n"
-                "    request_payload=''\n"
-                '    while [ "$#" -gt 0 ]; do\n'
-                '      case "$1" in\n'
-                '        -o) shift; output_file="$1" ;;\n'
-                '        --data) shift; request_payload="$1" ;;\n'
-                "      esac\n"
-                "      shift || true\n"
-                "    done\n"
-                "    if printf '%s' \"$request_payload\" | grep -q 'odoo-tenant-opw/.github/workflows/odoo-preview.yml'; then\n"
-                "      printf '%s\\n%s\\n' \"$request_payload\" '---END-GRANT---' >> \"$CAPTURED_GRANTS\"\n"
-                "    fi\n"
-                '    if [ -n "$output_file" ]; then\n'
-                '      printf \'{"status":"ok"}\' > "$output_file"\n'
-                "    fi\n"
-                "    printf '200'\n"
-                "    ;;\n"
-                "esac\n"
-            )
-            (captured_bin_directory / "mktemp").write_text(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
-            )
-            (captured_bin_directory / "curl").chmod(0o755)
-            (captured_bin_directory / "mktemp").chmod(0o755)
-            captured_grants = temporary_directory / "grants.jsonl"
-            captured_grants.touch()
-            captured_response_file = temporary_directory / "response.json"
-            env = {
-                **os.environ,
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
-                "GITHUB_REPOSITORY": "cbusillo/launchplane",
-                "GITHUB_SHA": "test-sha",
-                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
-                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
-                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
-                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
-                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
-                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
-                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
-                "CAPTURED_GRANTS": str(captured_grants),
-                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
-                "CAPTURED_BIN_DIR": str(captured_bin_directory),
-            }
-
-            result = subprocess.run(
-                ["bash", "-c", extractor],
-                check=False,
-                cwd=script_path.parent.parent.parent,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            grants = [
-                json.loads(grant_text)["grant"]
-                for grant_text in captured_grants.read_text().split("---END-GRANT---")
-                if grant_text.strip()
-            ]
-
-        grant_index = {
-            (grant["products"][0], grant["actions"][0], grant["source_label"]): grant
-            for grant in grants
-        }
-        expected_grants = {
-            (
-                "odoo-tenant-opw",
-                "odoo_artifact_publish_inputs.read",
-                "deploy:odoo-opw-preview-artifact-publish-inputs-manual-grant",
-            ): ["workflow_dispatch"],
-            (
-                "odoo",
-                "odoo_artifact_publish.write",
-                "deploy:odoo-opw-preview-artifact-publish-grant",
-            ): ["workflow_dispatch"],
-            (
-                "odoo-tenant-opw",
-                "preview_refresh.execute",
-                "deploy:odoo-opw-preview-refresh-grant",
-            ): ["pull_request"],
-            (
-                "odoo-tenant-opw",
-                "preview_pr_feedback.write",
-                "deploy:odoo-opw-preview-pr-feedback-grant",
-            ): ["pull_request"],
-            (
-                "odoo-tenant-opw",
-                "preview_pr_feedback.write",
-                "deploy:odoo-opw-preview-unsupported-feedback-grant",
-            ): ["pull_request_target"],
-            (
-                "odoo-tenant-opw",
-                "preview_destroy.execute",
-                "deploy:odoo-opw-preview-destroy-pr-grant",
-            ): ["pull_request"],
-            (
-                "odoo-tenant-opw",
-                "preview_destroy.execute",
-                "deploy:odoo-opw-preview-destroy-manual-grant",
-            ): ["workflow_dispatch"],
-            (
-                "odoo-tenant-opw",
-                "odoo_preview_apply.execute",
-                "deploy:odoo-opw-preview-apply-grant",
-            ): ["pull_request"],
-            (
-                "odoo-tenant-opw",
-                "odoo_preview_apply.execute",
-                "deploy:odoo-opw-preview-apply-manual-grant",
-            ): ["workflow_dispatch"],
-        }
-
-        self.assertLessEqual(set(expected_grants), set(grant_index))
-        for key, event_names in expected_grants.items():
-            grant = grant_index[key]
-            self.assertEqual(grant["repository"], "cbusillo/odoo-tenant-opw")
-            self.assertEqual(grant["contexts"], ["opw"])
-            self.assertEqual(grant["event_names"], event_names)
-            self.assertEqual(
-                grant["workflow_refs"],
-                ["cbusillo/odoo-tenant-opw/.github/workflows/odoo-preview.yml@*"],
-            )
 
     def test_deploy_authz_grants_scope_public_ingress_monitor_to_launchplane(
         self,

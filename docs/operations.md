@@ -229,6 +229,15 @@ DB-backed GitHub-human grants for `product_config.plan` and
 Leave those variables unset to skip reconciliation; do not hard-code human
 logins or product-specific operator grants in source.
 
+Product-specific GitHub Actions grants are not authored in the deploy script.
+When a temporary deploy-time bridge is needed, provide
+`LAUNCHPLANE_AUTHZ_GRANTS_JSON` as an explicit operator-controlled JSON array of
+grant requests with repository, workflow file, product, context, action, source
+label, and idempotency suffix fields. The script only submits that configured
+payload through the service; checked-in shell tuples must not become the live
+workflow grant catalog. Prefer the operator UI or service-backed authz policy
+management routes for steady-state shared and production grant changes.
+
 The deploy workflow also reconciles its own `authz_policy_grant.write` grants
 for product/context `launchplane`, covering both manual dispatches and automatic
 CI-success deploys. Those grants keep future grant reconciliation separate from
@@ -255,11 +264,8 @@ repair authority instead of widening routine local-operator access. Seed import
 catalogs are explicit import material, not deploy-time authority for these
 operator scopes.
 
-The deploy workflow maintains DB-backed grants for SellYourOutboard operational
-workflows, including product profile cutover reads/writes, production promotion,
-and generic-web preview refresh/destroy requests. The grant request returns only
-authz policy record metadata and rule counts; it does not echo workflow refs,
-human logins, or the full policy body.
+Grant requests return only authz policy record metadata and rule counts; they do
+not echo workflow refs, human logins, or the full policy body.
 
 Public ingress monitoring is a Launchplane-owned synthetic check for every
 public generic-web stable lane, including drivers that inherit generic-web
