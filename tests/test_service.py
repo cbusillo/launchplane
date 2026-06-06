@@ -16463,7 +16463,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -16533,7 +16533,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver_result = SimpleNamespace(deployment_record_id="deployment-odoo-testing")
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -16599,7 +16599,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -16686,7 +16686,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 first_status_code, first_payload = _invoke_app(
@@ -16773,7 +16773,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 first_status_code, first_payload = _invoke_app(
@@ -16863,7 +16863,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch("control_plane.service.execute_generic_web_deploy") as deploy:
+            with patch(
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy"
+            ) as deploy:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -16923,7 +16925,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
@@ -17299,7 +17301,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_rollback",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 status_code, payload = _invoke_app(
@@ -17386,7 +17388,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_rollback",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 status_code, payload = _invoke_app(
@@ -17467,7 +17469,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_rollback",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_rollback",
                 return_value=driver_result,
             ) as rollback:
                 first_status_code, first_payload = _invoke_app(
@@ -17578,7 +17580,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver_result = SimpleNamespace(deployment_record_id="deployment-generic-web-testing")
 
             with patch(
-                "control_plane.service.execute_generic_web_deploy",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_deploy",
                 return_value=driver_result,
             ) as deploy:
                 status_code, payload = _invoke_app(
