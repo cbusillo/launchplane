@@ -116,6 +116,7 @@ from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
 )
+from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
@@ -19514,7 +19515,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service._apply_generic_web_preview_verification_records",
+                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
                 return_value={
                     "transition": "ready",
                     "preview_state": "active",
@@ -19588,7 +19589,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service._apply_generic_web_preview_verification_records",
+                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
                 return_value={"transition": "ready"},
             ) as apply_records:
                 status_code, payload = _invoke_app(
@@ -19669,7 +19670,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service._apply_generic_web_preview_verification_records",
+                "control_plane.drivers.generic_web_preview_dispatch._apply_generic_web_preview_verification_records",
                 return_value={"transition": "ready"},
             ) as apply_records:
                 first_status_code, first_payload = _invoke_app(
@@ -19731,6 +19732,77 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             tuple_request.checked_urls,
             ("https://pr-42.cm-preview.example.test/cell-mechanic",),
+        )
+
+    def test_generic_web_preview_verification_records_reject_missing_preview(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            request = GenericWebPreviewVerificationRequest.model_validate(
+                {
+                    "schema_version": 1,
+                    "context": "cm",
+                    "anchor_repo": "odoo-tenant-cm",
+                    "anchor_pr_number": 42,
+                    "verification_status": "pass",
+                    "verified_at": "2026-05-09T15:08:00Z",
+                }
+            )
+
+            with self.assertRaises(ClickException) as raised:
+                generic_web_preview_dispatch._apply_generic_web_preview_verification_records(
+                    control_plane_root_path=root,
+                    record_store=store,
+                    request=request,
+                )
+
+        self.assertEqual(
+            str(raised.exception),
+            "No Launchplane preview found for cm/odoo-tenant-cm/pr-42.",
+        )
+
+    def test_generic_web_preview_verification_records_reject_missing_generation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-cm-odoo-tenant-cm-pr-42",
+                    context="cm",
+                    anchor_repo="odoo-tenant-cm",
+                    anchor_pr_number=42,
+                    anchor_pr_url="https://github.com/cbusillo/odoo-tenant-cm/pull/42",
+                    preview_label="preview",
+                    canonical_url="https://pr-42.cm-preview.example.test",
+                    state="pending",
+                    created_at="2026-05-09T15:00:00Z",
+                    updated_at="2026-05-09T15:05:00Z",
+                    eligible_at="2026-05-09T15:00:00Z",
+                )
+            )
+            request = GenericWebPreviewVerificationRequest.model_validate(
+                {
+                    "schema_version": 1,
+                    "context": "cm",
+                    "anchor_repo": "odoo-tenant-cm",
+                    "anchor_pr_number": 42,
+                    "verification_status": "pass",
+                    "verified_at": "2026-05-09T15:08:00Z",
+                }
+            )
+
+            with self.assertRaises(ClickException) as raised:
+                generic_web_preview_dispatch._apply_generic_web_preview_verification_records(
+                    control_plane_root_path=root,
+                    record_store=store,
+                    request=request,
+                )
+
+        self.assertEqual(
+            str(raised.exception),
+            "No Launchplane preview generation found for preview-cm-odoo-tenant-cm-pr-42.",
         )
 
     def test_odoo_preview_apply_route_resolves_runtime_environment_values(self) -> None:
