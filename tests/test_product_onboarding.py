@@ -664,6 +664,37 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 )
                 self.assertIn("audience: ${{ inputs.launchplane_audience }}", workflow_text)
 
+    def test_odoo_driver_route_smoke_proves_public_and_oidc_paths(self) -> None:
+        workflow_text = Path(".github/workflows/odoo-driver-route-smoke.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("workflow_call:", workflow_text)
+        self.assertIn("id-token: write", workflow_text)
+        self.assertIn("LAUNCHPLANE_PUBLIC_URL", workflow_text)
+        self.assertIn("source_git_ref:", workflow_text)
+        self.assertIn("SOURCE_GIT_REF: ${{ inputs.source_git_ref }}", workflow_text)
+        self.assertIn('[ "$status_code" = "404" ]', workflow_text)
+        self.assertIn('[ "$status_code" -ge 500 ]', workflow_text)
+        self.assertIn("--connect-timeout 10", workflow_text)
+        self.assertIn("--max-time 30", workflow_text)
+        self.assertIn("${GITHUB_RUN_ID}", workflow_text)
+        self.assertIn("${GITHUB_RUN_ATTEMPT}", workflow_text)
+        self.assertIn("cbusillo/launchplane/.github/actions/launchplane-request@main", workflow_text)
+        self.assertIn("route-path: /v1/drivers/odoo/artifact-publish-inputs", workflow_text)
+        self.assertIn("/v1/drivers/odoo/preview-apply-inputs", workflow_text)
+        self.assertIn("/v1/drivers/odoo/preview-apply", workflow_text)
+        self.assertIn("/v1/previews/pr-feedback", workflow_text)
+        self.assertIn("product=${{ env.PRODUCT }}", workflow_text)
+        self.assertIn("inputs.context=${{ env.CONTEXT_NAME }}", workflow_text)
+        self.assertIn("inputs.instance=${{ env.INSTANCE }}", workflow_text)
+        self.assertIn("inputs.source_git_ref=${{ env.SOURCE_GIT_REF }}", workflow_text)
+        self.assertIn("image_repository=result.image_repository", workflow_text)
+        self.assertIn("image_tag=result.image_tag", workflow_text)
+        self.assertIn('[ -z "$IMAGE_REPOSITORY" ]', workflow_text)
+        self.assertIn('[ -z "$IMAGE_TAG" ]', workflow_text)
+        self.assertNotIn("input_status", workflow_text)
+
     def test_ingress_route_dry_run_workflow_rejects_non_object_options(self) -> None:
         workflow_text = Path(".github/workflows/ingress-route-dry-run.yml").read_text(
             encoding="utf-8"
