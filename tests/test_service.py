@@ -18961,7 +18961,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -19105,7 +19105,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -19181,7 +19181,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "fail",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -20572,7 +20572,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "blocked",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -20663,7 +20663,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 side_effect=[
                     {
                         "refresh_status": "blocked",
@@ -20753,7 +20753,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch("control_plane.service.execute_generic_web_preview_refresh") as refresh:
+            with patch(
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh"
+            ) as refresh:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -20827,7 +20829,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 side_effect=[
                     {
                         "refresh_status": "fail",
@@ -20933,7 +20935,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_refresh",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_refresh",
                 return_value={
                     "refresh_status": "pass",
                     "refresh_started_at": "2026-05-03T15:00:00Z",
@@ -21073,7 +21075,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_destroy",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_destroy",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-05-03T16:00:00Z",
@@ -21163,7 +21165,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             second_request_payload["destroy"]["destroy_reason"] = "janitor_backstop"
 
             with patch(
-                "control_plane.service.execute_generic_web_preview_destroy",
+                "control_plane.drivers.generic_web_preview_dispatch.execute_generic_web_preview_destroy",
                 return_value=GenericWebPreviewDestroyResult(
                     destroy_status="pass",
                     destroy_started_at="2026-05-03T16:00:00Z",

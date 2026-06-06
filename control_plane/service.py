@@ -202,8 +202,10 @@ from control_plane.drivers.dispatch import (
     _DriverRouteExecutionMetadata as _DriverRouteExecutionMetadata,
     _ProductRouteEnvelope as _ProductRouteEnvelope,
     _ResolvedProductDriverContext as _ResolvedProductDriverContext,
+    _image_reference_tail as _image_reference_tail,
     _normalize_preview_verification_checked_urls as _normalize_preview_verification_checked_urls,
     _normalize_release_status as _normalize_release_status,
+    _repo_token as _repo_token,
     _validate_driver_envelope_product as _validate_driver_envelope_product,
     ProductDriverMismatchError as ProductDriverMismatchError,
 )
@@ -222,10 +224,22 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _GENERIC_WEB_PREVIEW_READINESS_ROUTE as _GENERIC_WEB_PREVIEW_READINESS_ROUTE,
     _GENERIC_WEB_PREVIEW_REFRESH_ROUTE as _GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
     _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE as _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+    _apply_generic_web_preview_refresh_records as _apply_generic_web_preview_refresh_records,
     _apply_generic_web_preview_verification_records as _apply_generic_web_preview_verification_records,
+    _generic_web_preview_anchor_head_sha as _generic_web_preview_anchor_head_sha,
+    _generic_web_preview_anchor_pr_number as _generic_web_preview_anchor_pr_number,
+    _generic_web_preview_anchor_pr_url as _generic_web_preview_anchor_pr_url,
+    _generic_web_preview_anchor_repo as _generic_web_preview_anchor_repo,
+    _generic_web_preview_manifest_fingerprint as _generic_web_preview_manifest_fingerprint,
+    _generic_web_preview_refresh_failure_summary as _generic_web_preview_refresh_failure_summary,
+    _generic_web_preview_refresh_mutation_requests as _generic_web_preview_refresh_mutation_requests,
+    _generic_web_preview_refresh_states as _generic_web_preview_refresh_states,
+    _generic_web_preview_refresh_timing as _generic_web_preview_refresh_timing,
     _handle_generic_web_preview_desired_state as _handle_generic_web_preview_desired_state,
+    _handle_generic_web_preview_destroy as _handle_generic_web_preview_destroy,
     _handle_generic_web_preview_inventory as _handle_generic_web_preview_inventory,
     _handle_generic_web_preview_readiness as _handle_generic_web_preview_readiness,
+    _handle_generic_web_preview_refresh as _handle_generic_web_preview_refresh,
     _handle_generic_web_preview_verification as _handle_generic_web_preview_verification,
     _validate_generic_web_preview_profile as _validate_generic_web_preview_profile,
     _write_preview_desired_state_if_supported as _write_preview_desired_state_if_supported,
@@ -367,14 +381,9 @@ from control_plane.workflows.generic_web_rollback import (
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewInventoryRequest,
-    GenericWebPreviewRefreshRequest,
-    GenericWebPreviewRefreshResult,
     GenericWebPreviewProfileStore,
     discover_generic_web_preview_desired_state,
-    execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
-    execute_generic_web_preview_refresh,
-    preview_pr_number_from_slug,
 )
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_REQUIRED_ENV_KEYS,
@@ -3268,50 +3277,6 @@ def _handle_odoo_preview_apply(
         result=driver_result.model_dump(mode="json"),
         driver_result=driver_result,
     )
-
-
-def _handle_generic_web_preview_refresh(
-    request: GenericWebPreviewRefreshEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    _generic_web_preview_anchor_pr_number(
-        request=request.refresh,
-        profile=resolved_context.profile,
-    )
-    driver_result = execute_generic_web_preview_refresh(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.refresh,
-        profile=resolved_context.profile,
-    )
-    driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
-    result = _apply_generic_web_preview_refresh_records(
-        control_plane_root_path=control_plane_root_path,
-        record_store=record_store,
-        request=request.refresh,
-        driver_result=driver_result,
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result=result, driver_result=driver_result)
-
-
-def _handle_generic_web_preview_destroy(
-    request: GenericWebPreviewDestroyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    assert resolved_context.profile is not None
-    driver_result = execute_generic_web_preview_destroy(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(GenericWebPreviewProfileStore, record_store),
-        request=request.destroy,
-        profile=resolved_context.profile,
-    )
-    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
 
 
 def _handle_verireel_preview_verification(
@@ -8821,222 +8786,12 @@ def _write_preview_pr_feedback_if_supported(
     return record.feedback_id
 
 
-def _repo_token(value: str) -> str:
-    normalized = "".join(
-        character if character.isalnum() else "-" for character in value.strip().lower()
-    ).strip("-")
-    while "--" in normalized:
-        normalized = normalized.replace("--", "-")
-    if not normalized:
-        raise ValueError("repository token is required")
-    return normalized
-
-
 def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
     normalized_sha = request.anchor_head_sha.strip().lower()
     short_sha = normalized_sha[:7]
     return (
         f"{_repo_token(request.anchor_repo)}-preview-manifest-"
         f"{request.preview_slug.strip()}-{short_sha}"
-    )
-
-
-def _image_reference_tail(value: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        return ""
-    for separator in ("@", ":"):
-        if separator in normalized:
-            normalized = normalized.rsplit(separator, maxsplit=1)[1]
-    return normalized.strip()
-
-
-def _generic_web_preview_manifest_fingerprint(
-    request: GenericWebPreviewRefreshRequest,
-) -> str:
-    artifact_token = _repo_token(_image_reference_tail(request.image_reference) or "image")
-    return f"{_repo_token(request.preview_slug)}-{artifact_token}"
-
-
-def _generic_web_preview_anchor_pr_number(
-    *,
-    request: GenericWebPreviewRefreshRequest,
-    profile: LaunchplaneProductProfileRecord,
-) -> int:
-    if request.anchor_pr_number is not None:
-        return request.anchor_pr_number
-    pr_number = preview_pr_number_from_slug(
-        preview_slug=request.preview_slug,
-        slug_template=profile.preview.slug_template,
-    )
-    if pr_number is None:
-        raise click.ClickException(
-            "Generic web preview refresh requires anchor_pr_number when preview_slug does not match the profile slug_template."
-        )
-    return pr_number
-
-
-def _generic_web_preview_anchor_pr_url(
-    *,
-    request: GenericWebPreviewRefreshRequest,
-    profile: LaunchplaneProductProfileRecord,
-    anchor_pr_number: int,
-) -> str:
-    if request.anchor_pr_url.strip():
-        return request.anchor_pr_url.strip()
-    return f"https://github.com/{profile.repository.strip()}/pull/{anchor_pr_number}"
-
-
-def _generic_web_preview_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
-    _owner, separator, repo = profile.repository.strip().partition("/")
-    if not separator or not repo.strip():
-        raise click.ClickException(
-            "Generic web preview profile repository must use owner/repo format."
-        )
-    return repo.strip()
-
-
-def _generic_web_preview_anchor_head_sha(request: GenericWebPreviewRefreshRequest) -> str:
-    if request.anchor_head_sha.strip():
-        return request.anchor_head_sha.strip()
-    return _image_reference_tail(request.image_reference) or request.image_reference.strip()
-
-
-def _generic_web_preview_refresh_timing(
-    driver_result: GenericWebPreviewRefreshResult,
-) -> tuple[str, str]:
-    requested_at = (
-        driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
-    )
-    finished_at = driver_result.refresh_finished_at.strip() or requested_at
-    return requested_at, finished_at
-
-
-def _generic_web_preview_refresh_failure_summary(
-    driver_result: GenericWebPreviewRefreshResult,
-) -> str:
-    smoke = driver_result.smoke
-    if smoke is not None and smoke.smoke_status == "fail" and smoke.failure_summary.strip():
-        return smoke.failure_summary.strip()
-    return driver_result.error_message.strip() or "Preview provisioning failed."
-
-
-@dataclass(frozen=True)
-class _GenericWebPreviewRefreshStates:
-    preview_state: Literal["pending", "active", "failed", "paused", "teardown_pending", "destroyed"]
-    generation_state: Literal[
-        "resolving", "building", "deploying", "verifying", "ready", "failed", "superseded"
-    ]
-    deploy_status: Literal["pending", "pass", "fail", "skipped"]
-    verify_status: Literal["pending", "pass", "fail", "skipped"]
-    overall_health_status: Literal["pending", "pass", "fail", "skipped"]
-    failure_stage: str
-
-
-def _generic_web_preview_refresh_states(
-    driver_result: GenericWebPreviewRefreshResult,
-) -> _GenericWebPreviewRefreshStates:
-    refresh_passed = driver_result.refresh_status == "pass"
-    smoke = driver_result.smoke
-    smoke_passed = smoke is not None and smoke.smoke_status == "pass"
-    smoke_failed = smoke is not None and smoke.smoke_status == "fail"
-    verify_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
-    if smoke_passed:
-        verify_status = "pass"
-    elif smoke_failed:
-        verify_status = "fail"
-    elif refresh_passed:
-        verify_status = "pending"
-    overall_health_status: Literal["pending", "pass", "fail", "skipped"] = "fail"
-    if smoke_passed:
-        overall_health_status = "pass"
-    elif smoke_failed:
-        overall_health_status = "fail"
-    elif refresh_passed:
-        overall_health_status = "pending"
-    return _GenericWebPreviewRefreshStates(
-        preview_state="active" if smoke_passed else "pending" if refresh_passed else "failed",
-        generation_state="ready" if smoke_passed else "verifying" if refresh_passed else "failed",
-        deploy_status="pass" if refresh_passed or smoke_failed else "fail",
-        verify_status=verify_status,
-        overall_health_status=overall_health_status,
-        failure_stage="" if refresh_passed else "verify" if smoke_failed else "provision",
-    )
-
-
-def _generic_web_preview_refresh_mutation_requests(
-    *,
-    request: GenericWebPreviewRefreshRequest,
-    driver_result: GenericWebPreviewRefreshResult,
-    profile: LaunchplaneProductProfileRecord,
-) -> tuple[PreviewMutationRequest, PreviewGenerationMutationRequest]:
-    anchor_pr_number = _generic_web_preview_anchor_pr_number(
-        request=request,
-        profile=profile,
-    )
-    requested_at, finished_at = _generic_web_preview_refresh_timing(driver_result)
-    states = _generic_web_preview_refresh_states(driver_result)
-    refresh_passed = driver_result.refresh_status == "pass"
-    failure_summary = _generic_web_preview_refresh_failure_summary(driver_result)
-    preview_request = PreviewMutationRequest(
-        context=profile.preview.context,
-        anchor_repo=_generic_web_preview_anchor_repo(profile),
-        anchor_pr_number=anchor_pr_number,
-        anchor_pr_url=_generic_web_preview_anchor_pr_url(
-            request=request,
-            profile=profile,
-            anchor_pr_number=anchor_pr_number,
-        ),
-        canonical_url=driver_result.preview_url.strip() or request.preview_url.strip(),
-        state=states.preview_state,
-        created_at=requested_at,
-        updated_at=finished_at,
-        eligible_at=requested_at,
-    )
-    generation_request = PreviewGenerationMutationRequest(
-        context=profile.preview.context,
-        anchor_repo=preview_request.anchor_repo,
-        anchor_pr_number=anchor_pr_number,
-        anchor_pr_url=preview_request.anchor_pr_url,
-        anchor_head_sha=_generic_web_preview_anchor_head_sha(request),
-        state=states.generation_state,
-        requested_reason="external_preview_refresh",
-        requested_at=requested_at,
-        started_at=requested_at,
-        ready_at=finished_at if states.generation_state == "ready" else "",
-        finished_at=finished_at if states.generation_state == "ready" or not refresh_passed else "",
-        failed_at=finished_at if not refresh_passed else "",
-        resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(request),
-        artifact_id=request.image_reference,
-        deploy_status=states.deploy_status,
-        verify_status=states.verify_status,
-        overall_health_status=states.overall_health_status,
-        failure_stage=states.failure_stage,
-        failure_summary="" if refresh_passed else failure_summary,
-    )
-    return preview_request, generation_request
-
-
-def _apply_generic_web_preview_refresh_records(
-    *,
-    control_plane_root_path: Path,
-    record_store: object,
-    request: GenericWebPreviewRefreshRequest,
-    driver_result: GenericWebPreviewRefreshResult,
-    profile: LaunchplaneProductProfileRecord,
-) -> dict[str, object]:
-    if driver_result.refresh_status == "blocked":
-        return {}
-    preview_request, generation_request = _generic_web_preview_refresh_mutation_requests(
-        request=request,
-        driver_result=driver_result,
-        profile=profile,
-    )
-    return apply_launchplane_generation_evidence(
-        control_plane_root_path=control_plane_root_path,
-        record_store=cast(LaunchplaneMutationStore, record_store),
-        preview_request=preview_request,
-        generation_request=generation_request,
     )
 
 
