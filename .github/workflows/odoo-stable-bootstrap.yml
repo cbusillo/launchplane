@@ -7,17 +7,14 @@ name: Odoo Stable Bootstrap
       product:
         description: Odoo product profile key.
         required: true
-        default: odoo-tenant-cm
         type: string
       context:
         description: Launchplane Odoo context.
         required: true
-        default: cm
         type: string
       instance:
         description: Stable Odoo instance to bootstrap.
         required: true
-        default: testing
         type: string
       confirmation:
         description: Type the lane policy confirmation to confirm destructive bootstrap.

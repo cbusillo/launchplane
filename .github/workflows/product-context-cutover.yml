@@ -7,22 +7,19 @@ name: Product Context Cutover
       product:
         description: Product profile key to cut over.
         required: true
-        default: sellyouroutboard
         type: string
       source_context:
         description: Legacy context to copy current-authority records from.
         required: true
-        default: sellyouroutboard-testing
         type: string
       target_context:
-        description: Canonical product context to copy current-authority records to.
+        description: >-
+          Canonical product context to copy current-authority records to.
         required: true
-        default: sellyouroutboard
         type: string
       display_name:
         description: Product display name to write with the profile cutover.
         required: true
-        default: SellYourOutboard
         type: string
       dry_run:
         description: Plan only when true; write records and profile when false.

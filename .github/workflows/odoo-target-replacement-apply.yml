@@ -7,7 +7,6 @@ name: Odoo Target Replacement Apply
       product:
         description: Odoo product profile key.
         required: true
-        default: odoo-tenant-cm
         type: string
       instance:
         description: Stable Odoo instance to recreate in place.

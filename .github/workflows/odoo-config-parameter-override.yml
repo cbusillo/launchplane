@@ -7,22 +7,18 @@ name: Odoo Config Parameter Override
       product:
         description: Odoo product profile key.
         required: true
-        default: odoo-tenant-cm
         type: string
       context:
         description: Launchplane Odoo context.
         required: true
-        default: cm
-        type: choice
-        options:
-          - cm
+        type: string
       instance:
         description: Stable Odoo instance to update.
         required: true
-        default: testing
         type: choice
         options:
           - testing
+          - prod
       key:
         description: Odoo config parameter key.
         required: true
@@ -33,7 +29,6 @@ name: Odoo Config Parameter Override
       value:
         description: Non-secret config parameter value.
         required: true
-        default: https://cm-testing.shinycomputers.com
         type: string
 
 permissions:
@@ -67,10 +62,6 @@ jobs:
           : "${INSTANCE:?Missing instance input}"
           : "${KEY_NAME:?Missing key input}"
           : "${VALUE:?Missing value input}"
-          if [ "$CONTEXT_NAME" != "cm" ] || [ "$INSTANCE" != "testing" ]; then
-            echo 'This workflow currently writes only cm/testing Odoo overrides.' >&2
-            exit 1
-          fi
           if [ "$KEY_NAME" != "web.base.url" ]; then
             echo 'Only web.base.url is currently service-writable.' >&2
             exit 1

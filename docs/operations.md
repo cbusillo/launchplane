@@ -150,14 +150,16 @@ The first implemented service command is:
 uv run launchplane service serve \
   --state-dir ./state \
   --database-url "$LAUNCHPLANE_DATABASE_URL" \
-  --policy-file ./bootstrap-policy.toml
+  --policy-file ./bootstrap-policy.toml \
+  --audience "$LAUNCHPLANE_SERVICE_AUDIENCE"
 ```
 
 The service needs an explicit minimal bootstrap policy input, but the repo no
 longer tracks the live policy. Product and workflow grants should be represented
 as DB-backed authz policy records. Omitting `--database-url` always fails closed,
 including loopback local development, rather than using file-backed JSON state
-as authority.
+as authority. The GitHub OIDC audience is explicit operator/process wiring;
+production code must not default it to a live domain.
 
 Current implementation scope:
 
@@ -288,11 +290,13 @@ GitHub `/user` API read outside Launchplane, and never print or paste the token
 itself into logs, issues, or records.
 
 The manual Product Context Cutover workflow plans or applies the same
-current-authority record move through the Launchplane service. Run it first with
-`dry_run=true`; run with `dry_run=false` only after the artifact shows the
-expected key/count metadata for runtime records, managed secrets, Dokploy
-targets, target IDs, inventories, release tuples, and the product profile lane
-contexts. The workflow intentionally leaves append-only deployments,
+current-authority record move through the Launchplane service. The workflow
+does not carry product/context defaults; operators must provide the product,
+legacy source context, canonical target context, and display name explicitly.
+Run it first with `dry_run=true`; run with `dry_run=false` only after the
+artifact shows the expected key/count metadata for runtime records, managed
+secrets, Dokploy targets, target IDs, inventories, release tuples, and the
+product profile lane contexts. The workflow intentionally leaves append-only deployments,
 promotions, backup gates, and preview history on their original contexts.
 
 After a cutover has been applied and the product profile no longer references
@@ -794,7 +798,10 @@ context only, and `context_instance` has both context and instance.
 - For shared/live targets, use the trusted `Odoo Config Parameter Override`
   workflow instead of local CLI writes. It calls
   `POST /v1/drivers/odoo/config-parameter-override` with GitHub Actions OIDC and
-  is currently limited to the non-secret `web.base.url` key for `cm/testing`.
+  requires explicit product, context, instance, key, and value inputs instead of
+  workflow-local product topology defaults. The current workflow only exposes
+  the non-secret `web.base.url` key; product/context/instance authority is
+  enforced by service authz and DB-backed product/runtime records.
   Service-written `web.base.url` records are always marked for `deploy` and
   `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
   apply the canonical URL before verification.
