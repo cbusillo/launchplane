@@ -585,7 +585,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_low_risk_routes_registered_in_descriptor_dispatch(self) -> None:
+    def test_odoo_routes_registered_in_descriptor_dispatch(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
         self.assertIn(
@@ -633,6 +633,27 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path,
             dispatch_routes,
         )
+        self.assertIn(
+            control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
+            dispatch_routes,
+        )
+        stable_bootstrap_route = dispatch_routes[
+            control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path
+        ]
+        stable_bootstrap_context = stable_bootstrap_route.context_resolver(
+            control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(
+                {
+                    "product": "odoo-tenant-cm",
+                    "bootstrap": {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "confirmation": "bootstrap cm testing",
+                    },
+                }
+            )
+        )
+        self.assertFalse(stable_bootstrap_context.use_resolved_profile_product_for_authorization)
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_odoo_preview_apply_inputs_registered_in_descriptor_dispatch(self) -> None:
@@ -1364,7 +1385,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_odoo_low_risk_descriptor_requires_dispatch_registration(self) -> None:
+    def test_odoo_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path)
@@ -1378,6 +1399,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         dispatch_routes.pop(control_plane_service._ODOO_POST_DEPLOY_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path)
         dispatch_routes.pop(control_plane_service._ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE.route_path)
+        dispatch_routes.pop(control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path)
 
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
@@ -1462,6 +1484,36 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             "_DESCRIPTORS",
             (
                 descriptor_without_prod_promotion,
+                *(
+                    descriptor
+                    for descriptor in registry._DESCRIPTORS
+                    if descriptor.driver_id != "odoo"
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "must be declared by a driver descriptor"):
+                control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_odoo_stable_bootstrap_dispatch_registration_requires_descriptor_route(
+        self,
+    ) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+        descriptor_without_stable_bootstrap = registry.ODOO_DRIVER.model_copy(
+            update={
+                "actions": tuple(
+                    action
+                    for action in registry.ODOO_DRIVER.actions
+                    if action.route_path
+                    != control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.route_path
+                )
+            }
+        )
+
+        with patch.object(
+            registry,
+            "_DESCRIPTORS",
+            (
+                descriptor_without_stable_bootstrap,
                 *(
                     descriptor
                     for descriptor in registry._DESCRIPTORS

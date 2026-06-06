@@ -28536,7 +28536,267 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 first_payload["records"]["odoo_stable_bootstrap_operation_id"],
                 second_payload["records"]["odoo_stable_bootstrap_operation_id"],
             )
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertEqual(first_payload["result"], second_payload["result"])
             worker_mock.assert_called_once()
+
+    def test_odoo_stable_bootstrap_dispatch_replays_same_key_reservation_collision(
+        self,
+    ) -> None:
+        class SameKeyReservationStore:
+            def __init__(self, operation: OdooStableBootstrapOperationRecord) -> None:
+                self.operation = operation
+
+            def write_odoo_stable_bootstrap_operation_record(
+                self, record: OdooStableBootstrapOperationRecord
+            ) -> object:
+                self.operation = record
+                return None
+
+            def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
+                self, record: OdooStableBootstrapOperationRecord
+            ) -> tuple[OdooStableBootstrapOperationRecord, bool]:
+                return self.operation, False
+
+            def read_odoo_stable_bootstrap_operation_record(
+                self, operation_id: str
+            ) -> OdooStableBootstrapOperationRecord:
+                if operation_id != self.operation.operation_id:
+                    raise FileNotFoundError(operation_id)
+                return self.operation
+
+            def list_odoo_stable_bootstrap_operation_records(
+                self,
+                *,
+                product: str = "",
+                context_name: str = "",
+                instance_name: str = "",
+                idempotency_key: str = "",
+                statuses: tuple[str, ...] = (),
+                limit: int | None = None,
+            ) -> tuple[OdooStableBootstrapOperationRecord, ...]:
+                del product, context_name, instance_name, idempotency_key, statuses, limit
+                return ()
+
+        request = control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(
+            {
+                "product": "odoo-tenant-cm",
+                "bootstrap": {
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "instance": "testing",
+                    "confirmation": "bootstrap cm testing",
+                },
+            }
+        )
+        request_fingerprint = control_plane_service._request_fingerprint(
+            request.model_dump(mode="json")
+        )
+        operation = control_plane_service._build_odoo_stable_bootstrap_operation_record(
+            bootstrap_request=request.bootstrap,
+            idempotency_key="bootstrap-cm-testing",
+            request_fingerprint=request_fingerprint,
+            created_at="2026-05-17T00:00:00Z",
+        )
+        start_response_calls: list[tuple[str, list[tuple[str, str]]]] = []
+
+        result = control_plane_service._dispatch_odoo_stable_bootstrap(
+            request,
+            control_plane_service._ResolvedProductDriverContext(profile=None),
+            SameKeyReservationStore(operation),
+            Path("/tmp/launchplane-test-root"),
+            Path("/tmp/launchplane-test-state"),
+            None,
+            _identity(),
+            "github-actions|cbusillo/launchplane|workflow|subject",
+            "bootstrap-cm-testing",
+            request_fingerprint,
+            lambda status, headers: start_response_calls.append((status, headers)),
+            "trace-race",
+        )
+
+        if isinstance(result, list):
+            self.fail("Expected stable bootstrap dispatch to replay the operation.")
+        records, driver_result = result
+        if driver_result is None or isinstance(driver_result, BaseModel):
+            self.fail("Expected stable bootstrap dispatch to return an operation payload.")
+        self.assertIsInstance(driver_result, dict)
+        self.assertEqual(records["odoo_stable_bootstrap_operation_id"], operation.operation_id)
+        self.assertEqual(driver_result["operation_id"], operation.operation_id)
+        self.assertEqual(start_response_calls, [])
+
+    def test_odoo_stable_bootstrap_driver_rejects_reused_idempotency_key_for_different_payload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_stable_bootstrap.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo-tenant-cm",
+                "bootstrap": {
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "instance": "testing",
+                    "confirmation": "bootstrap cm testing",
+                    "verify_health": True,
+                    "verify_canonical": True,
+                    "verify_logo": True,
+                },
+            }
+            changed_request_payload = {
+                "product": "odoo-tenant-cm",
+                "bootstrap": {
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "instance": "testing",
+                    "confirmation": "bootstrap cm testing",
+                    "verify_health": True,
+                    "verify_canonical": True,
+                    "verify_logo": False,
+                },
+            }
+
+            with patch(
+                "control_plane.service._start_odoo_stable_bootstrap_operation_worker"
+            ) as worker_mock:
+                first_status, _ = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/stable-bootstrap",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "bootstrap-cm-testing"},
+                )
+                second_status, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/stable-bootstrap",
+                    payload=changed_request_payload,
+                    headers={"Idempotency-Key": "bootstrap-cm-testing"},
+                )
+
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 409)
+            self.assertEqual(second_payload["error"]["code"], "idempotency_key_reused")
+            worker_mock.assert_called_once()
+
+    def test_odoo_stable_bootstrap_driver_reuses_idempotency_key_across_lanes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_profile_payload_with_prod_lane()
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_stable_bootstrap.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service._start_odoo_stable_bootstrap_operation_worker"
+            ) as worker_mock:
+                first_status, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/stable-bootstrap",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "bootstrap": {
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "testing",
+                            "confirmation": "bootstrap cm testing",
+                        },
+                    },
+                    headers={"Idempotency-Key": "bootstrap-cm"},
+                )
+                second_status, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/stable-bootstrap",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "bootstrap": {
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "prod",
+                            "confirmation": "bootstrap cm prod",
+                        },
+                    },
+                    headers={"Idempotency-Key": "bootstrap-cm"},
+                )
+
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 202)
+            self.assertNotEqual(
+                first_payload["records"]["odoo_stable_bootstrap_operation_id"],
+                second_payload["records"]["odoo_stable_bootstrap_operation_id"],
+            )
+            self.assertEqual(worker_mock.call_count, 2)
 
     def test_odoo_stable_bootstrap_driver_blocks_second_active_lane_operation(
         self,
