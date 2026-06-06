@@ -36,6 +36,8 @@ Each driver should have these pieces:
 
 - Descriptor metadata in `control_plane/drivers/registry.py`.
 - Shared descriptor-dispatch plumbing from `control_plane/drivers/dispatch.py`.
+- Generic-web preview-verification dispatch in
+  `control_plane/drivers/generic_web_preview_dispatch.py`.
 - Typed request and result models in a workflow module.
 - Service routes under `/v1/drivers/{driver_id}/...`.
 - Authz actions that match the driver actions and safety level.
@@ -135,6 +137,8 @@ secrets, or driver-owned derivation.
 4. Wire descriptor-backed service dispatch using the shared route primitives in
    `control_plane/drivers/dispatch.py`; keep driver-family handlers cohesive
    instead of growing unrelated `service.py` route tables.
+   Generic-web preview-verification route changes belong in
+   `control_plane/drivers/generic_web_preview_dispatch.py`.
 5. Write records through existing storage contracts when possible.
 6. Add focused unit tests for validation, authorization, execution, and failure
    evidence.
