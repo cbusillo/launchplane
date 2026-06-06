@@ -794,6 +794,33 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertNotIn("route_options_json", workflow_text)
 
+    def test_ingress_route_apply_workflow_requires_operator_guards(self) -> None:
+        workflow_text = Path(".github/workflows/ingress-route-apply.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('mode: "apply"', workflow_text)
+        self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
+        self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
+        self.assertIn("APPLY LAUNCHPLANE INGRESS ROUTE", workflow_text)
+        self.assertIn("route_json:", workflow_text)
+        self.assertIn("route_json.route.domain_names must be non-empty", workflow_text)
+        self.assertIn("route_json.expected_host_id must be a number", workflow_text)
+        self.assertIn("allow_create: option(\"allow_create\"; false)", workflow_text)
+        self.assertIn("allow_update: option(\"allow_update\"; true)", workflow_text)
+        self.assertIn("allow_enable_disable: option(\"allow_enable_disable\"; false)", workflow_text)
+        self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
+        self.assertIn("route-path: /v1/drivers/ingress/route-apply", workflow_text)
+        inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
+        self.assertEqual(inputs_section.count("        description:"), 6)
+
+    def test_github_metadata_prefers_repository_merge_method(self) -> None:
+        metadata = json.loads(Path(".github/github.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["pullRequests"]["preferredMergeMethod"], "merge")
+        self.assertEqual(metadata["pullRequests"]["allowedMergeMethods"], ["merge"])
+        self.assertIn("Ingress Route Apply", metadata["importantWorkflows"])
+
     def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
             encoding="utf-8"

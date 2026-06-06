@@ -223,6 +223,14 @@ and an explicit mutation path. The typed identity/access inputs build the same
 `identity_access` route binding as the CLI and fail closed if they conflict with
 legacy `npmplus_auth_request` values in route options.
 
+The `Ingress Route Apply` workflow is the generic operator mutation path for
+reviewed routes. It accepts `product`, `context`, a compact `route_json` desired
+state, an explicit idempotency key, and a confirmation phrase. It defaults to
+updating an existing expected provider host rather than creating a new one, and
+can carry NPMplus `locations` inside `route_json.route`. Use it for
+product-specific path routing only after the dry-run plan is reviewed and the
+target product/context has an `ingress_route.apply` grant.
+
 The `Ingress Route Canary Apply` workflow is the matching apply proof path. It
 uses the same canary-scoped product/context grant, reads the expected provider
 host id and canary route tuple from repository variables, and requires an explicit
