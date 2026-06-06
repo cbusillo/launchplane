@@ -34,6 +34,10 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
 )
+from control_plane.workflows.generic_web_promotion_workflow import (
+    GenericWebPromotionWorkflowRequest,
+    dispatch_generic_web_promotion_workflow,
+)
 from control_plane.workflows.generic_web_rollback import (
     GenericWebRollbackApplyStore,
     execute_generic_web_rollback,
@@ -185,6 +189,29 @@ _GENERIC_WEB_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebRollbackEnvelope,
     denial_message=(
         "Workflow cannot execute the generic web prod rollback for the requested product/context."
+    ),
+)
+
+
+class GenericWebPromotionWorkflowEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    workflow: GenericWebPromotionWorkflowRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPromotionWorkflowEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web promotion workflow requires product")
+        if self.product.strip() != self.workflow.product.strip():
+            raise ValueError("generic web promotion workflow requires matching product values")
+        return self
+
+
+_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+    envelope_model=GenericWebPromotionWorkflowEnvelope,
+    denial_message=(
+        "Caller cannot dispatch the generic web prod promotion workflow"
+        " for the requested product/context."
     ),
 )
 
@@ -359,5 +386,27 @@ def _handle_generic_web_rollback(
             "deploy_status": driver_result.deploy_status,
             "post_deploy_status": driver_result.post_deploy_status,
         },
+        driver_result=driver_result,
+    )
+
+
+def _handle_generic_web_promotion_workflow(
+    request: GenericWebPromotionWorkflowEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    del record_store
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web promotion workflow requires a product profile lane."
+        )
+    driver_result = dispatch_generic_web_promotion_workflow(
+        control_plane_root=control_plane_root_path,
+        profile=resolved_context.profile,
+        request=request.workflow,
+    )
+    return _DescriptorDriverDispatchResult(
+        result=driver_result.model_dump(mode="json"),
         driver_result=driver_result,
     )

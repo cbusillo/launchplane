@@ -206,17 +206,20 @@ from control_plane.drivers.dispatch import (
 )
 from control_plane.drivers.generic_web_dispatch import (
     GenericWebDeployEnvelope as GenericWebDeployEnvelope,
+    GenericWebPromotionWorkflowEnvelope as GenericWebPromotionWorkflowEnvelope,
     GenericWebRollbackEnvelope as GenericWebRollbackEnvelope,
     GenericWebRollbackPlanEnvelope as GenericWebRollbackPlanEnvelope,
     GenericWebStableVerificationEnvelope as GenericWebStableVerificationEnvelope,
     GenericWebStableVerificationRequest as GenericWebStableVerificationRequest,
     _GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
+    _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     _GENERIC_WEB_ROLLBACK_PLAN_ROUTE as _GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
     _apply_generic_web_stable_verification_records as _apply_generic_web_stable_verification_records,
     _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
     _handle_generic_web_deploy as _handle_generic_web_deploy,
+    _handle_generic_web_promotion_workflow as _handle_generic_web_promotion_workflow,
     _handle_generic_web_rollback as _handle_generic_web_rollback,
     _handle_generic_web_rollback_plan as _handle_generic_web_rollback_plan,
     _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
@@ -377,10 +380,6 @@ from control_plane.workflows.generic_web_promotion import (
     GenericWebPromotionStore,
     execute_generic_web_prod_promotion,
     resolve_generic_web_promotion_lanes,
-)
-from control_plane.workflows.generic_web_promotion_workflow import (
-    GenericWebPromotionWorkflowRequest,
-    dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
@@ -952,29 +951,6 @@ _GENERIC_WEB_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebProdPromotionEnvelope,
     denial_message=(
         "Workflow cannot execute the generic web prod promotion driver"
-        " for the requested product/context."
-    ),
-)
-
-
-class GenericWebPromotionWorkflowEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    workflow: GenericWebPromotionWorkflowRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "GenericWebPromotionWorkflowEnvelope":
-        if not self.product.strip():
-            raise ValueError("generic web promotion workflow requires product")
-        if self.product.strip() != self.workflow.product.strip():
-            raise ValueError("generic web promotion workflow requires matching product values")
-        return self
-
-
-_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _DriverRouteExecutionMetadata(
-    route_path="/v1/drivers/generic-web/prod-promotion-workflow",
-    envelope_model=GenericWebPromotionWorkflowEnvelope,
-    denial_message=(
-        "Caller cannot dispatch the generic web prod promotion workflow"
         " for the requested product/context."
     ),
 )
@@ -2352,28 +2328,6 @@ def _handle_npmplus_ingress_apply(
         "ingress_dry_run": ingress_result.dry_run,
         "ingress_route_audit_record_id": ingress_audit_record.record_id,
     }, ingress_result
-
-
-def _handle_generic_web_promotion_workflow(
-    request: GenericWebPromotionWorkflowEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-) -> _DescriptorDriverDispatchResult:
-    del record_store
-    if resolved_context.profile is None or resolved_context.lane is None:
-        raise ProductDriverMismatchError(
-            "Generic web promotion workflow requires a product profile lane."
-        )
-    driver_result = dispatch_generic_web_promotion_workflow(
-        control_plane_root=control_plane_root_path,
-        profile=resolved_context.profile,
-        request=request.workflow,
-    )
-    return _DescriptorDriverDispatchResult(
-        result=driver_result.model_dump(mode="json"),
-        driver_result=driver_result,
-    )
 
 
 def _dispatch_generic_web_prod_promotion(
