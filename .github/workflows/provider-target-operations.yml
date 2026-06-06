@@ -20,16 +20,23 @@ name: Provider Target Operations
         type: choice
         options:
           - single
-          - phase-two-initial
+          - configured-json
       context:
         description: Route context when target_set=single.
         required: false
-        default: verireel
+        default: ""
         type: string
       instance:
         description: Route instance when target_set=single.
         required: false
-        default: testing
+        default: ""
+        type: string
+      routes_json:
+        description: >-
+          JSON array of {"context","instance"} routes when
+          target_set=configured-json.
+        required: false
+        default: "[]"
         type: string
       provider_id:
         description: Provider id to inspect/backfill.
@@ -68,6 +75,7 @@ jobs:
       TARGET_SET: ${{ inputs.target_set }}
       CONTEXT: ${{ inputs.context }}
       INSTANCE: ${{ inputs.instance }}
+      ROUTES_JSON: ${{ inputs.routes_json }}
       PROVIDER_ID: ${{ inputs.provider_id }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
@@ -126,20 +134,17 @@ jobs:
               jq -n --arg context "$CONTEXT" --arg instance "$INSTANCE" \
                 '[{"context":$context,"instance":$instance}]' > "$routes_file"
               ;;
-            phase-two-initial)
-              cat > "$routes_file" <<'JSON'
-          [
-            {"context":"discord-blue","instance":"prod"},
-            {"context":"sellyouroutboard","instance":"testing"},
-            {"context":"sellyouroutboard","instance":"prod"},
-            {"context":"verireel","instance":"testing"},
-            {"context":"verireel","instance":"prod"},
-            {"context":"cm","instance":"testing"},
-            {"context":"cm","instance":"prod"},
-            {"context":"opw","instance":"testing"},
-            {"context":"opw","instance":"prod"}
-          ]
-          JSON
+            configured-json)
+              jq -e '
+                type == "array"
+                and length > 0
+                and all(.[];
+                  (.context | type == "string" and length > 0)
+                  and (.instance | type == "string" and length > 0)
+                )
+              ' <<< "$ROUTES_JSON" >/dev/null
+              jq '[.[] | {context, instance}]' <<< "$ROUTES_JSON" \
+                > "$routes_file"
               ;;
             *)
               echo "Unsupported target_set: $TARGET_SET" >&2
