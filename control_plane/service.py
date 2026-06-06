@@ -350,7 +350,6 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
     execute_generic_web_preview_refresh,
-    resolve_generic_web_preview_profile,
     preview_pr_number_from_slug,
 )
 from control_plane.workflows.odoo_preview_runtime import (
@@ -2445,6 +2444,8 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
+        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+        _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
         _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
         _ODOO_PREVIEW_APPLY_INPUTS_ROUTE.route_path,
         _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path,
@@ -3596,6 +3597,138 @@ def _handle_generic_web_preview_verification(
     )
 
 
+def _validate_generic_web_preview_profile(
+    request: _ProductRouteEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del request, record_store, control_plane_root_path
+    profile = resolved_context.profile
+    if profile is None:
+        raise ProductDriverMismatchError("Generic web preview routes require a product profile.")
+    if not product_profile_uses_generic_web_base(profile):
+        raise ProductDriverMismatchError(
+            "Generic web preview routes require a generic-web compatible product profile."
+        )
+    if not profile.preview.enabled:
+        raise ProductDriverMismatchError(
+            "Generic web preview routes require previews to be enabled."
+        )
+    if not profile.preview.context.strip():
+        raise ProductDriverMismatchError("Generic web preview routes require a preview context.")
+
+
+def _handle_generic_web_preview_desired_state(
+    request: GenericWebPreviewDesiredStateEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    driver_result = discover_generic_web_preview_desired_state(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPreviewProfileStore, record_store),
+        request=request.desired_state,
+        discovered_at=_utc_now_timestamp(),
+        profile=resolved_context.profile,
+    )
+    preview_desired_state_id = _write_preview_desired_state_if_supported(
+        record_store=record_store,
+        record=driver_result,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={"preview_desired_state_id": preview_desired_state_id},
+        driver_result=driver_result,
+    )
+
+
+def _handle_generic_web_preview_inventory(
+    request: GenericWebPreviewInventoryEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    driver_result = execute_generic_web_preview_inventory(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPreviewProfileStore, record_store),
+        request=request.inventory,
+        profile=resolved_context.profile,
+    )
+    preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
+        record_store=record_store,
+        context=driver_result.context,
+        source=driver_result.source,
+        preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
+    )
+    return _DescriptorDriverDispatchResult(
+        result={"preview_inventory_scan_id": preview_inventory_scan_id},
+        driver_result=driver_result,
+    )
+
+
+def _handle_generic_web_preview_refresh(
+    request: GenericWebPreviewRefreshEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    _generic_web_preview_anchor_pr_number(
+        request=request.refresh,
+        profile=resolved_context.profile,
+    )
+    driver_result = execute_generic_web_preview_refresh(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPreviewProfileStore, record_store),
+        request=request.refresh,
+        profile=resolved_context.profile,
+    )
+    driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
+    result = _apply_generic_web_preview_refresh_records(
+        control_plane_root_path=control_plane_root_path,
+        record_store=record_store,
+        request=request.refresh,
+        driver_result=driver_result,
+        profile=resolved_context.profile,
+    )
+    return _DescriptorDriverDispatchResult(result=result, driver_result=driver_result)
+
+
+def _handle_generic_web_preview_readiness(
+    request: GenericWebPreviewReadinessEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    driver_result = evaluate_generic_web_preview_readiness(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPreviewProfileStore, record_store),
+        request=request.readiness,
+        checked_at=_utc_now_timestamp(),
+        profile=resolved_context.profile,
+    )
+    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
+
+
+def _handle_generic_web_preview_destroy(
+    request: GenericWebPreviewDestroyEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    assert resolved_context.profile is not None
+    driver_result = execute_generic_web_preview_destroy(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPreviewProfileStore, record_store),
+        request=request.destroy,
+        profile=resolved_context.profile,
+    )
+    return _DescriptorDriverDispatchResult(result={}, driver_result=driver_result)
+
+
 def _handle_verireel_preview_verification(
     request: VeriReelPreviewVerificationEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -4008,6 +4141,63 @@ def _descriptor_driver_dispatch_routes(
             ),
             handler=_handle_generic_web_stable_verification,
         ),
+        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_desired_state,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
+        ),
+        _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_inventory,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
+            skip_pre_idempotency_check=True,
+        ),
+        _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_refresh,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
+        ),
+        _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_readiness,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
+            skip_pre_idempotency_check=True,
+        ),
+        _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context="",
+                use_preview_context_for_authorization=True,
+                require_profile=True,
+            ),
+            handler=_handle_generic_web_preview_destroy,
+            pre_idempotency_validator=_validate_generic_web_preview_profile,
+        ),
         _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -4292,6 +4482,11 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
+            _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
             _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
@@ -4458,64 +4653,6 @@ def _dispatch_descriptor_driver_route(
         control_plane_root_path,
     )
     return dispatch_result.result, dispatch_result.driver_result
-
-
-def _authorize_generic_web_preview_route(
-    *,
-    route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
-    payload: dict[str, object],
-    record_store: GenericWebPreviewProfileStore,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    start_response: _StartResponse,
-    trace_id: str,
-) -> tuple[_DriverRouteEnvelopeT, LaunchplaneProductProfileRecord, list[bytes] | None]:
-    request = route_metadata.envelope_model.model_validate(payload)
-    profile = resolve_generic_web_preview_profile(
-        record_store=record_store,
-        product=request.product,
-    )
-    authorization_response = _driver_route_authorization_response(
-        authz_policy=authz_policy,
-        identity=identity,
-        route_path=route_metadata.route_path,
-        product=profile.product,
-        context=profile.preview.context,
-        denial_message=route_metadata.denial_message,
-        start_response=start_response,
-        trace_id=trace_id,
-    )
-    return request, profile, authorization_response
-
-
-def _generic_web_preview_desired_state_route_metadata(
-    path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewDesiredStateEnvelope]:
-    return _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE
-
-
-def _generic_web_preview_inventory_route_metadata(
-    path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewInventoryEnvelope]:
-    return _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE
-
-
-def _generic_web_preview_refresh_route_metadata(
-    path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewRefreshEnvelope]:
-    return _GENERIC_WEB_PREVIEW_REFRESH_ROUTE
-
-
-def _generic_web_preview_readiness_route_metadata(
-    path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewReadinessEnvelope]:
-    return _GENERIC_WEB_PREVIEW_READINESS_ROUTE
-
-
-def _generic_web_preview_destroy_route_metadata(
-    path: str,
-) -> _DriverRouteExecutionMetadata[GenericWebPreviewDestroyEnvelope]:
-    return _GENERIC_WEB_PREVIEW_DESTROY_ROUTE
 
 
 def _http_status_text(status_code: int) -> str:
@@ -14467,167 +14604,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
-                generic_web_desired_state_request, profile, authorization_response = (
-                    _authorize_generic_web_preview_route(
-                        route_metadata=_generic_web_preview_desired_state_route_metadata(path),
-                        payload=payload,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = discover_generic_web_preview_desired_state(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_desired_state_request.desired_state,
-                    discovered_at=_utc_now_timestamp(),
-                    profile=profile,
-                )
-                preview_desired_state_id = _write_preview_desired_state_if_supported(
-                    record_store=record_store,
-                    record=driver_result,
-                )
-                result = {"preview_desired_state_id": preview_desired_state_id}
-            elif path in _PREVIEW_INVENTORY_ROUTE_PATHS:
-                generic_web_inventory_request, profile, authorization_response = (
-                    _authorize_generic_web_preview_route(
-                        route_metadata=_generic_web_preview_inventory_route_metadata(path),
-                        payload=payload,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = execute_generic_web_preview_inventory(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_inventory_request.inventory,
-                    profile=profile,
-                )
-                preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
-                    record_store=record_store,
-                    context=driver_result.context,
-                    source=driver_result.source,
-                    preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
-                )
-                result = {"preview_inventory_scan_id": preview_inventory_scan_id}
-            elif path in _PREVIEW_REFRESH_ROUTE_PATHS:
-                generic_web_refresh_request, profile, authorization_response = (
-                    _authorize_generic_web_preview_route(
-                        route_metadata=_generic_web_preview_refresh_route_metadata(path),
-                        payload=payload,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                _generic_web_preview_anchor_pr_number(
-                    request=generic_web_refresh_request.refresh,
-                    profile=profile,
-                )
-                driver_result = execute_generic_web_preview_refresh(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_refresh_request.refresh,
-                    profile=profile,
-                )
-                driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
-                result = _apply_generic_web_preview_refresh_records(
-                    control_plane_root_path=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_refresh_request.refresh,
-                    driver_result=driver_result,
-                    profile=profile,
-                )
-            elif path in _PREVIEW_READINESS_ROUTE_PATHS:
-                generic_web_readiness_request, profile, authorization_response = (
-                    _authorize_generic_web_preview_route(
-                        route_metadata=_generic_web_preview_readiness_route_metadata(path),
-                        payload=payload,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                driver_result = evaluate_generic_web_preview_readiness(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_readiness_request.readiness,
-                    checked_at=_utc_now_timestamp(),
-                    profile=profile,
-                )
-                result = {}
-            elif path in _PREVIEW_DESTROY_ROUTE_PATHS:
-                generic_web_destroy_request, profile, authorization_response = (
-                    _authorize_generic_web_preview_route(
-                        route_metadata=_generic_web_preview_destroy_route_metadata(path),
-                        payload=payload,
-                        record_store=record_store,
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                )
-                if authorization_response is not None:
-                    return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_generic_web_preview_destroy(
-                    control_plane_root=resolved_root,
-                    record_store=record_store,
-                    request=generic_web_destroy_request.destroy,
-                    profile=profile,
-                )
-                result = {}
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
                     payload
