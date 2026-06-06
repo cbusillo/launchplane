@@ -17701,7 +17701,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_prod_promotion",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
                 return_value=GenericWebProdPromotionResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -17751,6 +17751,102 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["provider_id"], "dokploy")
         self.assertEqual(payload["result"]["provider_target_type"], "application")
         self.assertNotIn("target_type", payload["result"])
+        execute_mock.assert_called_once()
+
+    def test_generic_web_prod_promotion_route_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "promotion": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    "source_git_ref": "abc123",
+                },
+            }
+
+            with patch(
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
+                return_value=GenericWebProdPromotionResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    from_instance="testing",
+                    to_instance="prod",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    promotion_record_id="promotion-syo-testing-to-prod",
+                    deployment_record_id="deployment-syo-prod",
+                    inventory_record_id="sellyouroutboard-testing-prod",
+                    promotion_status="pass",
+                    deployment_status="pass",
+                    backup_status="skipped",
+                    source_health_status="pass",
+                    destination_health_status="pass",
+                    target_name="syo-prod-app",
+                    target_id="app-123",
+                    target_category="application",
+                    provider_id="dokploy",
+                    provider_target_type="application",
+                ),
+            ) as execute_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-prod-promotion-replay"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-prod-promotion-replay"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"], second_payload["records"])
+        self.assertEqual(first_payload["result"], second_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertNotIn("target_type", second_payload["result"])
         execute_mock.assert_called_once()
 
     def test_generic_web_prod_promotion_route_rejects_wrong_product_context(self) -> None:
@@ -17855,7 +17951,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_prod_promotion",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
                 return_value=GenericWebProdPromotionResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -17951,7 +18047,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_generic_web_prod_promotion",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
                 return_value=GenericWebProdPromotionResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",
@@ -18031,7 +18127,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             cookie = _signed_in_cookie(app)
 
             with patch(
-                "control_plane.service.execute_generic_web_prod_promotion",
+                "control_plane.drivers.generic_web_dispatch.execute_generic_web_prod_promotion",
                 return_value=GenericWebProdPromotionResult(
                     product="sellyouroutboard",
                     context="sellyouroutboard-testing",

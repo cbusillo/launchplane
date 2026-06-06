@@ -19,10 +19,13 @@ from control_plane.drivers.dispatch import (
     _ProductRouteEnvelope,
     _ResolvedProductDriverContext,
     ProductDriverMismatchError,
+    _StartResponse,
+    _json_response,
     _normalize_preview_verification_checked_urls,
     _normalize_release_status,
     _validate_driver_envelope_product,
 )
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
@@ -33,6 +36,12 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
+)
+from control_plane.workflows.generic_web_promotion import (
+    GenericWebProdPromotionRequest,
+    GenericWebPromotionStore,
+    execute_generic_web_prod_promotion,
+    resolve_generic_web_promotion_lanes,
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
@@ -145,6 +154,29 @@ _GENERIC_WEB_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the generic web deploy driver for the requested product/context."
+    ),
+)
+
+
+class GenericWebProdPromotionEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    promotion: GenericWebProdPromotionRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebProdPromotionEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web prod promotion requires product")
+        if self.product.strip() != self.promotion.product.strip():
+            raise ValueError("generic web prod promotion requires matching product values")
+        return self
+
+
+_GENERIC_WEB_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/prod-promotion",
+    envelope_model=GenericWebProdPromotionEnvelope,
+    denial_message=(
+        "Workflow cannot execute the generic web prod promotion driver"
+        " for the requested product/context."
     ),
 )
 
@@ -362,6 +394,41 @@ def _handle_generic_web_deploy(
     )
 
 
+def _handle_generic_web_prod_promotion(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web prod promotion requires a product profile lane."
+        )
+    driver_result = execute_generic_web_prod_promotion(
+        control_plane_root=control_plane_root_path,
+        record_store=cast(GenericWebPromotionStore, record_store),
+        request=request.promotion,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "promotion_record_id": driver_result.promotion_record_id,
+            "deployment_record_id": driver_result.deployment_record_id,
+            "backup_record_id": driver_result.backup_record_id,
+            "inventory_record_id": driver_result.inventory_record_id,
+            "promotion_status": driver_result.promotion_status,
+            "deployment_status": driver_result.deployment_status,
+            "source_health_status": driver_result.source_health_status,
+            "destination_health_status": driver_result.destination_health_status,
+            "backup_status": driver_result.backup_status,
+            "release_status": driver_result.release_status,
+            "release_tag": driver_result.release_tag,
+            "release_url": driver_result.release_url,
+            "dry_run": driver_result.dry_run,
+        },
+        driver_result=driver_result,
+    )
+
+
 def _handle_generic_web_rollback(
     request: GenericWebRollbackEnvelope,
     resolved_context: _ResolvedProductDriverContext,
@@ -409,4 +476,45 @@ def _handle_generic_web_promotion_workflow(
     return _DescriptorDriverDispatchResult(
         result=driver_result.model_dump(mode="json"),
         driver_result=driver_result,
+    )
+
+
+def _validate_generic_web_prod_promotion_lanes(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del control_plane_root_path
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web prod promotion requires a product profile lane."
+        )
+    resolve_generic_web_promotion_lanes(
+        record_store=cast(GenericWebPromotionStore, record_store),
+        request=request.promotion,
+    )
+
+
+def _reject_human_live_generic_web_prod_promotion(
+    request: GenericWebProdPromotionEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    identity: LaunchplaneIdentity,
+    start_response: _StartResponse,
+    trace_id: str,
+) -> list[bytes] | None:
+    del resolved_context
+    if not isinstance(identity, GitHubHumanIdentity) or request.promotion.dry_run:
+        return None
+    return _json_response(
+        start_response=start_response,
+        status_code=403,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "authorization_denied",
+                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
+            },
+        },
     )
