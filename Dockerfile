@@ -12,7 +12,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM mirror.gcr.io/library/golang:1.26.3-bookworm AS github-cli-build
+FROM mirror.gcr.io/library/golang:1.26.4-bookworm AS github-cli-build
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local

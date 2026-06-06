@@ -841,6 +841,7 @@ class _ResolvedProductDriverContext:
 _DescriptorDriverDispatchContextResolver = Callable[
     [_DriverRouteEnvelopeT], _DescriptorDriverDispatchContext
 ]
+_DescriptorDriverAuthorizationActionResolver = Callable[[_DriverRouteEnvelopeT], str]
 _DescriptorDriverDispatchHandler = Callable[
     [
         _DriverRouteEnvelopeT,
@@ -899,10 +900,14 @@ class _DescriptorDriverDispatchRoute(Generic[_DriverRouteEnvelopeT]):
     pre_authorization_validator: (
         _DescriptorDriverPreAuthorizationValidator[_DriverRouteEnvelopeT] | None
     ) = None
+    authorization_action_resolver: (
+        _DescriptorDriverAuthorizationActionResolver[_DriverRouteEnvelopeT] | None
+    ) = None
     custom_dispatch_handler: (
         _DescriptorDriverCustomDispatchHandler[_DriverRouteEnvelopeT] | None
     ) = None
     skip_pre_idempotency_check: bool = False
+    skip_driver_context_resolution: bool = False
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -2652,6 +2657,7 @@ def _driver_route_authorization_response(
     denial_message: str,
     start_response: _StartResponse,
     trace_id: str,
+    action: str | None = None,
 ) -> list[bytes] | None:
     """Authorize descriptor routes against normalized product/context values."""
 
@@ -2659,7 +2665,7 @@ def _driver_route_authorization_response(
     normalized_context = context.strip()
     if authz_policy.allows(
         identity=identity,
-        action=_descriptor_driver_authz_action(route_path),
+        action=action or _descriptor_driver_authz_action(route_path),
         product=normalized_product,
         context=normalized_context,
     ):
@@ -2775,6 +2781,77 @@ def _handle_generic_web_deploy(
         result={"deployment_record_id": driver_result.deployment_record_id},
         driver_result=driver_result,
     )
+
+
+def _handle_npmplus_ingress_apply(
+    request: NpmplusIngressApplyEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+    state_dir: Path,
+    database_url: str | None,
+    identity: LaunchplaneIdentity,
+    request_scope: str,
+    request_idempotency_key: str,
+    request_fingerprint: str,
+    start_response: _StartResponse,
+    trace_id: str,
+    ingress_provider_factory: _IngressProviderFactory,
+) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    del resolved_context, control_plane_root_path, state_dir, database_url, identity
+    if request.ingress.mode == "apply" and not request_idempotency_key:
+        return _json_response(
+            start_response=start_response,
+            status_code=400,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "idempotency_key_required",
+                    "message": "NPMplus ingress apply requests require an Idempotency-Key header.",
+                },
+            },
+        )
+
+    ingress_provider = ingress_provider_factory()
+    if request.ingress.mode == "apply":
+        idempotent_response = _check_idempotent_request(
+            record_store=record_store,
+            scope=request_scope,
+            route_path=_NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
+            idempotency_key=request_idempotency_key,
+            request_fingerprint=request_fingerprint,
+            start_response=start_response,
+            trace_id=trace_id,
+        )
+        if idempotent_response is not None:
+            return idempotent_response
+        _write_ingress_route_pending_audit_record(
+            record_store=record_store,
+            trace_id=trace_id,
+            product=request.product,
+            context=request.context,
+            provider=ingress_provider.provider_id,
+            request=request.ingress,
+            idempotency_key=request_idempotency_key,
+        )
+    ingress_result = ingress_provider.apply_route(request=request.ingress)
+    ingress_audit_record = _write_ingress_route_audit_record(
+        record_store=record_store,
+        trace_id=trace_id,
+        product=request.product,
+        context=request.context,
+        provider=ingress_provider.provider_id,
+        request=request.ingress,
+        result=ingress_result,
+        idempotency_key=request_idempotency_key,
+    )
+    return {
+        "ingress_provider": ingress_provider.provider_id,
+        "ingress_status": ingress_result.status,
+        "ingress_dry_run": ingress_result.dry_run,
+        "ingress_route_audit_record_id": ingress_audit_record.record_id,
+    }, ingress_result
 
 
 def _handle_generic_web_promotion_workflow(
@@ -3819,8 +3896,57 @@ def _validate_generic_web_preview_verification_profile(
         )
 
 
-def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
+def _descriptor_driver_dispatch_routes(
+    *,
+    ingress_provider_factory: _IngressProviderFactory | None = None,
+) -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
+    resolved_ingress_provider_factory = ingress_provider_factory or default_ingress_provider
+
+    def dispatch_npmplus_ingress_apply(
+        request: NpmplusIngressApplyEnvelope,
+        resolved_context: _ResolvedProductDriverContext,
+        record_store: object,
+        control_plane_root_path: Path,
+        state_dir: Path,
+        database_url: str | None,
+        identity: LaunchplaneIdentity,
+        request_scope: str,
+        request_idempotency_key: str,
+        request_fingerprint: str,
+        start_response: _StartResponse,
+        trace_id: str,
+    ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+        return _handle_npmplus_ingress_apply(
+            request,
+            resolved_context,
+            record_store,
+            control_plane_root_path,
+            state_dir,
+            database_url,
+            identity,
+            request_scope,
+            request_idempotency_key,
+            request_fingerprint,
+            start_response,
+            trace_id,
+            resolved_ingress_provider_factory,
+        )
+
     return {
+        _NPMPLUS_INGRESS_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_NPMPLUS_INGRESS_APPLY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.context,
+                use_resolved_profile_product_for_authorization=False,
+            ),
+            authorization_action_resolver=lambda request: (
+                "ingress_route.apply" if request.ingress.mode == "apply" else "ingress_route.plan"
+            ),
+            custom_dispatch_handler=dispatch_npmplus_ingress_apply,
+            skip_pre_idempotency_check=True,
+            skip_driver_context_resolution=True,
+        ),
         _GENERIC_WEB_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_DEPLOY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -4167,6 +4293,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
             _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
+            _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
@@ -4230,13 +4357,17 @@ def _dispatch_descriptor_driver_route(
         )
     request = route_metadata.envelope_model.model_validate(payload)
     dispatch_context = dispatch_route.context_resolver(request)
-    resolved_driver_context = _resolve_descriptor_product_driver_context(
-        record_store=record_store,
-        route_path=route_metadata.route_path,
-        product=dispatch_context.product,
-        context=dispatch_context.context,
-        instance=dispatch_context.instance,
-        require_profile=dispatch_context.require_profile,
+    resolved_driver_context = (
+        _ResolvedProductDriverContext(profile=None)
+        if dispatch_route.skip_driver_context_resolution
+        else _resolve_descriptor_product_driver_context(
+            record_store=record_store,
+            route_path=route_metadata.route_path,
+            product=dispatch_context.product,
+            context=dispatch_context.context,
+            instance=dispatch_context.instance,
+            require_profile=dispatch_context.require_profile,
+        )
     )
     if dispatch_route.pre_idempotency_validator is not None:
         dispatch_route.pre_idempotency_validator(
@@ -4275,6 +4406,9 @@ def _dispatch_descriptor_driver_route(
         authz_policy=authz_policy,
         identity=identity,
         route_path=route_metadata.route_path,
+        action=dispatch_route.authorization_action_resolver(request)
+        if dispatch_route.authorization_action_resolver is not None
+        else None,
         product=authorization_product,
         context=authorization_context,
         denial_message=route_metadata.denial_message,
@@ -9692,9 +9826,6 @@ def create_launchplane_service_app(
             else None
         )
     )
-    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes()
-    _validate_descriptor_driver_dispatch_routes(descriptor_driver_dispatch_routes)
-    write_routes = _build_write_routes()
     resolved_ingress_provider_factory = ingress_provider_factory
     if resolved_ingress_provider_factory is None:
         if npmplus_ingress_client_factory is not None:
@@ -9705,6 +9836,11 @@ def create_launchplane_service_app(
             resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
         else:
             resolved_ingress_provider_factory = default_ingress_provider
+    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes(
+        ingress_provider_factory=resolved_ingress_provider_factory,
+    )
+    _validate_descriptor_driver_dispatch_routes(descriptor_driver_dispatch_routes)
+    write_routes = _build_write_routes()
 
     def app(
         environ: dict[str, object],
@@ -12780,86 +12916,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
-                ingress_request = NpmplusIngressApplyEnvelope.model_validate(payload)
-                ingress_action = (
-                    "ingress_route.apply"
-                    if ingress_request.ingress.mode == "apply"
-                    else "ingress_route.plan"
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action=ingress_action,
-                    product=ingress_request.product,
-                    context=ingress_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": _NPMPLUS_INGRESS_APPLY_ROUTE.denial_message,
-                            },
-                        },
-                    )
-                if ingress_request.ingress.mode == "apply" and not request_idempotency_key:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "idempotency_key_required",
-                                "message": "NPMplus ingress apply requests require an Idempotency-Key header.",
-                            },
-                        },
-                    )
-                ingress_provider = resolved_ingress_provider_factory()
-                if ingress_request.ingress.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                    _write_ingress_route_pending_audit_record(
-                        record_store=record_store,
-                        trace_id=request_trace_id,
-                        product=ingress_request.product,
-                        context=ingress_request.context,
-                        provider=ingress_provider.provider_id,
-                        request=ingress_request.ingress,
-                        idempotency_key=request_idempotency_key,
-                    )
-                ingress_result = ingress_provider.apply_route(
-                    request=ingress_request.ingress,
-                )
-                ingress_audit_record = _write_ingress_route_audit_record(
-                    record_store=record_store,
-                    trace_id=request_trace_id,
-                    product=ingress_request.product,
-                    context=ingress_request.context,
-                    provider=ingress_provider.provider_id,
-                    request=ingress_request.ingress,
-                    result=ingress_result,
-                    idempotency_key=request_idempotency_key,
-                )
-                result = {
-                    "ingress_provider": ingress_provider.provider_id,
-                    "ingress_status": ingress_result.status,
-                    "ingress_dry_run": ingress_result.dry_run,
-                }
-                result["ingress_route_audit_record_id"] = ingress_audit_record.record_id
-                driver_result = ingress_result
             elif path == "/v1/products/public-ingress-monitor/run-once":
                 monitor_request = PublicIngressMonitorRunOnceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

@@ -2844,6 +2844,63 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records[0].idempotency_key, "npmplus-ingress-apply")
         self.assertEqual(records[0].provider_host_id, 100)
 
+    def test_npmplus_ingress_route_apply_replays_idempotent_response(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.apply"],
+                    }
+                ]
+            }
+        )
+        request_payload = _npmplus_ingress_route_payload(mode="apply")
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=request_payload,
+                headers={"Idempotency-Key": "npmplus-ingress-apply-replay"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=request_payload,
+                headers={"Idempotency-Key": "npmplus-ingress-apply-replay"},
+            )
+            records = FilesystemRecordStore(root / "state").list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"], second_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(client.calls, ["list", "create"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "applied")
+
     def test_ingress_route_apply_uses_provider_adapter(self) -> None:
         client = _FakeNpmplusIngressClient()
         provider = _FakeIngressProvider(
