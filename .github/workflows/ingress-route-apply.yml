@@ -95,11 +95,6 @@ jobs:
               ($input.expected_host_id // null) as $expected_host_id |
               if ($allow_create | type) != "boolean" then
                 error("route_json.allow_create must be a boolean")
-              elif ($expected_host_id == null and ($allow_create | not)) then
-                error(
-                  "route_json.expected_host_id must be a number "
-                  + "unless allow_create is true"
-                )
               elif (
                 $expected_host_id != null
                 and ($expected_host_id | type) != "number"

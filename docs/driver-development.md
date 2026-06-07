@@ -226,10 +226,14 @@ legacy `npmplus_auth_request` values in route options.
 The `Ingress Route Apply` workflow is the generic operator mutation path for
 reviewed routes. It accepts `product`, `context`, a compact `route_json` desired
 state, an explicit idempotency key, and a confirmation phrase. It defaults to an
-update-only guard that requires an expected provider host id. A reviewed create
-apply must set `allow_create: true` in `route_json` and may use
-`expected_host_id: null` only when the dry-run showed that no existing provider
-host owns the domain. The workflow can carry NPMplus `locations` inside
+update-only guard, but `expected_host_id` is optional for ordinary domain-matched
+updates so the workflow is not stricter than the service route. Pass
+`expected_host_id` after review when the apply should fail closed unless one
+specific provider host owns the domain, and enable
+`require_exact_expected_host_domains` only when exact host/domain ownership is
+known. A reviewed create apply must set `allow_create: true` in `route_json` and
+may use `expected_host_id: null` only when the dry-run showed that no existing
+provider host owns the domain. The workflow can carry NPMplus `locations` inside
 `route_json.route`. Use it for product-specific path routing only after the
 dry-run plan is reviewed and the target product/context has an
 `ingress_route.apply` grant.
