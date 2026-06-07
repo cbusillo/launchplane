@@ -90,27 +90,41 @@ jobs:
               error("route_json.route must be a JSON object")
             elif (($input.route.domain_names // []) | length) == 0 then
               error("route_json.route.domain_names must be non-empty")
-            elif ($input.expected_host_id | type) != "number" then
-              error("route_json.expected_host_id must be a number")
             else
-            {
-              schema_version: 1,
-              product: $product,
-              context: $context,
-              ingress: {
+              option("allow_create"; false) as $allow_create |
+              ($input.expected_host_id // null) as $expected_host_id |
+              if ($allow_create | type) != "boolean" then
+                error("route_json.allow_create must be a boolean")
+              elif ($expected_host_id == null and ($allow_create | not)) then
+                error(
+                  "route_json.expected_host_id must be a number "
+                  + "unless allow_create is true"
+                )
+              elif (
+                $expected_host_id != null
+                and ($expected_host_id | type) != "number"
+              ) then
+                error("route_json.expected_host_id must be a number or null")
+              else
+              {
                 schema_version: 1,
-                mode: "apply",
-                expected_host_id: $input.expected_host_id,
-                require_exact_expected_host_domains: option(
-                  "require_exact_expected_host_domains"; false
-                ),
-                allow_create: option("allow_create"; false),
-                allow_update: option("allow_update"; true),
-                allow_enable_disable: option("allow_enable_disable"; false),
-                reason: $reason,
-                route: $input.route
+                product: $product,
+                context: $context,
+                ingress: {
+                  schema_version: 1,
+                  mode: "apply",
+                  expected_host_id: $expected_host_id,
+                  require_exact_expected_host_domains: option(
+                    "require_exact_expected_host_domains"; false
+                  ),
+                  allow_create: $allow_create,
+                  allow_update: option("allow_update"; true),
+                  allow_enable_disable: option("allow_enable_disable"; false),
+                  reason: $reason,
+                  route: $input.route
+                }
               }
-            }
+              end
             end' >"$payload_file"
           echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
 

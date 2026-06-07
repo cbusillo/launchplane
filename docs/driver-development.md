@@ -225,11 +225,14 @@ legacy `npmplus_auth_request` values in route options.
 
 The `Ingress Route Apply` workflow is the generic operator mutation path for
 reviewed routes. It accepts `product`, `context`, a compact `route_json` desired
-state, an explicit idempotency key, and a confirmation phrase. It defaults to
-updating an existing expected provider host rather than creating a new one, and
-can carry NPMplus `locations` inside `route_json.route`. Use it for
-product-specific path routing only after the dry-run plan is reviewed and the
-target product/context has an `ingress_route.apply` grant.
+state, an explicit idempotency key, and a confirmation phrase. It defaults to an
+update-only guard that requires an expected provider host id. A reviewed create
+apply must set `allow_create: true` in `route_json` and may use
+`expected_host_id: null` only when the dry-run showed that no existing provider
+host owns the domain. The workflow can carry NPMplus `locations` inside
+`route_json.route`. Use it for product-specific path routing only after the
+dry-run plan is reviewed and the target product/context has an
+`ingress_route.apply` grant.
 
 The `Ingress Route Dry Run` workflow can discover the existing provider host for
 a domain before an apply. Leave `expected_host_id` blank to ask Launchplane to
