@@ -24,9 +24,16 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 class LiveTargetRuntimeError(Exception):
-    def __init__(self, message: str, *, code: str = "live_target_runtime_failed") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "live_target_runtime_failed",
+        summary: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.summary = summary or {}
 
 
 class DokployDeployTrigger(Protocol):
@@ -79,7 +86,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
     context_name: str,
     instance_name: str,
     require_policy: bool = True,
-    required_binding_keys: tuple[str, ...] = (),
+    required_binding_keys: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     all_runtime_bindings = record_store.list_secret_bindings(
         integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
@@ -95,7 +102,11 @@ def evaluate_runtime_key_safety_for_live_target_sync(
             instance_name=instance_name,
         )
     )
-    binding_keys = required_binding_keys or tuple(binding.binding_key for binding in bindings)
+    binding_keys = (
+        required_binding_keys
+        if required_binding_keys is not None
+        else tuple(binding.binding_key for binding in bindings)
+    )
     if not binding_keys:
         return {"required": False, "status": "skipped", "checked_binding_keys": []}
     try:
@@ -105,7 +116,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
             instance=instance_name,
             environment_class=runtime_key_safety_environment_class(instance_name),
         )
-        if required_binding_keys:
+        if required_binding_keys is not None:
             evaluation = evaluate_runtime_key_safety(
                 target=target,
                 required_binding_keys=binding_keys,
@@ -145,6 +156,7 @@ def evaluate_runtime_key_safety_for_live_target_sync(
         raise LiveTargetRuntimeError(
             f"Runtime key-safety gate failed for live target sync{suffix}.",
             code="runtime_key_safety_failed",
+            summary=summary,
         )
     return summary
 
@@ -235,6 +247,40 @@ def _require_product_profile_runtime_secret_keys(
             instance_name=instance_name,
         )
     }
+
+
+def require_product_profile_runtime_secret_keys(
+    *,
+    record_store: LiveTargetRuntimeProfileStore,
+    product_name: str,
+    context_name: str,
+    instance_name: str,
+) -> set[str]:
+    return _require_product_profile_runtime_secret_keys(
+        record_store=record_store,
+        product_name=product_name,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+
+
+def runtime_key_safety_error_message(error: LiveTargetRuntimeError) -> str:
+    summary = getattr(error, "summary", None)
+    if not isinstance(summary, dict):
+        return str(error)
+    findings = summary.get("findings")
+    if not isinstance(findings, list):
+        return str(error)
+    binding_keys = sorted(
+        {
+            str(finding.get("binding_key") or "")
+            for finding in findings
+            if isinstance(finding, dict) and str(finding.get("binding_key") or "").strip()
+        }
+    )
+    if not binding_keys:
+        return str(error)
+    return f"{error} Affected binding keys: {', '.join(binding_keys)}."
 
 
 def _expected_config_route_matches(

@@ -1072,15 +1072,26 @@ def execute_odoo_stable_target_replacement_apply(
             )
         )
         try:
+            runtime_secret_binding_keys = (
+                control_plane_live_target_runtime.require_product_profile_runtime_secret_keys(
+                    record_store=record_store,
+                    product_name=plan.product,
+                    context_name=plan.context,
+                    instance_name=plan.instance,
+                )
+            )
             runtime_key_safety = (
                 control_plane_live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync(
                     record_store=record_store,
                     context_name=plan.context,
                     instance_name=plan.instance,
+                    required_binding_keys=tuple(sorted(runtime_secret_binding_keys)),
                 )
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-            raise click.ClickException(str(error)) from error
+            raise click.ClickException(
+                control_plane_live_target_runtime.runtime_key_safety_error_message(error)
+            ) from error
         runtime_source.update(
             {
                 f"runtime_key_safety_{key}": str(value)
