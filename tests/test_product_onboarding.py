@@ -1234,13 +1234,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             script_text,
         )
 
-    def test_deploy_authz_grants_include_local_operator_edge_endpoint_authority(
+    def test_deploy_authz_grants_include_edge_endpoint_authority(
         self,
     ) -> None:
         script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
+        self.assertIn("edge-endpoint-apply.yml", script_text)
         self.assertIn("edge_endpoint.apply", script_text)
         self.assertIn("edge_endpoint.read", script_text)
+        self.assertIn("deploy:edge-endpoint-apply-workflow-grant", script_text)
+        self.assertIn("deploy:edge-endpoint-read-workflow-grant", script_text)
         self.assertIn("deploy:local-operator-edge-endpoint-apply-grant", script_text)
         self.assertIn("deploy:local-operator-edge-endpoint-read-grant", script_text)
 
