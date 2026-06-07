@@ -670,6 +670,19 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 for literal in forbidden_literals:
                     self.assertNotIn(literal, workflow_text)
 
+    def test_dokploy_target_setup_workflow_supports_compose_domain_reconcile(self) -> None:
+        workflow_text = Path(".github/workflows/dokploy-target-setup.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("- reconcile-compose-domain", workflow_text)
+        self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
+        self.assertIn("RUNTIME_PORT: ${{ inputs.runtime_port }}", workflow_text)
+        self.assertIn("Validate reconcile compose domain inputs", workflow_text)
+        self.assertIn("domain is required when operation=reconcile-compose-domain", workflow_text)
+        self.assertIn("runtime_port is required for reconcile-compose-domain", workflow_text)
+        self.assertIn("APPLY DOKPLOY TARGET SETUP", workflow_text)
+
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-artifact-publish.yml"),

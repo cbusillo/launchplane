@@ -13756,6 +13756,356 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(target_id_record.target_id, "compose-123")
         self.assertEqual(provider_target.target_id, "compose-123")
 
+    def test_dokploy_target_setup_reconciles_existing_compose_domain_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-cm-website-testing",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            domain_routes: list[tuple[str, str, int]] = []
+
+            def _ensure_domain(
+                *,
+                host: str,
+                token: str,
+                compose_id: str,
+                domain_host: str,
+                runtime_port: int,
+                certificate_type: str = "none",
+            ) -> str:
+                del host, token, certificate_type
+                domain_routes.append((compose_id, domain_host, runtime_port))
+                return "domain-cm-website-testing"
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route",
+                    side_effect=_ensure_domain,
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "reconcile-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "domains": [
+                            "cm-website-testing.shinycomputers.com",
+                            "cm-website-alt.shinycomputers.com",
+                            "cm-website-testing.shinycomputers.com",
+                        ],
+                        "runtime_port": 8069,
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Reconcile cm website testing compose domain route.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-compose-domain-cm-website"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_record = store.read_dokploy_target_record(
+                    context_name="cm_website",
+                    instance_name="testing",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["operation"], "reconcile-compose-domain")
+        self.assertEqual(
+            payload["result"]["route_domain_ids"],
+            ["domain-cm-website-testing", "domain-cm-website-testing"],
+        )
+        self.assertNotIn("route_domain_ids", payload["result"]["setup"])
+        self.assertEqual(
+            domain_routes,
+            [
+                (
+                    "compose-cm-website-testing",
+                    "cm-website-testing.shinycomputers.com",
+                    8069,
+                ),
+                (
+                    "compose-cm-website-testing",
+                    "cm-website-alt.shinycomputers.com",
+                    8069,
+                ),
+            ],
+        )
+        self.assertEqual(
+            target_record.domains,
+            (
+                "cm-website-testing.shinycomputers.com",
+                "cm-website-alt.shinycomputers.com",
+            ),
+        )
+        self.assertEqual(
+            target_record.source_label,
+            "service:dokploy-targets:setup:reconcile-compose-domain",
+        )
+
+    def test_dokploy_target_setup_reconcile_compose_domain_dry_run_does_not_mutate(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-cm-website-testing",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route"
+                ) as ensure_domain,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "reconcile-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "runtime_port": 8069,
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertFalse(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["route_domain_ids"], [])
+        self.assertNotIn("route_domain_ids", payload["result"]["setup"])
+        self.assertEqual(
+            payload["result"]["setup"]["warnings"],
+            ["dry run only; Dokploy compose domain routes were not reconciled"],
+        )
+        ensure_domain.assert_not_called()
+
+    def test_dokploy_target_setup_reconcile_compose_domain_rejects_missing_records(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch(
+                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "reconcile-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "runtime_port": 8069,
+                    },
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertIn("requires tracked target records", payload["error"]["message"])
+
+    def test_dokploy_target_setup_reconcile_compose_domain_rejects_application_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="app-cm-website-testing",
+                target_type="application",
+                target_name="cm-website-testing",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch(
+                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "reconcile-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "runtime_port": 8069,
+                    },
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertIn("requires a compose target", payload["error"]["message"])
+
     def test_dokploy_target_setup_endpoint_applies_adopt(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

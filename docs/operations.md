@@ -972,6 +972,14 @@ current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,
 or change routes.
 
+For an already-tracked Dokploy compose target, use `Dokploy Target Setup` with
+`operation=reconcile-compose-domain` to reconcile the provider domain route
+without creating or adopting the target again. The service reads the
+Launchplane-owned Dokploy target/id records, requires the target to be a compose
+target, and applies each requested domain to Dokploy's `web` service on the
+requested runtime port. Dry-run mode reads the tracked records and reports the
+planned domain/port tuple without calling Dokploy.
+
 When a plan is `ready`, the trusted `Odoo Target Replacement Apply` workflow can
 call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 `recreate-in-place` path. The service creates a durable operation record and

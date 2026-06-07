@@ -53,6 +53,8 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
@@ -2101,7 +2103,12 @@ class DokployTargetSetupEnvelope(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     mode: Literal["dry-run", "apply"] = "dry-run"
-    operation: Literal["adopt", "create-application", "create-compose"]
+    operation: Literal[
+        "adopt",
+        "create-application",
+        "create-compose",
+        "reconcile-compose-domain",
+    ]
     product: str = "launchplane"
     context: str
     instance: str
@@ -2162,15 +2169,35 @@ class DokployTargetSetupEnvelope(BaseModel):
                 raise ValueError("Dokploy compose target creation requires target_name.")
             if not self.server_id:
                 raise ValueError("Dokploy compose target creation requires server_id.")
-        if self.runtime_port is not None and self.operation != "create-compose":
+        if self.runtime_port is not None and self.operation not in {
+            "create-compose",
+            "reconcile-compose-domain",
+        }:
             raise ValueError(
-                "Dokploy target setup runtime_port is only supported for create-compose."
+                "Dokploy target setup runtime_port is only supported for create-compose or reconcile-compose-domain."
             )
         if self.runtime_port is not None and not self.domains:
             raise ValueError("Dokploy target setup runtime_port requires at least one domain.")
+        if self.operation == "reconcile-compose-domain":
+            if not self.domains:
+                raise ValueError("Dokploy compose domain reconciliation requires domains.")
+            if self.runtime_port is None:
+                raise ValueError("Dokploy compose domain reconciliation requires runtime_port.")
         if self.healthcheck_path and not self.healthcheck_path.startswith("/"):
             raise ValueError("Dokploy target setup healthcheck_path must start with /.")
         return self
+
+
+class DokployComposeDomainReconcileResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    applied: bool
+    target_record: DokployTargetRecord
+    target_id_record: DokployTargetIdRecord
+    domains: tuple[str, ...]
+    runtime_port: int
+    route_domain_ids: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 class LiveTargetRuntimeApplyEnvelope(BaseModel):
@@ -2450,6 +2477,8 @@ def _dokploy_target_setup_result_payload(
     result: BaseModel,
 ) -> dict[str, object]:
     payload = result.model_dump(mode="json")
+    if isinstance(result, DokployComposeDomainReconcileResult):
+        payload.pop("route_domain_ids", None)
     record = payload.get("target_record")
     if isinstance(record, dict):
         env_payload = record.pop("env", None)
@@ -2470,7 +2499,10 @@ def _execute_dokploy_target_setup(
         control_plane_root=control_plane_root_path
     )
     result: (
-        DokployTargetAdoptionResult | DokployTargetCreateResult | DokployComposeTargetCreateResult
+        DokployTargetAdoptionResult
+        | DokployTargetCreateResult
+        | DokployComposeTargetCreateResult
+        | DokployComposeDomainReconcileResult
     )
     if request.operation == "adopt":
         result = adopt_dokploy_target(
@@ -2490,6 +2522,14 @@ def _execute_dokploy_target_setup(
             source_label="service:dokploy-targets:setup:adopt",
             apply=apply_changes,
             fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
+        )
+    elif request.operation == "reconcile-compose-domain":
+        result = _execute_dokploy_compose_domain_reconcile(
+            record_store=record_store,
+            request=request,
+            host=host,
+            token=token,
+            apply_changes=apply_changes,
         )
     elif request.operation == "create-application":
         result = create_dokploy_application_target(
@@ -2545,7 +2585,11 @@ def _execute_dokploy_target_setup(
             mutate_provider=_mutate_dokploy_payload_for_target_setup,
             fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
         )
-    route_domain_ids: list[str] = []
+    route_domain_ids = (
+        list(result.route_domain_ids)
+        if isinstance(result, DokployComposeDomainReconcileResult)
+        else []
+    )
     if apply_changes and request.operation == "create-compose" and request.runtime_port:
         for domain in request.domains:
             route_domain_ids.append(
@@ -2566,6 +2610,68 @@ def _execute_dokploy_target_setup(
         "route_domain_ids": route_domain_ids,
         "setup": _dokploy_target_setup_result_payload(result),
     }
+
+
+def _execute_dokploy_compose_domain_reconcile(
+    *,
+    record_store: PostgresRecordStore,
+    request: DokployTargetSetupEnvelope,
+    host: str,
+    token: str,
+    apply_changes: bool,
+) -> DokployComposeDomainReconcileResult:
+    try:
+        target_record = record_store.read_dokploy_target_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+        target_id_record = record_store.read_dokploy_target_id_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Dokploy compose domain reconciliation requires tracked target records."
+        ) from error
+    if target_record.target_type != "compose":
+        raise ValueError("Dokploy compose domain reconciliation requires a compose target.")
+    runtime_port = request.runtime_port
+    if runtime_port is None:
+        raise ValueError("Dokploy compose domain reconciliation requires runtime_port.")
+    requested_domains = tuple(dict.fromkeys(request.domains))
+    route_domain_ids: list[str] = []
+    if apply_changes:
+        for domain in requested_domains:
+            route_domain_ids.append(
+                control_plane_dokploy.ensure_compose_web_domain_route(
+                    host=host,
+                    token=token,
+                    compose_id=target_id_record.target_id,
+                    domain_host=domain,
+                    runtime_port=runtime_port,
+                )
+            )
+        merged_domains = tuple(dict.fromkeys((*target_record.domains, *requested_domains)))
+        if merged_domains != target_record.domains:
+            target_record = target_record.model_copy(
+                update={
+                    "domains": merged_domains,
+                    "updated_at": _utc_now_timestamp(),
+                    "source_label": ("service:dokploy-targets:setup:reconcile-compose-domain"),
+                }
+            )
+            record_store.write_dokploy_target_record(target_record)
+    return DokployComposeDomainReconcileResult(
+        applied=apply_changes,
+        target_record=target_record,
+        target_id_record=target_id_record,
+        domains=requested_domains,
+        runtime_port=runtime_port,
+        route_domain_ids=tuple(route_domain_ids),
+        warnings=()
+        if apply_changes
+        else ("dry run only; Dokploy compose domain routes were not reconciled",),
+    )
 
 
 def _handle_odoo_prod_promotion_inputs(
