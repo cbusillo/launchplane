@@ -459,8 +459,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "event_name": "push",
                 "workflow_ref_suffix": "refs/heads/release",
                 "job_workflow_ref": (
-                    "example-org/launchplane/.github/workflows/reusable.yml"
-                    "@refs/heads/main"
+                    "example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"
                 ),
             }
         ]
@@ -533,8 +532,14 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(len(grants), 1)
         grant = grants[0]
         self.assertEqual(grant["repository"], "example-org/example-product")
-        self.assertEqual(grant["workflow_refs"], ["example-org/example-product/.github/workflows/deploy.yml@refs/heads/release"])
-        self.assertEqual(grant["job_workflow_refs"], ["example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"])
+        self.assertEqual(
+            grant["workflow_refs"],
+            ["example-org/example-product/.github/workflows/deploy.yml@refs/heads/release"],
+        )
+        self.assertEqual(
+            grant["job_workflow_refs"],
+            ["example-org/launchplane/.github/workflows/reusable.yml@refs/heads/main"],
+        )
         self.assertEqual(grant["event_names"], ["push"])
         self.assertEqual(grant["products"], ["example-product"])
         self.assertEqual(grant["contexts"], ["example-context"])
@@ -636,11 +641,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         workflow_expectations = {
             "provider-target-operations.yml": (
                 "target_set=configured-json",
-                "JSON array of {\"context\",\"instance\"} routes",
+                'JSON array of {"context","instance"} routes',
             ),
             "product-environment-evidence.yml": (
                 "target_set=configured-json",
-                "JSON array of {\"product\",\"environment\"} routes",
+                'JSON array of {"product","environment"} routes',
             ),
         }
         forbidden_literals = (
@@ -655,9 +660,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
 
         for workflow_name, expected_snippets in workflow_expectations.items():
-            workflow_text = Path(f".github/workflows/{workflow_name}").read_text(
-                encoding="utf-8"
-            )
+            workflow_text = Path(f".github/workflows/{workflow_name}").read_text(encoding="utf-8")
             with self.subTest(workflow=workflow_name):
                 self.assertIn("routes_json:", workflow_text)
                 self.assertIn("configured-json", workflow_text)
@@ -728,7 +731,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("expected_host_id:", workflow_text)
         self.assertIn("Optional existing provider host id", workflow_text)
         self.assertIn("EXPECTED_HOST_ID: ${{ inputs.expected_host_id }}", workflow_text)
-        self.assertIn("--arg expected_host_id \"$EXPECTED_HOST_ID\"", workflow_text)
+        self.assertIn('--arg expected_host_id "$EXPECTED_HOST_ID"', workflow_text)
         self.assertIn('if . == "" then', workflow_text)
         self.assertIn('elif . == "null" then', workflow_text)
         self.assertIn(
@@ -851,25 +854,20 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("APPLY LAUNCHPLANE INGRESS ROUTE", workflow_text)
         self.assertIn("route_json:", workflow_text)
         self.assertIn("route_json.route.domain_names must be non-empty", workflow_text)
-        self.assertIn("option(\"allow_create\"; false) as $allow_create", workflow_text)
+        self.assertIn('option("allow_create"; false) as $allow_create', workflow_text)
         self.assertIn("($input.expected_host_id // null) as $expected_host_id", workflow_text)
-        self.assertIn("($allow_create | type) != \"boolean\"", workflow_text)
+        self.assertIn('($allow_create | type) != "boolean"', workflow_text)
         self.assertIn("route_json.allow_create must be a boolean", workflow_text)
-        self.assertIn("$expected_host_id == null", workflow_text)
-        self.assertIn("($allow_create | not)", workflow_text)
-        self.assertIn(
-            "route_json.expected_host_id must be a number ",
-            workflow_text,
-        )
-        self.assertIn("unless allow_create is true", workflow_text)
+        self.assertNotIn("$expected_host_id == null", workflow_text)
+        self.assertNotIn("unless allow_create is true", workflow_text)
         self.assertIn(
             "route_json.expected_host_id must be a number or null",
             workflow_text,
         )
         self.assertIn("expected_host_id: $expected_host_id", workflow_text)
         self.assertIn("allow_create: $allow_create", workflow_text)
-        self.assertIn("allow_update: option(\"allow_update\"; true)", workflow_text)
-        self.assertIn("allow_enable_disable: option(\"allow_enable_disable\"; false)", workflow_text)
+        self.assertIn('allow_update: option("allow_update"; true)', workflow_text)
+        self.assertIn('allow_enable_disable: option("allow_enable_disable"; false)', workflow_text)
         self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
         self.assertIn("route-path: /v1/drivers/ingress/route-apply", workflow_text)
         self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
