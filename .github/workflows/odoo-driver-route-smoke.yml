@@ -91,6 +91,8 @@ jobs:
       INSTANCE: ${{ inputs.instance }}
       SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
     steps:
+      - uses: actions/checkout@v6
+
       - name: Check public route registration
         env:
           ROUTE_PATHS: >-
@@ -133,7 +135,7 @@ jobs:
 
       - name: Resolve Odoo artifact publish inputs through GitHub OIDC
         id: publish_inputs
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: ./.github/actions/launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           audience: ${{ env.LAUNCHPLANE_AUDIENCE }}
