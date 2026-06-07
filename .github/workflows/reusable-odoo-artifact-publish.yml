@@ -18,6 +18,23 @@ name: Reusable Odoo Artifact Publish
         required: false
         default: ""
         type: string
+      product_repository:
+        description: >-
+          Source repository to publish. Defaults to the caller repository.
+        required: false
+        default: ""
+        type: string
+      source_git_ref:
+        description: >-
+          Source ref attached to the artifact. Defaults to the caller SHA.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Optional dispatch confirmation, unused by workflow callers.
+        required: false
+        default: ""
+        type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
         required: false
@@ -52,7 +69,53 @@ name: Reusable Odoo Artifact Publish
       source_commit:
         description: Source commit recorded in the artifact manifest.
         value: ${{ jobs.artifact-publish.outputs.source_commit }}
-
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Launchplane product profile key.
+        required: true
+        type: string
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        type: string
+      instance:
+        description: Odoo instance whose artifact should be published.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+          - prod
+      product_repository:
+        description: Product source repository, formatted as owner/name.
+        required: true
+        type: string
+      source_git_ref:
+        description: Source ref or commit SHA attached to the artifact.
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH LAUNCHPLANE ODOO ARTIFACT to confirm.
+        required: true
+        type: string
+      timeout-ms:
+        description: Launchplane request timeout in milliseconds.
+        required: false
+        default: "600000"
+        type: string
+      launchplane_url:
+        description: >-
+          Launchplane service URL. Defaults to LAUNCHPLANE_PUBLIC_URL.
+        required: false
+        default: ""
+        type: string
+      launchplane_audience:
+        description: >-
+          Optional GitHub OIDC audience. Defaults to the service URL host.
+        required: false
+        default: ""
+        type: string
 permissions:
   contents: read
   id-token: write
@@ -68,10 +131,61 @@ jobs:
       image_digest: ${{ steps.launchplane.outputs.image_digest }}
       source_commit: ${{ steps.launchplane.outputs.source_commit }}
     steps:
+      - name: Resolve artifact source
+        id: source
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          INPUT_PRODUCT_REPOSITORY: ${{ inputs.product_repository }}
+          INPUT_SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+          DEFAULT_REPOSITORY: ${{ github.repository }}
+          DEFAULT_SOURCE_GIT_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          repository="$INPUT_PRODUCT_REPOSITORY"
+          source_git_ref="$INPUT_SOURCE_GIT_REF"
+          if [ -z "$repository" ]; then
+            repository="$DEFAULT_REPOSITORY"
+          fi
+          if [ -z "$source_git_ref" ]; then
+            source_git_ref="$DEFAULT_SOURCE_GIT_REF"
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$CONFIRMATION" != "PUBLISH LAUNCHPLANE ODOO ARTIFACT" ]; then
+              echo "confirmation must be PUBLISH LAUNCHPLANE ODOO ARTIFACT" >&2
+              exit 1
+            fi
+            if [ -z "$INPUT_PRODUCT_REPOSITORY" ]; then
+              echo "product_repository is required for Launchplane dispatch." \
+                >&2
+              exit 1
+            fi
+            if [ -z "$INPUT_SOURCE_GIT_REF" ]; then
+              echo "source_git_ref is required for Launchplane dispatch." >&2
+              exit 1
+            fi
+          fi
+          if ! [[ "$repository" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "product_repository must be formatted as owner/name." >&2
+            exit 1
+          fi
+          if [ -z "${source_git_ref// }" ]; then
+            echo "source_git_ref is required." >&2
+            exit 1
+          fi
+          {
+            echo "repository=$repository"
+            echo "source_git_ref=$source_git_ref"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Checkout tenant repo
         uses: actions/checkout@v6
         with:
+          repository: ${{ steps.source.outputs.repository }}
+          ref: ${{ steps.source.outputs.source_git_ref }}
           path: tenant
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
           persist-credentials: false
 
       - name: Checkout devkit repo
@@ -140,7 +254,8 @@ jobs:
         id: publish_inputs
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/artifact-publish-inputs
           payload: >-
@@ -149,7 +264,7 @@ jobs:
             product=${{ steps.product.outputs.product }}
             inputs.context=${{ inputs.context }}
             inputs.instance=${{ inputs.instance }}
-            inputs.source_git_ref=${{ github.sha }}
+            inputs.source_git_ref=${{ steps.source.outputs.source_git_ref }}
           idempotency-key: >-
             ${{ steps.product.outputs.publish_inputs_idempotency_key }}
           timeout-ms: ${{ inputs['timeout-ms'] }}
@@ -182,6 +297,7 @@ jobs:
           GHCR_TOKEN: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          CONTEXT_NAME: ${{ inputs.context }}
           PUBLISH_INPUTS_FILE: >-
             ${{ steps.publish_inputs_file.outputs.inputs_file }}
         run: |
@@ -205,7 +321,7 @@ jobs:
             echo "Launchplane publish inputs did not return image_tag." >&2
             exit 1
           fi
-          output_file="$RUNNER_TEMP/${{ inputs.context }}-artifact.json"
+          output_file="$RUNNER_TEMP/${CONTEXT_NAME}-artifact.json"
           manifest_path="$PWD/workspace.toml"
           uv --directory ../odoo-devkit run platform runtime publish \
             --manifest "$manifest_path" \
@@ -220,7 +336,8 @@ jobs:
         id: launchplane
         uses: cbusillo/launchplane/.github/actions/launchplane-request@main
         with:
-          launchplane-url: ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
+          launchplane-url: >-
+            ${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ inputs.launchplane_audience }}
           route-path: /v1/drivers/odoo/artifact-publish
           payload: >-
