@@ -30,6 +30,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import (
@@ -525,6 +526,28 @@ class LaunchplaneIngressRouteAuditRow(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     provider_host_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEdgeEndpointRow(Base):
+    __tablename__ = "launchplane_edge_endpoints"
+    __table_args__ = (
+        Index(
+            "launchplane_edge_endpoints_provider_status_idx",
+            "provider",
+            "status",
+            "endpoint_key",
+        ),
+    )
+
+    endpoint_key: Mapped[str] = mapped_column(String, primary_key=True)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    server_name: Mapped[str] = mapped_column(String, nullable=False)
+    upstream_host: Mapped[str] = mapped_column(String, nullable=False)
+    upstream_scheme: Mapped[str] = mapped_column(String, nullable=False)
+    upstream_port: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2897,6 +2920,51 @@ class PostgresRecordStore(HumanSessionStore):
                 recorded_at=record.recorded_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> None:
+        self._write_row(
+            LaunchplaneEdgeEndpointRow(
+                endpoint_key=record.endpoint_key,
+                provider=record.provider,
+                server_name=record.server_name,
+                upstream_host=record.upstream_host,
+                upstream_scheme=record.upstream_scheme,
+                upstream_port=record.upstream_port,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord:
+        return self._read_model(
+            model_type=EdgeEndpointRecord,
+            orm_model=LaunchplaneEdgeEndpointRow,
+            filters=(LaunchplaneEdgeEndpointRow.endpoint_key == endpoint_key,),
+        )
+
+    def list_edge_endpoint_records(
+        self,
+        *,
+        provider: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EdgeEndpointRecord, ...]:
+        filters: list[object] = []
+        if provider:
+            filters.append(LaunchplaneEdgeEndpointRow.provider == provider)
+        if status:
+            filters.append(LaunchplaneEdgeEndpointRow.status == status)
+        return self._list_models(
+            model_type=EdgeEndpointRecord,
+            orm_model=LaunchplaneEdgeEndpointRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEdgeEndpointRow.provider.asc(),
+                LaunchplaneEdgeEndpointRow.endpoint_key.asc(),
+            ),
+            limit=limit,
         )
 
     def read_ingress_route_audit_record(self, record_id: str) -> IngressRouteAuditRecord:

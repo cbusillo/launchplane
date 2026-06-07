@@ -55,6 +55,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
@@ -536,6 +537,7 @@ _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
+_EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
@@ -835,6 +837,20 @@ class _IngressRouteAuditRecordStore(Protocol):
         context_name: str = "",
         limit: int | None = None,
     ) -> tuple[IngressRouteAuditRecord, ...]: ...
+
+
+class _EdgeEndpointRecordStore(Protocol):
+    def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> object: ...
+
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
+
+    def list_edge_endpoint_records(
+        self,
+        *,
+        provider: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EdgeEndpointRecord, ...]: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1289,6 +1305,29 @@ _NPMPLUS_INGRESS_APPLY_ROUTE = _DriverRouteExecutionMetadata(
         "Workflow cannot plan or apply the ingress route for the requested product/context."
     ),
 )
+
+
+class EdgeEndpointApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    endpoint: EdgeEndpointRecord
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "EdgeEndpointApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported edge endpoint apply schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Edge endpoint apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE EDGE ENDPOINT":
+                raise ValueError("Edge endpoint apply requires exact confirmation text")
+        return self
 
 
 class MergeTrainPolicyImportEnvelope(BaseModel):
@@ -2362,6 +2401,24 @@ def _handle_npmplus_ingress_apply(
         )
 
     ingress_provider = ingress_provider_factory()
+    try:
+        resolved_ingress_request = _resolve_ingress_edge_endpoint(
+            record_store=record_store,
+            request=request.ingress,
+        )
+    except click.ClickException as error:
+        return _json_response(
+            start_response=start_response,
+            status_code=400,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "invalid_edge_endpoint",
+                    "message": str(error),
+                },
+            },
+        )
     if request.ingress.mode == "apply":
         idempotent_response = _check_idempotent_request(
             record_store=record_store,
@@ -2380,17 +2437,17 @@ def _handle_npmplus_ingress_apply(
             product=request.product,
             context=request.context,
             provider=ingress_provider.provider_id,
-            request=request.ingress,
+            request=resolved_ingress_request,
             idempotency_key=request_idempotency_key,
         )
-    ingress_result = ingress_provider.apply_route(request=request.ingress)
+    ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
     ingress_audit_record = _write_ingress_route_audit_record(
         record_store=record_store,
         trace_id=trace_id,
         product=request.product,
         context=request.context,
         provider=ingress_provider.provider_id,
-        request=request.ingress,
+        request=resolved_ingress_request,
         result=ingress_result,
         idempotency_key=request_idempotency_key,
     )
@@ -4251,6 +4308,10 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_record_id": segments[4]}
+    if len(segments) == 3 and segments == ["v1", "edge-endpoints", "records"]:
+        return "edge_endpoint.read", {"edge_endpoint_list": "true"}
+    if len(segments) == 4 and segments[:3] == ["v1", "edge-endpoints", "records"]:
+        return "edge_endpoint.read", {"edge_endpoint_key": segments[3]}
     if path == _MERGE_TRAIN_ADMISSION_ROUTE:
         return "merge_train.admission", {}
     if path == _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE:
@@ -4453,6 +4514,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/product-onboarding/apply",
         "/v1/dokploy-targets/setup",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
+        _EDGE_ENDPOINT_APPLY_ROUTE,
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
         "/v1/product-profiles/legacy-context-cleanup/apply",
@@ -6480,6 +6542,7 @@ def _accepted_payload(
         "generic_web_rollback_plan_id",
         "public_ingress_notification_policy_id",
         "ingress_route_audit_record_id",
+        "edge_endpoint_key",
     }
     accepted_record_keys = record_keys | extra_record_keys
     records: dict[str, object] = {}
@@ -6511,6 +6574,8 @@ def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
         return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
     if route_path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
         return frozenset({"ingress_provider"})
+    if route_path == _EDGE_ENDPOINT_APPLY_ROUTE:
+        return frozenset({"edge_endpoint_status"})
     return frozenset()
 
 
@@ -6597,6 +6662,46 @@ def _ingress_route_audit_record_store(record_store: object) -> _IngressRouteAudi
     raise click.ClickException(
         "Ingress route audit reads require Launchplane ingress-audit record storage."
     )
+
+
+def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStore:
+    required_methods = (
+        "write_edge_endpoint_record",
+        "read_edge_endpoint_record",
+        "list_edge_endpoint_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_EdgeEndpointRecordStore, record_store)
+    raise click.ClickException("Edge endpoint operations require Launchplane record storage.")
+
+
+def _resolve_ingress_edge_endpoint(
+    *,
+    record_store: object,
+    request: NpmplusIngressApplyRequest,
+) -> NpmplusIngressApplyRequest:
+    endpoint_key = request.route.edge_endpoint_key.strip()
+    if not endpoint_key:
+        return request
+    endpoint_store = _edge_endpoint_record_store(record_store)
+    try:
+        endpoint = endpoint_store.read_edge_endpoint_record(endpoint_key)
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"Ingress edge endpoint {endpoint_key!r} was not found."
+        ) from exc
+    if endpoint.status != "active":
+        raise click.ClickException(
+            f"Ingress edge endpoint {endpoint_key!r} is {endpoint.status}, not active."
+        )
+    resolved_route = request.route.model_copy(
+        update={
+            "forward_scheme": endpoint.upstream_scheme,
+            "forward_host": endpoint.upstream_host,
+            "forward_port": endpoint.upstream_port,
+        }
+    )
+    return request.model_copy(update={"route": resolved_route})
 
 
 def _query_string_value(query: dict[str, list[str]], key: str) -> str:
@@ -7289,6 +7394,7 @@ def _write_ingress_route_audit_record(
         status=result.status,
         dry_run=result.dry_run,
         requested_domains=request.route.domain_names,
+        edge_endpoint_key=request.route.edge_endpoint_key,
         expected_host_id=request.expected_host_id,
         provider_host_id=provider_host_id,
         operations=tuple(
@@ -7302,6 +7408,30 @@ def _write_ingress_route_audit_record(
     )
     write_record(record)
     return record
+
+
+def _edge_endpoint_apply_result(
+    *,
+    record_store: object,
+    request: EdgeEndpointApplyEnvelope,
+) -> tuple[dict[str, object], dict[str, object]]:
+    endpoint_store = _edge_endpoint_record_store(record_store)
+    if request.mode == "apply":
+        endpoint_store.write_edge_endpoint_record(request.endpoint)
+        status = "applied"
+    else:
+        status = "planned"
+    return {
+        "edge_endpoint_key": request.endpoint.endpoint_key,
+        "edge_endpoint_status": status,
+        "mode": request.mode,
+        "reason": request.reason,
+    }, {
+        "mode": request.mode,
+        "endpoint_key": request.endpoint.endpoint_key,
+        "endpoint_status": status,
+        "record": request.endpoint.model_dump(mode="json"),
+    }
 
 
 def _write_ingress_route_pending_audit_record(
@@ -7331,6 +7461,7 @@ def _write_ingress_route_pending_audit_record(
         status="pending",
         dry_run=request.mode == "dry-run",
         requested_domains=request.route.domain_names,
+        edge_endpoint_key=request.route.edge_endpoint_key,
         expected_host_id=request.expected_host_id,
         provider_host_id=None,
         operations=(
@@ -9719,6 +9850,83 @@ def create_launchplane_service_app(
                             "count": len(limited_records),
                             "records": [
                                 record.model_dump(mode="json") for record in limited_records
+                            ],
+                        },
+                    )
+                if action == "edge_endpoint.read":
+                    endpoint_store = _edge_endpoint_record_store(record_store)
+                    if "edge_endpoint_key" in params:
+                        if not authz_policy.allows(
+                            identity=identity,
+                            action=action,
+                            product="launchplane",
+                            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": "Workflow cannot read Launchplane edge endpoint records.",
+                                    },
+                                },
+                            )
+                        try:
+                            endpoint_record = endpoint_store.read_edge_endpoint_record(
+                                params["edge_endpoint_key"]
+                            )
+                        except FileNotFoundError:
+                            return _not_found_response(
+                                start_response=start_response,
+                                trace_id=request_trace_id,
+                                path=path,
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "record": endpoint_record.model_dump(mode="json"),
+                            },
+                        )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Launchplane edge endpoint records.",
+                                },
+                            },
+                        )
+                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
+                    endpoint_records = endpoint_store.list_edge_endpoint_records(
+                        provider=_query_string_value(query, "provider"),
+                        status=_query_string_value(query, "status"),
+                        limit=limit,
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "limit": limit,
+                            "count": len(endpoint_records),
+                            "records": [
+                                record.model_dump(mode="json") for record in endpoint_records
                             ],
                         },
                     )
@@ -13704,6 +13912,55 @@ def create_launchplane_service_app(
                 assert isinstance(provider_target_result, ProviderTargetOperationRouteResult)
                 result = provider_target_result.result
                 driver_result = provider_target_result.driver_result
+            elif path == _EDGE_ENDPOINT_APPLY_ROUTE:
+                edge_endpoint_request = EdgeEndpointApplyEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="edge_endpoint.apply",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot apply Launchplane edge endpoint records.",
+                            },
+                        },
+                    )
+                if edge_endpoint_request.mode == "apply":
+                    if not request_idempotency_key:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_required",
+                                    "message": "Edge endpoint apply requests require an Idempotency-Key header.",
+                                },
+                            },
+                        )
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                result, driver_result = _edge_endpoint_apply_result(
+                    record_store=record_store,
+                    request=edge_endpoint_request,
+                )
             elif path in descriptor_driver_dispatch_routes:
                 try:
                     dispatch_response = _dispatch_descriptor_driver_route(

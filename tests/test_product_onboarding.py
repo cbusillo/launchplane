@@ -757,11 +757,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             workflow_text,
         )
         self.assertIn(
+            'error("forward_host and edge_endpoint_key are mutually exclusive")',
+            workflow_text,
+        )
+        self.assertIn(
             'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
-        self.assertEqual(inputs_section.count("        description:"), 10)
+        self.assertEqual(inputs_section.count("        description:"), 11)
+        self.assertIn("edge_endpoint_key:", inputs_section)
         self.assertIn('default: ""', inputs_section)
         self.assertNotIn("identity_access_provider:", inputs_section)
         self.assertNotIn("identity_access_send_basic_auth:", inputs_section)
@@ -866,6 +871,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
         self.assertIn("APPLY LAUNCHPLANE INGRESS ROUTE", workflow_text)
         self.assertIn("route_json:", workflow_text)
+        self.assertIn("route.edge_endpoint_key", workflow_text)
         self.assertIn("route_json.route.domain_names must be non-empty", workflow_text)
         self.assertIn('option("allow_create"; false) as $allow_create', workflow_text)
         self.assertIn("($input.expected_host_id // null) as $expected_host_id", workflow_text)
@@ -1227,6 +1233,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "deploy:local-operator-public-ingress-notification-policy-grant",
             script_text,
         )
+
+    def test_deploy_authz_grants_include_local_operator_edge_endpoint_authority(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("edge_endpoint.apply", script_text)
+        self.assertIn("edge_endpoint.read", script_text)
+        self.assertIn("deploy:local-operator-edge-endpoint-apply-grant", script_text)
+        self.assertIn("deploy:local-operator-edge-endpoint-read-grant", script_text)
 
     def test_deploy_authz_grants_skip_local_operator_product_config_without_scopes(
         self,

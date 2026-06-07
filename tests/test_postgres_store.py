@@ -33,6 +33,8 @@ from control_plane.contracts.deploy_target import (
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointStatus
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
@@ -393,6 +395,26 @@ def _dokploy_target_record(
         domains=(f"https://{instance}.example.com",),
         updated_at="2026-04-21T18:30:00Z",
         source_label="import:test",
+    )
+
+
+def _edge_endpoint_record(
+    *,
+    endpoint_key: str = "cm-prod-dokploy",
+    upstream_host: str = "100.73.170.113",
+    status: EdgeEndpointStatus = "active",
+) -> EdgeEndpointRecord:
+    return EdgeEndpointRecord(
+        endpoint_key=endpoint_key,
+        provider="dokploy",
+        server_name="docker-cm-prod",
+        upstream_host=upstream_host,
+        upstream_host_kind="ip",
+        upstream_scheme="https",
+        upstream_port=443,
+        status=status,
+        updated_at="2026-06-07T00:00:00Z",
+        source_label="test:edge-endpoint",
     )
 
 
@@ -924,9 +946,14 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_ingress_route_audit_record(ingress_route_audit)
             provider_target = _provider_target_record(context="reon", instance="prod")
             store.write_provider_target_record(provider_target)
+            edge_endpoint = _edge_endpoint_record()
+            store.write_edge_endpoint_record(edge_endpoint)
             inspect_engine = create_engine(database_url)
             inspector = inspect(inspect_engine)
             table_names = set(inspector.get_table_names())
+            edge_endpoint_columns = {
+                column["name"] for column in inspector.get_columns("launchplane_edge_endpoints")
+            }
             provider_target_columns = {
                 column["name"] for column in inspector.get_columns("launchplane_provider_targets")
             }
@@ -938,6 +965,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 context_name="reon",
                 instance_name="prod",
             )
+            loaded_edge_endpoint = store.read_edge_endpoint_record(edge_endpoint.endpoint_key)
             audit_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
             )
@@ -947,6 +975,22 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded.artifact_id, manifest.artifact_id)
         self.assertEqual(loaded.image.digest, "sha256:image123")
         self.assertEqual(loaded_provider_target.target_id, provider_target.target_id)
+        self.assertEqual(loaded_edge_endpoint.upstream_host, edge_endpoint.upstream_host)
+        self.assertIn("launchplane_edge_endpoints", table_names)
+        self.assertGreaterEqual(
+            edge_endpoint_columns,
+            {
+                "endpoint_key",
+                "provider",
+                "server_name",
+                "upstream_host",
+                "upstream_scheme",
+                "upstream_port",
+                "status",
+                "updated_at",
+                "payload",
+            },
+        )
         self.assertIn("launchplane_provider_targets", table_names)
         self.assertGreaterEqual(
             provider_target_columns,
@@ -2794,6 +2838,32 @@ env_var = "GH_TOKEN"
             [(record.context, record.instance) for record in listed_records],
             [("cm", "testing"), ("opw", "prod")],
         )
+
+    def test_write_read_and_list_edge_endpoint_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_edge_endpoint_record(
+                _edge_endpoint_record(endpoint_key="disabled-edge", status="disabled")
+            )
+            loaded_record = store.read_edge_endpoint_record("cm-prod-dokploy")
+            active_records = store.list_edge_endpoint_records(provider="dokploy", status="active")
+            store.close()
+
+        self.assertEqual(loaded_record.server_name, "docker-cm-prod")
+        self.assertEqual(loaded_record.upstream_host, "100.73.170.113")
+        self.assertEqual(loaded_record.upstream_scheme, "https")
+        self.assertEqual(loaded_record.upstream_port, 443)
+        self.assertEqual([record.endpoint_key for record in active_records], ["cm-prod-dokploy"])
+
+    def test_edge_endpoint_record_rejects_hostname_upstream(self) -> None:
+        with self.assertRaises(ValueError):
+            _edge_endpoint_record(upstream_host="dokploy.shiny")
 
     def test_write_and_list_runtime_environment_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

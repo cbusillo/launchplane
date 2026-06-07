@@ -73,6 +73,7 @@
     "CodeQL",
     "Deploy Launchplane",
     "Dokploy Target Setup",
+    "Edge Endpoint Apply",
     "Ingress Route Canary Apply",
     "Ingress Route Apply",
     "Ingress Route Audit Read",

@@ -41,6 +41,7 @@ class IngressRouteAuditRecord(BaseModel):
     status: IngressRouteAuditStatus
     dry_run: bool
     requested_domains: tuple[str, ...]
+    edge_endpoint_key: str = ""
     expected_host_id: int | None = Field(default=None, ge=1)
     provider_host_id: int | None = Field(default=None, ge=1)
     operations: tuple[IngressRouteAuditOperation, ...]
@@ -60,6 +61,7 @@ class IngressRouteAuditRecord(BaseModel):
         self.recorded_at = _required_text(
             self.recorded_at, "ingress route audit requires recorded_at"
         )
+        self.edge_endpoint_key = self.edge_endpoint_key.strip()
         self.idempotency_key = self.idempotency_key.strip()
         normalized_domains = tuple(
             dict.fromkeys(

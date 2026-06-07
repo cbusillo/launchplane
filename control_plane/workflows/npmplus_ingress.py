@@ -133,8 +133,9 @@ class NpmplusIngressRouteDesiredState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     domain_names: tuple[str, ...]
-    forward_scheme: NpmplusForwardScheme
-    forward_host: str
+    edge_endpoint_key: str = ""
+    forward_scheme: NpmplusForwardScheme = "https"
+    forward_host: str = ""
     forward_port: int | None = Field(default=None, ge=1, le=65535)
     certificate_id: int | Literal["new"] = 0
     ssl_forced: bool = True
@@ -158,6 +159,18 @@ class NpmplusIngressRouteDesiredState(BaseModel):
     locations: tuple[NpmplusLocationPayload, ...] = ()
 
     @model_validator(mode="after")
+    def _validate_upstream_source(self) -> "NpmplusIngressRouteDesiredState":
+        self.edge_endpoint_key = self.edge_endpoint_key.strip()
+        self.forward_host = self.forward_host.strip()
+        if self.edge_endpoint_key and self.forward_host:
+            raise ValueError(
+                "NPMplus ingress route cannot set both forward_host and edge_endpoint_key"
+            )
+        if not self.edge_endpoint_key and not self.forward_host:
+            raise ValueError("NPMplus ingress route requires forward_host or edge_endpoint_key")
+        return self
+
+    @model_validator(mode="after")
     def _validate_identity_access(self) -> "NpmplusIngressRouteDesiredState":
         if self.identity_access is None:
             return self
@@ -172,7 +185,7 @@ class NpmplusIngressRouteDesiredState(BaseModel):
 
     def to_proxy_host_payload(self) -> NpmplusProxyHostPayload:
         return NpmplusProxyHostPayload.model_validate(
-            self.model_dump(mode="json", exclude={"identity_access"})
+            self.model_dump(mode="json", exclude={"edge_endpoint_key", "identity_access"})
         )
 
 

@@ -13,7 +13,9 @@ name: Ingress Route Apply
         required: true
         type: string
       route_json:
-        description: JSON object with desired route and apply guard options.
+        description: >-
+          JSON object with desired route and apply guard options. Set
+          route.edge_endpoint_key to use a Launchplane-owned upstream record.
         required: true
         type: string
       reason:

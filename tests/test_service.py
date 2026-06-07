@@ -37,6 +37,8 @@ from control_plane.contracts.driver_descriptor import DriverActionDescriptor, Dr
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointStatus
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
@@ -194,6 +196,7 @@ from control_plane.workflows.ingress_provider import NpmplusIngressProvider
 from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyRequest,
     NpmplusIngressApplyResult,
+    NpmplusIngressRouteDesiredState,
 )
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1453,6 +1456,44 @@ def _npmplus_ingress_route_payload(
     }
 
 
+def _npmplus_proxy_host(**overrides: object) -> NpmplusProxyHost:
+    payload = NpmplusIngressRouteDesiredState(
+        domain_names=("ingress-canary.example.test",),
+        forward_scheme="https",
+        forward_host="100.73.170.113",
+        forward_port=443,
+        certificate_id=47,
+    ).to_proxy_host_payload()
+    return NpmplusProxyHost.model_validate(
+        {"id": 79, **payload.model_dump(mode="json"), "enabled": True, **overrides}
+    )
+
+
+def _edge_endpoint_record(*, status: EdgeEndpointStatus = "active") -> EdgeEndpointRecord:
+    return EdgeEndpointRecord(
+        endpoint_key="cm-prod-dokploy",
+        provider="dokploy",
+        server_name="docker-cm-prod",
+        upstream_host="100.73.170.113",
+        upstream_host_kind="ip",
+        upstream_scheme="https",
+        upstream_port=443,
+        status=status,
+        updated_at="2026-06-07T00:00:00Z",
+        source_label="test:edge-endpoint",
+    )
+
+
+def _edge_endpoint_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "endpoint": _edge_endpoint_record().model_dump(mode="json"),
+        "reason": "test edge endpoint apply",
+        "confirmation": "APPLY LAUNCHPLANE EDGE ENDPOINT" if mode == "apply" else "",
+    }
+
+
 def _meta_product_config_payload(
     *, mode: str = "dry-run", reason: str | None = None
 ) -> dict[str, object]:
@@ -2512,6 +2553,251 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ("route", "upstream", "certificate", "tls", "provider_options"),
         )
         self.assertEqual(records[0].trace_id, payload["trace_id"])
+
+    def test_edge_endpoint_apply_and_read_routes_store_db_backed_upstream(self) -> None:
+        policy = _local_operator_policy(
+            actions=("edge_endpoint.apply", "edge_endpoint.read"),
+            products=("launchplane",),
+            contexts=("launchplane",),
+        )
+        endpoint_payload = _edge_endpoint_apply_payload(mode="apply")
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                apply_status_code, apply_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/edge-endpoints/apply",
+                    payload=endpoint_payload,
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "edge-endpoint-apply"},
+                )
+                read_status_code, read_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/edge-endpoints/records/cm-prod-dokploy",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(apply_status_code, 202)
+        self.assertEqual(apply_payload["records"]["edge_endpoint_key"], "cm-prod-dokploy")
+        self.assertEqual(apply_payload["records"]["edge_endpoint_status"], "applied")
+        self.assertEqual(read_status_code, 200)
+        self.assertEqual(read_payload["record"]["server_name"], "docker-cm-prod")
+        self.assertEqual(read_payload["record"]["upstream_host"], "100.73.170.113")
+
+    def test_edge_endpoint_dry_run_does_not_store_upstream(self) -> None:
+        policy = _local_operator_policy(
+            actions=("edge_endpoint.apply", "edge_endpoint.read"),
+            products=("launchplane",),
+            contexts=("launchplane",),
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/edge-endpoints/apply",
+                    payload=_edge_endpoint_apply_payload(mode="dry-run"),
+                    authorization="Bearer local-operator-token",
+                )
+                read_status_code, read_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/edge-endpoints/records/cm-prod-dokploy",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["edge_endpoint_status"], "planned")
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["endpoint_key"], "cm-prod-dokploy")
+        self.assertEqual(read_status_code, 404)
+        self.assertEqual(read_payload["status"], "rejected")
+        self.assertEqual(read_payload["error"]["code"], "not_found")
+
+    def test_npmplus_ingress_route_resolves_edge_endpoint_key_to_ip(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(),))
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            record_store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(
+                    edge_endpoint_key="cm-prod-dokploy",
+                    forward_host="",
+                    forward_scheme="http",
+                    forward_port=80,
+                ),
+                headers={"Idempotency-Key": "npmplus-ingress-edge-dry-run"},
+            )
+            records = record_store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "unchanged")
+        self.assertEqual(
+            payload["result"]["operations"][0]["change_categories"],
+            [],
+        )
+        self.assertEqual(client.calls, ["list"])
+        self.assertEqual(records[0].edge_endpoint_key, "cm-prod-dokploy")
+
+    def test_npmplus_ingress_route_rejects_missing_edge_endpoint_key(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(
+                    edge_endpoint_key="cm-prod-dokploy",
+                    forward_host="",
+                ),
+                headers={"Idempotency-Key": "npmplus-ingress-edge-missing"},
+            )
+            records = record_store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_edge_endpoint")
+        self.assertIn("was not found", payload["error"]["message"])
+        self.assertEqual(client.calls, [])
+        self.assertEqual(records, ())
+
+    def test_npmplus_ingress_route_rejects_disabled_edge_endpoint_key(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["reon-prod"],
+                        "actions": ["ingress_route.plan"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            record_store.write_edge_endpoint_record(_edge_endpoint_record(status="disabled"))
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/ingress/route-apply",
+                payload=_npmplus_ingress_route_payload(
+                    edge_endpoint_key="cm-prod-dokploy",
+                    forward_host="",
+                ),
+                headers={"Idempotency-Key": "npmplus-ingress-edge-disabled"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_edge_endpoint")
+        self.assertEqual(client.calls, [])
 
     def test_ingress_route_audit_record_api_lists_and_reads_records(self) -> None:
         client = _FakeNpmplusIngressClient()

@@ -1,0 +1,203 @@
+---
+name: Edge Endpoint Apply
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Plan or apply the edge endpoint record.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      endpoint_key:
+        description: Human-friendly Launchplane edge endpoint key.
+        required: true
+        type: string
+      server_name:
+        description: Human-friendly provider server identity.
+        required: true
+        type: string
+      upstream_host:
+        description: IP address passed to the edge provider.
+        required: true
+        type: string
+      upstream_scheme:
+        description: Upstream scheme passed to the edge provider.
+        required: true
+        default: https
+        type: choice
+        options:
+          - http
+          - https
+      upstream_port:
+        description: Upstream port passed to the edge provider.
+        required: true
+        default: 443
+        type: number
+      status:
+        description: Edge endpoint lifecycle status.
+        required: true
+        default: active
+        type: choice
+        options:
+          - active
+          - disabled
+      source_label:
+        description: Optional source/provenance label.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Operator reason recorded with the Launchplane request.
+        required: true
+        type: string
+      idempotency_key:
+        description: Unique idempotency key for apply attempts.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Type APPLY LAUNCHPLANE EDGE ENDPOINT to confirm mutation.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-edge-endpoint-${{ inputs.endpoint_key }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build edge endpoint payload
+        id: payload
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          ENDPOINT_KEY: ${{ inputs.endpoint_key }}
+          SERVER_NAME: ${{ inputs.server_name }}
+          UPSTREAM_HOST: ${{ inputs.upstream_host }}
+          UPSTREAM_SCHEME: ${{ inputs.upstream_scheme }}
+          UPSTREAM_PORT: ${{ inputs.upstream_port }}
+          STATUS: ${{ inputs.status }}
+          SOURCE_LABEL: ${{ inputs.source_label }}
+          REASON: ${{ inputs.reason }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          payload_file="$RUNNER_TEMP/edge-endpoint-apply-request.json"
+          updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if ! jq -en --arg host "$UPSTREAM_HOST" '
+            def octet:
+              test("^(0|[1-9][0-9]?|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$");
+            ($host | split(".")) as $parts
+            | ($parts | length) == 4
+              and all($parts[]; octet)
+          ' >/dev/null; then
+            echo "upstream_host must be an IPv4 address." >&2
+            exit 1
+          fi
+          jq -n \
+            --arg mode "$MODE" \
+            --arg endpoint_key "$ENDPOINT_KEY" \
+            --arg server_name "$SERVER_NAME" \
+            --arg upstream_host "$UPSTREAM_HOST" \
+            --arg upstream_scheme "$UPSTREAM_SCHEME" \
+            --arg status "$STATUS" \
+            --arg source_label "$SOURCE_LABEL" \
+            --arg reason "$REASON" \
+            --arg confirmation "$CONFIRMATION" \
+            --arg updated_at "$updated_at" \
+            --argjson upstream_port "$UPSTREAM_PORT" \
+            '{
+              schema_version: 1,
+              mode: $mode,
+              reason: $reason,
+              confirmation: $confirmation,
+              endpoint: {
+                schema_version: 1,
+                endpoint_key: $endpoint_key,
+                provider: "dokploy",
+                server_name: $server_name,
+                upstream_host: $upstream_host,
+                upstream_host_kind: "ip",
+                upstream_scheme: $upstream_scheme,
+                upstream_port: $upstream_port,
+                status: $status,
+                source_label: $source_label,
+                updated_at: $updated_at
+              }
+            }' >"$payload_file"
+          echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
+
+      - name: Validate apply guards
+        if: ${{ inputs.mode == 'apply' }}
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          IDEMPOTENCY_KEY: ${{ inputs.idempotency_key }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "APPLY LAUNCHPLANE EDGE ENDPOINT" ]; then
+            echo "confirmation must be APPLY LAUNCHPLANE EDGE ENDPOINT" >&2
+            exit 1
+          fi
+          if [ -z "${IDEMPOTENCY_KEY// }" ]; then
+            echo "idempotency_key is required for apply." >&2
+            exit 1
+          fi
+
+      - name: Request edge endpoint apply
+        id: launchplane
+        uses: ./.github/actions/launchplane-request
+        with:
+          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
+          method: POST
+          route-path: /v1/edge-endpoints/apply
+          payload-file: ${{ steps.payload.outputs.payload_file }}
+          idempotency-key: ${{ inputs.idempotency_key }}
+          timeout-ms: "30000"
+          fail-result-paths: records.edge_endpoint_status
+          response-output-file: edge-endpoint-apply.json
+
+      - name: Summarize endpoint
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          jq . edge-endpoint-apply.json
+          endpoint_key="$(
+            jq -r '.result.endpoint_key' edge-endpoint-apply.json
+          )"
+          status="$(
+            jq -r '.records.edge_endpoint_status' edge-endpoint-apply.json
+          )"
+          {
+            echo '## Edge endpoint apply'
+            echo
+            echo "- Endpoint: $endpoint_key"
+            echo "- Mode: $MODE"
+            echo "- Status: $status"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload response
+        uses: actions/upload-artifact@v7
+        with:
+          name: edge-endpoint-apply
+          path: edge-endpoint-apply.json
+          if-no-files-found: error
