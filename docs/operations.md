@@ -630,13 +630,18 @@ Current derived-state behavior:
   routes are present, or the tracked target records omit a required target id.
 - `environments logs --context <context> --instance <instance> --lines <n>`
   resolves the DB-backed tracked Dokploy target and target id before fetching
-  bounded application logs. The first cut supports Dokploy `application`
-  targets, includes route/target/app/server metadata, accepts optional
-  `--since` and `--search`, and redacts likely secret values from returned log
-  lines.
+  bounded logs. It supports Dokploy `application` and `compose` targets,
+  includes route/target/app/server metadata, accepts optional `--since` and
+  `--search`, and redacts likely secret values from returned log lines.
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
   same tracked-target log reader through the authenticated service API using
   action `target_logs.read`.
+- The manual Tracked Target Logs workflow calls that service route with GitHub
+  OIDC and uploads the redacted JSON result, so operators can inspect compose
+  target boot failures without local Dokploy credentials. Tenant contexts need a
+  matching `target_logs.read` GitHub Actions grant in
+  `LAUNCHPLANE_AUTHZ_GRANTS_JSON`; do not broaden this workflow to read all
+  contexts by default.
 
 ## Runtime Environment Contracts
 

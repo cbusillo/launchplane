@@ -72,6 +72,9 @@ _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
     r"(?i)('?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*'?\s*[=:]\s*)'[^'\r\n]*'"
 )
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_DATABASE_URI_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)\b((?:postgres(?:ql)?|mysql|mariadb)://[^:\s/@]+:)[^@\s]+(@)"
+)
 _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
 _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
 
@@ -826,7 +829,8 @@ def redact_dokploy_log_line(raw_line: str) -> str:
     redacted_line = _DOUBLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r'\1"[redacted]"', raw_line)
     redacted_line = _SINGLE_QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1'[redacted]'", redacted_line)
     redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
-    return _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
+    redacted_line = _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
+    return _DATABASE_URI_CREDENTIAL_PATTERN.sub(r"\1[redacted]\2", redacted_line)
 
 
 def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
@@ -890,6 +894,76 @@ def fetch_dokploy_application_logs(
     )
     lines = normalize_dokploy_log_payload(payload)
     return lines[-normalized_line_count:]
+
+
+def fetch_dokploy_compose_logs(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+    app_name: str = "",
+    server_id: str = "",
+    line_count: int = DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+    since: str = "all",
+    search: str = "",
+) -> tuple[str, ...]:
+    normalized_compose_id = compose_id.strip()
+    if not normalized_compose_id:
+        raise click.ClickException("Dokploy compose logs require a compose id.")
+    normalized_line_count = normalize_dokploy_log_line_count(line_count)
+    normalized_since = normalize_dokploy_log_since(since)
+    normalized_search = normalize_dokploy_log_search(search)
+    normalized_app_name = app_name.strip()
+    normalized_server_id = server_id.strip()
+    query: dict[str, str | int] = {
+        "composeId": normalized_compose_id,
+        "tail": normalized_line_count,
+        "since": normalized_since,
+    }
+    if normalized_app_name:
+        container_query: dict[str, str | int] = {
+            "appName": normalized_app_name,
+            "appType": "docker-compose",
+        }
+        if normalized_server_id:
+            container_query["serverId"] = normalized_server_id
+        containers_payload = dokploy_request(
+            host=host,
+            token=token,
+            path="/api/docker.getContainersByAppNameMatch",
+            query=container_query,
+        )
+        containers = (
+            _collect_object_items(containers_payload)
+            if isinstance(containers_payload, list)
+            else []
+        )
+        web_container = _select_compose_log_container(containers)
+        container_id = str(web_container.get("containerId") or "").strip()
+        if container_id:
+            query["containerId"] = container_id
+    if normalized_search:
+        query["search"] = normalized_search
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.readLogs",
+        query=query,
+    )
+    lines = normalize_dokploy_log_payload(payload)
+    return lines[-normalized_line_count:]
+
+
+def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
+    for container in containers:
+        service_name = str(container.get("serviceName") or "").strip().lower()
+        container_name = str(container.get("name") or "").strip().lower()
+        if service_name == "web" or container_name.endswith("-web-1"):
+            return container
+    for container in containers:
+        if str(container.get("containerId") or "").strip():
+            return container
+    return {}
 
 
 def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:

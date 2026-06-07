@@ -45,9 +45,9 @@ def build_tracked_target_logs_payload(
         raise ValueError(
             "Missing DB-backed tracked Dokploy target records for requested context/instance."
         ) from error
-    if target_record.target_type != "application":
+    if target_record.target_type not in {"application", "compose"}:
         raise ValueError(
-            "Tracked target logs currently support Dokploy application targets only. "
+            "Tracked target logs currently support Dokploy application and compose targets only. "
             f"Configured target_type={target_record.target_type}."
         )
 
@@ -61,16 +61,28 @@ def build_tracked_target_logs_payload(
         target_type=target_record.target_type,
         target_id=target_id_record.target_id,
     )
-    logs = control_plane_dokploy.fetch_dokploy_application_logs(
-        host=host,
-        token=token,
-        application_id=target_id_record.target_id,
-        line_count=normalized_line_count,
-        since=normalized_since,
-        search=normalized_search,
-    )
     app_name = str(target_payload.get("appName") or "").strip()
     server_id = str(target_payload.get("serverId") or "").strip()
+    if target_record.target_type == "application":
+        logs = control_plane_dokploy.fetch_dokploy_application_logs(
+            host=host,
+            token=token,
+            application_id=target_id_record.target_id,
+            line_count=normalized_line_count,
+            since=normalized_since,
+            search=normalized_search,
+        )
+    else:
+        logs = control_plane_dokploy.fetch_dokploy_compose_logs(
+            host=host,
+            token=token,
+            compose_id=target_id_record.target_id,
+            app_name=app_name,
+            server_id=server_id,
+            line_count=normalized_line_count,
+            since=normalized_since,
+            search=normalized_search,
+        )
     return {
         "context": normalized_context,
         "instance": normalized_instance,
