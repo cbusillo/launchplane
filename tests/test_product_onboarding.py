@@ -833,8 +833,23 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("APPLY LAUNCHPLANE INGRESS ROUTE", workflow_text)
         self.assertIn("route_json:", workflow_text)
         self.assertIn("route_json.route.domain_names must be non-empty", workflow_text)
-        self.assertIn("route_json.expected_host_id must be a number", workflow_text)
-        self.assertIn("allow_create: option(\"allow_create\"; false)", workflow_text)
+        self.assertIn("option(\"allow_create\"; false) as $allow_create", workflow_text)
+        self.assertIn("($input.expected_host_id // null) as $expected_host_id", workflow_text)
+        self.assertIn("($allow_create | type) != \"boolean\"", workflow_text)
+        self.assertIn("route_json.allow_create must be a boolean", workflow_text)
+        self.assertIn("$expected_host_id == null", workflow_text)
+        self.assertIn("($allow_create | not)", workflow_text)
+        self.assertIn(
+            "route_json.expected_host_id must be a number ",
+            workflow_text,
+        )
+        self.assertIn("unless allow_create is true", workflow_text)
+        self.assertIn(
+            "route_json.expected_host_id must be a number or null",
+            workflow_text,
+        )
+        self.assertIn("expected_host_id: $expected_host_id", workflow_text)
+        self.assertIn("allow_create: $allow_create", workflow_text)
         self.assertIn("allow_update: option(\"allow_update\"; true)", workflow_text)
         self.assertIn("allow_enable_disable: option(\"allow_enable_disable\"; false)", workflow_text)
         self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
