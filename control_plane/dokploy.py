@@ -2290,7 +2290,6 @@ protected_shopify_store_keys=()
 {protected_shopify_store_key_lines}
 clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
-restart_web_on_success=0
 web_was_running=0
 
 resolve_container_id() {{
@@ -2331,9 +2330,7 @@ start_web_container() {{
 
 exit_trap() {{
     local exit_status="$?"
-    if [ "${{exit_status}}" -eq 0 ] && [ "${{restart_web_on_success}}" = "1" ]; then
-        start_web_container
-    fi
+    start_web_container
     exit "${{exit_status}}"
 }}
 
@@ -2468,9 +2465,7 @@ print(f"shopify_store_key_guard_pass db={{database_name}} value={{current_store_
 PY
 fi
 
-restart_web_on_success=1
 start_web_container
-restart_web_on_success=0
 trap - EXIT
 """
 
@@ -2498,6 +2493,7 @@ database_name={quoted_database_name}
 filestore_root={quoted_filestore_path}
 backup_root={quoted_backup_root}
 backup_record_id={quoted_backup_record_id}
+web_was_running=0
 
 resolve_container_id() {{
     local service_name="$1"
@@ -2523,26 +2519,37 @@ ensure_running() {{
     fi
 }}
 
+start_web_container() {{
+    if [ "${{web_was_running}}" != "1" ]; then
+        return
+    fi
+    local current_status
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null || true)
+    if [ "${{current_status}}" != "running" ]; then
+        echo "Starting web container ${{web_container_id}}"
+        docker start "${{web_container_id}}" >/dev/null || true
+    fi
+}}
+
+exit_trap() {{
+    local exit_status="$?"
+    start_web_container
+    exit "${{exit_status}}"
+}}
+
 database_container_id=$(resolve_container_id "database")
 script_runner_container_id=$(resolve_container_id "script-runner")
 web_container_id=$(resolve_container_id "web")
 ensure_running "${{database_container_id}}" "database"
 ensure_running "${{script_runner_container_id}}" "script-runner"
 
-web_was_running=0
+trap exit_trap EXIT
+
 if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" = "running" ]; then
     web_was_running=1
     echo "Stopping web container ${{web_container_id}} for backup consistency"
     docker stop "${{web_container_id}}" >/dev/null
 fi
-
-restart_web_on_exit() {{
-    if [ "${{web_was_running}}" = "1" ]; then
-        echo "Starting web container ${{web_container_id}}"
-        docker start "${{web_container_id}}" >/dev/null
-    fi
-}}
-trap restart_web_on_exit EXIT
 
 backup_dir="${{backup_root}}/${{database_name}}/${{backup_record_id}}"
 database_dump_path="${{backup_dir}}/${{database_name}}.dump"
@@ -2627,7 +2634,7 @@ with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
 PY
 
 echo "Odoo backup gate complete: ${{backup_dir}}"
-restart_web_on_exit
+start_web_container
 trap - EXIT
 """
 

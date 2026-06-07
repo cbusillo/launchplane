@@ -2631,6 +2631,12 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup gate")
         script = str(schedule_payloads[0]["script"])
         self.assertIn("docker stop", script)
+        self.assertIn('trap exit_trap EXIT', script)
+        self.assertIn('local exit_status="$?"', script)
+        self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
+        self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
+        self.assertIn('start_web_container\ntrap - EXIT', script)
+        self.assertNotIn('restart_web_on_exit', script)
         self.assertIn("pg_dump", script)
         self.assertIn("tar -C", script)
         self.assertIn("manifest.json", script)
@@ -3194,9 +3200,13 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
         self.assertIn("Missing required Odoo override environment key", script)
         self.assertIn("Protected Shopify store key is not allowed on this Dokploy lane.", script)
-        self.assertIn(
-            'if [ "${exit_status}" -eq 0 ] && [ "${restart_web_on_success}" = "1" ]', script
-        )
+        self.assertIn('trap exit_trap EXIT', script)
+        self.assertIn('exit_trap() {', script)
+        self.assertIn('local exit_status="$?"', script)
+        self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
+        self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
+        self.assertIn('start_web_container\ntrap - EXIT', script)
+        self.assertNotIn('restart_web_on_success', script)
         self.assertIn('"${workflow_environment[@]}"', script)
 
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
