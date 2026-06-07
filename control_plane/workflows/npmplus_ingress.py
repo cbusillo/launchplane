@@ -233,6 +233,11 @@ def apply_npmplus_ingress_route(
         expected_host_id=request.expected_host_id,
         require_exact_expected_host_domains=request.require_exact_expected_host_domains,
     )
+    desired_payload = _inherit_existing_npmplus_fields(
+        route=request.route,
+        desired_payload=desired_payload,
+        existing_host=existing_host,
+    )
     operations = _plan_operations(
         existing_host=existing_host,
         desired_payload=desired_payload,
@@ -277,6 +282,19 @@ def apply_npmplus_ingress_route(
         operations=operations,
         proxy_host=final_host,
     )
+
+
+def _inherit_existing_npmplus_fields(
+    *,
+    route: NpmplusIngressRouteDesiredState,
+    desired_payload: NpmplusProxyHostPayload,
+    existing_host: NpmplusProxyHost | None,
+) -> NpmplusProxyHostPayload:
+    # Omitted advanced_config inherits the live provider host value. Explicit
+    # values, including an empty string, replace or clear the provider value.
+    if existing_host is None or "advanced_config" in route.model_fields_set:
+        return desired_payload
+    return desired_payload.model_copy(update={"advanced_config": existing_host.advanced_config})
 
 
 def find_npmplus_proxy_host_by_domains(

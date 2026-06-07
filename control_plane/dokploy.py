@@ -956,14 +956,33 @@ def fetch_dokploy_compose_logs(
 
 def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
     for container in containers:
-        service_name = str(container.get("serviceName") or "").strip().lower()
-        container_name = str(container.get("name") or "").strip().lower()
-        if service_name == "web" or container_name.endswith("-web-1"):
+        if _compose_log_container_is_web(container):
             return container
     for container in containers:
         if str(container.get("containerId") or "").strip():
             return container
     return {}
+
+
+def _compose_log_container_is_web(container: JsonObject) -> bool:
+    service_name = str(container.get("serviceName") or "").strip().lower()
+    if service_name == "web":
+        return True
+    labels = container.get("labels")
+    if isinstance(labels, dict):
+        label_service = str(labels.get("com.docker.compose.service") or "").strip().lower()
+        if label_service == "web":
+            return True
+    container_name = str(container.get("name") or "").strip().lower().strip("/")
+    if not container_name:
+        return False
+    name_parts = tuple(part for part in re.split(r"[-_.]+", container_name) if part)
+    if not name_parts:
+        return False
+    service_part = (
+        name_parts[-2] if len(name_parts) > 1 and name_parts[-1].isdigit() else name_parts[-1]
+    )
+    return service_part == "web"
 
 
 def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:

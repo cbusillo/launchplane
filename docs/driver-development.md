@@ -238,6 +238,25 @@ provider host owns the domain. The workflow can carry NPMplus `locations` inside
 dry-run plan is reviewed and the target product/context has an
 `ingress_route.apply` grant.
 
+For existing NPMplus proxy hosts, omit `advanced_config` from the desired route
+when the provider host should keep its current advanced nginx config. This lets
+Odoo routes inherit the extra NPMplus config used for the current password-gated
+edge path. Passing `advanced_config` explicitly replaces the provider value;
+passing an explicit empty string clears it.
+
+Future edge-driver work should investigate Cloudflare Tunnel in #1215 as a
+Launchplane provider before deepening edge-provider assumptions beyond NPMplus.
+The intended spike is a shadow hostname routed through `cloudflared` running in
+or near Dokploy, with the Traefik service in the Dokploy compose network as the
+origin router and NPMplus kept as the active fallback until Cloudflare health
+evidence passes. The Cloudflare slice must model account/zone/tunnel identifiers,
+public hostname routes, managed credentials, connector placement, health
+evidence, and rollback state as Launchplane records. Keep Authentik as a
+separate identity/access layer;
+issue #1051 tracks provider-neutral `identity_access` bindings and future
+Cloudflare Access/OIDC integration, but public website edge routing should prove
+itself without requiring Authentik.
+
 The `Ingress Route Dry Run` workflow can discover the existing provider host for
 a domain before an apply. Leave `expected_host_id` blank to ask Launchplane to
 match by requested domain without mutation; pass `expected_host_id` after review

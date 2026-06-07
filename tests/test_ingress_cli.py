@@ -69,6 +69,7 @@ class IngressCliTests(unittest.TestCase):
         self.assertEqual(route["forward_port"], 8123)
         self.assertEqual(route["certificate_id"], 47)
         self.assertTrue(route["npmplus_noindex"])
+        self.assertNotIn("advanced_config", route)
         response_payload = json.loads(result.output)
         self.assertEqual(response_payload["result"]["status"], "planned")
 
@@ -106,6 +107,8 @@ class IngressCliTests(unittest.TestCase):
                     "new",
                     "--expected-host-id",
                     "78",
+                    "--advanced-config",
+                    "# explicit nginx config",
                     "--disable",
                     "--no-http3",
                     "--reason",
@@ -128,6 +131,7 @@ class IngressCliTests(unittest.TestCase):
         route = ingress["route"]
         assert isinstance(route, dict)
         self.assertEqual(route["certificate_id"], "new")
+        self.assertEqual(route["advanced_config"], "# explicit nginx config")
         self.assertFalse(route["enabled"])
         self.assertFalse(route["npmplus_http3_support"])
 
@@ -187,6 +191,52 @@ class IngressCliTests(unittest.TestCase):
                 "send_basic_auth": True,
             },
         )
+
+    def test_route_apply_sends_explicit_empty_advanced_config(self) -> None:
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"status": "planned", "dry_run": True},
+            }
+
+        with (
+            patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}),
+            patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post),
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "ingress",
+                    "route-apply",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--product",
+                    "launchplane",
+                    "--context",
+                    "reon-prod",
+                    "--domain",
+                    "ingress-canary.example.test",
+                    "--forward-host",
+                    "192.0.2.10",
+                    "--advanced-config",
+                    "",
+                    "--reason",
+                    "clear advanced config",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        ingress = payload["ingress"]
+        assert isinstance(ingress, dict)
+        route = ingress["route"]
+        assert isinstance(route, dict)
+        self.assertIn("advanced_config", route)
+        self.assertEqual(route["advanced_config"], "")
 
     def test_route_apply_rejects_conflicting_identity_access_binding(self) -> None:
         with patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}):
