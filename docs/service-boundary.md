@@ -54,6 +54,8 @@ VeriReel product paths:
   - `POST /v1/product-config/apply`
 - product onboarding route:
   - `POST /v1/product-onboarding/apply`
+- Dokploy target setup route:
+  - `POST /v1/dokploy-targets/setup`
 - provider-target operation route:
   - `POST /v1/provider-targets/operations`
 - product context cutover route:
@@ -859,6 +861,20 @@ idempotency-keyed and write only complete non-conflicting Dokploy target/id
 projections; existing rows and conflicts are reported rather than overwritten.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
+
+Dokploy target setup uses `POST /v1/dokploy-targets/setup`. The route is the
+service-owned path for adopting an existing Dokploy target or creating a new
+application/compose target while immediately writing the matching Dokploy
+target, target-id, and provider-target records. It supports dry-run and apply
+modes, requires `dokploy_target.setup` authz for product/context `launchplane`,
+and requires exact confirmation, an operator reason, and an idempotency key for
+apply. The manual `Dokploy Target Setup` workflow is the supported shared and
+production caller; product repos must not store live target IDs or provider
+fixtures as setup authority. Runtime port is accepted only for `create-compose`
+domain reconciliation with at least one domain. If a provider create succeeds
+but the service fails before records are written, recover by re-running the
+workflow with `operation=adopt` and the created provider target id, not by
+creating a second target for the same lane.
 
 The manual `Product Environment Evidence` workflow is the supported read-only
 Phase Two caller for product environment read-model evidence. It uses GitHub

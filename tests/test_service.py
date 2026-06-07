@@ -13454,6 +13454,552 @@ class LaunchplaneServiceTests(unittest.TestCase):
         assert provider_target is not None
         self.assertEqual(provider_target.target_id, "app-verireel-testing")
 
+    def test_dokploy_target_setup_endpoint_dry_run_does_not_persist(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            with patch(
+                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "create-compose",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "target_name": "cm-website-testing",
+                        "project_name": "Odoo",
+                        "environment_name": "production",
+                        "server_id": "server-123",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "runtime_port": 8069,
+                        "deploy_timeout_seconds": 900,
+                    },
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_records = store.list_dokploy_target_records()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertFalse(payload["result"]["applied"])
+        self.assertEqual(
+            payload["result"]["setup"]["target_id_record"]["target_id"],
+            "planned-compose-id",
+        )
+        self.assertEqual(target_records, ())
+
+    def test_dokploy_target_setup_endpoint_applies_compose_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            provider_requests: list[tuple[str, dict[str, object]]] = []
+            domain_routes: list[tuple[str, int]] = []
+
+            def _mutate_provider(
+                _host: str, _token: str, path: str, payload: dict[str, object]
+            ) -> dict[str, object]:
+                provider_requests.append((path, payload))
+                if path == "/api/project.create":
+                    return {"projectId": "project-123"}
+                if path == "/api/environment.create":
+                    return {"environmentId": "env-123"}
+                if path == "/api/compose.create":
+                    return {"composeId": "compose-123"}
+                raise AssertionError(path)
+
+            def _fetch_target(
+                _host: str, _token: str, _target_type: str, _target_id: str
+            ) -> dict[str, object]:
+                return {
+                    "name": "cm-website-testing",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "environment": {"project": {"name": "Odoo"}},
+                }
+
+            def _ensure_domain(
+                *,
+                host: str,
+                token: str,
+                compose_id: str,
+                domain_host: str,
+                runtime_port: int,
+                certificate_type: str = "none",
+            ) -> str:
+                del host, token, compose_id, certificate_type
+                domain_routes.append((domain_host, runtime_port))
+                return "domain-123"
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._mutate_dokploy_payload_for_target_setup",
+                    side_effect=_mutate_provider,
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    side_effect=_fetch_target,
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route",
+                    side_effect=_ensure_domain,
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "create-compose",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "target_name": "cm-website-testing",
+                        "project_name": "Odoo",
+                        "environment_name": "production",
+                        "server_id": "server-123",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "runtime_port": 8069,
+                        "deploy_timeout_seconds": 900,
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Create cm website testing target.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-target-setup-cm-website"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_record = store.read_dokploy_target_record(
+                    context_name="cm_website", instance_name="testing"
+                )
+                target_id_record = store.read_dokploy_target_id_record(
+                    context_name="cm_website", instance_name="testing"
+                )
+                provider_target = store.read_provider_target_record(
+                    context_name="cm_website", instance_name="testing"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["route_domain_ids"], ["domain-123"])
+        self.assertEqual(
+            [path for path, _payload in provider_requests],
+            ["/api/project.create", "/api/environment.create", "/api/compose.create"],
+        )
+        compose_payload = provider_requests[-1][1]
+        self.assertNotIn("sourceType", compose_payload)
+        self.assertNotIn("composePath", compose_payload)
+        self.assertEqual(domain_routes, [("cm-website-testing.shinycomputers.com", 8069)])
+        self.assertEqual(target_record.target_type, "compose")
+        self.assertEqual(target_record.target_name, "cm-website-testing")
+        self.assertEqual(target_id_record.target_id, "compose-123")
+        self.assertEqual(provider_target.target_id, "compose-123")
+
+    def test_dokploy_target_setup_endpoint_applies_adopt(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    return_value={
+                        "name": "existing-compose",
+                        "sourceType": "raw",
+                        "composePath": "docker-compose.yml",
+                        "environment": {"project": {"name": "Odoo"}},
+                    },
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "adopt",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "target_type": "compose",
+                        "target_id": "compose-existing",
+                        "target_name": "cm-website-testing",
+                        "project_name": "Odoo",
+                        "domains": ["cm-website-testing.shinycomputers.com"],
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Adopt cm website testing target.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-target-setup-adopt"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_id_record = store.read_dokploy_target_id_record(
+                    context_name="cm_website", instance_name="testing"
+                )
+                provider_target = store.read_provider_target_record(
+                    context_name="cm_website", instance_name="testing"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["operation"], "adopt")
+        self.assertEqual(target_id_record.target_id, "compose-existing")
+        self.assertEqual(provider_target.target_id, "compose-existing")
+
+    def test_dokploy_target_setup_endpoint_applies_application_target(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            provider_requests: list[tuple[str, dict[str, object]]] = []
+
+            def _mutate_provider(
+                _host: str, _token: str, path: str, payload: dict[str, object]
+            ) -> dict[str, object]:
+                provider_requests.append((path, payload))
+                if path == "/api/application.create":
+                    return {"applicationId": "app-123"}
+                raise AssertionError(path)
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._mutate_dokploy_payload_for_target_setup",
+                    side_effect=_mutate_provider,
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    return_value={
+                        "name": "discord-blue-prod",
+                        "environment": {"project": {"name": "Discord Blue"}},
+                    },
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "create-application",
+                        "product": "launchplane",
+                        "context": "discord-blue",
+                        "instance": "prod",
+                        "target_name": "discord-blue-prod",
+                        "environment_id": "env-existing",
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Create discord target.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-target-setup-app"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                provider_target = store.read_provider_target_record(
+                    context_name="discord-blue", instance_name="prod"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["operation"], "create-application")
+        self.assertEqual(
+            [path for path, _payload in provider_requests], ["/api/application.create"]
+        )
+        self.assertEqual(provider_target.target_id, "app-123")
+        self.assertEqual(provider_target.provider_target_type, "application")
+
+    def test_dokploy_target_setup_rejects_runtime_port_for_adopt(self) -> None:
+        app = create_launchplane_service_app(
+            state_dir=Path("/tmp") / "launchplane-test-state",
+            verifier=_StubVerifier(
+                _identity(
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            control_plane_root_path=Path("/tmp"),
+        )
+
+        status_code, payload = _invoke_app(
+            app,
+            method="POST",
+            path="/v1/dokploy-targets/setup",
+            payload={
+                "schema_version": 1,
+                "mode": "dry-run",
+                "operation": "adopt",
+                "product": "launchplane",
+                "context": "cm_website",
+                "instance": "testing",
+                "target_type": "compose",
+                "target_id": "compose-existing",
+                "domains": ["cm-website-testing.shinycomputers.com"],
+                "runtime_port": 8069,
+            },
+        )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_dokploy_target_setup_rejects_runtime_port_without_domains(self) -> None:
+        app = create_launchplane_service_app(
+            state_dir=Path("/tmp") / "launchplane-test-state",
+            verifier=_StubVerifier(
+                _identity(
+                    repository="cbusillo/launchplane",
+                    workflow_ref=(
+                        "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                    ),
+                    event_name="workflow_dispatch",
+                )
+            ),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            control_plane_root_path=Path("/tmp"),
+        )
+
+        status_code, payload = _invoke_app(
+            app,
+            method="POST",
+            path="/v1/dokploy-targets/setup",
+            payload={
+                "schema_version": 1,
+                "mode": "dry-run",
+                "operation": "create-compose",
+                "product": "launchplane",
+                "context": "cm_website",
+                "instance": "testing",
+                "target_name": "cm-website-testing",
+                "server_id": "server-123",
+                "runtime_port": 8069,
+            },
+        )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_dokploy_target_setup_endpoint_rejects_apply_without_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/dokploy-targets/setup",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "operation": "create-compose",
+                    "product": "launchplane",
+                    "context": "cm_website",
+                    "instance": "testing",
+                    "target_name": "cm-website-testing",
+                    "project_name": "Odoo",
+                    "environment_name": "production",
+                    "server_id": "server-123",
+                    "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                    "reason": "Create cm website testing target.",
+                },
+                headers={"Idempotency-Key": "dokploy-target-setup-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_provider_target_operation_endpoint_rejects_apply_without_authz(
         self,
     ) -> None:
@@ -30910,7 +31456,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 503)
             self.assertEqual(payload["error"]["code"], "driver_route_dependency_not_found")
-            self.assertEqual(payload["details"]["route_path"], "/v1/drivers/odoo/artifact-publish-inputs")
+            self.assertEqual(
+                payload["details"]["route_path"], "/v1/drivers/odoo/artifact-publish-inputs"
+            )
             self.assertNotIn("missing", payload["details"])
             self.assertNotIn("product_profiles", json.dumps(payload))
             self.assertNotIn("No Launchplane route", payload["error"]["message"])
@@ -30926,9 +31474,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             profile_payload = _odoo_preview_profile_payload("odoo-tenant-cm-website")
             profile_payload["display_name"] = "Cell Mechanic Website Odoo"
             profile_payload["repository"] = "cbusillo/odoo-tenant-cm-website"
-            profile_payload["image"] = {
-                "repository": "ghcr.io/cbusillo/odoo-tenant-cm-website"
-            }
+            profile_payload["image"] = {"repository": "ghcr.io/cbusillo/odoo-tenant-cm-website"}
             lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
             lanes[0]["context"] = "cm_website"
             profile_payload["lanes"] = tuple(lanes)

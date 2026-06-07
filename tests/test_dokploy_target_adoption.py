@@ -16,6 +16,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
     adopt_dokploy_target,
     create_dokploy_application_target,
+    create_dokploy_compose_target,
 )
 
 
@@ -649,6 +650,76 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_record.target_name, "discord-blue-prod")
         self.assertEqual(target_record.healthcheck_path, "/health")
         self.assertEqual(target_id_record.target_id, "app-123")
+
+    def test_create_compose_target_applies_provider_and_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                if path == "/api/project.create":
+                    return {"projectId": "project-123"}
+                if path == "/api/environment.create":
+                    self.assertEqual(payload["projectId"], "project-123")
+                    return {"environmentId": "env-123"}
+                if path == "/api/compose.create":
+                    self.assertEqual(payload["environmentId"], "env-123")
+                    self.assertEqual(payload["serverId"], "server-123")
+                    return {"composeId": "compose-123"}
+                raise AssertionError(path)
+
+            result = create_dokploy_compose_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="cm_website",
+                instance="testing",
+                target_name="cm-website-testing",
+                project_name="Odoo",
+                environment_name="production",
+                server_id="server-123",
+                healthcheck_path="/web/health",
+                domains=("cm-website-testing.shinycomputers.com",),
+                updated_at="2026-05-04T23:10:00Z",
+                apply=True,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {
+                    "name": "cm-website-testing",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "environment": {"project": {"name": "Odoo"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="testing"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="cm_website", instance_name="testing"
+            )
+            provider_target = store.read_provider_target_record(
+                context_name="cm_website", instance_name="testing"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(
+            [path for path, _payload in requests],
+            ["/api/project.create", "/api/environment.create", "/api/compose.create"],
+        )
+        self.assertEqual(target_record.target_type, "compose")
+        self.assertEqual(target_record.target_name, "cm-website-testing")
+        self.assertEqual(target_record.domains, ("cm-website-testing.shinycomputers.com",))
+        self.assertEqual(target_record.source_type, "raw")
+        self.assertEqual(target_record.compose_path, "docker-compose.yml")
+        self.assertEqual(target_id_record.target_id, "compose-123")
+        self.assertEqual(provider_target.provider_target_type, "compose")
+        self.assertEqual(provider_target.target_id, "compose-123")
 
     def test_create_application_target_canonicalizes_route_keys_before_persisting(
         self,

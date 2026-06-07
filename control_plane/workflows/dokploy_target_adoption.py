@@ -61,6 +61,29 @@ class DokployTargetCreateResult(BaseModel):
     warnings: tuple[str, ...] = ()
 
 
+class DokployComposeTargetCreatePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: dict[str, str]
+    environment: dict[str, str]
+    compose: dict[str, str]
+
+
+class DokployComposeTargetCreateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    applied: bool
+    plan: DokployComposeTargetCreatePlan
+    project_id: str = ""
+    environment_id: str = ""
+    target_record: DokployTargetRecord
+    target_id_record: DokployTargetIdRecord
+    provider_target_record: ProviderTargetRecord
+    provider_fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
+    provider_requests: tuple[dict[str, object], ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
 def adopt_dokploy_target(
     *,
     record_store: DokployTargetAdoptionRecordStore,
@@ -355,6 +378,221 @@ def create_dokploy_application_target(
     )
 
 
+def create_dokploy_compose_target(
+    *,
+    record_store: DokployTargetAdoptionRecordStore,
+    host: str,
+    token: str,
+    context: str,
+    instance: str,
+    target_name: str,
+    project_id: str = "",
+    project_name: str = "",
+    project_description: str = "",
+    environment_id: str = "",
+    environment_name: str = "",
+    environment_description: str = "",
+    server_id: str = "",
+    app_name: str = "",
+    compose_description: str = "",
+    source_git_ref: str = "origin/main",
+    source_type: str = "raw",
+    compose_path: str = "docker-compose.yml",
+    healthcheck_path: str = "",
+    domains: tuple[str, ...] = (),
+    deploy_timeout_seconds: int | None = None,
+    source_label: str = "cli:dokploy-targets:create-compose",
+    updated_at: str = "",
+    apply: bool = False,
+    mutate_provider: MutateDokployPayload,
+    fetch_target_payload: FetchDokployTargetPayload,
+) -> DokployComposeTargetCreateResult:
+    normalized_context = _normalize_route_part(context, "context")
+    normalized_instance = _normalize_route_part(instance, "instance")
+    normalized_target_name = _require_non_empty(target_name, "target_name")
+    normalized_project_id = project_id.strip()
+    normalized_project_name = project_name.strip()
+    normalized_environment_id = environment_id.strip()
+    normalized_environment_name = environment_name.strip() or normalized_instance
+    normalized_server_id = _require_non_empty(server_id, "server_id")
+    normalized_healthcheck_path = healthcheck_path.strip()
+    if normalized_healthcheck_path and not normalized_healthcheck_path.startswith("/"):
+        raise ValueError(
+            "Dokploy compose target creation requires --healthcheck-path to start with /"
+        )
+    if not normalized_environment_id and not normalized_project_id and not normalized_project_name:
+        raise ValueError(
+            "Dokploy compose target creation requires --project-id or --project-name when --environment-id is not supplied"
+        )
+
+    provider_requests = _planned_compose_provider_requests(
+        project_id=normalized_project_id,
+        project_name=normalized_project_name,
+        project_description=project_description,
+        environment_id=normalized_environment_id,
+        environment_name=normalized_environment_name,
+        environment_description=environment_description,
+        target_name=normalized_target_name,
+        app_name=app_name,
+        compose_description=compose_description,
+        server_id=normalized_server_id,
+        source_type=source_type,
+        compose_path=compose_path,
+    )
+    plan = DokployComposeTargetCreatePlan(
+        project={
+            "action": _project_plan_action(
+                project_id=normalized_project_id,
+                environment_id=normalized_environment_id,
+            ),
+            "project_id": normalized_project_id,
+            "project_name": normalized_project_name,
+        },
+        environment={
+            "action": "use_existing" if normalized_environment_id else "create",
+            "environment_id": normalized_environment_id,
+            "environment_name": normalized_environment_name,
+        },
+        compose={
+            "action": "create",
+            "target_name": normalized_target_name,
+            "app_name": app_name.strip(),
+            "server_id": normalized_server_id,
+            "source_type": source_type.strip() or "raw",
+            "compose_path": compose_path.strip() or "docker-compose.yml",
+        },
+    )
+
+    recorded_at = updated_at.strip() or utc_now_timestamp()
+    if not apply:
+        target_record = DokployTargetRecord(
+            context=normalized_context,
+            instance=normalized_instance,
+            project_name=normalized_project_name,
+            target_type="compose",
+            target_name=normalized_target_name,
+            source_git_ref=source_git_ref.strip() or "origin/main",
+            source_type=source_type.strip() or "raw",
+            compose_path=compose_path.strip() or "docker-compose.yml",
+            deploy_timeout_seconds=deploy_timeout_seconds,
+            healthcheck_path=normalized_healthcheck_path,
+            domains=domains,
+            updated_at=recorded_at,
+            source_label=source_label.strip() or "cli:dokploy-targets:create-compose",
+        )
+        target_id_record = DokployTargetIdRecord(
+            context=normalized_context,
+            instance=normalized_instance,
+            target_id="planned-compose-id",
+            updated_at=recorded_at,
+            source_label=target_record.source_label,
+        )
+        provider_target_record = ProviderTargetRecord.from_dokploy_records(
+            target_record=target_record,
+            target_id_record=target_id_record,
+        )
+        return DokployComposeTargetCreateResult(
+            applied=False,
+            plan=plan,
+            target_record=target_record,
+            target_id_record=target_id_record,
+            provider_target_record=provider_target_record,
+            provider_requests=provider_requests,
+            warnings=("dry run only; provider was not mutated and records were not written",),
+        )
+
+    _ensure_create_route_has_no_provider_target(
+        record_store=record_store,
+        context=normalized_context,
+        instance=normalized_instance,
+    )
+
+    created_project_id = normalized_project_id
+    if not created_project_id and not normalized_environment_id:
+        project_payload: JsonObject = {"name": normalized_project_name}
+        if project_description.strip():
+            project_payload["description"] = project_description.strip()
+        created_project = mutate_provider(host, token, "/api/project.create", project_payload)
+        created_project_id = _extract_provider_id(created_project, "projectId", "project")
+
+    created_environment_id = normalized_environment_id
+    if not created_environment_id:
+        environment_payload: JsonObject = {
+            "name": normalized_environment_name,
+            "projectId": created_project_id,
+        }
+        if environment_description.strip():
+            environment_payload["description"] = environment_description.strip()
+        created_environment = mutate_provider(
+            host, token, "/api/environment.create", environment_payload
+        )
+        created_environment_id = _extract_provider_id(
+            created_environment, "environmentId", "environment"
+        )
+
+    compose_payload: JsonObject = {
+        "name": normalized_target_name,
+        "appName": app_name.strip() or normalized_target_name,
+        "environmentId": created_environment_id,
+        "serverId": normalized_server_id,
+        "composeType": "docker-compose",
+    }
+    if compose_description.strip():
+        compose_payload["description"] = compose_description.strip()
+    created_compose = mutate_provider(host, token, "/api/compose.create", compose_payload)
+    compose_id = _extract_provider_id(created_compose, "composeId", "compose")
+
+    adoption = adopt_dokploy_target(
+        record_store=record_store,
+        host=host,
+        token=token,
+        context=normalized_context,
+        instance=normalized_instance,
+        target_type="compose",
+        target_id=compose_id,
+        project_name=normalized_project_name,
+        target_name=normalized_target_name,
+        source_git_ref=source_git_ref,
+        healthcheck_path=normalized_healthcheck_path,
+        domains=domains,
+        deploy_timeout_seconds=deploy_timeout_seconds,
+        source_label=source_label,
+        updated_at=updated_at,
+        apply=True,
+        fetch_target_payload=fetch_target_payload,
+    )
+    target_record = adoption.target_record.model_copy(
+        update={
+            "source_type": adoption.target_record.source_type or source_type.strip() or "raw",
+            "compose_path": adoption.target_record.compose_path
+            or compose_path.strip()
+            or "docker-compose.yml",
+        }
+    )
+    if target_record != adoption.target_record:
+        record_store.write_dokploy_target_record(target_record)
+        provider_target_record = prepare_provider_target_from_dokploy_records(
+            record_store=record_store,
+            target_record=target_record,
+            target_id_record=adoption.target_id_record,
+        )
+        record_store.write_provider_target_record(provider_target_record)
+    else:
+        provider_target_record = adoption.provider_target_record
+    return DokployComposeTargetCreateResult(
+        applied=True,
+        plan=plan,
+        project_id=created_project_id,
+        environment_id=created_environment_id,
+        target_record=target_record,
+        target_id_record=adoption.target_id_record,
+        provider_target_record=provider_target_record,
+        provider_fields=adoption.provider_fields,
+        provider_requests=provider_requests,
+        warnings=adoption.warnings,
+    )
+
+
 def _require_non_empty(value: str, field_name: str) -> str:
     normalized_value = value.strip()
     if not normalized_value:
@@ -441,6 +679,48 @@ def _planned_provider_requests(
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
     requests.append({"path": "/api/application.create", "payload": application_payload})
+    return tuple(requests)
+
+
+def _planned_compose_provider_requests(
+    *,
+    project_id: str,
+    project_name: str,
+    project_description: str,
+    environment_id: str,
+    environment_name: str,
+    environment_description: str,
+    target_name: str,
+    app_name: str,
+    compose_description: str,
+    server_id: str,
+    source_type: str,
+    compose_path: str,
+) -> tuple[dict[str, object], ...]:
+    requests: list[dict[str, object]] = []
+    if not environment_id and not project_id:
+        project_payload: dict[str, object] = {"name": project_name}
+        if project_description.strip():
+            project_payload["description"] = project_description.strip()
+        requests.append({"path": "/api/project.create", "payload": project_payload})
+    if not environment_id:
+        environment_payload: dict[str, object] = {
+            "name": environment_name,
+            "projectId": project_id or "<created-project-id>",
+        }
+        if environment_description.strip():
+            environment_payload["description"] = environment_description.strip()
+        requests.append({"path": "/api/environment.create", "payload": environment_payload})
+    compose_payload: dict[str, object] = {
+        "name": target_name,
+        "appName": app_name.strip() or target_name,
+        "environmentId": environment_id or "<created-environment-id>",
+        "serverId": server_id,
+        "composeType": "docker-compose",
+    }
+    if compose_description.strip():
+        compose_payload["description"] = compose_description.strip()
+    requests.append({"path": "/api/compose.create", "payload": compose_payload})
     return tuple(requests)
 
 

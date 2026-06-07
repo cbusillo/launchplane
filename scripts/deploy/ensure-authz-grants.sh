@@ -480,6 +480,14 @@ post_grant \
 	provider_target.backfill \
 	deploy:provider-target-operations-backfill-grant \
 	provider-target-operations-backfill
+post_grant \
+	"$GITHUB_REPOSITORY" \
+	dokploy-target-setup.yml \
+	launchplane \
+	launchplane \
+	dokploy_target.setup \
+	deploy:dokploy-target-setup-grant \
+	dokploy-target-setup
 post_terminal_agent_grant \
 	launchplane \
 	launchplane \
