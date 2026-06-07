@@ -12914,6 +12914,80 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["logs"]["lines"], ["ok", "RESEND_API_KEY=[redacted]"])
         self.assertNotIn("secret-token", json.dumps(payload))
 
+    def test_tracked_target_logs_endpoint_returns_redacted_compose_logs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-123",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["cm_website"],
+                            "actions": ["target_logs.read"],
+                        }
+                    ]
+                }
+            )
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    return_value=("booting", "ODOO_ADMIN_PASSWORD=[redacted]"),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    database_url=database_url,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/contexts/cm_website/instances/testing/logs",
+                    query_string="lines=2&since=5m",
+                )
+
+        self.assertEqual(status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            compose_id="compose-123",
+            app_name="cm-website-testing-iul0ql",
+            server_id="server-1",
+            line_count=2,
+            since="5m",
+            search="",
+        )
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["target"]["target_type"], "compose")
+        self.assertEqual(payload["target"]["target_name"], "cm-website-testing")
+        self.assertEqual(payload["target"]["app_name"], "cm-website-testing-iul0ql")
+        self.assertEqual(payload["logs"]["lines"], ["booting", "ODOO_ADMIN_PASSWORD=[redacted]"])
+        self.assertNotIn("secret-token", json.dumps(payload))
+
     def test_tracked_target_logs_endpoint_requires_authz_action(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

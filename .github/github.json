@@ -96,6 +96,7 @@
     "Product Environment Evidence",
     "Product Legacy Context Cleanup",
     "Provider Target Operations",
+    "Tracked Target Logs",
     "Work Graph Snapshot Validate",
     "Dependency Graph"
   ],

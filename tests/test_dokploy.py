@@ -209,7 +209,8 @@ class DokployConfigTests(unittest.TestCase):
                     "started",
                     (
                         "RESEND_API_KEY=re_123 Bearer abc.def "
-                        "SMTP_PASSWORD=smtp-secret LAUNCHPLANE_DATABASE_URL=postgresql://secret"
+                        "SMTP_PASSWORD=smtp-secret LAUNCHPLANE_DATABASE_URL=postgresql://secret "
+                        "postgresql://odoo:db-secret@database/cm"
                     ),
                 ]
             }
@@ -220,9 +221,11 @@ class DokployConfigTests(unittest.TestCase):
         self.assertIn("Bearer [redacted]", lines[1])
         self.assertIn("SMTP_PASSWORD=[redacted]", lines[1])
         self.assertIn("LAUNCHPLANE_DATABASE_URL=[redacted]", lines[1])
+        self.assertIn("postgresql://odoo:[redacted]@database/cm", lines[1])
         self.assertNotIn("re_123", lines[1])
         self.assertNotIn("smtp-secret", lines[1])
         self.assertNotIn("postgresql://secret", lines[1])
+        self.assertNotIn("db-secret", lines[1])
 
     def test_redact_dokploy_log_line_redacts_quoted_secret_fields(self) -> None:
         redacted_line = control_plane_dokploy.redact_dokploy_log_line(
@@ -268,6 +271,56 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(requests[0]["path"], "/api/application.readLogs")
         self.assertEqual(
             requests[0]["query"], {"applicationId": "app-123", "tail": 2, "since": "all"}
+        )
+        self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
+
+    def test_fetch_compose_logs_calls_dokploy_read_logs_endpoint(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "database-container", "name": "cm-database-1"},
+                    {"containerId": "web-container", "name": "cm-web-1"},
+                ]
+            return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="cm-testing-iul0ql",
+                server_id="server-1",
+                line_count=2,
+                since="5m",
+                search="odoo",
+            )
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["path"], "/api/docker.getContainersByAppNameMatch")
+        self.assertEqual(
+            requests[0]["query"],
+            {
+                "appName": "cm-testing-iul0ql",
+                "appType": "docker-compose",
+                "serverId": "server-1",
+            },
+        )
+        self.assertEqual(requests[1]["path"], "/api/compose.readLogs")
+        self.assertEqual(
+            requests[1]["query"],
+            {
+                "composeId": "compose-123",
+                "containerId": "web-container",
+                "tail": 2,
+                "since": "5m",
+                "search": "odoo",
+            },
         )
         self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
 
@@ -362,7 +415,7 @@ target_name = "syo-testing-app"
         self.assertIn("Missing DB-backed tracked Dokploy target records", result.output)
         self.assertNotIn("Traceback", result.output)
 
-    def test_environments_logs_rejects_compose_targets(self) -> None:
+    def test_environments_logs_resolves_tracked_compose_and_redacts_output(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -385,22 +438,56 @@ target_name = "opw-testing"
             )
             store.close()
 
-            result = runner.invoke(
-                main,
-                [
-                    "environments",
-                    "logs",
-                    "--database-url",
-                    database_url,
-                    "--context",
-                    "opw",
-                    "--instance",
-                    "testing",
-                ],
-            )
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "opw-testing-iul0ql", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    return_value=("started", "ODOO_DB_PASSWORD=[redacted]"),
+                ) as logs_mock,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "logs",
+                        "--database-url",
+                        database_url,
+                        "--context",
+                        "opw",
+                        "--instance",
+                        "testing",
+                        "--lines",
+                        "2",
+                        "--since",
+                        "5m",
+                    ],
+                )
 
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("application targets only", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            compose_id="compose-123",
+            app_name="opw-testing-iul0ql",
+            server_id="server-1",
+            line_count=2,
+            since="5m",
+            search="",
+        )
+        payload = json.loads(result.output)
+        self.assertEqual(payload["context"], "opw")
+        self.assertEqual(payload["target"]["target_id"], "compose-123")
+        self.assertEqual(payload["target"]["target_type"], "compose")
+        self.assertEqual(payload["target"]["app_name"], "opw-testing-iul0ql")
+        self.assertEqual(payload["logs"]["lines"], ["started", "ODOO_DB_PASSWORD=[redacted]"])
+        self.assertNotIn("secret-token", result.output)
 
     def test_update_application_env_includes_empty_build_fields_when_missing(self) -> None:
         requests: list[dict[str, object]] = []
