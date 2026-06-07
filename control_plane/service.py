@@ -203,6 +203,7 @@ from control_plane.drivers.dispatch import (
     _normalize_release_status as _normalize_release_status,
     _repo_token as _repo_token,
     _validate_driver_envelope_product as _validate_driver_envelope_product,
+    DriverRouteDependencyNotFoundError as DriverRouteDependencyNotFoundError,
     ProductDriverMismatchError as ProductDriverMismatchError,
 )
 from control_plane.drivers.generic_web_dispatch import (
@@ -7985,7 +7986,10 @@ def _resolve_product_driver_context(
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
         raise ValueError("Product driver validation requires product profile storage.")
-    profile = cast(LaunchplaneProductProfileRecord, read_profile(normalized_product))
+    try:
+        profile = cast(LaunchplaneProductProfileRecord, read_profile(normalized_product))
+    except FileNotFoundError as error:
+        raise DriverRouteDependencyNotFoundError from error
     if not _product_driver_route_compatible(
         profile=profile,
         expected_driver_id=normalized_driver_id,
@@ -13263,7 +13267,7 @@ def create_launchplane_service_app(
                         start_response=start_response,
                         trace_id=request_trace_id,
                     )
-                except FileNotFoundError:
+                except DriverRouteDependencyNotFoundError:
                     return _json_response(
                         start_response=start_response,
                         status_code=503,

@@ -30916,6 +30916,84 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertNotIn("No Launchplane route", payload["error"]["message"])
             self.assertEqual(control_plane_service._http_status_text(503), "Service Unavailable")
 
+    def test_odoo_artifact_publish_inputs_handler_file_miss_is_not_dependency_503(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _odoo_preview_profile_payload("odoo-tenant-cm-website")
+            profile_payload["display_name"] = "Cell Mechanic Website Odoo"
+            profile_payload["repository"] = "cbusillo/odoo-tenant-cm-website"
+            profile_payload["image"] = {
+                "repository": "ghcr.io/cbusillo/odoo-tenant-cm-website"
+            }
+            lanes = list(cast(tuple[dict[str, object], ...], profile_payload["lanes"]))
+            lanes[0]["context"] = "cm_website"
+            profile_payload["lanes"] = tuple(lanes)
+            preview = cast(dict[str, object], profile_payload["preview"])
+            preview["context"] = "cm_website"
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm-website",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm-website"],
+                            "contexts": ["cm_website"],
+                            "actions": ["odoo_artifact_publish_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm-website",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm-website/.github/workflows/odoo-preview.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.build_odoo_artifact_publish_inputs",
+                    side_effect=FileNotFoundError("handler-side file miss"),
+                ) as build_publish_inputs,
+                patch("control_plane.service._LOGGER.exception"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/artifact-publish-inputs",
+                    payload={
+                        "product": "odoo-tenant-cm-website",
+                        "inputs": {"context": "cm_website", "instance": "testing"},
+                    },
+                )
+
+            build_publish_inputs.assert_called_once()
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
+            self.assertNotEqual(
+                payload["error"]["code"],
+                "driver_route_dependency_not_found",
+            )
+
     def test_odoo_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
