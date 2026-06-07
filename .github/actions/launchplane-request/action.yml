@@ -124,6 +124,58 @@ outputs:
     description: HTTP status code returned by Launchplane.
   response-body:
     description: Raw Launchplane response body.
+  applied_at:
+    description: Dynamic output exposed by output-paths.
+  artifact_id:
+    description: Dynamic output exposed by output-paths.
+  backup_record_id:
+    description: Dynamic output exposed by output-paths.
+  backup_status:
+    description: Dynamic output exposed by output-paths.
+  deployment_record_id:
+    description: Dynamic output exposed by output-paths.
+  deployment_status:
+    description: Dynamic output exposed by output-paths.
+  destination_health_status:
+    description: Dynamic output exposed by output-paths.
+  error_message:
+    description: Dynamic output exposed by output-paths.
+  image_digest:
+    description: Dynamic output exposed by output-paths.
+  image_repository:
+    description: Dynamic output exposed by output-paths.
+  image_tag:
+    description: Dynamic output exposed by output-paths.
+  operation_id:
+    description: Dynamic output exposed by output-paths.
+  override_payload_rendered:
+    description: Dynamic output exposed by output-paths.
+  override_record_found:
+    description: Dynamic output exposed by output-paths.
+  override_status:
+    description: Dynamic output exposed by output-paths.
+  poll_url:
+    description: Dynamic output exposed by output-paths.
+  post_deploy_status:
+    description: Dynamic output exposed by output-paths.
+  preview_slug:
+    description: Dynamic output exposed by output-paths.
+  promotion_record_id:
+    description: Dynamic output exposed by output-paths.
+  promotion_status:
+    description: Dynamic output exposed by output-paths.
+  publish_status:
+    description: Dynamic output exposed by output-paths.
+  release_tuple_id:
+    description: Dynamic output exposed by output-paths.
+  rollback_health_status:
+    description: Dynamic output exposed by output-paths.
+  rollback_status:
+    description: Dynamic output exposed by output-paths.
+  source_commit:
+    description: Dynamic output exposed by output-paths.
+  trace_id:
+    description: Dynamic output exposed by output-paths.
 
 runs:
   using: node24
