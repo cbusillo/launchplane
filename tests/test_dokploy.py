@@ -448,6 +448,127 @@ class DokployConfigTests(unittest.TestCase):
         query = cast(dict[str, object], requests[1]["query"])
         self.assertEqual(query["containerId"], "web")
 
+    def test_fetch_compose_logs_prefers_web_container_pascal_case_label(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "db", "Name": "/tenant-database-1"},
+                    {
+                        "containerId": "web",
+                        "Name": "/tenant-runtime-1",
+                        "Labels": {"com.docker.compose.service": "web"},
+                    },
+                ]
+            return {"logs": "web log"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("web log",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "web")
+
+    def test_fetch_compose_logs_prefers_service_match_over_name_fallback(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "sidecar", "Name": "/tenant-cron-web-1"},
+                    {"containerId": "web", "serviceName": "web"},
+                ]
+            return {"logs": "web log"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("web log",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "web")
+
+    def test_fetch_compose_logs_prefers_web_container_docker_name_variants(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "db", "Name": "/tenant-database-1"},
+                    {"containerId": "script", "containerName": "tenant_script-runner_1"},
+                    {"containerId": "web", "Names": ["/tenant-web-1"]},
+                ]
+            return {"logs": "web log"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("web log",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "web")
+
+    def test_fetch_compose_logs_prefers_web_container_service_variants(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> object:
+            requests.append(kwargs)
+            if kwargs["path"] == "/api/docker.getContainersByAppNameMatch":
+                return [
+                    {"containerId": "db", "Service": "database"},
+                    {
+                        "containerId": "web",
+                        "composeServiceName": "web",
+                        "Name": "/tenant-runtime-1",
+                    },
+                ]
+            return {"logs": "web log"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_compose_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                compose_id="compose-123",
+                app_name="tenant",
+                line_count=10,
+            )
+
+        self.assertEqual(lines, ("web log",))
+        query = cast(dict[str, object], requests[1]["query"])
+        self.assertEqual(query["containerId"], "web")
+
     def test_environments_logs_resolves_tracked_application_and_redacts_output(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

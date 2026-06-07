@@ -956,7 +956,10 @@ def fetch_dokploy_compose_logs(
 
 def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
     for container in containers:
-        if _compose_log_container_is_web(container):
+        if _compose_log_container_has_web_service(container):
+            return container
+    for container in containers:
+        if _compose_log_container_has_web_name(container):
             return container
     for container in containers:
         if str(container.get("containerId") or "").strip():
@@ -965,18 +968,65 @@ def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
 
 
 def _compose_log_container_is_web(container: JsonObject) -> bool:
-    service_name = str(container.get("serviceName") or "").strip().lower()
-    if service_name == "web":
-        return True
-    labels = container.get("labels")
-    if isinstance(labels, dict):
-        label_service = str(labels.get("com.docker.compose.service") or "").strip().lower()
-        if label_service == "web":
+    return _compose_log_container_has_web_service(container) or _compose_log_container_has_web_name(
+        container
+    )
+
+
+def _compose_log_container_has_web_service(container: JsonObject) -> bool:
+    for service_name in _compose_log_container_service_names(container):
+        if service_name == "web":
             return True
-    container_name = str(container.get("name") or "").strip().lower().strip("/")
-    if not container_name:
+    return False
+
+
+def _compose_log_container_has_web_name(container: JsonObject) -> bool:
+    for container_name in _compose_log_container_names(container):
+        if _compose_log_container_name_is_web(container_name):
+            return True
+    return False
+
+
+def _compose_log_container_service_names(container: JsonObject) -> tuple[str, ...]:
+    service_names: list[str] = []
+    for key in ("serviceName", "Service", "composeServiceName"):
+        value = str(container.get(key) or "").strip().lower()
+        if value:
+            service_names.append(value)
+    for labels_key in ("labels", "Labels"):
+        labels = container.get(labels_key)
+        if isinstance(labels, dict):
+            for label_key, label_value in labels.items():
+                if str(label_key).strip().lower() == "com.docker.compose.service":
+                    value = str(label_value or "").strip().lower()
+                    if value:
+                        service_names.append(value)
+    return tuple(service_names)
+
+
+def _compose_log_container_names(container: JsonObject) -> tuple[str, ...]:
+    names: list[str] = []
+    for key in ("name", "Name", "containerName", "container_name"):
+        value = str(container.get(key) or "").strip()
+        if value:
+            names.append(value)
+    for key in ("names", "Names"):
+        values = container.get(key)
+        if isinstance(values, list):
+            for raw_name in values:
+                if raw_name is None:
+                    continue
+                normalized_value = str(raw_name).strip()
+                if normalized_value:
+                    names.append(normalized_value)
+    return tuple(names)
+
+
+def _compose_log_container_name_is_web(container_name: str) -> bool:
+    normalized_name = container_name.strip().lower().strip("/")
+    if not normalized_name:
         return False
-    name_parts = tuple(part for part in re.split(r"[-_.]+", container_name) if part)
+    name_parts = tuple(part for part in re.split(r"[-_.]+", normalized_name) if part)
     if not name_parts:
         return False
     service_part = (
