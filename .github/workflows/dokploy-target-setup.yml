@@ -21,6 +21,7 @@ name: Dokploy Target Setup
           - adopt
           - create-application
           - create-compose
+          - reconcile-compose-domain
       context:
         description: Launchplane target context.
         required: true
@@ -199,6 +200,34 @@ jobs:
           fi
           if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
             echo "reason is required when mode=apply." >&2
+            exit 1
+          fi
+
+      - name: Validate reconcile compose domain inputs
+        if: env.OPERATION == 'reconcile-compose-domain'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$(printf '%s' "$DOMAIN" | xargs)" ]; then
+            echo "domain is required when operation=reconcile-compose-domain." \
+              >&2
+            exit 1
+          fi
+          runtime_port="$(printf '%s' "$RUNTIME_PORT" | xargs)"
+          if [ -z "$runtime_port" ]; then
+            echo "runtime_port is required for reconcile-compose-domain." \
+              >&2
+            exit 1
+          fi
+          if ! [[ "$runtime_port" =~ ^[1-9][0-9]*$ ]]; then
+            echo \
+              "runtime_port must be a positive integer for reconcile." \
+              >&2
+            exit 1
+          fi
+          if [ "$runtime_port" -gt 65535 ]; then
+            echo "runtime_port must be <= 65535 for reconcile-compose-domain." \
+              >&2
             exit 1
           fi
 
