@@ -567,9 +567,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
         self.assertIn("repository: ${{ steps.source.outputs.repository }}", workflow_text)
         self.assertIn("ref: ${{ steps.source.outputs.source_git_ref }}", workflow_text)
-        self.assertIn("token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}", workflow_text)
+        self.assertIn(
+            "token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
+            workflow_text,
+        )
         self.assertIn(
             "inputs.source_git_ref=${{ steps.source.outputs.source_git_ref }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
             workflow_text,
         )
         self.assertIn("CONTEXT_NAME: ${{ inputs.context }}", workflow_text)

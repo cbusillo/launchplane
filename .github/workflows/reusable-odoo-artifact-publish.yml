@@ -185,7 +185,7 @@ jobs:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.source_git_ref }}
           path: tenant
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
           persist-credentials: false
 
       - name: Checkout devkit repo
@@ -193,7 +193,7 @@ jobs:
         with:
           repository: cbusillo/odoo-devkit
           path: odoo-devkit
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
           persist-credentials: false
 
       - name: Checkout shared addons repo
@@ -201,7 +201,7 @@ jobs:
         with:
           repository: cbusillo/odoo-shared-addons
           path: odoo-shared-addons
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
           persist-credentials: false
 
       - name: Install uv
@@ -296,7 +296,8 @@ jobs:
           GHCR_USERNAME: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          ODOO_SOURCE_GITHUB_TOKEN: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}
+          ODOO_SOURCE_GITHUB_TOKEN: >-
+            ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
           CONTEXT_NAME: ${{ inputs.context }}
           PUBLISH_INPUTS_FILE: >-
             ${{ steps.publish_inputs_file.outputs.inputs_file }}
