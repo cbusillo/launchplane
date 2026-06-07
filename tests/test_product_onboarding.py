@@ -547,7 +547,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
 
         self.assertIn("workflow_call", workflow_text)
+        self.assertIn("workflow_dispatch:", workflow_text)
         self.assertIn("product:", workflow_text)
+        self.assertIn("product_repository:", workflow_text)
+        self.assertIn("source_git_ref:", workflow_text)
+        self.assertIn("PUBLISH LAUNCHPLANE ODOO ARTIFACT", workflow_text)
         self.assertIn('product="odoo-tenant-${CONTEXT_NAME}"', workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish", workflow_text)
@@ -561,8 +565,15 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("${{ steps.product.outputs.publish_idempotency_key }}", workflow_text)
         self.assertIn("fail-result-paths: result.input_status", workflow_text)
         self.assertIn("fail-result-paths: result.status,result.publish_status", workflow_text)
+        self.assertIn("repository: ${{ steps.source.outputs.repository }}", workflow_text)
+        self.assertIn("ref: ${{ steps.source.outputs.source_git_ref }}", workflow_text)
         self.assertIn("token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN }}", workflow_text)
-        self.assertIn("inputs.source_git_ref=${{ github.sha }}", workflow_text)
+        self.assertIn(
+            "inputs.source_git_ref=${{ steps.source.outputs.source_git_ref }}",
+            workflow_text,
+        )
+        self.assertIn("CONTEXT_NAME: ${{ inputs.context }}", workflow_text)
+        self.assertIn('output_file="$RUNNER_TEMP/${CONTEXT_NAME}-artifact.json"', workflow_text)
         self.assertIn(
             "RESOLVED_IMAGE_REPOSITORY: >-\n"
             "            ${{ steps.publish_inputs.outputs.image_repository }}",

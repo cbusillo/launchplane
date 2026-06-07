@@ -195,6 +195,15 @@ read the Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and
 derive the GitHub OIDC audience from that URL host unless the caller passes an
 explicit `launchplane_audience` input.
 
+When a product repo does not have an eligible self-hosted runner lane, operators
+may dispatch `reusable-odoo-artifact-publish.yml` directly from Launchplane with
+an explicit `product_repository`, `source_git_ref`, product, context, instance,
+and confirmation phrase. That path checks out the product source on a
+Launchplane-owned runner and uses Launchplane-owned publish/source secrets, while
+still sending the same Odoo driver requests and recording the artifact through
+Launchplane. It is an operator execution path, not a reason for product repos to
+own provider runtime state or duplicate Launchplane request wiring.
+
 Odoo testing deploys follow the same ownership shape. Tenant repos own the
 manual dispatch confirmation and pass an explicit stored `artifact_id` plus
 `source_git_ref` into `reusable-odoo-testing-deploy.yml`; the reusable workflow
