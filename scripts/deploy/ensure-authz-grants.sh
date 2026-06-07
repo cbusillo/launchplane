@@ -546,6 +546,20 @@ post_local_owner_grant \
 	public_ingress_notification_policy.apply \
 	deploy:local-operator-public-ingress-notification-policy-grant \
 	local-operator-public-ingress-notification-policy
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
+	edge_endpoint.apply \
+	deploy:local-operator-edge-endpoint-apply-grant \
+	local-operator-edge-endpoint-apply
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
+	edge_endpoint.read \
+	deploy:local-operator-edge-endpoint-read-grant \
+	local-operator-edge-endpoint-read
 post_local_operator_product_config_grants \
 	product_config.plan \
 	deploy:local-operator-product-config-plan-grant \

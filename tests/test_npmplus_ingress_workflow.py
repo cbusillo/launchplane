@@ -302,6 +302,10 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
             route.identity_access.provider if route.identity_access else "", "authentik"
         )
 
+    def test_edge_endpoint_key_rejects_raw_forward_host_conflict(self) -> None:
+        with self.assertRaises(ValueError):
+            _desired_route(edge_endpoint_key="cm-prod-dokploy")
+
     def test_identity_access_binding_maps_authentik_basic_auth_forwarding(self) -> None:
         route = _desired_route(
             identity_access={

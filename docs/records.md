@@ -212,6 +212,13 @@ an ORM column/table or remains only in the evidence payload.
   payload-only until route ownership gets a broader operator UI. Apply requests
   first write a `pending` audit intent before provider mutation and then replace
   it with the final `applied` or `unchanged` outcome.
+- Edge endpoint: modeled fields are `endpoint_key`, `provider`, `server_name`,
+  `upstream_host`, `upstream_scheme`, `upstream_port`, `status`, and
+  `updated_at`. `endpoint_key` and `server_name` are human-facing operator
+  identity. `upstream_host` is the provider data-plane value and must be an IP
+  address for NPMplus-backed routes so a bad hostname cannot become a runtime
+  Nginx startup dependency. Product repositories must not own provider topology,
+  edge IPs, NPMplus host ids, or Dokploy server routing facts.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

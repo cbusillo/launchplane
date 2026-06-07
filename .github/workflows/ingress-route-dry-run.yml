@@ -17,8 +17,14 @@ name: Ingress Route Dry Run
         required: true
         type: string
       forward_host:
-        description: Upstream host for the desired provider route.
-        required: true
+        description: Raw upstream host override for the desired provider route.
+        required: false
+        default: ""
+        type: string
+      edge_endpoint_key:
+        description: DB-backed edge endpoint key used to resolve upstream IP.
+        required: false
+        default: ""
         type: string
       forward_port:
         description: Upstream port for the desired provider route.
@@ -83,6 +89,7 @@ jobs:
           EXPECTED_HOST_ID: ${{ inputs.expected_host_id }}
           FORWARD_SCHEME: ${{ inputs.forward_scheme }}
           FORWARD_HOST: ${{ inputs.forward_host }}
+          EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}
           FORWARD_PORT: ${{ inputs.forward_port }}
           CERTIFICATE_ID: ${{ inputs.certificate_id }}
           ROUTE_OPTIONS_JSON: ${{ inputs.route_options_json }}
@@ -96,6 +103,7 @@ jobs:
             --arg reason "$REASON" \
             --arg forward_scheme "$FORWARD_SCHEME" \
             --arg forward_host "$FORWARD_HOST" \
+            --arg edge_endpoint_key "$EDGE_ENDPOINT_KEY" \
             --arg route_options_json "$ROUTE_OPTIONS_JSON" \
             --arg expected_host_id "$EXPECTED_HOST_ID" \
             --argjson forward_port "$FORWARD_PORT" \
@@ -115,6 +123,16 @@ jobs:
               if $options | has($key) then $options[$key] else $default end;
             if ($options | type) != "object" then
               error("route_options_json must be a JSON object")
+            elif (
+              ($forward_host | length) == 0
+              and ($edge_endpoint_key | length) == 0
+            ) then
+              error("forward_host or edge_endpoint_key is required")
+            elif (
+              ($forward_host | length) != 0
+              and ($edge_endpoint_key | length) != 0
+            ) then
+              error("forward_host and edge_endpoint_key are mutually exclusive")
             elif (
               $expected_host_id_value != null
               and ($expected_host_id_value | type) != "number"
@@ -161,6 +179,7 @@ jobs:
               domain_names: [$domain],
               forward_scheme: $forward_scheme,
               forward_host: $forward_host,
+              edge_endpoint_key: $edge_endpoint_key,
               forward_port: $forward_port,
               certificate_id: $certificate_id,
               enabled: true,

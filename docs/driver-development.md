@@ -177,6 +177,15 @@ overrides.
 Ingress audit records must persist the adapter's provider identity explicitly;
 do not rely on a provider-specific model default for operator evidence.
 
+Dokploy-backed ingress routes should use a DB-backed edge endpoint record instead
+of passing raw upstream topology through product workflows. The endpoint record
+uses a human-friendly `endpoint_key` and `server_name` for operator review, but
+the `upstream_host` stored for NPMplus must be an IP address. The service
+resolves `route.edge_endpoint_key` into `forward_scheme`, `forward_host`, and
+`forward_port` before calling NPMplus, and fails closed when the endpoint is
+missing or disabled. Raw `forward_host` remains an explicit operator override;
+it is not product-repo-owned topology authority.
+
 The matching CLI entrypoint is service-mediated:
 
 ```bash

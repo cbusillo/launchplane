@@ -13,6 +13,7 @@ from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import (
@@ -567,6 +568,37 @@ class FilesystemRecordStore:
 
     def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> Path:
         return self._write_model("launchplane_ingress_route_audits", record.record_id, record)
+
+    def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> Path:
+        return self._write_model("launchplane_edge_endpoints", record.endpoint_key, record)
+
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord:
+        return self._read_model(
+            EdgeEndpointRecord,
+            "launchplane_edge_endpoints",
+            endpoint_key,
+        )
+
+    def list_edge_endpoint_records(
+        self,
+        *,
+        provider: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EdgeEndpointRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EdgeEndpointRecord,
+                "launchplane_edge_endpoints",
+            )
+            if (not provider or record.provider == provider)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.provider, record.endpoint_key))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_ingress_route_audit_record(self, record_id: str) -> IngressRouteAuditRecord:
         return self._read_model(
