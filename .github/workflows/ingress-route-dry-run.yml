@@ -29,9 +29,10 @@ name: Ingress Route Dry Run
         required: true
         type: number
       expected_host_id:
-        description: Existing provider host id that must own the domain.
-        required: true
-        type: number
+        description: Optional existing provider host id that must own the domain.
+        required: false
+        default: ""
+        type: string
       reason:
         description: Operator reason recorded with the Launchplane request.
         required: true
@@ -69,6 +70,8 @@ jobs:
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
     steps:
+      - uses: actions/checkout@v6
+
       - name: Build ingress route dry run payload
         id: payload
         shell: bash
@@ -94,14 +97,29 @@ jobs:
             --arg forward_scheme "$FORWARD_SCHEME" \
             --arg forward_host "$FORWARD_HOST" \
             --arg route_options_json "$ROUTE_OPTIONS_JSON" \
-            --argjson expected_host_id "$EXPECTED_HOST_ID" \
+            --arg expected_host_id "$EXPECTED_HOST_ID" \
             --argjson forward_port "$FORWARD_PORT" \
             --argjson certificate_id "$CERTIFICATE_ID" \
             '($route_options_json | fromjson) as $options |
+            ($expected_host_id |
+              if . == "" then
+                null
+              elif . == "null" then
+                error("expected_host_id must be blank or a JSON number")
+              else
+                try fromjson catch error(
+                  "expected_host_id must be a JSON number when provided"
+                )
+              end) as $expected_host_id_value |
             def option($key; $default):
               if $options | has($key) then $options[$key] else $default end;
             if ($options | type) != "object" then
               error("route_options_json must be a JSON object")
+            elif (
+              $expected_host_id_value != null
+              and ($expected_host_id_value | type) != "number"
+            ) then
+              error("expected_host_id must be a number when provided")
             elif ([
               $options
               | keys[]
@@ -159,7 +177,7 @@ jobs:
               ingress: {
                 schema_version: 1,
                 mode: "dry-run",
-                expected_host_id: $expected_host_id,
+                expected_host_id: $expected_host_id_value,
                 require_exact_expected_host_domains: option("require_exact_expected_host_domains"; false),
                 allow_create: option("allow_create"; true),
                 allow_update: option("allow_update"; true),
@@ -173,7 +191,7 @@ jobs:
 
       - name: Request ingress route dry run
         id: launchplane
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+        uses: ./.github/actions/launchplane-request
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           method: POST
@@ -185,6 +203,10 @@ jobs:
 
       - name: Summarize dry run
         shell: bash
+        env:
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          DOMAIN: ${{ inputs.domain }}
         run: |
           set -euo pipefail
           result_file="ingress-route-dry-run.json"
@@ -192,9 +214,9 @@ jobs:
           {
             echo '## Ingress route dry run'
             echo
-            echo "- Product: ${{ inputs.product }}"
-            echo "- Context: ${{ inputs.context }}"
-            echo "- Domain: ${{ inputs.domain }}"
+            echo "- Product: $PRODUCT"
+            echo "- Context: $CONTEXT"
+            echo "- Domain: $DOMAIN"
             echo "- Status: $(jq -r '.result.status' "$result_file")"
             echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
             echo

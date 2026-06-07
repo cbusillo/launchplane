@@ -231,6 +231,14 @@ can carry NPMplus `locations` inside `route_json.route`. Use it for
 product-specific path routing only after the dry-run plan is reviewed and the
 target product/context has an `ingress_route.apply` grant.
 
+The `Ingress Route Dry Run` workflow can discover the existing provider host for
+a domain before an apply. Leave `expected_host_id` blank to ask Launchplane to
+match by requested domain without mutation; pass `expected_host_id` after review
+when you want the dry-run or apply to fail closed unless that specific provider
+host owns the domain. Keep `require_exact_expected_host_domains` disabled during
+initial discovery, then enable it for reviewed update-only applies when exact
+domain ownership is known.
+
 The `Ingress Route Canary Apply` workflow is the matching apply proof path. It
 uses the same canary-scoped product/context grant, reads the expected provider
 host id and canary route tuple from repository variables, and requires an explicit

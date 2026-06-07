@@ -707,14 +707,41 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         self.assertIn('($options | type) != "object"', workflow_text)
         self.assertIn('error("route_options_json must be a JSON object")', workflow_text)
+        self.assertIn("expected_host_id:", workflow_text)
+        self.assertIn("Optional existing provider host id", workflow_text)
+        self.assertIn("EXPECTED_HOST_ID: ${{ inputs.expected_host_id }}", workflow_text)
+        self.assertIn("--arg expected_host_id \"$EXPECTED_HOST_ID\"", workflow_text)
+        self.assertIn('if . == "" then', workflow_text)
+        self.assertIn('elif . == "null" then', workflow_text)
+        self.assertIn(
+            'error("expected_host_id must be blank or a JSON number")',
+            workflow_text,
+        )
+        self.assertIn("expected_host_id: $expected_host_id_value", workflow_text)
+        self.assertIn(
+            'error("expected_host_id must be a number when provided")',
+            workflow_text,
+        )
         self.assertIn(
             'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertEqual(inputs_section.count("        description:"), 10)
+        self.assertIn('default: ""', inputs_section)
         self.assertNotIn("identity_access_provider:", inputs_section)
         self.assertNotIn("identity_access_send_basic_auth:", inputs_section)
+        self.assertIn("uses: actions/checkout@v6", workflow_text)
+        self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
+        self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
+        self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)
+        self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
+        self.assertIn('echo "- Product: $PRODUCT"', workflow_text)
+        self.assertIn('echo "- Context: $CONTEXT"', workflow_text)
+        self.assertIn('echo "- Domain: $DOMAIN"', workflow_text)
+        self.assertNotIn('echo "- Product: ${{ inputs.product }}"', workflow_text)
+        self.assertNotIn('echo "- Context: ${{ inputs.context }}"', workflow_text)
+        self.assertNotIn('echo "- Domain: ${{ inputs.domain }}"', workflow_text)
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertIn(
             "npmplus_noindex: false",
