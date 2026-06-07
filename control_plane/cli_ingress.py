@@ -114,7 +114,11 @@ def ingress() -> None:
     default=False,
     help="Use the Authentik basic-auth forwarding mode for the identity/access binding.",
 )
-@click.option("--advanced-config", default="")
+@click.option(
+    "--advanced-config",
+    default=None,
+    help="NPMplus advanced nginx config. Omit to preserve an existing host value.",
+)
 @click.option("--allow-create/--no-allow-create", default=True, show_default=True)
 @click.option("--allow-update/--no-allow-update", default=True, show_default=True)
 @click.option("--allow-enable-disable/--no-allow-enable-disable", default=True, show_default=True)
@@ -143,7 +147,7 @@ def ingress_route_apply(
     auth_request: str,
     identity_access_provider: str,
     identity_access_send_basic_auth: bool,
-    advanced_config: str,
+    advanced_config: str | None,
     allow_create: bool,
     allow_update: bool,
     allow_enable_disable: bool,
@@ -216,7 +220,7 @@ def _route_apply_payload(
     auth_request: str,
     identity_access_provider: str,
     identity_access_send_basic_auth: bool,
-    advanced_config: str,
+    advanced_config: str | None,
     allow_create: bool,
     allow_update: bool,
     allow_enable_disable: bool,
@@ -254,9 +258,10 @@ def _route_apply_payload(
         "access_list_id": access_list_id,
         "npmplus_noindex": npmplus_noindex,
         "npmplus_auth_request": auth_request,
-        "advanced_config": advanced_config,
         "enabled": enabled,
     }
+    if advanced_config is not None:
+        route["advanced_config"] = advanced_config
     if identity_access:
         route["identity_access"] = identity_access
     if forward_port is not None:

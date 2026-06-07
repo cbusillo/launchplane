@@ -77,7 +77,7 @@ def _request(
     return NpmplusIngressApplyRequest.model_validate(
         {
             "mode": mode,
-            "route": (route or _desired_route()).model_dump(mode="json"),
+            "route": (route or _desired_route()).model_dump(mode="json", exclude_unset=True),
             "reason": "test ingress workflow",
             **overrides,
         }
@@ -177,6 +177,72 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
         self.assertEqual(result.operations[0].change_categories, ())
         self.assertEqual(client.calls, ["list"])
+
+    def test_omitted_advanced_config_preserves_existing_proxy_host_value(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(advanced_config="# odoo config"),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply"),
+        )
+
+        self.assertEqual(result.status, "unchanged")
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("no-op",))
+        self.assertEqual(
+            result.proxy_host.advanced_config if result.proxy_host else "",
+            "# odoo config",
+        )
+        self.assertEqual(client.calls, ["list"])
+
+    def test_omitted_advanced_config_preserves_existing_value_during_update(self) -> None:
+        client = _FakeNpmplusClient(
+            (_proxy_host(advanced_config="# odoo config", forward_port=8080),)
+        )
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply"),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("upstream",))
+        self.assertEqual(
+            result.proxy_host.advanced_config if result.proxy_host else "",
+            "# odoo config",
+        )
+        self.assertEqual(client.calls, ["list", "update:78"])
+
+    def test_explicit_empty_advanced_config_clears_existing_proxy_host_value(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(advanced_config="# odoo config"),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(mode="apply", route=_desired_route(advanced_config="")),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("provider_options",))
+        self.assertEqual(result.proxy_host.advanced_config if result.proxy_host else None, "")
+        self.assertEqual(client.calls, ["list", "update:78"])
+
+    def test_explicit_advanced_config_replaces_existing_proxy_host_value(self) -> None:
+        client = _FakeNpmplusClient((_proxy_host(advanced_config="# odoo config"),))
+
+        result = apply_npmplus_ingress_route(
+            client=client,
+            request=_request(
+                mode="apply",
+                route=_desired_route(advanced_config="# replacement config"),
+            ),
+        )
+
+        self.assertEqual(tuple(operation.action for operation in result.operations), ("update",))
+        self.assertEqual(result.operations[0].change_categories, ("provider_options",))
+        self.assertEqual(
+            result.proxy_host.advanced_config if result.proxy_host else "",
+            "# replacement config",
+        )
+        self.assertEqual(client.calls, ["list", "update:78"])
 
     def test_noop_ignores_api_assigned_location_ids(self) -> None:
         route = _desired_route(locations=[_location()])
