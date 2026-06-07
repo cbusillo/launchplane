@@ -1,6 +1,10 @@
 {
   "defaultBranch": "main",
   "projectType": "control-plane",
+  "pullRequests": {
+    "preferredMergeMethod": "merge",
+    "allowedMergeMethods": ["merge"]
+  },
   "docs": {
     "index": "docs/README.md",
     "architecture": "docs/architecture.md",
@@ -69,6 +73,7 @@
     "CodeQL",
     "Deploy Launchplane",
     "Ingress Route Canary Apply",
+    "Ingress Route Apply",
     "Ingress Route Audit Read",
     "Ingress Route Dry Run",
     "Live Target Runtime",
