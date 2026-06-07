@@ -488,6 +488,16 @@ post_grant \
 	dokploy_target.setup \
 	deploy:dokploy-target-setup-grant \
 	dokploy-target-setup
+post_launchplane_service_grant \
+	edge-endpoint-apply.yml \
+	edge_endpoint.apply \
+	deploy:edge-endpoint-apply-workflow-grant \
+	edge-endpoint-apply-workflow
+post_launchplane_service_grant \
+	edge-endpoint-apply.yml \
+	edge_endpoint.read \
+	deploy:edge-endpoint-read-workflow-grant \
+	edge-endpoint-read-workflow
 post_terminal_agent_grant \
 	launchplane \
 	launchplane \
