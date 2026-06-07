@@ -129,6 +129,9 @@ jobs:
 
       - name: Summarize apply
         shell: bash
+        env:
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
         run: |
           set -euo pipefail
           result_file="ingress-route-apply.json"
@@ -136,8 +139,8 @@ jobs:
           {
             echo '## Ingress route apply'
             echo
-            echo "- Product: ${{ inputs.product }}"
-            echo "- Context: ${{ inputs.context }}"
+            echo "- Product: $PRODUCT"
+            echo "- Context: $CONTEXT"
             echo "- Status: $(jq -r '.result.status' "$result_file")"
             echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
             echo

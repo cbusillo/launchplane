@@ -812,6 +812,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("allow_enable_disable: option(\"allow_enable_disable\"; false)", workflow_text)
         self.assertIn("uses: ./.github/actions/launchplane-request", workflow_text)
         self.assertIn("route-path: /v1/drivers/ingress/route-apply", workflow_text)
+        self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
+        self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)
+        self.assertIn('echo "- Product: $PRODUCT"', workflow_text)
+        self.assertIn('echo "- Context: $CONTEXT"', workflow_text)
+        self.assertNotIn('echo "- Product: ${{ inputs.product }}"', workflow_text)
+        self.assertNotIn('echo "- Context: ${{ inputs.context }}"', workflow_text)
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertEqual(inputs_section.count("        description:"), 6)
 
