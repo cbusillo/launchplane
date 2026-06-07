@@ -92,6 +92,20 @@ values. Use `--project-name`, `--target-name`, `--domain`, and
 `--healthcheck-path` when the provider payload does not expose enough redacted
 metadata for the record.
 
+For shared or production live mutations, use the manual `Dokploy Target Setup`
+workflow instead of local CLI commands. The workflow calls the deployed
+Launchplane service route `POST /v1/dokploy-targets/setup` with GitHub OIDC,
+supports dry-run and apply modes, and writes the Dokploy target, target-id, and
+provider-target records through Launchplane storage. `create-compose` is the
+stable Odoo setup path when no Dokploy compose target exists yet; provide the
+Dokploy project/environment or project name, server id, target name, optional
+domain hosts, runtime port, and an operator reason before applying. Runtime port
+is used only for `create-compose` domain reconciliation and requires at least
+one domain. If a provider create succeeds but the follow-up Launchplane record
+write fails, note the created Dokploy compose/application id from the workflow
+logs and re-run the workflow with `operation=adopt` for the same
+context/instance instead of creating another target.
+
 When the Dokploy application does not exist yet, let Launchplane plan and apply
 the provider mutation so the app id is captured in records immediately:
 

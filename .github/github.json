@@ -72,6 +72,7 @@
     "Security",
     "CodeQL",
     "Deploy Launchplane",
+    "Dokploy Target Setup",
     "Ingress Route Canary Apply",
     "Ingress Route Apply",
     "Ingress Route Audit Read",

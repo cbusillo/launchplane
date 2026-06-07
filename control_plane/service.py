@@ -396,6 +396,14 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
 )
+from control_plane.workflows.dokploy_target_adoption import (
+    DokployComposeTargetCreateResult,
+    DokployTargetAdoptionResult,
+    DokployTargetCreateResult,
+    adopt_dokploy_target,
+    create_dokploy_application_target,
+    create_dokploy_compose_target,
+)
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
@@ -2088,6 +2096,83 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         return self
 
 
+class DokployTargetSetupEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    operation: Literal["adopt", "create-application", "create-compose"]
+    product: str = "launchplane"
+    context: str
+    instance: str
+    target_type: Literal["application", "compose"] = "compose"
+    target_id: str = ""
+    target_name: str = ""
+    project_id: str = ""
+    project_name: str = ""
+    project_description: str = ""
+    environment_id: str = ""
+    environment_name: str = ""
+    environment_description: str = ""
+    server_id: str = ""
+    app_name: str = ""
+    description: str = ""
+    source_git_ref: str = "origin/main"
+    source_type: str = "raw"
+    compose_path: str = "docker-compose.yml"
+    healthcheck_path: str = ""
+    domains: tuple[str, ...] = ()
+    runtime_port: int | None = Field(default=None, ge=1, le=65535)
+    deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    confirmation: str = ""
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_setup(self) -> "DokployTargetSetupEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Dokploy target setup requires product 'launchplane'.")
+        self.product = "launchplane"
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        self.target_id = self.target_id.strip()
+        self.target_name = self.target_name.strip()
+        self.project_id = self.project_id.strip()
+        self.project_name = self.project_name.strip()
+        self.environment_id = self.environment_id.strip()
+        self.environment_name = self.environment_name.strip()
+        self.server_id = self.server_id.strip()
+        self.app_name = self.app_name.strip()
+        self.source_git_ref = self.source_git_ref.strip() or "origin/main"
+        self.source_type = self.source_type.strip() or "raw"
+        self.compose_path = self.compose_path.strip() or "docker-compose.yml"
+        self.healthcheck_path = self.healthcheck_path.strip()
+        self.confirmation = self.confirmation.strip()
+        self.reason = self.reason.strip()
+        self.domains = tuple(domain.strip() for domain in self.domains if domain.strip())
+        if not self.context:
+            raise ValueError("Dokploy target setup requires context.")
+        if not self.instance:
+            raise ValueError("Dokploy target setup requires instance.")
+        if self.operation == "adopt" and not self.target_id:
+            raise ValueError("Dokploy target adoption requires target_id.")
+        if self.operation == "create-application" and not self.target_name:
+            raise ValueError("Dokploy application target creation requires target_name.")
+        if self.operation == "create-compose":
+            if not self.target_name:
+                raise ValueError("Dokploy compose target creation requires target_name.")
+            if not self.server_id:
+                raise ValueError("Dokploy compose target creation requires server_id.")
+        if self.runtime_port is not None and self.operation != "create-compose":
+            raise ValueError(
+                "Dokploy target setup runtime_port is only supported for create-compose."
+            )
+        if self.runtime_port is not None and not self.domains:
+            raise ValueError("Dokploy target setup runtime_port requires at least one domain.")
+        if self.healthcheck_path and not self.healthcheck_path.startswith("/"):
+            raise ValueError("Dokploy target setup healthcheck_path must start with /.")
+        return self
+
+
 class LiveTargetRuntimeApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2326,6 +2411,161 @@ def _handle_odoo_artifact_publish_inputs(
         product_profile=resolved_context.profile,
     )
     return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
+
+
+def _mutate_dokploy_payload_for_target_setup(
+    host: str,
+    token: str,
+    path: str,
+    payload: dict[str, control_plane_dokploy.JsonValue],
+) -> dict[str, control_plane_dokploy.JsonValue]:
+    response = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path=path,
+        method="POST",
+        payload=payload,
+    )
+    response_object = control_plane_dokploy.as_json_object(response)
+    if response_object is None:
+        raise click.ClickException(f"Dokploy API POST {path} returned an invalid response.")
+    return response_object
+
+
+def _fetch_dokploy_target_payload_for_setup(
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+) -> dict[str, control_plane_dokploy.JsonValue]:
+    return control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+
+def _dokploy_target_setup_result_payload(
+    result: BaseModel,
+) -> dict[str, object]:
+    payload = result.model_dump(mode="json")
+    record = payload.get("target_record")
+    if isinstance(record, dict):
+        env_payload = record.pop("env", None)
+        if isinstance(env_payload, dict):
+            record["env_keys"] = sorted(str(key) for key in env_payload)
+            record["env_value_count"] = len(env_payload)
+    return payload
+
+
+def _execute_dokploy_target_setup(
+    *,
+    control_plane_root_path: Path,
+    record_store: PostgresRecordStore,
+    request: DokployTargetSetupEnvelope,
+) -> dict[str, object]:
+    apply_changes = request.mode == "apply"
+    host, token = control_plane_dokploy.read_dokploy_config(
+        control_plane_root=control_plane_root_path
+    )
+    result: (
+        DokployTargetAdoptionResult | DokployTargetCreateResult | DokployComposeTargetCreateResult
+    )
+    if request.operation == "adopt":
+        result = adopt_dokploy_target(
+            record_store=record_store,
+            host=host,
+            token=token,
+            context=request.context,
+            instance=request.instance,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            project_name=request.project_name,
+            target_name=request.target_name,
+            source_git_ref=request.source_git_ref,
+            healthcheck_path=request.healthcheck_path,
+            domains=request.domains,
+            deploy_timeout_seconds=request.deploy_timeout_seconds,
+            source_label="service:dokploy-targets:setup:adopt",
+            apply=apply_changes,
+            fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
+        )
+    elif request.operation == "create-application":
+        result = create_dokploy_application_target(
+            record_store=record_store,
+            host=host,
+            token=token,
+            context=request.context,
+            instance=request.instance,
+            target_name=request.target_name,
+            project_id=request.project_id,
+            project_name=request.project_name,
+            project_description=request.project_description,
+            environment_id=request.environment_id,
+            environment_name=request.environment_name,
+            environment_description=request.environment_description,
+            server_id=request.server_id,
+            app_name=request.app_name,
+            application_description=request.description,
+            source_git_ref=request.source_git_ref,
+            healthcheck_path=request.healthcheck_path,
+            domains=request.domains,
+            deploy_timeout_seconds=request.deploy_timeout_seconds,
+            source_label="service:dokploy-targets:setup:create-application",
+            apply=apply_changes,
+            mutate_provider=_mutate_dokploy_payload_for_target_setup,
+            fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
+        )
+    else:
+        result = create_dokploy_compose_target(
+            record_store=record_store,
+            host=host,
+            token=token,
+            context=request.context,
+            instance=request.instance,
+            target_name=request.target_name,
+            project_id=request.project_id,
+            project_name=request.project_name,
+            project_description=request.project_description,
+            environment_id=request.environment_id,
+            environment_name=request.environment_name,
+            environment_description=request.environment_description,
+            server_id=request.server_id,
+            app_name=request.app_name,
+            compose_description=request.description,
+            source_git_ref=request.source_git_ref,
+            source_type=request.source_type,
+            compose_path=request.compose_path,
+            healthcheck_path=request.healthcheck_path,
+            domains=request.domains,
+            deploy_timeout_seconds=request.deploy_timeout_seconds,
+            source_label="service:dokploy-targets:setup:create-compose",
+            apply=apply_changes,
+            mutate_provider=_mutate_dokploy_payload_for_target_setup,
+            fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
+        )
+    route_domain_ids: list[str] = []
+    if apply_changes and request.operation == "create-compose" and request.runtime_port:
+        for domain in request.domains:
+            route_domain_ids.append(
+                control_plane_dokploy.ensure_compose_web_domain_route(
+                    host=host,
+                    token=token,
+                    compose_id=result.target_id_record.target_id,
+                    domain_host=domain,
+                    runtime_port=request.runtime_port,
+                )
+            )
+    return {
+        "mode": request.mode,
+        "operation": request.operation,
+        "context": request.context,
+        "instance": request.instance,
+        "applied": apply_changes,
+        "route_domain_ids": route_domain_ids,
+        "setup": _dokploy_target_setup_result_payload(result),
+    }
 
 
 def _handle_odoo_prod_promotion_inputs(
@@ -4105,6 +4345,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
+        "/v1/dokploy-targets/setup",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
@@ -13159,6 +13400,113 @@ def create_launchplane_service_app(
                         onboarding_result
                     )
                 )
+            elif path == "/v1/dokploy-targets/setup":
+                setup_request = DokployTargetSetupEnvelope.model_validate(payload)
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Dokploy target setup requires Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="dokploy_target.setup",
+                    product=setup_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot run Launchplane Dokploy target setup.",
+                            },
+                        },
+                    )
+                if setup_request.mode == "apply":
+                    if setup_request.confirmation != "APPLY DOKPLOY TARGET SETUP":
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "confirmation_required",
+                                    "message": "Dokploy target setup apply requires exact confirmation text.",
+                                },
+                            },
+                        )
+                    if not setup_request.reason:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "reason_required",
+                                    "message": "Dokploy target setup apply requires a reason.",
+                                },
+                            },
+                        )
+                    if not request_idempotency_key:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_required",
+                                    "message": "Dokploy target setup apply requires an Idempotency-Key header.",
+                                },
+                            },
+                        )
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    result = _execute_dokploy_target_setup(
+                        control_plane_root_path=resolved_root,
+                        record_store=record_store,
+                        request=setup_request,
+                    )
+                except ValueError as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_dokploy_target_setup",
+                                "message": str(error),
+                            },
+                        },
+                    )
+                driver_result = {
+                    **result,
+                    "reason": setup_request.reason,
+                }
             elif path == PROVIDER_TARGET_OPERATIONS_ROUTE:
                 provider_target_request = ProviderTargetOperationEnvelope.model_validate(payload)
                 if not isinstance(record_store, PostgresRecordStore):

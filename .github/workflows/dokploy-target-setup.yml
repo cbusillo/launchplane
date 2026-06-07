@@ -1,0 +1,329 @@
+---
+name: Dokploy Target Setup
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Target setup mode.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      operation:
+        description: Target setup operation.
+        required: true
+        default: create-compose
+        type: choice
+        options:
+          - adopt
+          - create-application
+          - create-compose
+      context:
+        description: Launchplane target context.
+        required: true
+        type: string
+      instance:
+        description: Launchplane target instance.
+        required: true
+        type: string
+      target_type:
+        description: Target type when operation=adopt.
+        required: false
+        default: compose
+        type: choice
+        options:
+          - compose
+          - application
+      target_id:
+        description: Existing Dokploy target id when operation=adopt.
+        required: false
+        default: ""
+        type: string
+      target_name:
+        description: Dokploy target display name.
+        required: false
+        default: ""
+        type: string
+      project_id:
+        description: Existing Dokploy project id.
+        required: false
+        default: ""
+        type: string
+      project_name:
+        description: Dokploy project name to create or record.
+        required: false
+        default: ""
+        type: string
+      environment_id:
+        description: Existing Dokploy environment id.
+        required: false
+        default: ""
+        type: string
+      environment_name:
+        description: Dokploy environment name to create.
+        required: false
+        default: ""
+        type: string
+      server_id:
+        description: Dokploy server id for compose targets.
+        required: false
+        default: ""
+        type: string
+      app_name:
+        description: Optional provider app name.
+        required: false
+        default: ""
+        type: string
+      description:
+        description: Optional provider target description.
+        required: false
+        default: ""
+        type: string
+      source_git_ref:
+        description: Source ref to store in the Launchplane target record.
+        required: false
+        default: origin/main
+        type: string
+      source_type:
+        description: Source type to store for compose targets.
+        required: false
+        default: raw
+        type: string
+      compose_path:
+        description: Compose path to store for compose targets.
+        required: false
+        default: docker-compose.yml
+        type: string
+      domain:
+        description: Optional comma-separated domain hosts to store/reconcile.
+        required: false
+        default: ""
+        type: string
+      runtime_port:
+        description: Optional runtime port for compose domain reconciliation.
+        required: false
+        default: ""
+        type: string
+      healthcheck_path:
+        description: Optional target healthcheck path.
+        required: false
+        default: /web/health
+        type: string
+      deploy_timeout_seconds:
+        description: Optional deploy timeout to store.
+        required: false
+        default: "900"
+        type: string
+      confirmation:
+        description: Type APPLY DOKPLOY TARGET SETUP when mode=apply.
+        required: false
+        default: ""
+        type: string
+      reason:
+        description: Operator reason. Required when mode=apply.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dokploy-target-setup-${{ inputs.context }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MODE: ${{ inputs.mode }}
+      OPERATION: ${{ inputs.operation }}
+      CONTEXT: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      TARGET_TYPE: ${{ inputs.target_type }}
+      TARGET_ID: ${{ inputs.target_id }}
+      TARGET_NAME: ${{ inputs.target_name }}
+      PROJECT_ID: ${{ inputs.project_id }}
+      PROJECT_NAME: ${{ inputs.project_name }}
+      ENVIRONMENT_ID: ${{ inputs.environment_id }}
+      ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+      SERVER_ID: ${{ inputs.server_id }}
+      APP_NAME: ${{ inputs.app_name }}
+      DESCRIPTION: ${{ inputs.description }}
+      SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
+      SOURCE_TYPE: ${{ inputs.source_type }}
+      COMPOSE_PATH: ${{ inputs.compose_path }}
+      DOMAIN: ${{ inputs.domain }}
+      RUNTIME_PORT: ${{ inputs.runtime_port }}
+      HEALTHCHECK_PATH: ${{ inputs.healthcheck_path }}
+      DEPLOY_TIMEOUT_SECONDS: ${{ inputs.deploy_timeout_seconds }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve service endpoint
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          origin="${LAUNCHPLANE_URL%/}"
+          without_scheme="${origin#*://}"
+          audience="${without_scheme%%/*}"
+          audience="${audience%%:*}"
+          if [ -z "$audience" ] || [ "$audience" = "$origin" ]; then
+            echo "LAUNCHPLANE_URL must be an absolute URL." >&2
+            exit 1
+          fi
+          {
+            echo "origin=$origin"
+            echo "audience=$audience"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate apply guard
+        if: env.MODE == 'apply'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "APPLY DOKPLOY TARGET SETUP" ]; then
+            echo "Exact confirmation text is required." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
+            echo "reason is required when mode=apply." >&2
+            exit 1
+          fi
+
+      - name: Request target setup
+        env:
+          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
+          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token value." >&2
+            exit 1
+          fi
+
+          domains_json="$({
+            jq -Rsc '
+              split(",")
+              | map(gsub("^\\s+|\\s+$"; ""))
+              | map(select(length > 0))
+            ' <<< "$DOMAIN"
+          })"
+          payload="$({
+            jq -n \
+              --arg mode "$MODE" \
+              --arg operation "$OPERATION" \
+              --arg context "$CONTEXT" \
+              --arg instance "$INSTANCE" \
+              --arg target_type "$TARGET_TYPE" \
+              --arg target_id "$TARGET_ID" \
+              --arg target_name "$TARGET_NAME" \
+              --arg project_id "$PROJECT_ID" \
+              --arg project_name "$PROJECT_NAME" \
+              --arg environment_id "$ENVIRONMENT_ID" \
+              --arg environment_name "$ENVIRONMENT_NAME" \
+              --arg server_id "$SERVER_ID" \
+              --arg app_name "$APP_NAME" \
+              --arg description "$DESCRIPTION" \
+              --arg source_git_ref "$SOURCE_GIT_REF" \
+              --arg source_type "$SOURCE_TYPE" \
+              --arg compose_path "$COMPOSE_PATH" \
+              --arg healthcheck_path "$HEALTHCHECK_PATH" \
+              --arg confirmation "$CONFIRMATION" \
+              --arg reason "$REASON" \
+              --argjson domains "$domains_json" \
+              '{schema_version:1,
+                mode:$mode,
+                operation:$operation,
+                product:"launchplane",
+                context:$context,
+                instance:$instance,
+                target_type:$target_type,
+                target_id:$target_id,
+                target_name:$target_name,
+                project_id:$project_id,
+                project_name:$project_name,
+                environment_id:$environment_id,
+                environment_name:$environment_name,
+                server_id:$server_id,
+                app_name:$app_name,
+                description:$description,
+                source_git_ref:$source_git_ref,
+                source_type:$source_type,
+                compose_path:$compose_path,
+                healthcheck_path:$healthcheck_path,
+                domains:$domains,
+                confirmation:$confirmation,
+                reason:$reason}'
+          })"
+          if [ -n "$(printf '%s' "$RUNTIME_PORT" | xargs)" ]; then
+            payload="$(
+              jq --argjson runtime_port "$RUNTIME_PORT" \
+                '.runtime_port = $runtime_port' <<< "$payload"
+            )"
+          fi
+          if [ -n "$(printf '%s' "$DEPLOY_TIMEOUT_SECONDS" | xargs)" ]; then
+            payload="$(
+              jq --argjson timeout "$DEPLOY_TIMEOUT_SECONDS" \
+                '.deploy_timeout_seconds = $timeout' <<< "$payload"
+            )"
+          fi
+          idempotency_key="dokploy-target-setup:${OPERATION}:"
+          idempotency_key+="${CONTEXT}:${INSTANCE}:"
+          idempotency_key+="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          status_code="$({
+            curl -sS \
+              -o dokploy-target-setup.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: ${idempotency_key}" \
+              --data "$payload" \
+              "${SERVICE_ORIGIN%/}/v1/dokploy-targets/setup"
+          })"
+          jq . dokploy-target-setup.json
+          if [ "$status_code" != "202" ]; then
+            echo "Dokploy target setup failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+      - name: Upload setup evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dokploy-target-setup-result
+          path: dokploy-target-setup.json
+          if-no-files-found: error
+
+      - name: Summarize setup
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Dokploy target setup"
+            echo
+            echo "- Mode: $MODE"
+            echo "- Operation: $OPERATION"
+            echo "- Route: $CONTEXT/$INSTANCE"
+            echo "- Evidence artifact: dokploy-target-setup-result"
+          } >> "$GITHUB_STEP_SUMMARY"
