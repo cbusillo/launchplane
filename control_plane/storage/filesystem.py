@@ -62,6 +62,7 @@ from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -162,6 +163,15 @@ class FilesystemRecordStore:
         return self._write_model(
             "launchplane_runner_host_hygiene_audits",
             _runner_host_hygiene_audit_record_id(record.audit_record_key),
+            record,
+        )
+
+    def write_runner_lane_registration_audit_record(
+        self, record: RunnerLaneRegistrationAuditRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_runner_lane_registration_audits",
+            _runner_lane_registration_audit_record_id(record.audit_record_key),
             record,
         )
 
@@ -425,6 +435,31 @@ class FilesystemRecordStore:
                 "launchplane_runner_host_hygiene_audits",
             )
             if (not normalized_host_name or record.request.host_name == normalized_host_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: record.audit_record_key, reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def list_runner_lane_registration_audit_records(
+        self,
+        *,
+        repository: str = "",
+        host_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RunnerLaneRegistrationAuditRecord, ...]:
+        normalized_repository = repository.strip().lower()
+        normalized_host_name = host_name.strip().lower()
+        records = [
+            record
+            for record in self._list_models(
+                RunnerLaneRegistrationAuditRecord,
+                "launchplane_runner_lane_registration_audits",
+            )
+            if (not normalized_repository or record.request.repository == normalized_repository)
+            and (not normalized_host_name or record.request.host_name == normalized_host_name)
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: record.audit_record_key, reverse=True)
@@ -1413,6 +1448,11 @@ def _odoo_stable_bootstrap_lane_reservation_id(
 
 
 def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
+    digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
+    return audit_record_key.strip().replace("/", "-") + f"-{digest}"
+
+
+def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
     return audit_record_key.strip().replace("/", "-") + f"-{digest}"
 

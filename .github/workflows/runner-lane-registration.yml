@@ -1,0 +1,168 @@
+---
+name: Runner Lane Registration
+
+"on":
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: owner/name repository to receive the runner lane.
+        required: true
+        type: string
+      lane_name:
+        description: Runner lane name to register.
+        required: true
+        type: string
+      registration_root:
+        description: Approved absolute runner registration root.
+        required: false
+        default: /opt/actions-runners
+        type: string
+      labels:
+        description: Comma-separated runner labels.
+        required: false
+        default: self-hosted,launchplane,launchplane-managed
+        type: string
+      audit_record_key:
+        description: Launchplane audit record key.
+        required: true
+        type: string
+      mutate:
+        description: Register the runner lane.
+        required: true
+        default: false
+        type: boolean
+      confirmation:
+        description: Required text when mutate=true.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    runner-lane-registration-${{ inputs.repository }}-${{ inputs.lane_name }}
+  cancel-in-progress: false
+
+jobs:
+  runner-lane-registration:
+    runs-on:
+      - self-hosted
+      - launchplane
+      - chris-testing-ops-gate
+    env:
+      RUNNER_REGISTRATION_HOST: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
+      RUNNER_REGISTRATION_EXECUTION_LANE: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
+      RUNNER_REGISTRATION_SERVICE_USER: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RUNNER_REGISTRATION_HOST:-}" ]; then
+            echo "Missing runner registration host variable." >&2
+            exit 1
+          fi
+          if [ -z "${RUNNER_REGISTRATION_EXECUTION_LANE:-}" ]; then
+            echo "Missing runner registration execution lane variable." >&2
+            exit 1
+          fi
+          if [ -z "${RUNNER_REGISTRATION_SERVICE_USER:-}" ]; then
+            echo "Missing runner registration service user variable." >&2
+            exit 1
+          fi
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ]; then
+            echo "Missing Launchplane public URL variable." >&2
+            exit 1
+          fi
+          if [ "$(id -un)" != "$RUNNER_REGISTRATION_SERVICE_USER" ]; then
+            echo "Runner must execute as expected service user." >&2
+            exit 1
+          fi
+          if [ "${{ inputs.mutate }}" = "true" ] &&
+            [ "${{ inputs.confirmation }}" != "register runner lane" ]; then
+            echo "mutate=true requires confirmation: register runner lane" >&2
+            exit 1
+          fi
+
+      - name: Read pre-registration inventory
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Missing runner registration GitHub token secret." >&2
+            exit 1
+          fi
+          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
+            runner-inventory \
+            --repository "$TARGET_REPOSITORY" \
+            > runner-lane-registration-pre-inventory.json
+
+      - name: Run runner lane registration executor
+        shell: bash
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          LANE_NAME: ${{ inputs.lane_name }}
+          REGISTRATION_ROOT: ${{ inputs.registration_root }}
+          LABELS: ${{ inputs.labels }}
+          AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
+          GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Missing runner registration GitHub token secret." >&2
+            exit 1
+          fi
+          label_args=()
+          IFS=',' read -r -a labels <<< "$LABELS"
+          for label in "${labels[@]}"; do
+            trimmed="$(xargs <<< "$label")"
+            if [ -n "$trimmed" ]; then
+              label_args+=(--label "$trimmed")
+            fi
+          done
+          mutate_flag=--dry-run
+          if [ "${{ inputs.mutate }}" = "true" ]; then
+            mutate_flag=--mutate
+          fi
+          GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
+            runner-lane-registration-executor \
+            --repository "$TARGET_REPOSITORY" \
+            --host-name "$RUNNER_REGISTRATION_HOST" \
+            --execution-lane "$RUNNER_REGISTRATION_EXECUTION_LANE" \
+            --service-user "$RUNNER_REGISTRATION_SERVICE_USER" \
+            --lane-name "$LANE_NAME" \
+            --registration-root "$REGISTRATION_ROOT" \
+            "${label_args[@]}" \
+            --audit-record-key "$AUDIT_RECORD_KEY" \
+            --allowed-repository "$TARGET_REPOSITORY" \
+            --approved-host "$RUNNER_REGISTRATION_HOST" \
+            --allowed-registration-root "$REGISTRATION_ROOT" \
+            --inventory-file runner-lane-registration-pre-inventory.json \
+            --audit-mode service \
+            --service-url "$LAUNCHPLANE_SERVICE_URL" \
+            "$mutate_flag" \
+            > runner-lane-registration-result.json
+
+      - name: Upload registration result
+        uses: actions/upload-artifact@v7
+        with:
+          name: runner-lane-registration-result
+          path: |
+            runner-lane-registration-pre-inventory.json
+            runner-lane-registration-result.json
+          if-no-files-found: error

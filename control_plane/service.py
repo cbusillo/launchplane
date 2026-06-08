@@ -176,6 +176,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
@@ -922,6 +923,23 @@ class RunnerHostHygieneAuditEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "RunnerHostHygieneAuditEvidenceEnvelope":
         if self.product.strip() != "launchplane":
             raise ValueError("runner host hygiene audit evidence requires product 'launchplane'")
+        self.product = "launchplane"
+        return self
+
+
+class RunnerLaneRegistrationAuditEvidenceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    audit: RunnerLaneRegistrationAuditRecord
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "RunnerLaneRegistrationAuditEvidenceEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError(
+                "runner lane registration audit evidence requires product 'launchplane'"
+            )
         self.product = "launchplane"
         return self
 
@@ -4500,6 +4518,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/runner-host-hygiene/audits",
+        "/v1/evidence/runner-lane-registration/audits",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
@@ -6539,6 +6558,7 @@ def _accepted_payload(
         "odoo_stable_bootstrap_operation_id",
         "odoo_stable_target_replacement_operation_id",
         "runner_host_hygiene_audit_record_key",
+        "runner_lane_registration_audit_record_key",
         "generic_web_rollback_plan_id",
         "public_ingress_notification_policy_id",
         "ingress_route_audit_record_id",
@@ -12704,6 +12724,60 @@ def create_launchplane_service_app(
                     "audit_status": runner_host_hygiene_request.audit.status,
                     "mutate": runner_host_hygiene_request.audit.request.mutate,
                     "audit": runner_host_hygiene_request.audit.model_dump(mode="json"),
+                }
+            elif path == "/v1/evidence/runner-lane-registration/audits":
+                runner_lane_registration_request = (
+                    RunnerLaneRegistrationAuditEvidenceEnvelope.model_validate(payload)
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="runner_lane_registration_audit.write",
+                    product=runner_lane_registration_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write runner lane registration audit evidence."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                record_store.write_runner_lane_registration_audit_record(
+                    runner_lane_registration_request.audit
+                )
+                result = {
+                    "runner_lane_registration_audit_record_key": (
+                        runner_lane_registration_request.audit.audit_record_key
+                    ),
+                }
+                driver_result = {
+                    "runner_lane_registration_audit_record_key": (
+                        runner_lane_registration_request.audit.audit_record_key
+                    ),
+                    "repository": runner_lane_registration_request.audit.request.repository,
+                    "host_name": runner_lane_registration_request.audit.request.host_name,
+                    "lane_name": runner_lane_registration_request.audit.request.lane_name,
+                    "audit_status": runner_lane_registration_request.audit.status,
+                    "mutate": runner_lane_registration_request.audit.request.mutate,
+                    "audit": runner_lane_registration_request.audit.model_dump(mode="json"),
                 }
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (

@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
 from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationTokenRecord
 from control_plane.github_payload import json_object
 from control_plane.github_payload import repository_full_name
 from control_plane.github_payload import required_int
@@ -47,9 +48,7 @@ class GitHubRunnerLaneInventoryReader:
             payload_object = _json_object(payload, "GitHub runner list response")
             runners_payload = payload_object.get("runners")
             if not isinstance(runners_payload, list):
-                raise MergeTrainGitHubError(
-                    "GitHub runner list response must include runners."
-                )
+                raise MergeTrainGitHubError("GitHub runner list response must include runners.")
             page_lanes = tuple(
                 _runner_lane_record(
                     repository=repository_path,
@@ -66,6 +65,41 @@ class GitHubRunnerLaneInventoryReader:
                     lanes=tuple(lanes),
                 )
             page += 1
+
+
+class GitHubRunnerLaneRegistrationTokenFetcher:
+    def __init__(
+        self,
+        *,
+        transport: MergeTrainGitHubTransport,
+        clock: RunnerLaneClock | None = None,
+    ) -> None:
+        self.transport = transport
+        self.clock = clock or SystemRunnerLaneClock()
+
+    def fetch_registration_token(
+        self, *, repository: str
+    ) -> tuple[str, RunnerLaneRegistrationTokenRecord]:
+        repository_path = _repository_path(repository)
+        payload = self.transport.request(
+            method="POST",
+            path=f"/repos/{repository_path}/actions/runners/registration-token",
+        )
+        payload_object = _json_object(payload, "GitHub runner registration token response")
+        token = _required_text(
+            payload_object.get("token"),
+            "GitHub runner registration token response requires token.",
+        )
+        expires_at = _required_text(
+            payload_object.get("expires_at"),
+            "GitHub runner registration token response requires expires_at.",
+        )
+        fetched_at = self.clock.now().isoformat().replace("+00:00", "Z")
+        return token, RunnerLaneRegistrationTokenRecord(
+            repository=repository_path,
+            expires_at=expires_at,
+            fetched_at=fetched_at,
+        )
 
 
 def _runner_lane_record(

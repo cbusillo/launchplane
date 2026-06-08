@@ -183,6 +183,14 @@ generic `docker volume prune`, runner work-directory deletion, runner service
 restart, builder deletion, or automatic rollback. Operators should use the
 captured image and volume inventory to decide any later phase-two cleanup lane.
 
+Runner lane registration uses a separate manual ops-lane workflow,
+`.github/workflows/runner-lane-registration.yml`. It shares the same approved
+host, execution-lane, and service-user variables, but it does not prune Docker
+state or restart existing services. Its first slice registers a repo-scoped
+Actions runner lane under an allowlisted registration root and verifies the lane
+through GitHub inventory. Treat the registration artifact as evidence until the
+service-backed runner-registration audit record is accepted.
+
 ## Host Replacement Runbook
 
 `chris-testing` is no longer just a basic self-hosted runner. It also carries the
