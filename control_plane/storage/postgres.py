@@ -2786,9 +2786,9 @@ class PostgresRecordStore(HumanSessionStore):
         self._write_row(
             LaunchplaneRunnerLaneRegistrationAuditRow(
                 audit_record_key=record.audit_record_key,
-                repository=record.request.repository,
-                host_name=record.request.host_name,
-                lane_name=record.request.lane_name,
+                repository=record.request.repository.strip().lower(),
+                host_name=record.request.host_name.strip().lower(),
+                lane_name=record.request.lane_name.strip().lower(),
                 status=record.status,
                 mutate=int(record.request.mutate),
                 payload=self._payload_dict(record),

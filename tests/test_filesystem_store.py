@@ -234,15 +234,17 @@ def _runner_lane_registration_audit_record(
     audit_record_key: str,
     status: RunnerLaneRegistrationAuditStatus = "planned",
     message: str = "planned runner lane registration; no host mutation was executed",
+    repository: str = "cbusillo/odoo-tenant-cm-website",
+    host_name: str = "chris-testing",
 ) -> RunnerLaneRegistrationAuditRecord:
     inventory = build_runner_lane_inventory(
-        repository="cbusillo/odoo-tenant-cm-website",
+        repository=repository,
         observed_at="2026-06-08T17:30:00Z",
         lanes=(),
     )
     request = RunnerLaneRegistrationRequest(
-        repository="cbusillo/odoo-tenant-cm-website",
-        host_name="chris-testing",
+        repository=repository,
+        host_name=host_name,
         lane_name="cm-website-runner-1",
         registration_root="/opt/actions-runners",
         labels=("self-hosted", "launchplane", "launchplane-managed"),
@@ -442,7 +444,8 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             state_dir = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=state_dir)
             older_record = _runner_lane_registration_audit_record(
-                audit_record_key="runner-lane-registration/2026-06-08/cm-website/old"
+                audit_record_key="runner-lane-registration/2026-06-08/cm-website/old",
+                host_name="Chris-Testing",
             )
             newer_record = _runner_lane_registration_audit_record(
                 audit_record_key="runner-lane-registration/2026-06-09/cm-website/new"

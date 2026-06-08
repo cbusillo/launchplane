@@ -434,7 +434,10 @@ class FilesystemRecordStore:
                 RunnerHostHygieneApplyAuditRecord,
                 "launchplane_runner_host_hygiene_audits",
             )
-            if (not normalized_host_name or record.request.host_name == normalized_host_name)
+            if (
+                not normalized_host_name
+                or record.request.host_name.strip().lower() == normalized_host_name
+            )
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: record.audit_record_key, reverse=True)
@@ -458,8 +461,14 @@ class FilesystemRecordStore:
                 RunnerLaneRegistrationAuditRecord,
                 "launchplane_runner_lane_registration_audits",
             )
-            if (not normalized_repository or record.request.repository == normalized_repository)
-            and (not normalized_host_name or record.request.host_name == normalized_host_name)
+            if (
+                not normalized_repository
+                or record.request.repository.strip().lower() == normalized_repository
+            )
+            and (
+                not normalized_host_name
+                or record.request.host_name.strip().lower() == normalized_host_name
+            )
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: record.audit_record_key, reverse=True)
