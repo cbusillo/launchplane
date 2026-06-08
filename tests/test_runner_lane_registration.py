@@ -197,8 +197,10 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         self.assertEqual(token_fetcher.calls, ["cbusillo/odoo-tenant-cm-website"])
         self.assertEqual(len(command_runner.commands), 1)
         command_text = " ".join(command_runner.commands[0])
+        self.assertIn("actions-runner-linux-${runner_arch}-${runner_version}.tar.gz", command_text)
         self.assertIn("./config.sh", command_text)
-        self.assertIn("--labels 'launchplane,launchplane-managed,self-hosted'", command_text)
+        self.assertIn("nohup ./run.sh", command_text)
+        self.assertIn("--labels launchplane,launchplane-managed,self-hosted", command_text)
         self.assertIn("RUNNER_REGISTRATION_TOKEN", command_runner.envs[0])
         self.assertEqual(command_runner.envs[0]["RUNNER_REGISTRATION_TOKEN"], "secret-token")
         self.assertNotIn("secret-token", command_text)
@@ -279,7 +281,10 @@ def _policy() -> RunnerLaneRegistrationPolicy:
     return RunnerLaneRegistrationPolicy(
         allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
         approved_hosts=("chris-testing",),
-        allowed_registration_roots=("/opt/actions-runners",),
+        allowed_registration_roots=(
+            "/home/launchplane-runner-hygiene/actions-runners",
+            "/opt/actions-runners",
+        ),
     )
 
 
@@ -306,7 +311,7 @@ def _executor_request(*, mutate: bool) -> RunnerLaneRegistrationExecutorRequest:
         execution_lane="chris-testing-ops-gate",
         service_user="launchplane-runner-hygiene",
         lane_name="cm-website-runner-1",
-        registration_root="/opt/actions-runners",
+        registration_root="/home/launchplane-runner-hygiene/actions-runners",
         labels=("self-hosted", "launchplane", "launchplane-managed"),
         mutate=mutate,
         audit_record_key="runner-lane-registration/2026-06-08/cm-website/test",

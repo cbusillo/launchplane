@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 import json
 import os
 import pwd
+import shlex
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -287,19 +288,59 @@ def _audit_route_payload(audit: RunnerLaneRegistrationAuditRecord) -> dict[str, 
 
 def _registration_command(*, request: RunnerLaneRegistrationExecutorRequest) -> tuple[str, ...]:
     runner_directory = f"{request.registration_root}/{request.lane_name}"
+    quoted_runner_directory = shlex.quote(runner_directory)
+    quoted_repository_url = shlex.quote(f"https://github.com/{request.repository}")
+    quoted_lane_name = shlex.quote(request.lane_name)
+    quoted_labels = shlex.quote(",".join(request.labels))
     return (
         "bash",
         "-lc",
         "set -euo pipefail\n"
-        f"mkdir -p {runner_directory!r}\n"
-        f"cd {runner_directory!r}\n"
+        f"mkdir -p {quoted_runner_directory}\n"
+        f"cd {quoted_runner_directory}\n"
+        "if [ ! -x ./config.sh ]; then\n"
+        '  runner_arch="$(uname -m)"\n'
+        '  case "$runner_arch" in\n'
+        "    x86_64|amd64) runner_arch=x64 ;;\n"
+        "    aarch64|arm64) runner_arch=arm64 ;;\n"
+        '    *) echo "unsupported runner architecture: $runner_arch" >&2; exit 1 ;;\n'
+        "  esac\n"
+        '  runner_version="${ACTIONS_RUNNER_VERSION:-}"\n'
+        '  if [ -z "$runner_version" ]; then\n'
+        "    runner_version=\"$(python3 - <<'PY'\n"
+        "import json\n"
+        "import urllib.request\n"
+        "request = urllib.request.Request(\n"
+        "    'https://api.github.com/repos/actions/runner/releases/latest',\n"
+        "    headers={'Accept': 'application/vnd.github+json'},\n"
+        ")\n"
+        "with urllib.request.urlopen(request, timeout=30) as response:\n"
+        "    payload = json.load(response)\n"
+        "print(str(payload['tag_name']).removeprefix('v'))\n"
+        "PY\n"
+        '    )"\n'
+        "  fi\n"
+        '  asset="actions-runner-linux-${runner_arch}-${runner_version}.tar.gz"\n'
+        '  url="https://github.com/actions/runner/releases/download/v${runner_version}/${asset}"\n'
+        '  archive="$(mktemp)"\n'
+        '  curl -fsSL "$url" -o "$archive"\n'
+        '  tar -xzf "$archive"\n'
+        '  rm -f "$archive"\n'
+        "fi\n"
         "test -x ./config.sh\n"
         "./config.sh "
-        f"--url https://github.com/{request.repository} "
+        f"--url {quoted_repository_url} "
         '--token "$RUNNER_REGISTRATION_TOKEN" '
-        f"--name {request.lane_name!r} "
-        f"--labels {','.join(request.labels)!r} "
-        "--unattended --replace",
+        f"--name {quoted_lane_name} "
+        f"--labels {quoted_labels} "
+        "--unattended --replace\n"
+        'if [ -f .runner.pid ] && kill -0 "$(cat .runner.pid)" 2>/dev/null; then\n'
+        "  :\n"
+        "else\n"
+        "  nohup ./run.sh > runner.log 2>&1 &\n"
+        "  echo $! > .runner.pid\n"
+        "fi\n"
+        "sleep 12",
     )
 
 
