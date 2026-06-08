@@ -181,24 +181,31 @@ uv run launchplane work-graph runner-lane-registration-executor \
   --execution-lane chris-testing-ops-gate \
   --service-user launchplane-runner-hygiene \
   --lane-name product-runner-1 \
-  --registration-root /opt/actions-runners \
+  --registration-root /home/launchplane-runner-hygiene/actions-runners \
   --label self-hosted \
   --label launchplane \
   --label launchplane-managed \
   --audit-record-key runner-lane-registration/2026-06-08/product/dry-run \
   --allowed-repository owner/name \
   --approved-host chris-testing \
-  --allowed-registration-root /opt/actions-runners \
+  --allowed-registration-root /home/launchplane-runner-hygiene/actions-runners \
   --inventory-file runner-inventory.json
 ```
 
 The command is dry-run by default. A dry-run writes only local JSON evidence and
 does not request a GitHub registration token. `--mutate` requires an environment
 GitHub token, validates the local host/user/execution-lane boundary, requests a
-short-lived GitHub runner registration token, runs the host-local runner
-`config.sh`, then re-reads GitHub inventory and fails closed unless the expected
-lane appears online with the requested labels. The token itself is never written
-to the audit record, command output, or JSON result.
+short-lived GitHub runner registration token, prepares the official GitHub
+Actions runner package under the approved registration root when needed, runs
+the host-local runner `config.sh`, starts the runner process, then re-reads
+GitHub inventory and fails closed unless the expected lane appears online with
+the requested labels. The token itself is never written to the audit record,
+command output, or JSON result.
+
+The manual workflow defaults `registration_root` to `auto`, which resolves to
+`$HOME/actions-runners` for the constrained service user. Operators may pass an
+absolute root explicitly, but the service user must already be able to create
+lane directories below that root.
 
 The manual workflow requires the repository secret
 `LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner

@@ -13,9 +13,9 @@ name: Runner Lane Registration
         required: true
         type: string
       registration_root:
-        description: Approved absolute runner registration root.
+        description: Absolute runner root, or auto for service-user home.
         required: false
-        default: /opt/actions-runners
+        default: auto
         type: string
       labels:
         description: Comma-separated runner labels.
@@ -125,6 +125,13 @@ jobs:
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "Missing runner registration GitHub token secret." >&2
+            exit 1
+          fi
+          if [ "$REGISTRATION_ROOT" = "auto" ]; then
+            REGISTRATION_ROOT="$HOME/actions-runners"
+          fi
+          if [ "${REGISTRATION_ROOT#/}" = "$REGISTRATION_ROOT" ]; then
+            echo "registration_root must be absolute or auto." >&2
             exit 1
           fi
           label_args=()
