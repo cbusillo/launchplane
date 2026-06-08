@@ -113,12 +113,13 @@ jobs:
             > runner-lane-registration-pre-inventory.json
 
       - name: Run runner lane registration executor
+        id: registration
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           LANE_NAME: ${{ inputs.lane_name }}
           REGISTRATION_ROOT: ${{ inputs.registration_root }}
-          LABELS: ${{ inputs.labels }}
+          RUNNER_LABELS_INPUT: ${{ inputs.labels }}
           AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
           GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
         run: |
@@ -135,7 +136,7 @@ jobs:
             exit 1
           fi
           label_args=()
-          IFS=',' read -r -a labels <<< "$LABELS"
+          IFS=',' read -r -a labels <<< "$RUNNER_LABELS_INPUT"
           for label in "${labels[@]}"; do
             trimmed="$(xargs <<< "$label")"
             if [ -n "$trimmed" ]; then
@@ -165,10 +166,7 @@ jobs:
             "$mutate_flag" \
             > runner-lane-registration-result.json
           status="$(jq -r '.status // ""' runner-lane-registration-result.json)"
-          if [ "$status" != "blocked" ] && [ "$status" != "completed" ]; then
-            jq . runner-lane-registration-result.json >&2
-            exit 1
-          fi
+          echo "registration_status=$status" >>"$GITHUB_OUTPUT"
 
       - name: Upload registration result
         uses: actions/upload-artifact@v7
@@ -178,3 +176,14 @@ jobs:
             runner-lane-registration-pre-inventory.json
             runner-lane-registration-result.json
           if-no-files-found: error
+
+      - name: Fail on unexpected registration result
+        env:
+          REGISTRATION_STATUS: >-
+            ${{ steps.registration.outputs.registration_status }}
+        run: |
+          if [ "$REGISTRATION_STATUS" != "blocked" ] &&
+            [ "$REGISTRATION_STATUS" != "completed" ]; then
+            jq . runner-lane-registration-result.json >&2
+            exit 1
+          fi
