@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
+import re
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -63,9 +64,17 @@ class RunnerLaneRegistrationRequest(BaseModel):
         self.repository = _normalized_repository(self.repository)
         self.host_name = _required_text(
             self.host_name, "runner lane registration requires host_name"
-        )
+        ).lower()
         self.lane_name = _required_text(
             self.lane_name, "runner lane registration requires lane_name"
+        ).lower()
+        _validate_slug(
+            self.host_name,
+            "runner lane registration host_name must use letters, numbers, dots, underscores, or hyphens",
+        )
+        _validate_slug(
+            self.lane_name,
+            "runner lane registration lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
         self.registration_root = _normalized_path(
             _required_text(
@@ -256,7 +265,9 @@ def plan_runner_lane_registration(
                 f"runner lane inventory repository does not match request: {inventory_repository}",
             )
         )
-    existing_lanes = tuple(lane for lane in inventory.lanes if lane.name == request.lane_name)
+    existing_lanes = tuple(
+        lane for lane in inventory.lanes if lane.name.strip().lower() == request.lane_name
+    )
     if existing_lanes:
         blockers.append(
             _blocker(
@@ -345,7 +356,13 @@ def _normalized_labels(values: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _normalized_tokens(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(sorted({value.strip().lower() for value in values if value.strip()}))
+    normalized_tokens = tuple(sorted({value.strip().lower() for value in values if value.strip()}))
+    for token in normalized_tokens:
+        _validate_slug(
+            token,
+            "runner lane registration labels must use letters, numbers, dots, underscores, or hyphens",
+        )
+    return normalized_tokens
 
 
 def _normalized_path(value: str) -> str:
@@ -362,6 +379,11 @@ def _normalized_path(value: str) -> str:
             continue
         segments.append(segment)
     return "/" + "/".join(segments)
+
+
+def _validate_slug(value: str, message: str) -> None:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", value):
+        raise ValueError(message)
 
 
 def _required_text(value: str, message: str) -> str:

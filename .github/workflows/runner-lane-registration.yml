@@ -58,6 +58,8 @@ jobs:
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
       RUNNER_REGISTRATION_SERVICE_USER: >-
         ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_SERVICE_USER }}
+      RUNNER_REGISTRATION_ALLOWED_ROOT: >-
+        ${{ vars.LAUNCHPLANE_RUNNER_REGISTRATION_ALLOWED_ROOT }}
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
     steps:
       - name: Checkout
@@ -90,11 +92,14 @@ jobs:
             echo "Runner must execute as expected service user." >&2
             exit 1
           fi
-          if [ "${{ inputs.mutate }}" = "true" ] &&
-            [ "${{ inputs.confirmation }}" != "register runner lane" ]; then
+          if [ "${MUTATE_REQUESTED}" = "true" ] &&
+            [ "${CONFIRMATION}" != "register runner lane" ]; then
             echo "mutate=true requires confirmation: register runner lane" >&2
             exit 1
           fi
+        env:
+          MUTATE_REQUESTED: ${{ inputs.mutate }}
+          CONFIRMATION: ${{ inputs.confirmation }}
 
       - name: Read pre-registration inventory
         shell: bash
@@ -122,29 +127,47 @@ jobs:
           RUNNER_LABELS_INPUT: ${{ inputs.labels }}
           AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
           GH_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
+          MUTATE_REQUESTED: ${{ inputs.mutate }}
         run: |
           set -euo pipefail
+          approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
+          jq -n \
+            --arg audit_record_key "$AUDIT_RECORD_KEY" \
+            --arg message \
+              "runner lane registration executor did not produce a result" \
+            '{status:"failed", audit_record_key:$audit_record_key,
+              message:$message}' \
+            > runner-lane-registration-result.json
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "Missing runner registration GitHub token secret." >&2
             exit 1
           fi
           if [ "$REGISTRATION_ROOT" = "auto" ]; then
-            REGISTRATION_ROOT="$HOME/actions-runners"
+            REGISTRATION_ROOT="$approved_root"
           fi
           if [ "${REGISTRATION_ROOT#/}" = "$REGISTRATION_ROOT" ]; then
             echo "registration_root must be absolute or auto." >&2
             exit 1
           fi
-          label_args=()
-          IFS=',' read -r -a labels <<< "$RUNNER_LABELS_INPUT"
-          for label in "${labels[@]}"; do
-            trimmed="$(xargs <<< "$label")"
-            if [ -n "$trimmed" ]; then
-              label_args+=(--label "$trimmed")
-            fi
-          done
+          if [ -n "${RUNNER_REGISTRATION_ALLOWED_ROOT:-}" ] &&
+            [ "$REGISTRATION_ROOT" != "$RUNNER_REGISTRATION_ALLOWED_ROOT" ]; then
+            echo "registration_root must match Launchplane approved root." >&2
+            exit 1
+          fi
+          python - <<'PY' > runner-lane-registration-label-args.bin
+          import os
+          import sys
+
+          labels = os.environ["RUNNER_LABELS_INPUT"].split(",")
+          for label in labels:
+              trimmed = label.strip()
+              if trimmed:
+                  sys.stdout.write("--label\0")
+                  sys.stdout.write(f"{trimmed}\0")
+          PY
+          mapfile -d '' -t label_args < runner-lane-registration-label-args.bin
           mutate_flag=--dry-run
-          if [ "${{ inputs.mutate }}" = "true" ]; then
+          if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
           fi
           GITHUB_TOKEN="$GH_TOKEN" uv run launchplane work-graph \
@@ -159,23 +182,27 @@ jobs:
             --audit-record-key "$AUDIT_RECORD_KEY" \
             --allowed-repository "$TARGET_REPOSITORY" \
             --approved-host "$RUNNER_REGISTRATION_HOST" \
-            --allowed-registration-root "$REGISTRATION_ROOT" \
+            --allowed-registration-root "$approved_root" \
             --inventory-file runner-lane-registration-pre-inventory.json \
             --audit-mode service \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             "$mutate_flag" \
-            > runner-lane-registration-result.json
+            > runner-lane-registration-result.tmp
+          mv \
+            runner-lane-registration-result.tmp \
+            runner-lane-registration-result.json
           status="$(jq -r '.status // ""' runner-lane-registration-result.json)"
           echo "registration_status=$status" >>"$GITHUB_OUTPUT"
 
       - name: Upload registration result
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: runner-lane-registration-result
           path: |
             runner-lane-registration-pre-inventory.json
             runner-lane-registration-result.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Fail on unexpected registration result
         env:

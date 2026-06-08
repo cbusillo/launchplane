@@ -11,6 +11,7 @@ from typing import cast
 from typing import Any
 from click import Command
 from click.testing import CliRunner
+import getpass
 
 from control_plane.cli import main
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
@@ -28,6 +29,9 @@ from control_plane.workflows.runner_lane_registration_executor import (
 )
 from control_plane.workflows.runner_lane_registration_executor import (
     execute_runner_lane_registration_executor,
+)
+from control_plane.workflows.runner_lane_registration_executor import (
+    validate_local_executor_environment,
 )
 
 
@@ -80,6 +84,22 @@ class _AuditPoster:
 
 
 class RunnerLaneRegistrationPlanTests(unittest.TestCase):
+    def test_request_rejects_unsafe_lane_name(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lane_name must use"):
+            _request(lane_name="cm-website;rm -rf /", mutate=True)
+
+    def test_request_rejects_unsafe_label(self) -> None:
+        with self.assertRaisesRegex(ValueError, "labels must use"):
+            RunnerLaneRegistrationRequest(
+                repository="cbusillo/odoo-tenant-cm-website",
+                host_name="chris-testing",
+                lane_name="cm-website-runner-1",
+                registration_root="/opt/actions-runners",
+                labels=("self-hosted", "launchplane $(touch bad)"),
+                mutate=True,
+                audit_record_key="runner-lane-registration/2026-06-08/cm-website/test",
+            )
+
     def test_plan_blocks_without_mutate_and_without_allowed_repo(self) -> None:
         plan = plan_runner_lane_registration(
             policy=RunnerLaneRegistrationPolicy(
@@ -124,7 +144,7 @@ class RunnerLaneRegistrationPlanTests(unittest.TestCase):
         plan = plan_runner_lane_registration(
             policy=_policy(),
             request=_request(mutate=True),
-            inventory=_inventory(lanes=(_lane(),)),
+            inventory=_inventory(lanes=(_lane(name="CM-Website-Runner-1"),)),
         )
 
         self.assertEqual(plan.status, "blocked")
@@ -153,6 +173,10 @@ class GitHubRunnerLaneRegistrationTokenFetcherTests(unittest.TestCase):
 
 
 class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
+    def test_executor_request_rejects_unsafe_execution_lane(self) -> None:
+        with self.assertRaisesRegex(ValueError, "execution_lane must use"):
+            _executor_request(mutate=True, execution_lane="ops-gate;touch bad")
+
     def test_blocked_plan_posts_planned_audit_without_token_or_command(self) -> None:
         token_fetcher = _TokenFetcher()
         command_runner = _CommandRunner()
@@ -196,9 +220,35 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         self.assertNotIn("secret-token", result.model_dump_json())
         self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
 
+    def test_local_environment_fails_closed_without_actions_repository(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must run from cbusillo/launchplane"):
+            validate_local_executor_environment(
+                request=_executor_request(mutate=True),
+                env={},
+                current_user="launchplane-runner-hygiene",
+            )
+
+    def test_local_environment_fails_closed_without_execution_lane_label(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved execution lane"):
+            validate_local_executor_environment(
+                request=_executor_request(mutate=True),
+                env={"GITHUB_REPOSITORY": "cbusillo/launchplane"},
+                current_user="launchplane-runner-hygiene",
+            )
+
+    def test_local_environment_accepts_expected_actions_scope(self) -> None:
+        validate_local_executor_environment(
+            request=_executor_request(mutate=True),
+            env={
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "RUNNER_LABELS": "self-hosted,launchplane,chris-testing-ops-gate",
+            },
+            current_user="launchplane-runner-hygiene",
+        )
+
 
 class RunnerLaneRegistrationCliTests(unittest.TestCase):
-    def test_cli_dry_run_emits_blocked_result_without_github_token(self) -> None:
+    def test_cli_dry_run_requires_github_token(self) -> None:
         with TemporaryDirectory() as temp_dir:
             inventory_file = Path(temp_dir) / "inventory.json"
             inventory_file.write_text(
@@ -243,12 +293,10 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
                 env={},
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["status"], "blocked")
-        self.assertIn("planned_response", payload)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Missing GitHub token", result.output)
 
-    def test_cli_mutate_reports_supervisor_required_without_github_token(self) -> None:
+    def test_cli_dry_run_requires_matching_actions_execution_context(self) -> None:
         with TemporaryDirectory() as temp_dir:
             inventory_file = Path(temp_dir) / "inventory.json"
             inventory_file.write_text(
@@ -268,7 +316,7 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
                     "--execution-lane",
                     "chris-testing-ops-gate",
                     "--service-user",
-                    "launchplane-runner-hygiene",
+                    getpass.getuser(),
                     "--lane-name",
                     "cm-website-runner-1",
                     "--registration-root",
@@ -289,17 +337,37 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
                     "/opt/actions-runners",
                     "--inventory-file",
                     str(inventory_file),
-                    "--mutate",
                 ],
-                env={},
+                env={"GITHUB_TOKEN": "github-token"},
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["status"], "failed")
-        self.assertIn("supervised host maintainer", payload["message"])
-        self.assertEqual(payload["token_record"], None)
-        self.assertNotIn("secret-token", result.output)
+        self.assertEqual(result.exit_code, 1)
+        self.assertTrue(
+            "must run from cbusillo/launchplane" in result.output
+            or "approved execution lane" in result.output,
+            result.output,
+        )
+
+
+class RunnerLaneRegistrationWorkflowTests(unittest.TestCase):
+    def test_workflow_uses_env_confirmation_and_preserves_artifacts(self) -> None:
+        workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn('${{ inputs.confirmation }}" !=', workflow_text)
+        self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
+        self.assertIn("if: always()", workflow_text)
+        self.assertIn("if-no-files-found: warn", workflow_text)
+        self.assertIn("runner lane registration executor did not produce a result", workflow_text)
+
+    def test_workflow_does_not_allowlist_user_registration_root(self) -> None:
+        workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn('--allowed-registration-root "$REGISTRATION_ROOT"', workflow_text)
+        self.assertIn('--allowed-registration-root "$approved_root"', workflow_text)
 
 
 def _policy() -> RunnerLaneRegistrationPolicy:
@@ -317,11 +385,12 @@ def _request(
     *,
     registration_root: str = "/opt/actions-runners",
     mutate: bool,
+    lane_name: str = "cm-website-runner-1",
 ) -> RunnerLaneRegistrationRequest:
     return RunnerLaneRegistrationRequest(
         repository="cbusillo/odoo-tenant-cm-website",
         host_name="chris-testing",
-        lane_name="cm-website-runner-1",
+        lane_name=lane_name,
         registration_root=registration_root,
         labels=("self-hosted", "launchplane", "launchplane-managed"),
         mutate=mutate,
@@ -329,11 +398,13 @@ def _request(
     )
 
 
-def _executor_request(*, mutate: bool) -> RunnerLaneRegistrationExecutorRequest:
+def _executor_request(
+    *, mutate: bool, execution_lane: str = "chris-testing-ops-gate"
+) -> RunnerLaneRegistrationExecutorRequest:
     return RunnerLaneRegistrationExecutorRequest(
         repository="cbusillo/odoo-tenant-cm-website",
         host_name="chris-testing",
-        execution_lane="chris-testing-ops-gate",
+        execution_lane=execution_lane,
         service_user="launchplane-runner-hygiene",
         lane_name="cm-website-runner-1",
         registration_root="/home/launchplane-runner-hygiene/actions-runners",
@@ -351,10 +422,10 @@ def _inventory(*, lanes: tuple[RunnerLaneRecord, ...]) -> RunnerLaneInventory:
     )
 
 
-def _lane() -> RunnerLaneRecord:
+def _lane(*, name: str = "cm-website-runner-1") -> RunnerLaneRecord:
     return RunnerLaneRecord(
         github_id=1,
-        name="cm-website-runner-1",
+        name=name,
         repository="cbusillo/odoo-tenant-cm-website",
         status="online",
         busy=False,

@@ -57,6 +57,9 @@ from control_plane.workflows.runner_lane_registration_executor import dry_run_au
 from control_plane.workflows.runner_lane_registration_executor import (
     execute_runner_lane_registration_executor,
 )
+from control_plane.workflows.runner_lane_registration_executor import (
+    validate_local_executor_environment as validate_runner_registration_environment,
+)
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
@@ -67,7 +70,9 @@ from control_plane.workflows.runner_host_hygiene_executor import (
 from control_plane.workflows.runner_host_hygiene_executor import (
     execute_runner_host_hygiene_executor,
 )
-from control_plane.workflows.runner_host_hygiene_executor import validate_local_executor_environment
+from control_plane.workflows.runner_host_hygiene_executor import (
+    validate_local_executor_environment as validate_runner_host_hygiene_environment,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -608,8 +613,10 @@ def runner_lane_registration_executor(
         pre_inventory = _load_runner_lane_inventory(inventory_file)
         token_env = github_token_env.strip()
         token = os.environ.get(token_env, "").strip() if token_env else ""
+        if not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
         transport = UrllibMergeTrainGitHubTransport(
-            token=token or "dry-run-token",
+            token=token,
             api_base_url=github_api_base_url,
         )
         inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
@@ -628,19 +635,21 @@ def runner_lane_registration_executor(
                     label="runner lane registration",
                 ),
             )
+        request = RunnerLaneRegistrationExecutorRequest(
+            repository=repository,
+            host_name=host_name,
+            execution_lane=execution_lane,
+            service_user=service_user,
+            lane_name=lane_name,
+            registration_root=registration_root,
+            labels=labels,
+            mutate=mutate,
+            audit_record_key=audit_record_key,
+            timeout_seconds=timeout_seconds,
+        )
+        validate_runner_registration_environment(request=request)
         result = execute_runner_lane_registration_executor(
-            request=RunnerLaneRegistrationExecutorRequest(
-                repository=repository,
-                host_name=host_name,
-                execution_lane=execution_lane,
-                service_user=service_user,
-                lane_name=lane_name,
-                registration_root=registration_root,
-                labels=labels,
-                mutate=mutate,
-                audit_record_key=audit_record_key,
-                timeout_seconds=timeout_seconds,
-            ),
+            request=request,
             policy=RunnerLaneRegistrationPolicy(
                 allowed_repositories=allowed_repositories,
                 approved_hosts=approved_hosts,
@@ -1225,7 +1234,7 @@ def runner_host_hygiene_executor(
             timeout_seconds=timeout_seconds,
             prune_until=prune_until,
         )
-        validate_local_executor_environment(request=request)
+        validate_runner_host_hygiene_environment(request=request)
         result = execute_runner_host_hygiene_executor(
             request=request,
             remote_runner=build_local_command_runner(),
