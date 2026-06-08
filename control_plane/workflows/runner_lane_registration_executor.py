@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 import json
 import os
 import pwd
+import re
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -46,15 +47,27 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
         self.repository = repository_full_name(self.repository)
         self.host_name = _required_text(
             self.host_name, "runner lane registration executor requires host_name"
-        )
+        ).lower()
         self.execution_lane = _required_text(
             self.execution_lane, "runner lane registration executor requires execution_lane"
-        )
+        ).lower()
         self.service_user = _required_text(
             self.service_user, "runner lane registration executor requires service_user"
         )
         self.lane_name = _required_text(
             self.lane_name, "runner lane registration executor requires lane_name"
+        ).lower()
+        _validate_slug(
+            self.host_name,
+            "runner lane registration executor host_name must use letters, numbers, dots, underscores, or hyphens",
+        )
+        _validate_slug(
+            self.execution_lane,
+            "runner lane registration executor execution_lane must use letters, numbers, dots, underscores, or hyphens",
+        )
+        _validate_slug(
+            self.lane_name,
+            "runner lane registration executor lane_name must use letters, numbers, dots, underscores, or hyphens",
         )
         self.registration_root = _required_text(
             self.registration_root,
@@ -156,19 +169,25 @@ def execute_runner_lane_registration_executor(
     )
 
 
-def validate_local_executor_environment(*, request: RunnerLaneRegistrationExecutorRequest) -> None:
-    current_user = pwd.getpwuid(os.getuid()).pw_name
-    if current_user != request.service_user:
+def validate_local_executor_environment(
+    *,
+    request: RunnerLaneRegistrationExecutorRequest,
+    env: Mapping[str, str] | None = None,
+    current_user: str | None = None,
+) -> None:
+    execution_env = os.environ if env is None else env
+    effective_user = current_user or pwd.getpwuid(os.getuid()).pw_name
+    if effective_user != request.service_user:
         raise ValueError(f"runner lane registration executor must run as {request.service_user}.")
-    github_repository = os.environ.get("GITHUB_REPOSITORY", "").strip().lower()
-    if github_repository and github_repository != "cbusillo/launchplane":
+    github_repository = execution_env.get("GITHUB_REPOSITORY", "").strip().lower()
+    if github_repository != "cbusillo/launchplane":
         raise ValueError("runner lane registration executor must run from cbusillo/launchplane.")
     runner_labels = {
         label.strip().lower()
-        for label in os.environ.get("RUNNER_LABELS", "").split(",")
+        for label in execution_env.get("RUNNER_LABELS", "").split(",")
         if label.strip()
     }
-    if runner_labels and request.execution_lane.lower() not in runner_labels:
+    if request.execution_lane.lower() not in runner_labels:
         raise ValueError(
             "runner lane registration executor is not running on the approved execution lane."
         )
@@ -270,3 +289,8 @@ def _required_text(value: str, message: str) -> str:
     if not normalized_value:
         raise ValueError(message)
     return normalized_value
+
+
+def _validate_slug(value: str, message: str) -> None:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", value):
+        raise ValueError(message)
