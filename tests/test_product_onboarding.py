@@ -761,9 +761,21 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             workflow_text,
         )
         self.assertIn(
+            'error("route.forward_host or route.edge_endpoint_key is required")',
+            workflow_text,
+        )
+        self.assertIn(
+            'error("route.forward_host and route.edge_endpoint_key are mutually exclusive")',
+            workflow_text,
+        )
+        self.assertIn(
             'error("route_options_json contains unsupported route option key(s)")',
             workflow_text,
         )
+        self.assertIn("forward_host: $forward_host", workflow_text)
+        self.assertIn("edge_endpoint_key: $edge_endpoint_key", workflow_text)
+        self.assertNotIn('                "forward_host",', workflow_text)
+        self.assertNotIn('                "edge_endpoint_key",', workflow_text)
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertEqual(inputs_section.count("        description:"), 11)
         self.assertIn("edge_endpoint_key:", inputs_section)

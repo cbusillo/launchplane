@@ -14,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
@@ -305,6 +306,52 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_read_and_list_edge_endpoint_records_escape_endpoint_key_paths(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            escaped_record = EdgeEndpointRecord(
+                endpoint_key="../cm-prod/dokploy",
+                provider="dokploy",
+                server_name="docker-cm-prod",
+                upstream_host="100.73.170.113",
+                upstream_host_kind="ip",
+                upstream_scheme="https",
+                upstream_port=443,
+                status="active",
+                updated_at="2026-06-07T00:00:00Z",
+                source_label="test:edge-endpoint",
+            )
+            disabled_record = escaped_record.model_copy(
+                update={
+                    "endpoint_key": "disabled:edge",
+                    "status": "disabled",
+                }
+            )
+
+            written_path = store.write_edge_endpoint_record(escaped_record)
+            store.write_edge_endpoint_record(disabled_record)
+            loaded_record = store.read_edge_endpoint_record("../cm-prod/dokploy")
+            active_records = store.list_edge_endpoint_records(
+                provider="dokploy",
+                status="active",
+            )
+            preserved_safe_key_path_exists = (
+                state_dir / "launchplane_edge_endpoints" / "disabled:edge.json"
+            ).exists()
+
+        self.assertEqual(
+            written_path.parent.relative_to(state_dir).as_posix(),
+            "launchplane_edge_endpoints",
+        )
+        self.assertEqual(written_path.name, "..%2Fcm-prod%2Fdokploy.json")
+        self.assertTrue(preserved_safe_key_path_exists)
+        self.assertFalse((state_dir / "cm-prod" / "dokploy.json").exists())
+        self.assertEqual(loaded_record.endpoint_key, "../cm-prod/dokploy")
+        self.assertEqual([record.endpoint_key for record in active_records], ["../cm-prod/dokploy"])
+
     def test_write_and_list_runner_host_hygiene_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)
