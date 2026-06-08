@@ -508,7 +508,7 @@ def runner_control_plan(
     "--mutate/--dry-run",
     default=False,
     show_default=True,
-    help="Create the runner registration token and run config.sh. Defaults to dry-run.",
+    help="Record apply intent. Live registration is disabled until a supervised maintainer exists.",
 )
 @click.option(
     "--audit-record-key",
@@ -549,7 +549,7 @@ def runner_control_plan(
     "--github-token-env",
     default="GITHUB_TOKEN",
     show_default=True,
-    help="Environment variable containing the GitHub token for mutate mode.",
+    help="Environment variable reserved for future supervised registration token fetches.",
 )
 @click.option(
     "--github-api-base-url",
@@ -608,8 +608,6 @@ def runner_lane_registration_executor(
         pre_inventory = _load_runner_lane_inventory(inventory_file)
         token_env = github_token_env.strip()
         token = os.environ.get(token_env, "").strip() if token_env else ""
-        if mutate and not token:
-            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
         transport = UrllibMergeTrainGitHubTransport(
             token=token or "dry-run-token",
             api_base_url=github_api_base_url,
