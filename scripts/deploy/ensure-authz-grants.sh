@@ -402,6 +402,14 @@ post_grant \
 	runner-host-hygiene-audit
 post_grant \
 	"$GITHUB_REPOSITORY" \
+	runner-lane-registration.yml \
+	launchplane \
+	launchplane \
+	runner_lane_registration_audit.write \
+	deploy:runner-lane-registration-audit-grant \
+	runner-lane-registration-audit
+post_grant \
+	"$GITHUB_REPOSITORY" \
 	work-graph-snapshot-validate.yml \
 	launchplane \
 	launchplane \

@@ -440,6 +440,16 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("merge-train-runner-schedule", script_text)
         self.assertIn("schedule", script_text)
 
+    def test_deploy_authz_grants_include_runner_registration_audit_writer(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("runner-lane-registration.yml", script_text)
+        self.assertIn("runner_lane_registration_audit.write", script_text)
+        self.assertIn("deploy:runner-lane-registration-audit-grant", script_text)
+        self.assertIn("runner-lane-registration-audit", script_text)
+
     def test_deploy_authz_grants_accept_configured_github_action_grants(
         self,
     ) -> None:
