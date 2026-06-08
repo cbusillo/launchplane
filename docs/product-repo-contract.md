@@ -189,20 +189,15 @@ artifact-record request, idempotency keys, and response mapping. The tenant
 workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
 `/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
 reusable workflow defaults the Launchplane product key to
-`odoo-tenant-${context}` so publish metadata resolves through the tenant product
-profile that owns the image repository and stable lanes. Reusable Odoo workflows
-read the Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and
-derive the GitHub OIDC audience from that URL host unless the caller passes an
-explicit `launchplane_audience` input.
-
-When a product repo does not have an eligible self-hosted runner lane, operators
-may dispatch `reusable-odoo-artifact-publish.yml` directly from Launchplane with
-an explicit `product_repository`, `source_git_ref`, product, context, instance,
-and confirmation phrase. That path checks out the product source on a
-Launchplane-owned runner and uses Launchplane-owned publish/source secrets, while
-still sending the same Odoo driver requests and recording the artifact through
-Launchplane. It is an operator execution path, not a reason for product repos to
-own provider runtime state or duplicate Launchplane request wiring.
+`odoo-tenant-${context}` with underscores normalized to dashes, so publish
+metadata resolves through the tenant product profile that owns the image
+repository and stable lanes. Reusable Odoo workflows read the Launchplane service
+URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the GitHub OIDC audience
+from that URL host unless the caller passes an explicit `launchplane_audience`
+input. The reusable jobs run on GitHub-hosted runners because they call the
+deployed Launchplane service over HTTPS; product repos do not need direct access
+to Launchplane self-hosted runners, and privileged provider mutations still run
+inside the Launchplane service boundary.
 
 Odoo testing deploys follow the same ownership shape. Tenant repos own the
 manual dispatch confirmation and pass an explicit stored `artifact_id` plus

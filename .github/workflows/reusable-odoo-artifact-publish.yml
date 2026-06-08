@@ -124,9 +124,7 @@ permissions:
 
 jobs:
   artifact-publish:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     outputs:
       artifact_id: ${{ steps.launchplane.outputs.artifact_id }}
       image_digest: ${{ steps.launchplane.outputs.image_digest }}

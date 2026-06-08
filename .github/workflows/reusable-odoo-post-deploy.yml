@@ -79,9 +79,7 @@ jobs:
         ${{ steps.lp.outputs.website_bootstrap_included }}
       applied_at: ${{ steps.lp.outputs.applied_at }}
       error_message: ${{ steps.lp.outputs.error_message }}
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane product
         id: product
