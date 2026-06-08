@@ -189,6 +189,17 @@ jobs:
               npmplus_noindex: false,
               access_list_id: 0
             } + $route_options) as $route |
+            if (
+              (($route.forward_host // "") | length) == 0
+              and (($route.edge_endpoint_key // "") | length) == 0
+            ) then
+              error("route.forward_host or route.edge_endpoint_key is required")
+            elif (
+              (($route.forward_host // "") | length) != 0
+              and (($route.edge_endpoint_key // "") | length) != 0
+            ) then
+              error("route.forward_host and route.edge_endpoint_key are mutually exclusive")
+            else
             {
               schema_version: 1,
               product: $product,
@@ -205,6 +216,7 @@ jobs:
                 route: $route
               }
             }
+            end
             end' >"$payload_file"
           echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
 

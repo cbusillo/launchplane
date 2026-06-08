@@ -570,13 +570,17 @@ class FilesystemRecordStore:
         return self._write_model("launchplane_ingress_route_audits", record.record_id, record)
 
     def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> Path:
-        return self._write_model("launchplane_edge_endpoints", record.endpoint_key, record)
+        return self._write_model(
+            "launchplane_edge_endpoints",
+            _edge_endpoint_record_id(record.endpoint_key),
+            record,
+        )
 
     def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord:
         return self._read_model(
             EdgeEndpointRecord,
             "launchplane_edge_endpoints",
-            endpoint_key,
+            _edge_endpoint_record_id(endpoint_key),
         )
 
     def list_edge_endpoint_records(
@@ -1411,3 +1415,7 @@ def _odoo_stable_bootstrap_lane_reservation_id(
 def _runner_host_hygiene_audit_record_id(audit_record_key: str) -> str:
     digest = hashlib.sha256(audit_record_key.encode()).hexdigest()[:16]
     return audit_record_key.strip().replace("/", "-") + f"-{digest}"
+
+
+def _edge_endpoint_record_id(endpoint_key: str) -> str:
+    return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
