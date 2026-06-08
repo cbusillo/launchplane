@@ -20,6 +20,9 @@ from control_plane.contracts.runner_lane_control import RunnerLaneControlPolicy
 from control_plane.contracts.runner_lane_control import RunnerLaneControlRequest
 from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.contracts.runner_lane_maintainer import RunnerLaneDesiredState
+from control_plane.contracts.runner_lane_maintainer import RunnerLaneMaintainerPolicy
+from control_plane.contracts.runner_lane_maintainer import plan_runner_lane_maintainer
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAction
@@ -81,6 +84,7 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
+    work_graph.add_command(runner_maintainer_plan, name="runner-maintainer-plan")
     work_graph.add_command(
         runner_lane_registration_executor,
         name="runner-lane-registration-executor",
@@ -485,6 +489,146 @@ def runner_control_plan(
             {
                 "policy": policy.model_dump(mode="json"),
                 "request": request.model_dump(mode="json"),
+                "plan": plan.model_dump(mode="json"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@click.command("runner-maintainer-plan")
+@click.option("--repository", required=True, help="owner/name repository for the runner lane.")
+@click.option("--host-name", required=True, help="Approved runner host name.")
+@click.option("--lane-name", required=True, help="Desired runner lane name.")
+@click.option(
+    "--runner-directory",
+    required=True,
+    help="Desired absolute lane directory below an allowed registration root.",
+)
+@click.option("--service-user", required=True, help="Constrained runner service user.")
+@click.option(
+    "--systemd-unit-name",
+    required=True,
+    help="Desired systemd unit name, for example launchplane-runner@lane.service.",
+)
+@click.option("--label", "labels", multiple=True, required=True, help="Desired runner label.")
+@click.option(
+    "--runner-version",
+    default="latest-approved",
+    show_default=True,
+    help="Desired runner version policy label. This command does not download runners.",
+)
+@click.option(
+    "--allowed-repository",
+    "allowed_repositories",
+    multiple=True,
+    help="Repository opted into runner lane maintenance. Repeat as needed.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for runner lane maintenance. Repeat as needed.",
+)
+@click.option(
+    "--allowed-registration-root",
+    "allowed_registration_roots",
+    multiple=True,
+    help="Absolute root allowed for runner registration. Repeat as needed.",
+)
+@click.option(
+    "--allowed-service-user",
+    "allowed_service_users",
+    multiple=True,
+    help="Service user approved for runner lane maintenance. Repeat as needed.",
+)
+@click.option(
+    "--required-label",
+    "required_labels",
+    multiple=True,
+    help="Label required by maintainer policy. Defaults to self-hosted, launchplane, launchplane-managed.",
+)
+@click.option(
+    "--required-managed-label",
+    default="launchplane-managed",
+    show_default=True,
+    help="Label required on existing lanes before they can be adopted or removed.",
+)
+@click.option(
+    "--require-baseline-readiness/--allow-missing-baseline-readiness",
+    default=True,
+    show_default=True,
+    help="Whether baseline readiness must pass before maintainer planning is ready.",
+)
+@click.option(
+    "--inventory-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="RunnerLaneInventory JSON from runner-inventory or an equivalent fixture.",
+)
+@click.option(
+    "--baseline-readiness-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="RunnerLaneBaselineReadiness JSON or runner-baseline-observe output.",
+)
+def runner_maintainer_plan(
+    repository: str,
+    host_name: str,
+    lane_name: str,
+    runner_directory: str,
+    service_user: str,
+    systemd_unit_name: str,
+    labels: tuple[str, ...],
+    runner_version: str,
+    allowed_repositories: tuple[str, ...],
+    approved_hosts: tuple[str, ...],
+    allowed_registration_roots: tuple[str, ...],
+    allowed_service_users: tuple[str, ...],
+    required_labels: tuple[str, ...],
+    required_managed_label: str,
+    require_baseline_readiness: bool,
+    inventory_file: Path,
+    baseline_readiness_file: Path,
+) -> None:
+    try:
+        policy = RunnerLaneMaintainerPolicy(
+            allowed_repositories=allowed_repositories,
+            approved_hosts=approved_hosts,
+            allowed_registration_roots=allowed_registration_roots,
+            allowed_service_users=allowed_service_users,
+            required_labels=(
+                required_labels or ("self-hosted", "launchplane", "launchplane-managed")
+            ),
+            required_managed_label=required_managed_label,
+            require_baseline_readiness=require_baseline_readiness,
+        )
+        desired_state = RunnerLaneDesiredState(
+            repository=repository,
+            host_name=host_name,
+            lane_name=lane_name,
+            runner_directory=runner_directory,
+            service_user=service_user,
+            systemd_unit_name=systemd_unit_name,
+            labels=labels,
+            runner_version=runner_version,
+        )
+        inventory = _load_runner_lane_inventory(inventory_file)
+        baseline_readiness = _load_runner_lane_baseline_readiness(baseline_readiness_file)
+        plan = plan_runner_lane_maintainer(
+            policy=policy,
+            desired_state=desired_state,
+            inventory=inventory,
+            baseline_readiness=baseline_readiness,
+        )
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(
+        json.dumps(
+            {
+                "policy": policy.model_dump(mode="json"),
+                "desired_state": desired_state.model_dump(mode="json"),
                 "plan": plan.model_dump(mode="json"),
             },
             indent=2,
