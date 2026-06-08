@@ -168,6 +168,48 @@ baseline readiness JSON. `--mutate` records the operator's explicit mutation
 intent in the request so the planner can tell whether a future host adapter would
 be allowed to proceed, but this CLI command itself remains a dry-run surface.
 
+Runner maintainer planning is also read-only. The typed contract in
+`control_plane.contracts.runner_lane_maintainer` captures the desired durable
+runner state for a repository, host, lane, registration root, service user,
+systemd unit name, labels, and runner-version policy. It compares that desired
+state against saved GitHub runner inventory and saved baseline readiness, then
+returns the future maintainer decision without contacting GitHub or the host.
+
+To build the first desired-state plan for a product lane, run:
+
+```bash
+uv run launchplane work-graph runner-maintainer-plan \
+  --repository owner/name \
+  --host-name chris-testing \
+  --lane-name product-runner-1 \
+  --runner-directory \
+    /home/launchplane-runner-hygiene/actions-runners/product-runner-1 \
+  --service-user launchplane-runner-hygiene \
+  --systemd-unit-name launchplane-runner@product-runner-1.service \
+  --label self-hosted \
+  --label launchplane \
+  --label launchplane-managed \
+  --allowed-repository owner/name \
+  --approved-host chris-testing \
+  --allowed-registration-root /home/launchplane-runner-hygiene/actions-runners \
+  --allowed-service-user launchplane-runner-hygiene \
+  --inventory-file runner-inventory.json \
+  --baseline-readiness-file runner-baseline.json
+```
+
+The plan decision can be `recommend_create`, `recommend_verify_adoption`,
+`recommend_remove_recreate`, or `blocked`. A recommendation names the durable
+action a future maintainer should take; it does not authorize this command to
+perform that action. Until the supervised host maintainer exists,
+otherwise-valid create, adoption-verification, and remove/recreate plans remain
+`status: blocked` with the typed capability blocker
+`supervised_maintainer_required`. These packets set `policy_ready: true` and
+`capability_ready: false`. Policy blockers such as an unapproved host, unsafe
+runner directory, missing managed label, duplicate lane name, repository
+mismatch, or failed baseline readiness produce `decision: blocked` with
+`policy_ready: false` and must be resolved before any host mutation can be
+considered.
+
 ## Registration Executor
 
 The first narrow host adapter for creating a repo-scoped runner lane is the
