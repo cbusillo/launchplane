@@ -854,6 +854,7 @@
             "context": "cm_website",
             "instance": "testing",
             "target_id": "__ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID__",
+            "project_name": "odoo",
             "target_type": "compose",
             "target_name": "odoo-tenant-cm-website-testing",
             "domains": ["cm-website-testing.shinycomputers.com"],

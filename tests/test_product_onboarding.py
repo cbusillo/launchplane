@@ -1754,13 +1754,20 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertFalse(policies["prod"].enabled)
         self.assertEqual(
             [
-                (target.context, target.instance, target.target_type, target.target_id)
+                (
+                    target.context,
+                    target.instance,
+                    target.project_name,
+                    target.target_type,
+                    target.target_id,
+                )
                 for target in manifest.provider_targets
             ],
             [
                 (
                     "cm_website",
                     "testing",
+                    "odoo",
                     "compose",
                     "compose-cm-website-testing",
                 ),
@@ -1790,11 +1797,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             manifest = ProductOnboardingManifest.model_validate(
                 _seed_import_manifest(
                     "odoo-cm-website-product-onboarding",
-                    {
-                        "ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID": (
-                            "compose-cm-website-testing"
-                        )
-                    },
+                    {"ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID": "compose-cm-website-testing"},
                 )
             )
 
@@ -1815,6 +1818,48 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 ("prod", "https://www.cellmechanic.com/launchplane/health"),
             ],
         )
+
+    def test_apply_odoo_cm_website_onboarding_accepts_existing_provider_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="cm_website",
+                    instance="testing",
+                    provider_id="dokploy",
+                    target_category="compose",
+                    target_id="compose-cm-website-testing",
+                    display_name="odoo-tenant-cm-website-testing",
+                    provider_target_type="compose",
+                    provider_evidence={"project_name": "odoo"},
+                    updated_at="2026-06-07T14:24:42Z",
+                    source_label="service:dokploy-targets:setup:create-compose",
+                )
+            )
+            manifest = ProductOnboardingManifest.model_validate(
+                _seed_import_manifest(
+                    "odoo-cm-website-product-onboarding",
+                    {"ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID": "compose-cm-website-testing"},
+                )
+            )
+
+            apply_product_onboarding_manifest(
+                record_store=store, manifest=manifest, updated_at="2026-06-08T00:00:00Z"
+            )
+
+            provider_target = store.read_provider_target_record(
+                context_name="cm_website", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(provider_target.provider_evidence, {"project_name": "odoo"})
+        self.assertEqual(provider_target.target_id, "compose-cm-website-testing")
+        self.assertEqual(provider_target.updated_at, "2026-06-08T00:00:00Z")
 
     def test_seed_import_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
         with self.assertRaisesRegex(ValueError, "target requires target_id"):
