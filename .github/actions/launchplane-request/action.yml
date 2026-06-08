@@ -176,6 +176,8 @@ outputs:
     description: Dynamic output exposed by output-paths.
   trace_id:
     description: Dynamic output exposed by output-paths.
+  website_bootstrap_included:
+    description: Dynamic output exposed by output-paths.
 
 runs:
   using: node24

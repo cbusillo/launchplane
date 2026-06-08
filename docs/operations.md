@@ -781,6 +781,13 @@ context only, and `context_instance` has both context and instance.
   and re-provision derived Odoo service-user API keys. Full database
   sanitization such as disabling mail servers and cron remains tied to explicit
   restore/bootstrap workflows, not ordinary prod image deploys.
+- Reusable Odoo GitHub workflows resolve the Launchplane product before calling
+  driver routes. Callers may pass `product` explicitly; otherwise the default is
+  `odoo-tenant-${context}` after normalizing underscores to dashes, so context
+  `cm_website` resolves to product `odoo-tenant-cm-website`. Post-deploy
+  workflow outputs include `website_bootstrap_included` so callers can prove
+  whether the typed website bootstrap payload was rendered into the remote data
+  workflow request.
 - `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
   the DB-backed `testing` release tuple for the same context. The driver owns
   rollback intent and promotion-record annotation, but the provider mutation runs

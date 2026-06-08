@@ -14,7 +14,8 @@ name: Reusable Odoo Artifact Publish
         type: string
       product:
         description: >-
-          Launchplane product profile key. Defaults to odoo-tenant-${context}.
+          Launchplane product profile key. Defaults to odoo-tenant-${context}
+          with underscores normalized to dashes.
         required: false
         default: ""
         type: string
@@ -232,7 +233,8 @@ jobs:
           set -euo pipefail
           product="$INPUT_PRODUCT"
           if [ -z "$product" ]; then
-            product="odoo-tenant-${CONTEXT_NAME}"
+            context_slug="${CONTEXT_NAME//_/-}"
+            product="odoo-tenant-${context_slug}"
           fi
           publish_scope="${product}:${CONTEXT_NAME}:${INSTANCE_NAME}"
           run_scope="run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
