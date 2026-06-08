@@ -782,6 +782,13 @@
     {
       "kind": "product_onboarding",
       "import_id": "odoo-cm-website-product-onboarding",
+      "target_id_env": [
+        {
+          "context": "cm_website",
+          "instance": "testing",
+          "env": "ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID"
+        }
+      ],
       "manifest": {
         "product": "odoo-tenant-cm-website",
         "display_name": "Cell Mechanic Website Odoo",
@@ -796,6 +803,17 @@
             "context": "cm_website",
             "base_url": "https://cm-website-testing.shinycomputers.com",
             "health_url": "https://cm-website-testing.shinycomputers.com/launchplane/health",
+            "odoo_stable_bootstrap": {
+              "enabled": true,
+              "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/1224",
+              "data_source_mode": "empty",
+              "confirmation": "bootstrap cm website testing",
+              "expected_target_name": "odoo-tenant-cm-website-testing",
+              "expected_domains": ["cm-website-testing.shinycomputers.com"],
+              "require_health_verification": true,
+              "require_canonical_verification": true,
+              "require_logo_verification": false
+            },
             "odoo_data_policy": {
               "data_authority": "resettable",
               "allowed_rebuild_sources": ["empty"],
@@ -831,6 +849,19 @@
           "preview_url_env_keys": ["WEB_BASE_URL"],
           "data_transport_mode": "driver"
         },
+        "provider_targets": [
+          {
+            "context": "cm_website",
+            "instance": "testing",
+            "target_id": "__ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID__",
+            "target_type": "compose",
+            "target_name": "odoo-tenant-cm-website-testing",
+            "domains": ["cm-website-testing.shinycomputers.com"],
+            "healthcheck_path": "/launchplane/health",
+            "healthcheck_enabled": true,
+            "deploy_timeout_seconds": 900
+          }
+        ],
         "runtime_environments": [
           {
             "scope": "instance",

@@ -269,6 +269,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertIn("APPLY LAUNCHPLANE SEED IMPORTS", workflow_text)
         self.assertIn("--apply", workflow_text)
         self.assertIn("launchplane-seed-import", workflow_text)
+        self.assertIn("ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID", workflow_text)
 
     def test_launchplane_seed_import_catalog_validates_contracts(self) -> None:
         catalog = json.loads(
@@ -1692,7 +1693,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
     def test_seed_import_odoo_cm_website_onboarding_manifest_owns_preview_records(
         self,
     ) -> None:
-        manifest_payload = _seed_import_manifest("odoo-cm-website-product-onboarding")
+        manifest_payload = _seed_import_manifest(
+            "odoo-cm-website-product-onboarding",
+            {"ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID": "compose-cm-website-testing"},
+        )
         manifest = ProductOnboardingManifest.model_validate(manifest_payload)
 
         self.assertEqual(manifest.product, "odoo-tenant-cm-website")
@@ -1729,7 +1733,43 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(manifest.preview.override_env, {"ODOO_INSTALL_MODULES": "cm_website"})
         self.assertEqual(manifest.preview.preview_url_env_keys, ("WEB_BASE_URL",))
         self.assertEqual(manifest.preview.data_transport_mode, "driver")
-        self.assertEqual(manifest.provider_targets, ())
+        policies = {lane.instance: lane.odoo_stable_bootstrap for lane in manifest.lanes}
+        self.assertTrue(policies["testing"].enabled)
+        self.assertEqual(
+            policies["testing"].approval_issue_url,
+            "https://github.com/cbusillo/launchplane/issues/1224",
+        )
+        self.assertEqual(policies["testing"].confirmation, "bootstrap cm website testing")
+        self.assertEqual(
+            policies["testing"].expected_target_name,
+            "odoo-tenant-cm-website-testing",
+        )
+        self.assertEqual(
+            policies["testing"].expected_domains,
+            ("cm-website-testing.shinycomputers.com",),
+        )
+        self.assertTrue(policies["testing"].require_health_verification)
+        self.assertTrue(policies["testing"].require_canonical_verification)
+        self.assertFalse(policies["testing"].require_logo_verification)
+        self.assertFalse(policies["prod"].enabled)
+        self.assertEqual(
+            [
+                (target.context, target.instance, target.target_type, target.target_id)
+                for target in manifest.provider_targets
+            ],
+            [
+                (
+                    "cm_website",
+                    "testing",
+                    "compose",
+                    "compose-cm-website-testing",
+                ),
+            ],
+        )
+        self.assertEqual(
+            [tuple(target.domains) for target in manifest.provider_targets],
+            [("cm-website-testing.shinycomputers.com",)],
+        )
         _assert_odoo_stable_lane_runtime_contract(
             self,
             manifest=manifest,
@@ -1748,7 +1788,14 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             )
             store.ensure_schema()
             manifest = ProductOnboardingManifest.model_validate(
-                _seed_import_manifest("odoo-cm-website-product-onboarding")
+                _seed_import_manifest(
+                    "odoo-cm-website-product-onboarding",
+                    {
+                        "ODOO_CM_WEBSITE_TESTING_DOKPLOY_TARGET_ID": (
+                            "compose-cm-website-testing"
+                        )
+                    },
+                )
             )
 
             apply_product_onboarding_manifest(record_store=store, manifest=manifest)
