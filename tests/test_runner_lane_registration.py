@@ -9,8 +9,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from typing import Any
-from unittest.mock import patch
-
 from click import Command
 from click.testing import CliRunner
 
@@ -175,54 +173,28 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         self.assertEqual(command_runner.commands, [])
         self.assertEqual(audit_poster.records[0][0], "planned")
 
-    def test_ready_executor_registers_and_verifies_inventory(self) -> None:
+    def test_ready_executor_requires_supervised_host_maintainer(self) -> None:
         token_fetcher = _TokenFetcher()
         command_runner = _CommandRunner()
         audit_poster = _AuditPoster()
 
-        with patch(
-            "control_plane.workflows.runner_lane_registration_executor.validate_local_executor_environment"
-        ):
-            result = execute_runner_lane_registration_executor(
-                request=_executor_request(mutate=True),
-                policy=_policy(),
-                pre_inventory=_inventory(lanes=()),
-                inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
-                token_fetcher=token_fetcher,  # type: ignore[arg-type]
-                remote_runner=command_runner,
-                audit_poster=audit_poster,
-            )
-
-        self.assertEqual(result.status, "completed")
-        self.assertEqual(token_fetcher.calls, ["cbusillo/odoo-tenant-cm-website"])
-        self.assertEqual(len(command_runner.commands), 1)
-        command_text = " ".join(command_runner.commands[0])
-        self.assertIn("actions-runner-linux-${runner_arch}-${runner_version}.tar.gz", command_text)
-        self.assertIn("./config.sh", command_text)
-        self.assertIn("nohup ./run.sh", command_text)
-        self.assertIn("--labels launchplane,launchplane-managed,self-hosted", command_text)
-        self.assertIn("RUNNER_REGISTRATION_TOKEN", command_runner.envs[0])
-        self.assertEqual(command_runner.envs[0]["RUNNER_REGISTRATION_TOKEN"], "secret-token")
-        self.assertNotIn("secret-token", command_text)
-        self.assertNotIn("secret-token", result.model_dump_json())
-        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "completed"])
-
-    def test_executor_fails_when_post_inventory_does_not_show_lane(self) -> None:
-        with patch(
-            "control_plane.workflows.runner_lane_registration_executor.validate_local_executor_environment"
-        ):
-            result = execute_runner_lane_registration_executor(
-                request=_executor_request(mutate=True),
-                policy=_policy(),
-                pre_inventory=_inventory(lanes=()),
-                inventory_reader=lambda _repo: _inventory(lanes=()),
-                token_fetcher=_TokenFetcher(),  # type: ignore[arg-type]
-                remote_runner=_CommandRunner(),
-                audit_poster=_AuditPoster(),
-            )
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(mutate=True),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("inventory", result.message)
+        self.assertIn("supervised host maintainer", result.message)
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual(result.token_record, None)
+        self.assertNotIn("secret-token", result.model_dump_json())
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
 
 
 class RunnerLaneRegistrationCliTests(unittest.TestCase):
@@ -275,6 +247,59 @@ class RunnerLaneRegistrationCliTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "blocked")
         self.assertIn("planned_response", payload)
+
+    def test_cli_mutate_reports_supervisor_required_without_github_token(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            inventory_file = Path(temp_dir) / "inventory.json"
+            inventory_file.write_text(
+                json.dumps(_inventory(lanes=()).model_dump(mode="json")),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                CLI_MAIN,
+                [
+                    "work-graph",
+                    "runner-lane-registration-executor",
+                    "--repository",
+                    "cbusillo/odoo-tenant-cm-website",
+                    "--host-name",
+                    "chris-testing",
+                    "--execution-lane",
+                    "chris-testing-ops-gate",
+                    "--service-user",
+                    "launchplane-runner-hygiene",
+                    "--lane-name",
+                    "cm-website-runner-1",
+                    "--registration-root",
+                    "/opt/actions-runners",
+                    "--label",
+                    "self-hosted",
+                    "--label",
+                    "launchplane",
+                    "--label",
+                    "launchplane-managed",
+                    "--audit-record-key",
+                    "runner-lane-registration/2026-06-08/cm-website/mutate",
+                    "--allowed-repository",
+                    "cbusillo/odoo-tenant-cm-website",
+                    "--approved-host",
+                    "chris-testing",
+                    "--allowed-registration-root",
+                    "/opt/actions-runners",
+                    "--inventory-file",
+                    str(inventory_file),
+                    "--mutate",
+                ],
+                env={},
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "failed")
+        self.assertIn("supervised host maintainer", payload["message"])
+        self.assertEqual(payload["token_record"], None)
+        self.assertNotIn("secret-token", result.output)
 
 
 def _policy() -> RunnerLaneRegistrationPolicy:

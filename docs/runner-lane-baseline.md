@@ -193,13 +193,13 @@ uv run launchplane work-graph runner-lane-registration-executor \
 ```
 
 The command is dry-run by default. A dry-run writes only local JSON evidence and
-does not request a GitHub registration token. `--mutate` requires an environment
-GitHub token, validates the local host/user/execution-lane boundary, requests a
-short-lived GitHub runner registration token, prepares the official GitHub
-Actions runner package under the approved registration root when needed, runs
-the host-local runner `config.sh`, starts the runner process, then re-reads
-GitHub inventory and fails closed unless the expected lane appears online with
-the requested labels. The token itself is never written to the audit record,
+does not request a GitHub registration token. `--mutate` records apply intent
+and writes a failed audit explaining that runner registration requires a
+supervised host maintainer. The earlier proof path briefly started `run.sh` from
+inside the GitHub Actions job, but that can produce transient online evidence
+and leave the runner offline after job cleanup. That shortcut is disabled. Until
+the supervised maintainer exists, mutate runs do not request a GitHub
+registration token. The token itself must never be written to the audit record,
 command output, or JSON result.
 
 The manual workflow defaults `registration_root` to `auto`, which resolves to
@@ -220,3 +220,29 @@ audit persistence is available through
 registration planning remains a later slice. The workflow still uploads the JSON
 artifact so operators can inspect the exact plan/result packet for cm-website or
 any other product proof.
+
+## Supervised Runner Maintainer Plan
+
+The durable runner maintainer must replace the disabled apply shortcut before a
+product repository can rely on a Launchplane-managed runner lane. The maintainer
+should reconcile desired runner state rather than simply start `run.sh`:
+
+1. Read GitHub runner inventory and local service state for the requested lane.
+2. If registration is required, request a short-lived GitHub registration token
+   and run `config.sh` under an approved registration root.
+3. Install or update a persistent supervisor outside the GitHub Actions job
+   process tree. Prefer a root-owned systemd unit such as
+   `launchplane-runner@<lane>.service` with `User=<service_user>`, an approved
+   `WorkingDirectory`, `ExecStart=<runner-dir>/run.sh`, and `Restart=always`.
+4. Use a small validated root helper or narrow sudo rule for the privileged
+   systemd verbs. Do not grant arbitrary `systemctl`, file-write, or shell
+   authority.
+5. Mark the audit completed only after the service is enabled and active, the
+   process runs as the expected service user, GitHub inventory shows the lane
+   online with expected labels, and baseline readiness passes.
+
+The offline `cm-website-chris-testing` proof runner was removed from GitHub
+inventory after demonstrating why transient process supervision is not
+acceptable. Future cm-website proof runs should first produce a maintainer
+dry-run that decides whether to adopt, remove, or recreate any existing runner
+record, then apply only through the supervised maintainer path.

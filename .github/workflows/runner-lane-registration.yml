@@ -164,6 +164,11 @@ jobs:
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
             "$mutate_flag" \
             > runner-lane-registration-result.json
+          status="$(jq -r '.status // ""' runner-lane-registration-result.json)"
+          if [ "$status" != "blocked" ] && [ "$status" != "completed" ]; then
+            jq . runner-lane-registration-result.json >&2
+            exit 1
+          fi
 
       - name: Upload registration result
         uses: actions/upload-artifact@v7
