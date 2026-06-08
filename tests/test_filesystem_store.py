@@ -89,6 +89,12 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObserva
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygienePolicy
 from control_plane.contracts.runner_host_hygiene import evaluate_runner_host_hygiene
 from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene_apply
+from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditStatus
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationRequest
+from control_plane.contracts.runner_lane_registration import plan_runner_lane_registration
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -219,6 +225,46 @@ def _runner_host_hygiene_audit_record(
         plan=plan,
         pre_apply_report=report,
         post_apply_report=report if status != "planned" else None,
+        message=message,
+    )
+
+
+def _runner_lane_registration_audit_record(
+    *,
+    audit_record_key: str,
+    status: RunnerLaneRegistrationAuditStatus = "planned",
+    message: str = "planned runner lane registration; no host mutation was executed",
+) -> RunnerLaneRegistrationAuditRecord:
+    inventory = build_runner_lane_inventory(
+        repository="cbusillo/odoo-tenant-cm-website",
+        observed_at="2026-06-08T17:30:00Z",
+        lanes=(),
+    )
+    request = RunnerLaneRegistrationRequest(
+        repository="cbusillo/odoo-tenant-cm-website",
+        host_name="chris-testing",
+        lane_name="cm-website-runner-1",
+        registration_root="/opt/actions-runners",
+        labels=("self-hosted", "launchplane", "launchplane-managed"),
+        mutate=True,
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_lane_registration(
+        policy=RunnerLaneRegistrationPolicy(
+            allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
+            approved_hosts=("chris-testing",),
+            allowed_registration_roots=("/opt/actions-runners",),
+        ),
+        request=request,
+        inventory=inventory,
+    )
+    return RunnerLaneRegistrationAuditRecord(
+        audit_record_key=audit_record_key,
+        status=status,
+        request=request,
+        plan=plan,
+        pre_inventory=inventory,
+        post_inventory=inventory if status != "planned" else None,
         message=message,
     )
 
@@ -382,6 +428,46 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             "launchplane_runner_host_hygiene_audits",
         )
         self.assertTrue(written_path.name.startswith("runner-host-hygiene-2026-05-23-"))
+        self.assertEqual(
+            [record.audit_record_key for record in planned_records],
+            [newer_record.audit_record_key, older_record.audit_record_key],
+        )
+        self.assertEqual(
+            [record.audit_record_key for record in limited_records],
+            [failed_record.audit_record_key],
+        )
+
+    def test_write_and_list_runner_lane_registration_audit_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = _runner_lane_registration_audit_record(
+                audit_record_key="runner-lane-registration/2026-06-08/cm-website/old"
+            )
+            newer_record = _runner_lane_registration_audit_record(
+                audit_record_key="runner-lane-registration/2026-06-09/cm-website/new"
+            )
+            failed_record = _runner_lane_registration_audit_record(
+                audit_record_key="runner-lane-registration/2026-06-10/cm-website/failed",
+                status="failed",
+                message="post-registration inventory did not show the lane",
+            )
+
+            written_path = store.write_runner_lane_registration_audit_record(older_record)
+            store.write_runner_lane_registration_audit_record(newer_record)
+            store.write_runner_lane_registration_audit_record(failed_record)
+            planned_records = store.list_runner_lane_registration_audit_records(
+                repository="CBUSILLO/ODOO-TENANT-CM-WEBSITE",
+                host_name="Chris-Testing",
+                status="planned",
+            )
+            limited_records = store.list_runner_lane_registration_audit_records(limit=1)
+
+        self.assertEqual(
+            written_path.parent.relative_to(state_dir).as_posix(),
+            "launchplane_runner_lane_registration_audits",
+        )
+        self.assertTrue(written_path.name.startswith("runner-lane-registration-2026-06-08-"))
         self.assertEqual(
             [record.audit_record_key for record in planned_records],
             [newer_record.audit_record_key, older_record.audit_record_key],

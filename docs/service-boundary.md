@@ -1472,6 +1472,35 @@ storage, and returns the `runner_host_hygiene_audit_record_key`. It is evidence
 ingress only: it records planned, completed, or failed audit facts supplied by a
 future approved executor, but it does not mutate runner hosts itself.
 
+### Runner lane registration audit evidence
+
+`POST /v1/evidence/runner-lane-registration/audits`
+
+Request payload:
+
+```json
+{
+  "schema_version": 1,
+  "product": "launchplane",
+  "audit": {
+    "schema_version": 1,
+    "audit_record_key": "runner-lane-registration/2026-06-08/cm-website/dry-run",
+    "status": "planned",
+    "request": "RunnerLaneRegistrationRequest",
+    "plan": "RunnerLaneRegistrationPlan",
+    "pre_inventory": "RunnerLaneInventory",
+    "post_inventory": null,
+    "message": "planned runner lane registration; no host mutation was executed"
+  }
+}
+```
+
+The route requires `runner_lane_registration_audit.write` for product/context
+`launchplane/launchplane`, writes the typed audit record to Launchplane-owned
+storage, and returns the `runner_lane_registration_audit_record_key`. It is
+evidence ingress only; the host-side registration executor owns any GitHub
+registration token request and runner `config.sh` execution.
+
 For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate
 under `verireel-testing` because previews are not another durable promotion

@@ -87,6 +87,7 @@ from control_plane.contracts.runtime_environment_record import (
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -420,6 +421,35 @@ class LaunchplaneRunnerHostHygieneAuditRow(Base):
     audit_record_key: Mapped[str] = mapped_column(String, primary_key=True)
     host_name: Mapped[str] = mapped_column(String, nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    mutate: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRunnerLaneRegistrationAuditRow(Base):
+    __tablename__ = "launchplane_runner_lane_registration_audits"
+    __table_args__ = (
+        Index(
+            "launchplane_runner_lane_registration_audits_repo_idx",
+            "repository",
+            desc("audit_record_key"),
+        ),
+        Index(
+            "launchplane_runner_lane_registration_audits_host_idx",
+            "host_name",
+            desc("audit_record_key"),
+        ),
+        Index(
+            "launchplane_runner_lane_registration_audits_status_idx",
+            "status",
+            desc("audit_record_key"),
+        ),
+    )
+
+    audit_record_key: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    host_name: Mapped[str] = mapped_column(String, nullable=False)
+    lane_name: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     mutate: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -2750,6 +2780,50 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_runner_lane_registration_audit_record(
+        self, record: RunnerLaneRegistrationAuditRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneRunnerLaneRegistrationAuditRow(
+                audit_record_key=record.audit_record_key,
+                repository=record.request.repository,
+                host_name=record.request.host_name,
+                lane_name=record.request.lane_name,
+                status=record.status,
+                mutate=int(record.request.mutate),
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_runner_lane_registration_audit_records(
+        self,
+        *,
+        repository: str = "",
+        host_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RunnerLaneRegistrationAuditRecord, ...]:
+        filters: list[object] = []
+        normalized_repository = repository.strip().lower()
+        normalized_host_name = host_name.strip().lower()
+        if normalized_repository:
+            filters.append(
+                LaunchplaneRunnerLaneRegistrationAuditRow.repository == normalized_repository
+            )
+        if normalized_host_name:
+            filters.append(
+                LaunchplaneRunnerLaneRegistrationAuditRow.host_name == normalized_host_name
+            )
+        if status:
+            filters.append(LaunchplaneRunnerLaneRegistrationAuditRow.status == status)
+        return self._list_models(
+            model_type=RunnerLaneRegistrationAuditRecord,
+            orm_model=LaunchplaneRunnerLaneRegistrationAuditRow,
+            filters=filters,
+            order_by=(LaunchplaneRunnerLaneRegistrationAuditRow.audit_record_key.desc(),),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -3878,6 +3952,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_lifecycle_plans": 0,
             "preview_pr_feedback": 0,
             "runner_host_hygiene_audits": 0,
+            "runner_lane_registration_audits": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
             "merge_train_pr_feedback": 0,
@@ -3949,9 +4024,15 @@ class PostgresRecordStore(HumanSessionStore):
                 self.write_preview_pr_feedback_record(pr_feedback_record)
                 counts["preview_pr_feedback"] += 1
         if hasattr(filesystem_store, "list_runner_host_hygiene_audit_records"):
-            for audit_record in filesystem_store.list_runner_host_hygiene_audit_records():
-                self.write_runner_host_hygiene_audit_record(audit_record)
+            for hygiene_audit_record in filesystem_store.list_runner_host_hygiene_audit_records():
+                self.write_runner_host_hygiene_audit_record(hygiene_audit_record)
                 counts["runner_host_hygiene_audits"] += 1
+        if hasattr(filesystem_store, "list_runner_lane_registration_audit_records"):
+            for (
+                registration_audit_record
+            ) in filesystem_store.list_runner_lane_registration_audit_records():
+                self.write_runner_lane_registration_audit_record(registration_audit_record)
+                counts["runner_lane_registration_audits"] += 1
         if hasattr(filesystem_store, "list_every_code_preview_gate_records"):
             for gate_record in filesystem_store.list_every_code_preview_gate_records():
                 self.write_every_code_preview_gate_record(gate_record)

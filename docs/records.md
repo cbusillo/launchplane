@@ -204,6 +204,12 @@ an ORM column/table or remains only in the evidence payload.
   operator message. Docker toolchain evidence, host-command output, Docker
   summaries, and rollout notes stay payload-only until they need queryable
   operational views.
+- Runner lane registration audit: modeled fields are `audit_record_key`,
+  `repository`, `host_name`, `lane_name`, `status`, and `mutate`. The payload
+  carries the typed request, registration plan, pre/post runner inventory, and
+  operator message. GitHub registration token values are never persisted; token
+  metadata and host command evidence stay payload-only until operator views need
+  them.
 - Ingress route audit: modeled fields are `record_id`, `product`, `context`,
   `mode`, `status`, `provider_host_id`, and `recorded_at`. The payload carries
   the typed requested domains, expected provider host id, dry-run/apply mode,
@@ -970,6 +976,11 @@ preflights.
   including Docker credential isolation and Docker toolchain/version policy;
   they are not product deploy authority and they do not replace route-specific
   authorization, promotion, backup-gate, or provider safety checks.
+- Runner lane registration audit records are the durable record for the first
+  Launchplane-controlled repository-runner registration host adapter. They live
+  in `launchplane_runner_lane_registration_audits`, are written through
+  `POST /v1/evidence/runner-lane-registration/audits`, and preserve dry-run or
+  apply evidence without storing GitHub runner registration tokens.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

@@ -167,3 +167,49 @@ the typed runner-control policy and request against the supplied inventory and
 baseline readiness JSON. `--mutate` records the operator's explicit mutation
 intent in the request so the planner can tell whether a future host adapter would
 be allowed to proceed, but this CLI command itself remains a dry-run surface.
+
+## Registration Executor
+
+The first narrow host adapter for creating a repo-scoped runner lane is the
+manual ops-lane workflow `.github/workflows/runner-lane-registration.yml` and its
+CLI entrypoint:
+
+```bash
+uv run launchplane work-graph runner-lane-registration-executor \
+  --repository owner/name \
+  --host-name chris-testing \
+  --execution-lane chris-testing-ops-gate \
+  --service-user launchplane-runner-hygiene \
+  --lane-name product-runner-1 \
+  --registration-root /opt/actions-runners \
+  --label self-hosted \
+  --label launchplane \
+  --label launchplane-managed \
+  --audit-record-key runner-lane-registration/2026-06-08/product/dry-run \
+  --allowed-repository owner/name \
+  --approved-host chris-testing \
+  --allowed-registration-root /opt/actions-runners \
+  --inventory-file runner-inventory.json
+```
+
+The command is dry-run by default. A dry-run writes only local JSON evidence and
+does not request a GitHub registration token. `--mutate` requires an environment
+GitHub token, validates the local host/user/execution-lane boundary, requests a
+short-lived GitHub runner registration token, runs the host-local runner
+`config.sh`, then re-reads GitHub inventory and fails closed unless the expected
+lane appears online with the requested labels. The token itself is never written
+to the audit record, command output, or JSON result.
+
+The manual workflow requires the repository secret
+`LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN` for cross-repository runner
+inventory and registration-token requests. The default `GITHUB_TOKEN` from the
+Launchplane workflow is not sufficient authority for product repository runner
+administration.
+
+This executor is the proving-ground adapter for #1231. Durable service-backed
+audit persistence is available through
+`POST /v1/evidence/runner-lane-registration/audits` under
+`runner_lane_registration_audit.write`; descriptor-backed operator routing for
+registration planning remains a later slice. The workflow still uploads the JSON
+artifact so operators can inspect the exact plan/result packet for cm-website or
+any other product proof.

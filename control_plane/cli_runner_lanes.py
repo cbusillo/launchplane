@@ -20,6 +20,7 @@ from control_plane.contracts.runner_lane_control import RunnerLaneControlPolicy
 from control_plane.contracts.runner_lane_control import RunnerLaneControlRequest
 from control_plane.contracts.runner_lane_control import plan_runner_lane_control
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationPolicy
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneObservation
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAction
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
@@ -38,7 +39,24 @@ from control_plane.contracts.runner_host_hygiene import plan_runner_host_hygiene
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
+from control_plane.runner_lane_github import GitHubRunnerLaneRegistrationTokenFetcher
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
+from control_plane.workflows.runner_lane_registration_executor import (
+    RunnerLaneRegistrationExecutorRequest,
+)
+from control_plane.workflows.runner_lane_registration_executor import (
+    build_local_command_runner as build_runner_registration_command_runner,
+)
+from control_plane.workflows.runner_lane_registration_executor import (
+    build_refreshing_service_audit_poster as build_runner_registration_service_audit_poster,
+)
+from control_plane.workflows.runner_lane_registration_executor import (
+    AuditPoster as RunnerRegistrationAuditPoster,
+)
+from control_plane.workflows.runner_lane_registration_executor import dry_run_audit_poster
+from control_plane.workflows.runner_lane_registration_executor import (
+    execute_runner_lane_registration_executor,
+)
 from control_plane.workflows.runner_host_hygiene_executor import RunnerHostHygieneExecutorRequest
 from control_plane.workflows.runner_host_hygiene_executor import DOCKER_BUILDX_PLUGIN_PATH_COMMAND
 from control_plane.workflows.runner_host_hygiene_executor import RemoteCommandRunner
@@ -58,6 +76,10 @@ def register_runner_lane_commands(work_graph: click.Group) -> None:
     work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
     work_graph.add_command(runner_control_plan, name="runner-control-plan")
+    work_graph.add_command(
+        runner_lane_registration_executor,
+        name="runner-lane-registration-executor",
+    )
     work_graph.add_command(runner_host_hygiene_report, name="runner-host-hygiene-report")
     work_graph.add_command(runner_host_hygiene_apply_plan, name="runner-host-hygiene-apply-plan")
     work_graph.add_command(
@@ -464,6 +486,182 @@ def runner_control_plan(
             sort_keys=True,
         )
     )
+
+
+@click.command("runner-lane-registration-executor")
+@click.option("--repository", required=True, help="owner/name repository for the runner lane.")
+@click.option("--host-name", required=True, help="Approved runner host name.")
+@click.option(
+    "--execution-lane",
+    required=True,
+    help="Approved self-hosted ops lane label executing this registration.",
+)
+@click.option("--service-user", required=True, help="Constrained host service user.")
+@click.option("--lane-name", required=True, help="Runner lane name to register.")
+@click.option(
+    "--registration-root",
+    required=True,
+    help="Absolute root directory where runner lanes may be registered.",
+)
+@click.option("--label", "labels", multiple=True, required=True, help="Runner label.")
+@click.option(
+    "--mutate/--dry-run",
+    default=False,
+    show_default=True,
+    help="Create the runner registration token and run config.sh. Defaults to dry-run.",
+)
+@click.option(
+    "--audit-record-key",
+    required=True,
+    help="Launchplane-owned audit record key for this registration attempt.",
+)
+@click.option(
+    "--allowed-repository",
+    "allowed_repositories",
+    multiple=True,
+    help="Repository opted into runner lane registration. Repeat as needed.",
+)
+@click.option(
+    "--approved-host",
+    "approved_hosts",
+    multiple=True,
+    help="Host approved for runner lane registration. Repeat as needed.",
+)
+@click.option(
+    "--allowed-registration-root",
+    "allowed_registration_roots",
+    multiple=True,
+    help="Absolute root allowed for runner registration. Repeat as needed.",
+)
+@click.option(
+    "--required-label",
+    "required_labels",
+    multiple=True,
+    help="Label required by policy. Defaults to self-hosted, launchplane, launchplane-managed.",
+)
+@click.option(
+    "--inventory-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Pre-mutation RunnerLaneInventory JSON from runner-inventory.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token for mutate mode.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+@click.option(
+    "--timeout-seconds",
+    default=120,
+    show_default=True,
+    type=click.IntRange(min=1),
+    help="Timeout for the local runner config command.",
+)
+@click.option(
+    "--audit-mode",
+    type=click.Choice(("local", "service")),
+    default="local",
+    show_default=True,
+    help="Where runner registration audit records should be written.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service origin for --audit-mode service.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a Launchplane bearer token.",
+)
+def runner_lane_registration_executor(
+    repository: str,
+    host_name: str,
+    execution_lane: str,
+    service_user: str,
+    lane_name: str,
+    registration_root: str,
+    labels: tuple[str, ...],
+    mutate: bool,
+    audit_record_key: str,
+    allowed_repositories: tuple[str, ...],
+    approved_hosts: tuple[str, ...],
+    allowed_registration_roots: tuple[str, ...],
+    required_labels: tuple[str, ...],
+    inventory_file: Path,
+    github_token_env: str,
+    github_api_base_url: str,
+    timeout_seconds: int,
+    audit_mode: str,
+    service_url: str,
+    bearer_token_env: str,
+) -> None:
+    try:
+        pre_inventory = _load_runner_lane_inventory(inventory_file)
+        token_env = github_token_env.strip()
+        token = os.environ.get(token_env, "").strip() if token_env else ""
+        if mutate and not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+        transport = UrllibMergeTrainGitHubTransport(
+            token=token or "dry-run-token",
+            api_base_url=github_api_base_url,
+        )
+        inventory_reader = GitHubRunnerLaneInventoryReader(transport=transport)
+        audit_poster: RunnerRegistrationAuditPoster = dry_run_audit_poster
+        if audit_mode == "service":
+            token_env = bearer_token_env.strip()
+            if not token_env:
+                raise click.ClickException(
+                    "runner lane registration executor requires --bearer-token-env."
+                )
+            audit_poster = build_runner_registration_service_audit_poster(
+                service_url=service_url,
+                bearer_token_provider=lambda: _launchplane_service_bearer_token(
+                    service_url=service_url,
+                    token_env=token_env,
+                    label="runner lane registration",
+                ),
+            )
+        result = execute_runner_lane_registration_executor(
+            request=RunnerLaneRegistrationExecutorRequest(
+                repository=repository,
+                host_name=host_name,
+                execution_lane=execution_lane,
+                service_user=service_user,
+                lane_name=lane_name,
+                registration_root=registration_root,
+                labels=labels,
+                mutate=mutate,
+                audit_record_key=audit_record_key,
+                timeout_seconds=timeout_seconds,
+            ),
+            policy=RunnerLaneRegistrationPolicy(
+                allowed_repositories=allowed_repositories,
+                approved_hosts=approved_hosts,
+                allowed_registration_roots=allowed_registration_roots,
+                required_labels=(
+                    required_labels or ("self-hosted", "launchplane", "launchplane-managed")
+                ),
+            ),
+            pre_inventory=pre_inventory,
+            inventory_reader=lambda repo: inventory_reader.read_runner_lane_inventory(
+                repository=repo
+            ),
+            token_fetcher=GitHubRunnerLaneRegistrationTokenFetcher(transport=transport),
+            remote_runner=build_runner_registration_command_runner(),
+            audit_poster=audit_poster,
+        )
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @click.command("runner-host-hygiene-report")
@@ -1090,6 +1288,14 @@ def _load_runner_host_hygiene_apply_plan(apply_plan_file: Path) -> RunnerHostHyg
 
 
 def _runner_host_hygiene_bearer_token(*, service_url: str, token_env: str) -> str:
+    return _launchplane_service_bearer_token(
+        service_url=service_url,
+        token_env=token_env,
+        label="runner host hygiene",
+    )
+
+
+def _launchplane_service_bearer_token(*, service_url: str, token_env: str, label: str) -> str:
     env_token = os.environ.get(token_env, "").strip()
     if env_token:
         return env_token
@@ -1101,7 +1307,7 @@ def _runner_host_hygiene_bearer_token(*, service_url: str, token_env: str) -> st
 
     parsed_service_url = urlsplit(service_url.strip())
     if not parsed_service_url.hostname:
-        raise click.ClickException("runner host hygiene service URL must include a hostname.")
+        raise click.ClickException(f"{label} service URL must include a hostname.")
     separator = "&" if "?" in request_url else "?"
     oidc_request = Request(
         request_url + separator + urlencode({"audience": parsed_service_url.hostname}),

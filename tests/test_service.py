@@ -106,6 +106,13 @@ from control_plane.contracts.runner_host_hygiene import (
     evaluate_runner_host_hygiene,
     plan_runner_host_hygiene_apply,
 )
+from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    RunnerLaneRegistrationPolicy,
+    RunnerLaneRegistrationRequest,
+    plan_runner_lane_registration,
+)
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
@@ -1346,6 +1353,45 @@ def _runner_host_hygiene_audit_payload(
         plan=plan,
         pre_apply_report=report,
         message="planned runner host hygiene apply; no host mutation was executed",
+    )
+    return {"schema_version": 1, "product": product, "audit": audit_record.model_dump(mode="json")}
+
+
+def _runner_lane_registration_audit_payload(
+    *,
+    audit_record_key: str = "runner-lane-registration/2026-06-08/cm-website/dry-run",
+    product: str = "launchplane",
+) -> dict[str, object]:
+    inventory = build_runner_lane_inventory(
+        repository="cbusillo/odoo-tenant-cm-website",
+        observed_at="2026-06-08T17:30:00Z",
+        lanes=(),
+    )
+    request = RunnerLaneRegistrationRequest(
+        repository="cbusillo/odoo-tenant-cm-website",
+        host_name="chris-testing",
+        lane_name="cm-website-runner-1",
+        registration_root="/opt/actions-runners",
+        labels=("self-hosted", "launchplane", "launchplane-managed"),
+        mutate=False,
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_lane_registration(
+        policy=RunnerLaneRegistrationPolicy(
+            allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
+            approved_hosts=("chris-testing",),
+            allowed_registration_roots=("/opt/actions-runners",),
+        ),
+        request=request,
+        inventory=inventory,
+    )
+    audit_record = RunnerLaneRegistrationAuditRecord(
+        audit_record_key=audit_record_key,
+        status="planned",
+        request=request,
+        plan=plan,
+        pre_inventory=inventory,
+        message="planned runner lane registration; no host mutation was executed",
     )
     return {"schema_version": 1, "product": product, "audit": audit_record.model_dump(mode="json")}
 
@@ -26537,6 +26583,204 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="POST",
                 path="/v1/evidence/runner-host-hygiene/audits",
                 payload=_runner_host_hygiene_audit_payload(product="odoo"),
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_runner_lane_registration_audit_endpoint_writes_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_lane_registration_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-lane-registration/audits",
+                payload=_runner_lane_registration_audit_payload(),
+            )
+
+            self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "runner_lane_registration_audit_record_key": (
+                        "runner-lane-registration/2026-06-08/cm-website/dry-run"
+                    ),
+                },
+            )
+            self.assertEqual(
+                payload["result"]["runner_lane_registration_audit_record_key"],
+                "runner-lane-registration/2026-06-08/cm-website/dry-run",
+            )
+            self.assertEqual(payload["result"]["repository"], "cbusillo/odoo-tenant-cm-website")
+            self.assertEqual(payload["result"]["host_name"], "chris-testing")
+            self.assertEqual(payload["result"]["lane_name"], "cm-website-runner-1")
+            self.assertEqual(payload["result"]["audit_status"], "planned")
+            self.assertFalse(payload["result"]["mutate"])
+            self.assertEqual(payload["result"]["audit"]["status"], "planned")
+            store = FilesystemRecordStore(state_dir=state_dir)
+            records = store.list_runner_lane_registration_audit_records(
+                repository="cbusillo/odoo-tenant-cm-website",
+                host_name="chris-testing",
+                status="planned",
+            )
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                records[0].audit_record_key,
+                "runner-lane-registration/2026-06-08/cm-website/dry-run",
+            )
+            self.assertFalse(records[0].request.mutate)
+
+    def test_runner_lane_registration_audit_endpoint_replays_idempotent_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_lane_registration_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_lane_registration_audit_payload()
+
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-lane-registration/audits",
+                payload=request_payload,
+                headers={"Idempotency-Key": "runner-lane-registration:cm-website:planned"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-lane-registration/audits",
+                payload=request_payload,
+                headers={"Idempotency-Key": "runner-lane-registration:cm-website:planned"},
+            )
+
+            self.assertEqual(first_status_code, 202, msg=json.dumps(first_payload, indent=2))
+            self.assertEqual(second_status_code, 202, msg=json.dumps(second_payload, indent=2))
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertTrue(second_payload["replayed"])
+            self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    def test_runner_lane_registration_audit_endpoint_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-lane-registration/audits",
+                payload=_runner_lane_registration_audit_payload(),
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_runner_lane_registration_audit_endpoint_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": ["*"],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runner_lane_registration_audit.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/runner-lane-registration/audits",
+                payload=_runner_lane_registration_audit_payload(product="odoo"),
             )
 
             self.assertEqual(status_code, 400)
