@@ -44,6 +44,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
+    _target_health_url,
 )
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
@@ -188,7 +189,7 @@ def _verification_result() -> OdooVerificationResult:
         logo_status="pass",
         evidence=OdooVerificationEvidence(
             base_url="https://cm-testing.shinycomputers.com",
-            health_url="https://cm-testing.shinycomputers.com/web/health",
+            health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             canonical_url="https://cm-testing.shinycomputers.com",
             logo_urls=("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
         ),
@@ -653,6 +654,55 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             )
 
+    def test_target_health_url_uses_odoo_runtime_identity_path(self) -> None:
+        profile = _profile().model_copy(update={"health_path": "/cm-website/health"})
+        lane = profile.lanes[0]
+
+        health_url = _target_health_url(
+            profile=profile,
+            lane=lane,
+            domains=("cm-website-testing.shinycomputers.com",),
+        )
+
+        self.assertEqual(
+            health_url,
+            "https://cm-website-testing.shinycomputers.com/launchplane/health",
+        )
+
+    def test_target_health_url_ignores_stale_derived_product_health_url(self) -> None:
+        profile = _profile().model_copy(update={"health_path": "/cm-website/health"})
+        lane = profile.lanes[0].model_copy(
+            update={
+                "base_url": "https://cm-website-testing.shinycomputers.com/",
+                "health_url": "HTTPS://CM-WEBSITE-TESTING.SHINYCOMPUTERS.COM/cm-website/health/",
+            }
+        )
+
+        health_url = _target_health_url(
+            profile=profile,
+            lane=lane,
+            domains=("cm-website-testing.shinycomputers.com",),
+        )
+
+        self.assertEqual(
+            health_url,
+            "https://cm-website-testing.shinycomputers.com/launchplane/health",
+        )
+
+    def test_target_health_url_allows_explicit_lane_override(self) -> None:
+        profile = _profile().model_copy(update={"health_path": "/cm-website/health"})
+        lane = profile.lanes[0].model_copy(
+            update={"health_url": "https://internal.example.test/web/health"}
+        )
+
+        health_url = _target_health_url(
+            profile=profile,
+            lane=lane,
+            domains=("cm-website-testing.shinycomputers.com",),
+        )
+
+        self.assertEqual(health_url, "https://internal.example.test/web/health")
+
     def test_apply_recreates_target_in_place_and_writes_breadcrumb_inventory(self) -> None:
         store = _Store(
             target_record=_target_record(),
@@ -873,14 +923,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
-            health_url="https://cm-testing.shinycomputers.com/web/health",
+            health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,
             verify_logo=True,
             timeout_seconds=180,
             retry_interval_seconds=5,
         )
-        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/web/health")
+        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health")
         self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
         self.assertEqual(
             result.logo_urls,

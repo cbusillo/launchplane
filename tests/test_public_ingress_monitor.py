@@ -263,12 +263,61 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(targets[0].health_url, "https://example.test/healthz")
 
     def test_discovers_inherited_generic_web_drivers(self) -> None:
-        store = _Store((_profile(driver_id="odoo"),))
+        store = _Store(
+            (
+                _profile(
+                    driver_id="odoo",
+                ).model_copy(update={"health_path": "/cm-website/health"}),
+            )
+        )
 
         targets = discover_public_ingress_monitor_targets(store)
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].driver_id, "odoo")
+        self.assertEqual(targets[0].health_url, "https://example.test/launchplane/health")
+
+    def test_discovers_odoo_targets_with_stale_derived_health_url(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test/",
+            health_url="HTTPS://EXAMPLE.TEST/cm-website/health/",
+            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=True),
+        )
+        store = _Store(
+            (
+                _profile(driver_id="odoo", lane=lane).model_copy(
+                    update={"health_path": "/cm-website/health"}
+                ),
+            )
+        )
+
+        targets = discover_public_ingress_monitor_targets(store)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].health_url, "https://example.test/launchplane/health")
+
+    def test_discovers_odoo_targets_with_explicit_health_url_override(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_url="https://internal.example.test/web/health",
+            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=True),
+        )
+        store = _Store(
+            (
+                _profile(driver_id="odoo", lane=lane).model_copy(
+                    update={"health_path": "/cm-website/health"}
+                ),
+            )
+        )
+
+        targets = discover_public_ingress_monitor_targets(store)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].health_url, "https://internal.example.test/web/health")
 
     def test_disabled_lane_is_not_monitored(self) -> None:
         lane = ProductLaneProfile(

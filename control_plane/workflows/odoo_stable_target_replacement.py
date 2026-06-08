@@ -36,6 +36,7 @@ from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, exec
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
     default_odoo_health_url,
+    is_legacy_derived_odoo_health_url,
     verify_odoo_stable_readiness,
 )
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
@@ -561,10 +562,15 @@ def _target_base_url(*, lane: ProductLaneProfile, domains: tuple[str, ...]) -> s
 def _target_health_url(
     *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, domains: tuple[str, ...]
 ) -> str:
-    if lane.health_url.strip():
-        return lane.health_url.strip()
     base_url = _target_base_url(lane=lane, domains=domains)
-    return default_odoo_health_url(base_url=base_url, health_path=profile.health_path)
+    lane_health_url = lane.health_url.strip()
+    if lane_health_url and not is_legacy_derived_odoo_health_url(
+        health_url=lane_health_url,
+        base_url=base_url,
+        profile_health_path=profile.health_path,
+    ):
+        return lane_health_url
+    return default_odoo_health_url(base_url=base_url)
 
 
 def _normalize_domain(raw_domain: str) -> str:

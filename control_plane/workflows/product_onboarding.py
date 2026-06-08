@@ -8,6 +8,7 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_onboarding_manifest import (
+    ProductOnboardingLaneManifest,
     ProductOnboardingManifest,
     ProductOnboardingSecretBindingManifest,
 )
@@ -94,7 +95,7 @@ def build_product_profile_record(
                 instance=lane.instance,
                 context=lane.context,
                 base_url=lane.base_url,
-                health_url=lane.health_url or _health_url(lane.base_url, manifest.health_path),
+                health_url=_lane_health_url(manifest=manifest, lane=lane),
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
                 odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
                 odoo_data_policy=lane.odoo_data_policy,
@@ -109,6 +110,15 @@ def build_product_profile_record(
         updated_at=updated_at,
         source=manifest.source_label,
     )
+
+
+def _lane_health_url(*, manifest: ProductOnboardingManifest, lane: ProductOnboardingLaneManifest) -> str:
+    health_url = lane.health_url.strip()
+    if health_url:
+        return health_url
+    if manifest.driver_id == "odoo":
+        return ""
+    return _health_url(lane.base_url, manifest.health_path)
 
 
 def _merged_historical_contexts(

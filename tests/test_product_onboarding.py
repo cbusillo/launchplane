@@ -1700,13 +1700,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "testing",
                     "cm_website",
                     "https://cm-website-testing.shinycomputers.com",
-                    "https://cm-website-testing.shinycomputers.com/cm-website/health",
+                    "https://cm-website-testing.shinycomputers.com/launchplane/health",
                 ),
                 (
                     "prod",
                     "cm_website",
                     "https://www.cellmechanic.com",
-                    "https://www.cellmechanic.com/cm-website/health",
+                    "https://www.cellmechanic.com/launchplane/health",
                 ),
             ],
         )
@@ -1727,6 +1727,34 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(
             manifest.source_label,
             "import-material:odoo-cm-website-product-onboarding",
+        )
+
+    def test_apply_odoo_product_onboarding_keeps_runtime_identity_health_urls(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(
+                _seed_import_manifest("odoo-cm-website-product-onboarding")
+            )
+
+            apply_product_onboarding_manifest(record_store=store, manifest=manifest)
+
+            profile = store.read_product_profile_record("odoo-tenant-cm-website")
+            store.close()
+
+        self.assertEqual(profile.driver_id, "odoo")
+        self.assertEqual(profile.health_path, "/cm-website/health")
+        self.assertEqual(
+            [(lane.instance, lane.health_url) for lane in profile.lanes],
+            [
+                (
+                    "testing",
+                    "https://cm-website-testing.shinycomputers.com/launchplane/health",
+                ),
+                ("prod", "https://www.cellmechanic.com/launchplane/health"),
+            ],
         )
 
     def test_seed_import_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
