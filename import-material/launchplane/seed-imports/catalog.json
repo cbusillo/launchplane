@@ -795,7 +795,7 @@
             "instance": "testing",
             "context": "cm_website",
             "base_url": "https://cm-website-testing.shinycomputers.com",
-            "health_url": "https://cm-website-testing.shinycomputers.com/cm-website/health",
+            "health_url": "https://cm-website-testing.shinycomputers.com/launchplane/health",
             "odoo_data_policy": {
               "data_authority": "resettable",
               "allowed_rebuild_sources": ["empty"],
@@ -808,7 +808,7 @@
             "instance": "prod",
             "context": "cm_website",
             "base_url": "https://www.cellmechanic.com",
-            "health_url": "https://www.cellmechanic.com/cm-website/health",
+            "health_url": "https://www.cellmechanic.com/launchplane/health",
             "odoo_data_policy": {
               "data_authority": "resettable",
               "allowed_rebuild_sources": ["empty"],

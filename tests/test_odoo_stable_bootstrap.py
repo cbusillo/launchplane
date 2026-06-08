@@ -63,7 +63,7 @@ def _verification_result() -> OdooVerificationResult:
         logo_status="pass",
         evidence=OdooVerificationEvidence(
             base_url="https://cm-testing.shinycomputers.com",
-            health_url="https://cm-testing.shinycomputers.com/web/health",
+            health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             canonical_url="https://cm-testing.shinycomputers.com",
             logo_urls=("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
         ),
@@ -77,7 +77,7 @@ def _verification_failure_result() -> OdooVerificationResult:
         logo_status="skipped",
         evidence=OdooVerificationEvidence(
             base_url="https://cm-testing.shinycomputers.com",
-            health_url="https://cm-testing.shinycomputers.com/web/health",
+            health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             canonical_url="https://cm-testing.shinycomputers.com",
         ),
         error_message="canonical failed",
@@ -263,14 +263,14 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "deploy")
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
-            health_url="https://cm-testing.shinycomputers.com/web/health",
+            health_url="https://cm-testing.shinycomputers.com/launchplane/health",
             verify_health=True,
             verify_canonical=True,
             verify_logo=True,
             timeout_seconds=30,
             retry_interval_seconds=5,
         )
-        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/web/health")
+        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health")
         self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
         self.assertEqual(
             result.logo_urls,

@@ -44,6 +44,10 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
 )
 from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.workflows.odoo_verification import (
+    default_odoo_health_url,
+    is_legacy_derived_odoo_health_url,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -205,9 +209,7 @@ def discover_public_ingress_monitor_targets(
             if not lane.public_ingress_monitoring.enabled:
                 continue
             base_url = lane.base_url.strip().rstrip("/")
-            health_url = (
-                lane.health_url.strip() or _health_url(base_url, profile.health_path)
-            ).strip()
+            health_url = _monitor_health_url(profile=profile, lane=lane, base_url=base_url)
             if not (base_url or health_url):
                 continue
             targets.append(
@@ -811,7 +813,27 @@ def _failure_summary(code: PublicIngressFailureCode) -> str:
 def _health_url(base_url: str, health_path: str) -> str:
     if not base_url.strip():
         return ""
-    return f"{base_url.rstrip('/')}{health_path}"
+    normalized_health_path = health_path.strip()
+    if not normalized_health_path.startswith("/"):
+        normalized_health_path = f"/{normalized_health_path}"
+    return f"{base_url.rstrip('/')}{normalized_health_path}"
+
+
+def _monitor_health_url(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, base_url: str
+) -> str:
+    lane_health_url = lane.health_url.strip()
+    if profile.driver_id == "odoo":
+        if lane_health_url and not is_legacy_derived_odoo_health_url(
+            health_url=lane_health_url,
+            base_url=base_url,
+            profile_health_path=profile.health_path,
+        ):
+            return lane_health_url
+        return default_odoo_health_url(base_url=base_url)
+    if lane_health_url:
+        return lane_health_url
+    return _health_url(base_url, profile.health_path).strip()
 
 
 def _normalized_url(url: str) -> str:

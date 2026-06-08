@@ -7,7 +7,7 @@ import re
 import time
 from typing import Literal
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunsplit
 from urllib.request import Request, urlopen
 
 import click
@@ -72,6 +72,29 @@ def default_odoo_health_url(
     if not normalized_health_path.startswith("/"):
         normalized_health_path = f"/{normalized_health_path}"
     return f"{normalized_base_url}{normalized_health_path}"
+
+
+def is_legacy_derived_odoo_health_url(
+    *, health_url: str, base_url: str, profile_health_path: str
+) -> bool:
+    expected = default_odoo_health_url(base_url=base_url, health_path=profile_health_path)
+    return bool(expected) and _normalized_health_url(health_url) == _normalized_health_url(expected)
+
+
+def _normalized_health_url(raw_url: str) -> str:
+    parsed = urlparse(raw_url.strip())
+    path = (parsed.path or "/").rstrip("/") or "/"
+    if parsed.params:
+        path = f"{path};{parsed.params}"
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            parsed.query,
+            "",
+        )
+    )
 
 
 def verify_odoo_stable_readiness(
