@@ -642,6 +642,22 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
                 self.assertNotIn('"product":"odoo"', workflow_text)
 
+    def test_reusable_odoo_workflows_use_caller_visible_runner(self) -> None:
+        workflow_paths = (
+            Path(".github/workflows/reusable-odoo-artifact-publish.yml"),
+            Path(".github/workflows/reusable-odoo-testing-deploy.yml"),
+            Path(".github/workflows/reusable-odoo-post-deploy.yml"),
+            Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
+            Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
+        )
+
+        for workflow_path in workflow_paths:
+            with self.subTest(workflow=workflow_path.name):
+                workflow_text = workflow_path.read_text(encoding="utf-8")
+                self.assertIn("runs-on: ubuntu-latest", workflow_text)
+                self.assertNotIn("LAUNCHPLANE_RUNNER_LABEL", workflow_text)
+                self.assertNotIn("runs-on:\n      - self-hosted", workflow_text)
+
     def test_odoo_website_bootstrap_override_requires_explicit_target_inputs(self) -> None:
         workflow_text = Path(".github/workflows/odoo-website-bootstrap-override.yml").read_text(
             encoding="utf-8"

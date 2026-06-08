@@ -787,7 +787,10 @@ context only, and `context_instance` has both context and instance.
   `cm_website` resolves to product `odoo-tenant-cm-website`. Post-deploy
   workflow outputs include `website_bootstrap_included` so callers can prove
   whether the typed website bootstrap payload was rendered into the remote data
-  workflow request.
+  workflow request. These reusable workflow jobs use GitHub-hosted runners so
+  tenant repositories do not need direct access to Launchplane self-hosted
+  runners; privileged provider mutations still execute inside the deployed
+  Launchplane service.
 - `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
   the DB-backed `testing` release tuple for the same context. The driver owns
   rollback intent and promotion-record annotation, but the provider mutation runs

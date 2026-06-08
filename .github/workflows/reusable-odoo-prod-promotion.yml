@@ -39,9 +39,7 @@ permissions:
 
 jobs:
   prod-promotion:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane product
         id: product

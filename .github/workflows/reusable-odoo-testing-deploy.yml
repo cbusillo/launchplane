@@ -86,9 +86,7 @@ jobs:
       canonical_status: ${{ steps.poll.outputs.canonical_status }}
       logo_status: ${{ steps.poll.outputs.logo_status }}
       error_message: ${{ steps.poll.outputs.error_message }}
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    runs-on: ubuntu-latest
     steps:
       - name: Resolve Launchplane product
         id: product
