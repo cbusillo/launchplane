@@ -35,6 +35,9 @@ RUN apt-get update \
         libk5crypto3 \
         libkrb5-3 \
         libkrb5support0 \
+        libssl3t64 \
+        openssl \
+        openssl-provider-legacy \
     && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
