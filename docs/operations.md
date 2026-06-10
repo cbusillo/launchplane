@@ -246,11 +246,10 @@ CI-success deploys. Those grants keep future grant reconciliation separate from
 Launchplane self-deploy authority.
 
 The #1049 compatibility cleanup removed stale
-`launchplane_service_deploy.execute` GitHub Actions rules for the seed-import
-and merge-train policy import workflows through the service-backed removals
-route. Do not reintroduce those broad rules; keep those workflows paired with
-the narrow `product_onboarding.apply`, `runtime_key_safety.write`, and
-`merge_train.policy_import` grants.
+`launchplane_service_deploy.execute` GitHub Actions rules for policy import
+workflows through the service-backed removals route. Do not reintroduce those
+broad rules; keep those workflows paired with narrow action grants such as
+`merge_train.policy_import`.
 
 The deploy workflow also reconciles the manual `Provider Target Operations`
 workflow grants. `provider_target.audit` covers audit and dry-run requests;
@@ -262,9 +261,8 @@ Routine local-operator product-config grants are scoped, not wildcard, and the
 deploy reconciliation skips them unless explicit product/context scopes are
 configured. Set `LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON` only for
 operator-reviewed routine write access; use local-admin grants for rare broader
-repair authority instead of widening routine local-operator access. Seed import
-catalogs are explicit import material, not deploy-time authority for these
-operator scopes.
+repair authority instead of widening routine local-operator access. Checked-in
+catalogs are not deploy-time authority for these operator scopes.
 
 Grant requests return only authz policy record metadata and rule counts; they do
 not echo workflow refs, human logins, or the full policy body.
@@ -410,9 +408,9 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
-  - product target ids are no longer consumed by normal deploy seed writes; use
-    the manual `Launchplane Seed Import` workflow when import material needs to
-    create or repair product onboarding records
+  - product target ids are not consumed from deploy-time seed files; create or
+    repair product onboarding records through Launchplane service routes with
+    scoped authorization
 
 The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
@@ -433,15 +431,10 @@ Before rollback, the workflow uses those same break-glass credentials to capture
 redacted Dokploy target, container, and recent log diagnostics for the failed
 rollout. Diagnostics failures are non-blocking so rollback remains the priority.
 
-Product onboarding manifests and runtime key-safety policies live under
-`import-material/launchplane/seed-imports/` as explicit import material. Normal
-deploy does not apply those records. Use the manual `Launchplane Seed Import`
-workflow for dry-run evidence first, then rerun with `apply`, exact confirmation,
-and an operator reason when the DB-backed records need to be created or repaired.
-The workflow calls Launchplane service routes with GitHub OIDC and dedicated
-apply authority: `product_onboarding.apply` for product onboarding and
-`runtime_key_safety.write` for runtime key-safety policy records. It uploads the
-payload/evidence artifact for review.
+Product onboarding manifests and runtime key-safety policies are DB-backed
+Launchplane records. Create or repair them through the Launchplane service API
+or operator UI with scoped authorization and operator evidence; do not load
+product/runtime truth from checked-in catalogs.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that

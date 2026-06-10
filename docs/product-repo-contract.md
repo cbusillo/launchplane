@@ -39,6 +39,47 @@ Launchplane
 The product repo should not carry Launchplane lifecycle truth in TOML, JSON,
 checked-in fixtures, or copied ops scripts. Product and lane configuration lives
 in Launchplane DB-backed records.
+Moving lifecycle truth from code into repo metadata, workflow defaults, TOML,
+JSON, or YAML is still a boundary violation unless the file is docs, tests, or
+Launchplane self-bootstrap.
+
+## Repo Metadata Boundary
+
+Product repos may keep `.github/github.json` as repo ergonomics metadata. It can
+name non-authoritative facts such as the default branch, project type, docs
+index, quality-gate commands, important workflow names, cleanup preferences,
+GitHub signal capability hints, labels used by repo automation, and public repo
+relationships used for navigation or operator orientation.
+
+Repo metadata must not become the source of truth for Launchplane lifecycle or
+runtime state. Do not store real product profiles, product domains, owner
+identity, Launchplane driver selection, preview slug policy, preview route
+topology, lane URLs, lane health URLs, deploy routes, provider targets, provider
+target ids, runtime environments, managed secret bindings, authz grants,
+operator identities, promotion policy, rollback policy, cleanup protection, or
+production readiness authority in `.github/github.json`.
+
+Thin connector metadata is allowed only when it identifies a generic connection
+surface rather than product topology. Examples include the name of the variable
+that supplies the Launchplane service URL, a reusable workflow entrypoint, a
+shared action path, a GitHub label that triggers a workflow, or a generic
+Launchplane route path used by the shared request action. The product-specific
+facts sent to that route should come from Launchplane records, GitHub OIDC
+claims, workflow dispatch input, or immutable build outputs, not from a
+checked-in catalog.
+
+Existing product repo metadata that lists product identity, public domains,
+health URLs, preview/deploy route configuration, or lane topology is an audit and
+remediation target unless it is explicitly reclassified as a Launchplane-stamped
+read model. A stamped read model must carry provenance that identifies
+Launchplane as the writer, the source record or response it mirrors, the stamp
+time or source hash, and a contract that operator edits are non-authoritative.
+Launchplane must still read authoritative lifecycle state from DB-backed records
+or driver responses, not from the stamped repo copy.
+
+Do not replace hard-coded lifecycle authority in code with the same authority in
+JSON, TOML, YAML, workflow defaults, or repo metadata. Moving the value changes
+the hiding place, not the ownership boundary.
 
 ## What Product Repos Own
 
@@ -60,9 +101,10 @@ in Launchplane DB-backed records.
 
 Product-specific checks may stay in the repo when they exercise product behavior
 Launchplane cannot know generically, such as a checkout flow, owner route, QR
-scan flow, or domain-specific API behavior. Generic runtime health and revision
-checks should move to Launchplane drivers once the driver has the necessary
-profile data.
+scan flow, or domain-specific API behavior. They should send facts to
+Launchplane rather than defining product topology, target inventory, domains, or
+runtime authority. Generic runtime health and revision checks should move to
+Launchplane drivers once the driver has the necessary profile data.
 
 ## What Launchplane Owns
 

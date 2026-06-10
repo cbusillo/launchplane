@@ -18,6 +18,15 @@ Treat this file as the launch checklist for each Every Code session in
   do not rely on system Python directly.
 - Persist runtime records under `state/` or another explicit state directory,
   not in git-tracked history.
+- Do not store real product, tenant, repository, branch, domain, lane,
+  provider-target, runtime-environment, authz, operator, or other mutable
+  runtime configuration as authority in production code or checked-in config
+  files. Code owns schemas, validators, generic behavior, and fail-closed
+  defaults; Launchplane records or operator-supplied input own real identities
+  and values.
+- The only runtime configuration exception for checked-in or process-level
+  config is Launchplane's own minimal bootstrap/root-of-trust wiring required
+  for the service to start and reach DB-backed records and managed secrets.
 
 ## Operating Guardrails
 
@@ -35,8 +44,12 @@ Treat this file as the launch checklist for each Every Code session in
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower temporary compatibility fallback.
 - Do not hard-code real tenant, product, repository, branch, domain, or operator
-  values into production defaults or fallback behavior; see the coding
-  standards for the docs/tests/import-material boundary.
+  values into production defaults, fallback behavior, or checked-in catalogs;
+  see the coding standards for the docs/tests boundary.
+- Do not replace code hard-coding with checked-in config hard-coding. A real
+  product/repo/domain list in TOML, JSON, YAML, workflow defaults, or repo
+  metadata is still runtime authority unless it is docs, tests, or the
+  Launchplane self-bootstrap exception above.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   operator explicitly asks for a time-boxed mitigation.
