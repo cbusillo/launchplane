@@ -435,8 +435,7 @@ def _candidate_paths(
     discovered_paths = [root / relative_path for relative_path in _git_tracked_relative_paths(root)]
     if include_untracked:
         discovered_paths.extend(
-            root / relative_path
-            for relative_path in _git_untracked_relative_paths(root)
+            root / relative_path for relative_path in _git_untracked_relative_paths(root)
         )
     return sorted(discovered_paths)
 
@@ -596,7 +595,9 @@ def _python_semantic_value_candidates(
     if isinstance(node, ast.Dict):
         for key_node, value_node in zip(node.keys, node.values, strict=False):
             key_value = _literal_value(key_node)
-            child_key = f"{base_key}.{key_value}" if key_value is not None else f"{base_key}.<dynamic>"
+            child_key = (
+                f"{base_key}.{key_value}" if key_value is not None else f"{base_key}.<dynamic>"
+            )
             candidates.extend(
                 _python_semantic_value_candidates(
                     value_node,
@@ -806,15 +807,15 @@ def _rule_id(*, key: str, value: object) -> str:
         return "secret_binding_identity"
     if URL_PATTERN.search(value_text) or "DOMAIN" in leaf_text or "URL" in leaf_text:
         return "domain_or_url_authority"
-    if (
-        OWNER_REPO_PATTERN.search(value_text)
-        or "REPO" in leaf_text
-        or "REPOSITORY" in leaf_text
-    ):
+    if OWNER_REPO_PATTERN.search(value_text) or "REPO" in leaf_text or "REPOSITORY" in leaf_text:
         return "repository_authority"
     if "AUTHZ" in leaf_text or "OPERATOR" in leaf_text or "SUBJECT" in leaf_text:
         return "authz_or_operator_authority"
-    if "TARGET" in leaf_text or "PROVIDER" in leaf_text or PROVIDER_TARGET_PATTERN.search(value_text):
+    if (
+        "TARGET" in leaf_text
+        or "PROVIDER" in leaf_text
+        or PROVIDER_TARGET_PATTERN.search(value_text)
+    ):
         return "provider_target_authority"
     return "runtime_config_authority"
 
@@ -925,7 +926,9 @@ def _git_tracked_relative_paths(root: Path) -> list[str]:
 
 def _git_changed_files(root: Path) -> list[Path]:
     changed = {relative_path for _, relative_path in _git_status_entries(root)}
-    return sorted(root / relative_path for relative_path in changed if (root / relative_path).is_file())
+    return sorted(
+        root / relative_path for relative_path in changed if (root / relative_path).is_file()
+    )
 
 
 def _git_untracked_relative_paths(root: Path) -> list[str]:

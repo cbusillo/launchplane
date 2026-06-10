@@ -225,7 +225,6 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
-
     def test_deploy_authz_grants_include_scheduled_merge_train_runner(
         self,
     ) -> None:

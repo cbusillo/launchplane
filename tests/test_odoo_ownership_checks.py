@@ -14,9 +14,7 @@ from control_plane.odoo_ownership_checks import (
 
 class OdooOwnershipChecksTests(TestCase):
     def test_default_policy_includes_odoo_product_repositories(self) -> None:
-        scanned_repositories = {
-            policy.repository for policy in DEFAULT_ODOO_REPO_POLICIES
-        }
+        scanned_repositories = {policy.repository for policy in DEFAULT_ODOO_REPO_POLICIES}
 
         self.assertIn("odoo-tenant-cm", scanned_repositories)
         self.assertIn("odoo-tenant-cm-website", scanned_repositories)

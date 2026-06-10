@@ -161,9 +161,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             keys,
         )
         path_glob_findings = [
-            finding
-            for finding in _findings(payload)
-            if "allowed_path_globs" in str(finding["key"])
+            finding for finding in _findings(payload) if "allowed_path_globs" in str(finding["key"])
         ]
         self.assertTrue(path_glob_findings)
         self.assertTrue(
@@ -302,9 +300,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     {
                         "docs": {"operations": "docs/operations.md"},
                         "qualityGate": {
-                            "security": {
-                                "secretScan": "docker run ghcr.io/example/gitleaks:latest"
-                            }
+                            "security": {"secretScan": "docker run ghcr.io/example/gitleaks:latest"}
                         },
                         "relatedRepos": ["example/example-product"],
                         "healthUrls": [
@@ -349,9 +345,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(by_key["product.name"]["evidence"], "<redacted-runtime-identity>")
         self.assertEqual(by_key["product.owner"]["evidence"], "<redacted-runtime-identity>")
         self.assertEqual(by_key["launchplane.lanes.testing.url"]["allow_reason"], "")
-        self.assertEqual(
-            by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], ""
-        )
+        self.assertEqual(by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], "")
 
     def test_hashes_are_stable_for_same_inputs_and_findings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -374,7 +368,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             source = root / "control_plane" / "config_authority_audit.py"
             source.parent.mkdir()
             source.write_text(
-                'ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = '
+                "ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "
                 '"operator_supplied_runtime_input"\n',
                 encoding="utf-8",
             )
@@ -415,9 +409,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 '{"repository":"cbusillo/original-product"}\n', encoding="utf-8"
             )
             _commit_all(root)
-            tracked_file.write_text(
-                '{"repository":"cbusillo/changed-product"}\n', encoding="utf-8"
-            )
+            tracked_file.write_text('{"repository":"cbusillo/changed-product"}\n', encoding="utf-8")
 
             payload = build_config_authority_audit(control_plane_root=root)
 
@@ -478,7 +470,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("name", keys)
         self.assertNotIn("uses", keys)
         self.assertNotIn("run", keys)
-        route_path = next(finding for finding in _findings(payload) if finding["key"] == "route-path")
+        route_path = next(
+            finding for finding in _findings(payload) if finding["key"] == "route-path"
+        )
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
 
     def test_cli_outputs_json_and_markdown(self) -> None:
