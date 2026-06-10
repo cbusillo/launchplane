@@ -31,6 +31,8 @@ class ServiceCliCallbacks:
     trigger_and_wait_for_dokploy_target_deploy: Callable[..., dict[str, str]]
     verify_healthcheck_urls: Callable[..., None]
     inspect_local_launchplane_config_boundary: Callable[..., dict[str, object]]
+    build_config_authority_audit: Callable[..., dict[str, object]]
+    render_config_authority_markdown: Callable[..., str]
 
 
 _callbacks: ServiceCliCallbacks | None = None
@@ -523,6 +525,68 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     payload = callbacks.inspect_local_launchplane_config_boundary(
         control_plane_root=launchplane_root
     )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service.command("audit-config-authority")
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to scan checked-in config authority.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["full-audit", "changed-files-gate"]),
+    default="full-audit",
+    show_default=True,
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "markdown"]),
+    default="json",
+    show_default=True,
+)
+@click.option(
+    "--include-untracked",
+    is_flag=True,
+    default=False,
+    help="Include untracked files during full-audit discovery.",
+)
+@click.option(
+    "--include-ignored",
+    is_flag=True,
+    default=False,
+    help="Include ignored files during full-audit discovery except heavyweight directories.",
+)
+@click.option(
+    "--path",
+    "scan_paths",
+    type=click.Path(path_type=Path),
+    multiple=True,
+    help="Limit the audit to one or more files. Relative paths resolve from the control-plane root.",
+)
+def service_audit_config_authority(
+    control_plane_root: Path | None,
+    mode: str,
+    output_format: str,
+    include_untracked: bool,
+    include_ignored: bool,
+    scan_paths: tuple[Path, ...],
+) -> None:
+    callbacks = _service_callbacks()
+    launchplane_root = control_plane_root or _control_plane_root()
+    payload = callbacks.build_config_authority_audit(
+        control_plane_root=launchplane_root,
+        mode=mode,
+        include_untracked=include_untracked,
+        include_ignored=include_ignored,
+        paths=scan_paths,
+    )
+    if output_format == "markdown":
+        click.echo(callbacks.render_config_authority_markdown(payload))
+        return
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 

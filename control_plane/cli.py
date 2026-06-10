@@ -79,6 +79,10 @@ from control_plane.cli_records import RecordsCliCallbacks, register_record_comma
 from control_plane.cli_service import ServiceCliCallbacks, register_service_commands
 from control_plane.cli_storage_secrets import register_storage_secret_commands
 from control_plane.cli_work_graph import register_work_graph_core_commands
+from control_plane.config_authority_audit import (
+    build_config_authority_audit,
+    render_config_authority_markdown,
+)
 from control_plane.launchplane_rendering import (
     build_launchplane_action_script as _build_launchplane_action_script,
     build_launchplane_backup_gate_write_recipe_script as _build_launchplane_backup_gate_write_recipe_script,
@@ -3835,6 +3839,8 @@ register_service_commands(
         trigger_and_wait_for_dokploy_target_deploy=_trigger_and_wait_for_dokploy_target_deploy,
         verify_healthcheck_urls=_verify_healthcheck_urls,
         inspect_local_launchplane_config_boundary=_inspect_local_launchplane_config_boundary,
+        build_config_authority_audit=build_config_authority_audit,
+        render_config_authority_markdown=render_config_authority_markdown,
     ),
 )
 register_record_commands(

@@ -16,9 +16,9 @@ It exists to keep new cross-product work aligned with Launchplane's target form:
 - thin repo extensions
 
 The repo-local CLI is an operator/client surface around this boundary. Local
-file-backed state is allowed only for development, tests, import/backfill,
-explicit local rehearsal, and emergency inspection; it is not a production
-persistence fallback.
+file-backed state is allowed only for development, tests, explicitly scoped
+record backfill, local rehearsal, and emergency inspection; it is not a
+production persistence fallback or product/runtime config authority.
 
 Agent-facing context and scoped write-intent rules are summarized in
 [agent-context-boundary.md](agent-context-boundary.md). Keep that page aligned
@@ -841,9 +841,8 @@ and managed secret binding placeholders. Manifests must use neutral
 `provider_targets`; obsolete `dokploy_targets` input is rejected with a clear
 validation error. The route is restricted to `product_onboarding.apply`
 authority for product/context `launchplane`, requires DB-backed storage,
-returns only sanitized `provider_target*` summaries, and exists so the
-Launchplane seed import workflow can seed product records without product repos
-storing live lifecycle truth.
+and returns only sanitized `provider_target*` summaries. Product records are not
+loaded from checked-in catalogs or product repos.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
 deleted runtime identity records under neutral `provider_targets` and

@@ -15,10 +15,13 @@ title: Config Boundary
 
 Launchplane's long-term config model is:
 
-- bootstrap/root-of-trust stays outside the database
+- Launchplane's minimal self-bootstrap/root-of-trust stays outside the database
 - all other live mutable config is DB-backed
 - checked-in repo files are examples, docs, schemas, tests, and workflows; live
   authz and target files are not repo authority
+- checked-in code or config must not act as authority for real product, tenant,
+  repository, branch, domain, lane, provider-target, runtime-environment, authz,
+  operator, or mutable product/runtime configuration
 - local files under `~/.config/launchplane/` are not Launchplane config
   authority and should be archived or deleted when found
 - the service never silently falls back across multiple live authorities
@@ -33,18 +36,22 @@ shared store, Launchplane should fail closed.
 These values remain outside the database because Launchplane needs them before
 it can reach, trust, or decrypt DB-backed state.
 
-| Class | Current surface | Final authority | Notes |
-| --- | --- | --- | --- |
-| Database connectivity | `LAUNCHPLANE_DATABASE_URL` | Bootstrap env | Required before Launchplane can read DB-backed config. |
-| Secret decryption root | `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` | Bootstrap env | Must stay outside the DB it decrypts. |
-| Authz bootstrap | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE` | Minimal bootstrap env/file | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records. |
-| Launchplane self image ref | `DOCKER_IMAGE_REFERENCE` | Service target env | Needed for Launchplane self-deploy and rollback posture. |
-| Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. `LAUNCHPLANE_STATE_DIR` is a non-authoritative runtime directory; service persistence still requires `LAUNCHPLANE_DATABASE_URL`. |
-| Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
-| Every Code worker bearer token | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config. |
-| Terminal-agent read bearer token | `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`, optional `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT`, optional `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and a trusted local terminal agent for redacted `GET` context reads only. Store it outside repository config and keep it distinct from Every Code worker credentials. |
-| Local-operator write bearer token | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, optional `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, optional `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for routine reason-bearing operator mutations. Exact authority is DB-backed by `local_operators` authz policy rules. Store it outside repository config and keep it distinct from read-only terminal-agent credentials. |
-| Local-admin write bearer token | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, optional `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, optional `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation. |
+This category is only for Launchplane's own startup/root-of-trust wiring. It is
+not a general exception for product, tenant, repository, lane, provider,
+workflow, or operator configuration.
+
+| Class                             | Current surface                                                                                                                           | Final authority                  | Notes                                                                                                                                                                                                                                                                                                |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database connectivity             | `LAUNCHPLANE_DATABASE_URL`                                                                                                                | Bootstrap env                    | Required before Launchplane can read DB-backed config.                                                                                                                                                                                                                                               |
+| Secret decryption root            | `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`                                                                                                       | Bootstrap env                    | Must stay outside the DB it decrypts.                                                                                                                                                                                                                                                                |
+| Authz bootstrap                   | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE`                                                            | Minimal bootstrap env/file       | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records.                                                                                                                                                                            |
+| Launchplane self image ref        | `DOCKER_IMAGE_REFERENCE`                                                                                                                  | Service target env               | Needed for Launchplane self-deploy and rollback posture.                                                                                                                                                                                                                                             |
+| Process wiring                    | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT`   | Service target env               | Runtime/process wiring, not product config. `LAUNCHPLANE_STATE_DIR` is a non-authoritative runtime directory; service persistence still requires `LAUNCHPLANE_DATABASE_URL`.                                                                                                                         |
+| Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET`                                                                                            | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config.                                                                                                                                                                               |
+| Every Code worker bearer token    | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`                                                                                                     | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config.                                                                                                                                                                 |
+| Terminal-agent read bearer token  | `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`, optional `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT`, optional `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and a trusted local terminal agent for redacted `GET` context reads only. Store it outside repository config and keep it distinct from Every Code worker credentials.                                                                                              |
+| Local-operator write bearer token | `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`, optional `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT`, optional `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL`      | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for routine reason-bearing operator mutations. Exact authority is DB-backed by `local_operators` authz policy rules. Store it outside repository config and keep it distinct from read-only terminal-agent credentials.         |
+| Local-admin write bearer token    | `LAUNCHPLANE_LOCAL_ADMIN_TOKEN`, optional `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT`, optional `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`               | Bootstrap env or platform secret | Shared by the Launchplane service and trusted local owner automation for rare privileged mutations. Exact authority is DB-backed by `local_admins` authz policy rules; the token alone does not grant blanket access. Store it outside repository config and load it only for deliberate escalation. |
 
 The Launchplane self-deploy workflow has a manual `omit_every_code_env`
 compatibility input for the one deploy that teaches an older running service to
@@ -76,36 +83,41 @@ the token is absent and never falls back to active local `gh` authentication.
 These values are live mutable control-plane config and should resolve from
 Launchplane records/secrets instead of repo files or operator-local env.
 
-| Class | Current surface | Final authority | Notes |
-| --- | --- | --- | --- |
+| Class                         | Current surface                    | Final authority                     | Notes                                                                                                                                                                                                                          |
+| ----------------------------- | ---------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Merge-train repository policy | `launchplane_merge_train_policies` | DB-backed Launchplane policy record | Defines supported repository/base branch merge-train policies. The service fails closed when no active policy record exists and for unsupported pairs before GitHub calls. Repo TOML files are not a supported live authority. |
 
-| Class | Current surface(s) | Final authority | Notes |
-| --- | --- | --- | --- |
-| Dokploy credentials | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`) | Launchplane managed secrets | Fail closed when the shared store does not have both bindings. |
-| Dokploy edge upstream endpoints | `launchplane_edge_endpoints` | DB-backed Launchplane edge endpoint records | Server identity is human-readable, but provider upstreams passed to NPMplus must be stored IP addresses. Product repos and ad hoc workflow inputs are not durable topology authority. |
-| Runtime environment values | Runtime-environment records | Launchplane runtime-environment records | Includes shared, context, and instance-scoped values. |
-| Secret-shaped runtime keys | Managed runtime secrets overlay | Launchplane managed secrets | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. |
-| Runtime key-safety policy | `launchplane_runtime_key_safety_policies`, seed-import reconciliation endpoint | Launchplane runtime key-safety policy records | Classifies managed secret binding keys by runtime class and scope. Seed-import reconciliation carries metadata only and cannot replace secret values. |
-| Ship mode overrides | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>` | Launchplane runtime-environment records | Mutable operator behavior, not bootstrap. |
-| Preview routing/config | `LAUNCHPLANE_PREVIEW_BASE_URL` | Launchplane runtime-environment records | Shared control-plane-owned runtime value. |
-| GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` | Launchplane runtime-environment records and managed secrets | Current docs already classify these as DB-backed target state. |
-| Product/tenant runtime env | Odoo runtime values, tenant-specific env keys | Launchplane runtime-environment records and managed secrets | Includes shared and per-instance overlays. |
-| Odoo application override intent | Former `ENV_OVERRIDE_CONFIG_PARAM__*`, Authentik, and Shopify override shapes | Launchplane Odoo instance override records plus managed secret bindings | `ENV_OVERRIDE_*` names are migration inputs to retire, not the durable contract. |
-| Worker/runtime-action config | Product-specific worker commands, host/user metadata, operation knobs, and secret bindings | Launchplane runtime-environment records and managed secrets | Delegated-worker dispatch strips inherited process values and injects the DB-resolved runtime contract into the worker environment. |
-| Dokploy target-id overrides | DB records | Launchplane target-id records | File catalogs are not a supported authority. |
-| Stable target definitions | Launchplane DB-backed target records | Launchplane DB-backed target records | Repo catalogs should be examples only, not seed or authority material. |
-| Release tuple baseline authority | Launchplane release-tuple records | Launchplane record store | Repo catalogs should not be treated as live mutable authority. |
+| Class                                      | Current surface(s)                                                                         | Final authority                                                         | Notes                                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Dokploy credentials                        | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`)                              | Launchplane managed secrets                                             | Fail closed when the shared store does not have both bindings.                                                                                                                        |
+| Dokploy edge upstream endpoints            | `launchplane_edge_endpoints`                                                               | DB-backed Launchplane edge endpoint records                             | Server identity is human-readable, but provider upstreams passed to NPMplus must be stored IP addresses. Product repos and ad hoc workflow inputs are not durable topology authority. |
+| Runtime environment values                 | Runtime-environment records                                                                | Launchplane runtime-environment records                                 | Includes shared, context, and instance-scoped values.                                                                                                                                 |
+| Secret-shaped runtime keys                 | Managed runtime secrets overlay                                                            | Launchplane managed secrets                                             | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`.                                                                                                                                |
+| Runtime key-safety policy                  | `launchplane_runtime_key_safety_policies`                                                  | Launchplane runtime key-safety policy records                           | Classifies managed secret binding keys by runtime class and scope. Requests carry metadata only and cannot replace secret values.                                                     |
+| Ship mode overrides                        | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>`                                  | Launchplane runtime-environment records                                 | Mutable operator behavior, not bootstrap.                                                                                                                                             |
+| Preview routing/config                     | `LAUNCHPLANE_PREVIEW_BASE_URL`                                                             | Launchplane runtime-environment records                                 | Shared control-plane-owned runtime value.                                                                                                                                             |
+| GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`                                                    | Launchplane runtime-environment records and managed secrets             | Current docs already classify these as DB-backed target state.                                                                                                                        |
+| Product/tenant runtime env                 | Odoo runtime values, tenant-specific env keys                                              | Launchplane runtime-environment records and managed secrets             | Includes shared and per-instance overlays.                                                                                                                                            |
+| Odoo application override intent           | Former `ENV_OVERRIDE_CONFIG_PARAM__*`, Authentik, and Shopify override shapes              | Launchplane Odoo instance override records plus managed secret bindings | `ENV_OVERRIDE_*` names are migration inputs to retire, not the durable contract.                                                                                                      |
+| Worker/runtime-action config               | Product-specific worker commands, host/user metadata, operation knobs, and secret bindings | Launchplane runtime-environment records and managed secrets             | Delegated-worker dispatch strips inherited process values and injects the DB-resolved runtime contract into the worker environment.                                                   |
+| Dokploy target-id overrides                | DB records                                                                                 | Launchplane target-id records                                           | File catalogs are not a supported authority.                                                                                                                                          |
+| Stable target definitions                  | Launchplane DB-backed target records                                                       | Launchplane DB-backed target records                                    | Repo catalogs should be examples only, not seed or authority material.                                                                                                                |
+| Release tuple baseline authority           | Launchplane release-tuple records                                                          | Launchplane record store                                                | Repo catalogs should not be treated as live mutable authority.                                                                                                                        |
 
 ### Repo Only
 
 These stay in git, but not as live mutable runtime authority.
 
-| Class | Examples |
-| --- | --- |
+| Class                     | Examples                                                                   |
+| ------------------------- | -------------------------------------------------------------------------- |
 | Bootstrap policy snippets | Docs and test fixtures only; no tracked live `config/*.toml` policy source |
-| Docs/specs | `docs/*`, `README.md` |
-| Schemas/tests | storage schema code, tests, fixtures |
+| Docs/specs                | `docs/*`, `README.md`                                                      |
+| Schemas/tests             | storage schema code, tests, fixtures                                       |
+
+Checked-in workflows and repo metadata may route to Launchplane, run quality
+gates, and document examples. They must not define the real product catalog,
+repo catalog, lane topology, target inventory, domain inventory, authz grants,
+operator identities, or mutable runtime values used by production behavior.
 
 ### Stale Local Artifacts
 
@@ -113,11 +125,11 @@ These should not be treated as Launchplane config. If found, archive or delete
 them after verifying the equivalent authority is represented in DB-backed
 records or bootstrap env.
 
-| Class | Final location | Notes |
-| --- | --- | --- |
-| Legacy operator env file | `~/.config/launchplane/dokploy.env` | Not a supported Launchplane input. |
-| Legacy runtime environments file | `~/.config/launchplane/runtime-environments.toml` | Not a supported Launchplane input. |
-| Legacy local policy copies after replacement | `~/.config/launchplane/...` | Not a supported Launchplane input once bootstrap policy is replaced. |
+| Class                                        | Final location                                    | Notes                                                                |
+| -------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------- |
+| Legacy operator env file                     | `~/.config/launchplane/dokploy.env`               | Not a supported Launchplane input.                                   |
+| Legacy runtime environments file             | `~/.config/launchplane/runtime-environments.toml` | Not a supported Launchplane input.                                   |
+| Legacy local policy copies after replacement | `~/.config/launchplane/...`                       | Not a supported Launchplane input once bootstrap policy is replaced. |
 
 ## Removed Runtime Fallbacks
 
@@ -167,12 +179,9 @@ live authority across DB, files, and process env:
   target ids, base URLs, and health URLs, is served by Launchplane from
   DB-backed target/runtime records. Product-repo workflows should ask
   Launchplane for those values instead of hard-coding stable lane topology.
-- Product onboarding and runtime key-safety seed payloads are explicit import
-  material under `import-material/launchplane/seed-imports/`. They are applied
-  only through the manual `Launchplane Seed Import` workflow, which calls
-  service routes with OIDC and records evidence; normal deploy does not reapply
-  those mutable DB records or derive routine operator product-config scopes from
-  the seed catalog.
+- Product onboarding and runtime key-safety policy writes use Launchplane service
+  routes with scoped authorization. Product/runtime records are not read from
+  checked-in catalogs during deploy or repair.
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.
@@ -186,6 +195,10 @@ authority or supported import compatibility.
 - Launchplane should fail closed when DB-backed config is missing.
 - Repo-owned config files may document non-runtime examples, but they should not
   seed or act as live source of truth for production behavior.
+- Moving real values from Python into checked-in TOML, JSON, YAML, workflow
+  defaults, or repo metadata does not satisfy this boundary; it only moves the
+  violation. Use Launchplane records, managed secrets, or explicit
+  operator-supplied input instead.
 
 ## Inspection
 
@@ -198,6 +211,17 @@ uv run launchplane service inspect-config-boundary --control-plane-root .
 
 That payload is intended to make DB-backed authority and stale legacy files
 visible without treating those files as runtime inputs.
+
+Use the read-only config-authority audit to produce a redacted checked-in
+surface report with input/finding hashes, file/worktree hashes, explicit allow
+reasons, and coverage gaps:
+
+```bash
+uv run launchplane service audit-config-authority --control-plane-root .
+```
+
+The initial audit is report-only. Use it to classify findings and understand the
+baseline before adding changed-file enforcement.
 
 When operators need to inspect or mutate tracked Dokploy target records, use the
 DB-backed Launchplane CLI surface rather than editing any repo-local file:
