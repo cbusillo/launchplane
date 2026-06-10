@@ -38,6 +38,10 @@ def _commit_all(root: Path) -> None:
     _git(root, "commit", "-m", "initial")
 
 
+def _checkout_branch(root: Path, branch_name: str) -> None:
+    _git(root, "checkout", "-b", branch_name)
+
+
 def _findings(payload: dict[str, object]) -> list[dict[str, object]]:
     return cast("list[dict[str, object]]", payload["findings"])
 
@@ -258,6 +262,30 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertIn("new.env", untracked_paths)
         self.assertNotIn("ignored.env", untracked_paths)
         self.assertIn("ignored.env", ignored_paths)
+
+    def test_changed_files_gate_scans_committed_branch_diff(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            (root / "tracked.env").write_text("PRODUCT_CONTEXT=main\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-audit")
+            (root / "tracked.env").write_text("PRODUCT_CONTEXT=feature\n", encoding="utf-8")
+            (root / "new.env").write_text(
+                "PRODUCT_REPOSITORY=cbusillo/new-product\n", encoding="utf-8"
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                mode="changed-files-gate",
+            )
+
+        finding_paths = {finding["path"] for finding in _findings(payload)}
+        self.assertEqual(finding_paths, {"new.env", "tracked.env"})
+        coverage = cast("dict[str, object]", payload["coverage"])
+        self.assertEqual(coverage["source_file_count"], 2)
 
     def test_click_option_metadata_is_reported_as_operator_input(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -505,10 +533,26 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "markdown",
                 ],
             )
+            changed_files_result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                ],
+            )
 
         self.assertEqual(json_result.exit_code, 0, json_result.output)
         self.assertEqual(markdown_result.exit_code, 0, markdown_result.output)
+        self.assertEqual(changed_files_result.exit_code, 0, changed_files_result.output)
         self.assertEqual(json.loads(json_result.output)["mode"], "full-audit")
+        self.assertEqual(
+            json.loads(changed_files_result.output)["mode"],
+            "changed-files-gate",
+        )
         self.assertIn("# Config Authority Audit", markdown_result.output)
 
     def test_markdown_renderer_handles_empty_report(self) -> None:

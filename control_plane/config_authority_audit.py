@@ -925,10 +925,23 @@ def _git_tracked_relative_paths(root: Path) -> list[str]:
 
 
 def _git_changed_files(root: Path) -> list[Path]:
-    changed = {relative_path for _, relative_path in _git_status_entries(root)}
+    changed = set(_git_branch_changed_relative_paths(root))
+    changed.update(relative_path for _, relative_path in _git_status_entries(root))
     return sorted(
         root / relative_path for relative_path in changed if (root / relative_path).is_file()
     )
+
+
+def _git_branch_changed_relative_paths(root: Path) -> list[str]:
+    merge_base = _git_output(root, "merge-base", "HEAD", "origin/main")
+    if not merge_base:
+        merge_base = _git_output(root, "merge-base", "HEAD", "main")
+    if not merge_base:
+        return []
+    output = _git_output(root, "diff", "--name-only", "--diff-filter=ACMRT", merge_base, "HEAD")
+    if not output:
+        return []
+    return [line for line in output.splitlines() if line]
 
 
 def _git_untracked_relative_paths(root: Path) -> list[str]:
