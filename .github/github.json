@@ -103,7 +103,6 @@
   ],
   "qaLabels": [],
   "deployLabels": [],
-  "healthUrls": ["https://launchplane.shinycomputers.com/v1/health"],
   "relatedRepos": [
     "cbusillo/sellyouroutboard",
     "cbusillo/verireel",

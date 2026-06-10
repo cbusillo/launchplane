@@ -770,6 +770,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(metadata["pullRequests"]["preferredMergeMethod"], "merge")
         self.assertEqual(metadata["pullRequests"]["allowedMergeMethods"], ["merge"])
         self.assertIn("Ingress Route Apply", metadata["importantWorkflows"])
+        self.assertNotIn("healthUrls", metadata)
 
     def test_reusable_odoo_testing_deploy_exposes_result_outputs(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
