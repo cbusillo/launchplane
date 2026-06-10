@@ -608,7 +608,8 @@ def _python_semantic_value_candidates(
         return candidates
     if isinstance(node, ast.Call):
         call_name = _call_name(node.func)
-        field_names = dataclass_fields.get(call_name, ())
+        call_leaf_name = call_name.rsplit(".", 1)[-1]
+        field_names = dataclass_fields.get(call_name) or dataclass_fields.get(call_leaf_name, ())
         if not field_names:
             return candidates
         for index, argument in enumerate(node.args):
@@ -783,6 +784,8 @@ def _candidate_is_interesting(*, key: str, value: object) -> bool:
     value_text = _string_value(value)
     if _is_click_option_metadata_key(key):
         return True
+    if _is_repo_metadata_ergonomics_key(key):
+        return True
     if not value_text.strip():
         return False
     if key_text in BOOTSTRAP_ENV_KEYS:
@@ -881,9 +884,11 @@ def _is_repo_metadata_ergonomics_key(key: str) -> bool:
             "deployLabels",
             "docs.",
             "githubSignals.",
+            "githubSettings.",
             "importantWorkflows",
             "metadataFreshness.",
             "projectType",
+            "pullRequests.",
             "qaLabels",
             "qualityGate.",
             "relatedRepos[",

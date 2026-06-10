@@ -126,6 +126,36 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("tenant-primary", json.dumps(payload))
         self.assertNotIn("image-builder", json.dumps(payload))
 
+    def test_module_qualified_dataclass_policy_catalog_is_reported_by_shape(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            source = root / "control_plane" / "catalog.py"
+            source.parent.mkdir()
+            source.write_text(
+                "from dataclasses import dataclass\n\n"
+                "@dataclass(frozen=True)\n"
+                "class RepoPolicy:\n"
+                "    repository: str\n"
+                "    family: str\n\n"
+                "class policies:\n"
+                "    RepoPolicy = RepoPolicy\n\n"
+                "DEFAULT_REPO_POLICIES = (\n"
+                "    policies.RepoPolicy('tenant-qualified', 'tenant'),\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        keys = {str(finding["key"]) for finding in _findings(payload)}
+        self.assertIn(
+            "DEFAULT_REPO_POLICIES[0].policies.RepoPolicy.repository",
+            keys,
+        )
+        self.assertNotIn("tenant-qualified", json.dumps(payload))
+
     def test_known_odoo_repo_policy_catalog_is_reported_without_name_catalog(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -326,10 +356,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             metadata.write_text(
                 json.dumps(
                     {
+                        "defaultBranch": "main",
                         "docs": {"operations": "docs/operations.md"},
+                        "importantWorkflows": ["CI"],
+                        "pullRequests": {"preferredMergeMethod": "merge"},
                         "qualityGate": {
                             "security": {"secretScan": "docker run ghcr.io/example/gitleaks:latest"}
                         },
+                        "githubSettings": {"actions": {"enabled": True}},
                         "relatedRepos": ["example/example-product"],
                         "healthUrls": [
                             {"name": "testing", "url": "https://product.example.test/health"}
@@ -357,11 +391,27 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         by_key = {finding["key"]: finding for finding in _findings(payload)}
         self.assertEqual(
+            by_key["defaultBranch"]["allow_reason"],
+            "repo_metadata_ergonomics",
+        )
+        self.assertEqual(
             by_key["docs.operations"]["allow_reason"],
             "repo_metadata_ergonomics",
         )
         self.assertEqual(
+            by_key["importantWorkflows[0]"]["allow_reason"],
+            "repo_metadata_ergonomics",
+        )
+        self.assertEqual(
+            by_key["pullRequests.preferredMergeMethod"]["allow_reason"],
+            "repo_metadata_ergonomics",
+        )
+        self.assertEqual(
             by_key["qualityGate.security.secretScan"]["allow_reason"],
+            "repo_metadata_ergonomics",
+        )
+        self.assertEqual(
+            by_key["githubSettings.actions.enabled"]["allow_reason"],
             "repo_metadata_ergonomics",
         )
         self.assertEqual(
