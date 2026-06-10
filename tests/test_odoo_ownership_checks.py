@@ -6,12 +6,22 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.odoo_ownership_checks import (
+    DEFAULT_ODOO_REPO_POLICIES,
     OdooOwnershipRepoPolicy,
     scan_odoo_ownership_boundaries,
 )
 
 
 class OdooOwnershipChecksTests(TestCase):
+    def test_default_policy_includes_odoo_product_repositories(self) -> None:
+        scanned_repositories = {
+            policy.repository for policy in DEFAULT_ODOO_REPO_POLICIES
+        }
+
+        self.assertIn("odoo-tenant-cm", scanned_repositories)
+        self.assertIn("odoo-tenant-cm-website", scanned_repositories)
+        self.assertIn("odoo-tenant-opw", scanned_repositories)
+
     def test_allows_shared_launchplane_connectors(self) -> None:
         with TemporaryDirectory() as workspace:
             workspace_root = Path(workspace)
@@ -107,6 +117,7 @@ jobs:
         with TemporaryDirectory() as workspace:
             workspace_root = Path(workspace)
             for repository in (
+                "odoo-tenant-cm-website",
                 "odoo-tenant-opw",
                 "odoo-docker",
                 "odoo-enterprise-docker",

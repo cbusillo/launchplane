@@ -79,6 +79,7 @@ class _Rule:
 
 DEFAULT_ODOO_REPO_POLICIES: tuple[OdooOwnershipRepoPolicy, ...] = (
     OdooOwnershipRepoPolicy("odoo-tenant-cm", "tenant"),
+    OdooOwnershipRepoPolicy("odoo-tenant-cm-website", "tenant"),
     OdooOwnershipRepoPolicy("odoo-tenant-opw", "tenant"),
     OdooOwnershipRepoPolicy("odoo-docker", "image"),
     OdooOwnershipRepoPolicy("odoo-enterprise-docker", "image"),
