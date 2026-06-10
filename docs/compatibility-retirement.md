@@ -5,10 +5,10 @@ title: Compatibility Retirement
 ## Purpose
 
 Launchplane keeps local CLI helpers and file-backed stores only for local
-development, tests, explicit import/backfill, local rehearsal, and emergency
+development, tests, local rehearsal, read-only diagnostics, and emergency
 operator inspection. They are not production authority, and production-capable
 service or CLI mutation paths must fail closed unless they have DB-backed
-authority.
+authority or explicit operator-supplied input.
 
 Use this page as the review checklist before keeping or deleting compatibility
 surfaces.
@@ -29,8 +29,8 @@ Keep a compatibility surface only when it is one of these:
 - local-development scaffolding used by tests or operator rehearsal
 - a read-only diagnostic helper that does not mutate production truth
 - an emergency operator client for the same typed service contract
-- seed/example material for rebuilding DB-backed records through explicit write
-  paths
+- docs or tests that use non-production examples and are not reachable by
+  production code
 
 ## Current Checkpoints
 
@@ -52,9 +52,8 @@ Keep a compatibility surface only when it is one of these:
   obsolete `dokploy_targets` input raises a validation error.
   Product-onboarding service responses expose only neutral `provider_target*`
   summary keys. Context audit/cutover and cleanup summaries expose
-  `provider_targets` and `provider_target_ids`. Seed import material must use
-  `provider_targets`; the import helper no longer falls back to
-  `dokploy_targets`.
+  `provider_targets` and `provider_target_ids`. Product onboarding requests use
+  `provider_targets`; obsolete `dokploy_targets` input is rejected.
 - Generic-web and VeriReel driver result payloads no longer expose the
   response-only `target_type` alias. Responses use `target_category`,
   `provider_id`, and `provider_target_type`; internal Dokploy execution config

@@ -13467,7 +13467,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "repository": "cbusillo/launchplane",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
@@ -13483,7 +13483,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/launchplane",
                         workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ),
                         event_name="workflow_dispatch",
                     )
@@ -13603,7 +13603,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "repository": "cbusillo/launchplane",
                             "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["launchplane"],
@@ -13619,7 +13619,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/launchplane",
                         workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/launchplane-seed-import.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ),
                         event_name="workflow_dispatch",
                     )

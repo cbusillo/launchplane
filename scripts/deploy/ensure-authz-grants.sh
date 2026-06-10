@@ -458,22 +458,6 @@ post_grant \
 	merge-train-policy-import
 post_grant \
 	"$GITHUB_REPOSITORY" \
-	launchplane-seed-import.yml \
-	launchplane \
-	launchplane \
-	product_onboarding.apply \
-	deploy:launchplane-seed-import-product-onboarding-grant \
-	launchplane-seed-import-product-onboarding
-post_grant \
-	"$GITHUB_REPOSITORY" \
-	launchplane-seed-import.yml \
-	launchplane \
-	launchplane \
-	runtime_key_safety.write \
-	deploy:launchplane-seed-import-runtime-key-safety-grant \
-	launchplane-seed-import-runtime-key-safety
-post_grant \
-	"$GITHUB_REPOSITORY" \
 	provider-target-operations.yml \
 	launchplane \
 	launchplane \

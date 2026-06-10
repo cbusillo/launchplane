@@ -17,7 +17,7 @@ class DeployTargetContractTests(unittest.TestCase):
             provider_target_type=" Managed-Service ",
             provider_evidence={" region ": " us-east-1 "},
             updated_at=" 2026-06-01T20:00:00Z ",
-            source_label=" import-material:syo ",
+            source_label=" service:syo ",
         )
 
         self.assertEqual(record.context, "syo")
@@ -63,7 +63,7 @@ class DeployTargetContractTests(unittest.TestCase):
             target_type="application",
             target_name="syo-prod",
             updated_at="2026-06-01T20:00:00Z",
-            source_label="import-material:syo",
+            source_label="service:syo",
         )
         target_id_record = DokployTargetIdRecord(
             context="syo",
@@ -85,7 +85,7 @@ class DeployTargetContractTests(unittest.TestCase):
         self.assertEqual(provider_record.provider_target_type, "application")
         self.assertEqual(provider_record.provider_evidence, {"project_name": "SYO"})
         self.assertEqual(provider_record.updated_at, "2026-06-01T20:00:01Z")
-        self.assertEqual(provider_record.source_label, "import-material:syo")
+        self.assertEqual(provider_record.source_label, "service:syo")
 
     def test_provider_target_record_from_dokploy_records_uses_fallbacks(self) -> None:
         target_record = DokployTargetRecord(
