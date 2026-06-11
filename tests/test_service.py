@@ -210,6 +210,16 @@ from control_plane.workflows.npmplus_ingress import (
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
 CLI_MAIN = cast(Command, main)
+TERMINAL_AGENT_AUTH_ENV = {
+    "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
+    "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
+    "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "local-owner-read",
+}
+LOCAL_OPERATOR_AUTH_ENV = {
+    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+}
 
 
 class _StubVerifier:
@@ -4106,7 +4116,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                LOCAL_OPERATOR_AUTH_ENV,
                 clear=True,
             ):
                 no_reason_status, no_reason_payload = _invoke_app(
@@ -15902,7 +15912,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -15950,7 +15960,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -16006,7 +16016,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -16681,7 +16691,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -17452,7 +17462,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -17538,7 +17548,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(runtime_records, ())
         self.assertEqual(secret_records, ())
 
-    def test_product_config_api_local_operator_apply_requires_reason(self) -> None:
+    def test_product_config_api_local_operator_requires_configured_identity(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -17557,6 +17569,39 @@ class LaunchplaneServiceTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(mode="apply"),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-no-identity"},
+                )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    def test_product_config_api_local_operator_apply_requires_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                LOCAL_OPERATOR_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -17589,7 +17634,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                LOCAL_OPERATOR_AUTH_ENV,
                 clear=True,
             ):
                 status_code, payload = _invoke_app(
@@ -17640,7 +17685,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 os.environ,
                 {
                     control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    **LOCAL_OPERATOR_AUTH_ENV,
                 },
                 clear=True,
             ):
@@ -24680,7 +24725,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                TERMINAL_AGENT_AUTH_ENV,
                 clear=True,
             ):
                 read_status_code, read_payload = _invoke_app(

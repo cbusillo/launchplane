@@ -37,6 +37,14 @@ SYO_RUNTIME_KEYS = (
     "CONTACT_EMAIL_RESEND_TIMEOUT_MS",
     "NEXT_PUBLIC_META_PIXEL_ID",
 )
+OWNER_AUTHZ_ENV = {
+    "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "test-terminal-agent-subject",
+    "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "test-terminal-agent-read-token",
+    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "test-local-operator-subject",
+    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "test-local-operator-write-token",
+    "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT": "test-local-admin-subject",
+    "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL": "test-local-admin-token",
+}
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -279,6 +287,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 'case "$*" in\n'
                 '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
                 "  *)\n"
+                '    printf \'%s\\n\' "$*" >> "$CAPTURED_GRANT_ATTEMPTS"\n'
                 "    output_file=''\n"
                 "    request_payload=''\n"
                 '    while [ "$#" -gt 0 ]; do\n'
@@ -308,6 +317,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_response_file = temporary_directory / "response.json"
             env = {
                 **os.environ,
+                **OWNER_AUTHZ_ENV,
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
@@ -352,6 +362,76 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(grant["contexts"], ["example-context"])
         self.assertEqual(grant["actions"], ["example_action.execute"])
         self.assertEqual(grant["source_label"], "operator-config:example-product-deploy")
+
+    def test_deploy_authz_grants_require_configured_owner_identities(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                '    printf \'%s\\n\' "$*" >> "$CAPTURED_GRANT_ATTEMPTS"\n'
+                "    output_file=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_response_file = temporary_directory / "response.json"
+            captured_grant_attempts = temporary_directory / "grant-attempts.txt"
+            env = {key: value for key, value in os.environ.items() if key not in OWNER_AUTHZ_ENV}
+            env.update(
+                {
+                    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "GITHUB_SHA": "test-sha",
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                    "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                    "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                    "CAPTURED_GRANT_ATTEMPTS": str(captured_grant_attempts),
+                    "CAPTURED_BIN_DIR": str(captured_bin_directory),
+                }
+            )
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Configured authz grant is missing LAUNCHPLANE_TERMINAL_AGENT_SUBJECT.",
+            result.stderr,
+        )
+        self.assertFalse(captured_grant_attempts.exists())
 
     def test_reusable_odoo_artifact_publish_standardizes_request_shape(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-artifact-publish.yml").read_text(
@@ -1064,6 +1144,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_response_file = temporary_directory / "response.json"
             env = {
                 **os.environ,
+                **OWNER_AUTHZ_ENV,
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
@@ -1205,6 +1286,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_response_file = temporary_directory / "response.json"
             env = {
                 **os.environ,
+                **OWNER_AUTHZ_ENV,
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
@@ -1288,6 +1370,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             captured_response_file = temporary_directory / "response.json"
             env = {
                 **os.environ,
+                **OWNER_AUTHZ_ENV,
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
@@ -1363,6 +1446,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             )
             env = {
                 **os.environ,
+                **OWNER_AUTHZ_ENV,
                 "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
                 "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",

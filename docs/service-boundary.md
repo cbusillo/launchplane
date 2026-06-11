@@ -191,13 +191,13 @@ Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not
 `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
-secret to the trusted local terminal agent out of band. Optional
+secret to the trusted local terminal agent out of band. Configure
 `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
-`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` values identify the local owner subject
-and token label used by `terminal_agents` authz policy rules; the defaults are
-`local-owner-agent` and `local-owner-read`. The service only accepts this
-identity on `GET` routes, so even an overly broad terminal-agent policy rule
-cannot dispatch product config writes, prod promotion, destructive cleanup,
+`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` to identify the local owner subject and
+token label used by `terminal_agents` authz policy rules; both identity values
+are required whenever the bearer token is configured. The service only accepts
+this identity on `GET` routes, so even an overly broad terminal-agent policy
+rule cannot dispatch product config writes, prod promotion, destructive cleanup,
 authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
 Policy still scopes which redacted read actions and product/context pairs the
 agent can access, such as `product_environment.read` for product environment and
@@ -207,18 +207,18 @@ Trusted owner terminals that need to make Launchplane-owned operator mutations
 without a browser session can use separate owner-agent bearer credentials.
 Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the service and provide the same
 secret to trusted local agents through
-`~/.config/launchplane/local-operator.env`. Optional
+`~/.config/launchplane/local-operator.env`. Configure
 `LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
-`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` values identify the actor in audit and
-idempotency records; the defaults are `local-owner-agent` and
-`local-owner-write`. Routine owner-operator authority is DB-backed by
-`local_operators` authz policy rules, scoped by subject, token label, product,
-context, and action.
+`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` to identify the actor in audit and
+idempotency records; both identity values are required whenever the bearer token
+is configured. Routine owner-operator authority is DB-backed by `local_operators`
+authz policy rules, scoped by subject, token label, product, context, and action.
 
-Rare owner-admin operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with optional
+Rare owner-admin operations use `LAUNCHPLANE_LOCAL_ADMIN_TOKEN` with configured
 `LAUNCHPLANE_LOCAL_ADMIN_SUBJECT` and `LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL`.
-Those credentials are also DB-backed by exact `local_admins` authz policy rules;
-the token alone does not grant blanket access. Owner-agent write requests must
+Both identity values are required whenever the bearer token is configured. Those
+credentials are also DB-backed by exact `local_admins` authz policy rules; the
+token alone does not grant blanket access. Owner-agent write requests must
 include a non-empty `reason`; product-config apply is also rejected until the
 service has recorded a matching owner-agent dry-run for the same payload. These
 requests still use Launchplane records, redacted responses, runtime key-safety
