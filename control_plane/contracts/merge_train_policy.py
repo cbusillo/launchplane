@@ -12,6 +12,7 @@ MergeTrainFailurePolicy = Literal["pause_train", "continue_after_blocking_pr"]
 MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_token_secret"]
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
 MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
+MergeTrainSchedulerRunnerMode = Literal["level1", "controller"]
 
 
 class MergeTrainEnqueuePolicy(BaseModel):
@@ -74,6 +75,14 @@ class MergeTrainGitHubTokenSource(BaseModel):
         return self
 
 
+class MergeTrainSchedulerPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    runner_mode: MergeTrainSchedulerRunnerMode = "controller"
+    mutate: bool = False
+
+
 class MergeTrainRepositoryPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -88,6 +97,7 @@ class MergeTrainRepositoryPolicy(BaseModel):
     merge_identity: MergeTrainIdentity
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
     github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
+    scheduler: MergeTrainSchedulerPolicy = Field(default_factory=MergeTrainSchedulerPolicy)
 
     @model_validator(mode="after")
     def _validate_repository_policy(self) -> "MergeTrainRepositoryPolicy":
@@ -216,6 +226,12 @@ def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
             "stack_child_disposition_label"
         ):
             repository_policy.pop("stack_child_disposition_label", None)
+        if isinstance(repository_policy, dict) and repository_policy.get("scheduler") == {
+            "enabled": False,
+            "runner_mode": "controller",
+            "mutate": False,
+        }:
+            repository_policy.pop("scheduler", None)
     encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -224,4 +240,6 @@ def _normalize_required_value(value: str, message: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ValueError(message)
+    if "\n" in normalized or "\r" in normalized:
+        raise ValueError(f"{message}; value must be a single line")
     return normalized

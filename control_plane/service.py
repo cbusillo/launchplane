@@ -10740,6 +10740,7 @@ def create_launchplane_service_app(
                                 "repository": repository_policy.repository,
                                 "base_branch": repository_policy.base_branch,
                                 "policy_key": repository_policy.policy_key,
+                                "scheduler": repository_policy.scheduler.model_dump(mode="json"),
                                 "service_authz": repository_policy.service_authz.model_dump(
                                     mode="json"
                                 ),

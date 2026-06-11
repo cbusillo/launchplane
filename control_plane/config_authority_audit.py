@@ -219,6 +219,10 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
     ".github/workflows/merge-train-policy-import.yml": {
         "POLICY_REPOSITORY": frozenset(("${{ inputs.repository }}",))
     },
+    ".github/workflows/merge-train-runner.yml": {
+        "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
+        "REQUESTED_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
+    },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "KEY_NAME": frozenset(("${{ inputs.key }}",))
     },

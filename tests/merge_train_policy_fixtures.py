@@ -4,9 +4,11 @@ from control_plane.contracts.merge_train_policy import parse_merge_train_policy_
 
 
 def build_test_merge_train_policy(
-    *, repository: str = "cbusillo/sellyouroutboard"
+    *, repository: str = "cbusillo/sellyouroutboard", scheduler_enabled: bool = False
 ) -> MergeTrainPolicy:
-    return parse_merge_train_policy_toml(_policy_toml(repository))
+    return parse_merge_train_policy_toml(
+        _policy_toml(repository, scheduler_enabled=scheduler_enabled)
+    )
 
 
 def build_test_merge_train_policy_record(
@@ -36,11 +38,24 @@ def build_test_merge_train_policy_with_codex_skills() -> MergeTrainPolicy:
     )
 
 
-def _policy_toml(repository: str) -> str:
-    return "\n\n".join(("schema_version = 1", _policy_table(repository)))
+def _policy_toml(repository: str, *, scheduler_enabled: bool = False) -> str:
+    return "\n\n".join(
+        (
+            "schema_version = 1",
+            _policy_table(repository, scheduler_enabled=scheduler_enabled),
+        )
+    )
 
 
-def _policy_table(repository: str) -> str:
+def _policy_table(repository: str, *, scheduler_enabled: bool = False) -> str:
+    scheduler_table = ""
+    if scheduler_enabled:
+        scheduler_table = """
+[policies.scheduler]
+enabled = true
+runner_mode = "controller"
+mutate = false
+"""
     return f"""[[policies]]
 repository = "{repository}"
 base_branch = "main"
@@ -65,4 +80,5 @@ context = "launchplane"
 
 [policies.github_token]
 env_var = "GH_TOKEN"
+{scheduler_table}
 """

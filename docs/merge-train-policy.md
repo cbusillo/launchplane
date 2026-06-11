@@ -53,6 +53,10 @@ Each repository policy contains:
   service endpoint may run the policy.
 - `github_token`: Launchplane service-host token source used for live GitHub
   API calls.
+- `scheduler`: Optional DB-backed scheduler intent for the GitHub Actions
+  scheduler. When enabled, the scheduler reads this target from the deployed
+  Launchplane API; checked-in workflows and GitHub variables are not target
+  authority.
 
 The initial enqueue policy is intentionally narrow: the enqueue label must be
 present and the enqueue action must come from a repo owner or repo admin. That
@@ -192,6 +196,11 @@ context = "launchplane"
 
 [policies.github_token]
 env_var = "GH_TOKEN"
+
+[policies.scheduler]
+enabled = true
+runner_mode = "controller"
+mutate = false
 
 [[policies]]
 repository = "cbusillo/codex-skills"
@@ -538,18 +547,21 @@ policy; stale records remain visible in the summaries with a stale reason. It is
 also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
 
-The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` uses
-that admission route before every worker call. It defaults to the Level 1
-`run-once` route for compatibility, and can call the full controller exactly
-once per admitted pass when manual dispatch sets `runner_mode: controller` or a
-scheduled run sets the repository variable `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE`
-to `controller`. Controller-mode mutate runs and manually dispatched
-batch-candidate, stack-collapse, or batch-landing phases render conservative PR
-feedback payloads from their worker responses and post them through the managed
-feedback endpoint, so queued PRs get one evolving Launchplane status comment as
-the train builds, waits, blocks, or completes. Controller-mode dry-runs do not
-deliver feedback comments. The scheduler still writes at most one Launchplane
-worker result per pass; the five-minute schedule is the retry loop.
+The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
+authorized policy targets from `GET /v1/work-graph/merge-train/policy-targets`
+on every scheduled run. Exactly one target may have `scheduler.enabled = true`;
+zero enabled targets make the scheduled pass a successful no-op, and multiple
+enabled targets fail closed until an operator narrows the DB-backed scheduler
+intent. The scheduler then uses the admission route before every worker call and
+writes at most one Launchplane worker result per pass; the five-minute schedule
+is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
+repository, base branch, runner mode, mutation, and phase-specific commands.
+Controller-mode mutate runs and manually dispatched batch-candidate,
+stack-collapse, or batch-landing phases render conservative PR feedback payloads
+from their worker responses and post them through the managed feedback endpoint,
+so queued PRs get one evolving Launchplane status comment as the train builds,
+waits, blocks, or completes. Controller-mode dry-runs do not deliver feedback
+comments.
 
 ## Scheduler rollout runbook
 
@@ -560,18 +572,20 @@ to read admission and run the selected worker route, and the target repository
 should have low-risk candidate pull requests whose checks and labels make the
 expected train behavior easy to inspect.
 
-To opt a repository into observation, set the scheduler repository variables in
-the Launchplane repo:
+To opt a repository into observation, import an active merge-train policy record
+with exactly one repository policy whose scheduler is enabled:
 
-- `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY=owner/name`
-- `LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH=<policy base branch>`
-- `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE=controller`
-- `LAUNCHPLANE_MERGE_TRAIN_MUTATE=false`
+```toml
+[policies.scheduler]
+enabled = true
+runner_mode = "controller"
+mutate = false
+```
 
-Scheduled runs use the `LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH` repository variable;
-manual workflow dispatches use the explicit `base_branch` input. Use a
-repository/base branch that is present in the active merge-train policy. Missing
-base branch input fails closed before any worker request.
+Scheduled runs resolve the repository, base branch, runner mode, and mutation
+flag from that DB-backed policy target through the deployed Launchplane API.
+Manual workflow dispatches use explicit workflow inputs. Missing manual
+repository or base branch input fails closed before any worker request.
 
 Observe at least two scheduled dry-run passes before enabling mutation. A healthy
 observation pass has a successful GitHub Actions run, an admitted or explicitly
@@ -584,26 +598,25 @@ the same active records, stale-record reasons, latest run result, and next
 controller action without requiring a GitHub read.
 
 Enable mutation only after an operator explicitly chooses to promote the dry-run
-lane. Set `LAUNCHPLANE_MERGE_TRAIN_MUTATE=true` for that promotion and confirm
-that service deploy health, required checks, runner capacity, and target PR
-heads are still current. A mutate run still performs at most one controller
-action per scheduled pass. Managed PR feedback comments are allowed in mutate
-mode and should summarize whether a PR is queued, blocked, waiting, stale, or
-completed.
+lane. Import a replacement active policy record with `scheduler.mutate = true`
+for that promotion and confirm that service deploy health, required checks,
+runner capacity, and target PR heads are still current. A mutate run still
+performs at most one controller action per scheduled pass. Managed PR feedback
+comments are allowed in mutate mode and should summarize whether a PR is queued,
+blocked, waiting, stale, or completed.
 
-To stop mutation without removing visibility, set
-`LAUNCHPLANE_MERGE_TRAIN_MUTATE=false`. To disarm the scheduled lane entirely,
-remove `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`; scheduled runs without a target
-repository should skip before admission. Removing
-`LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE` returns the workflow to the Level 1
-compatibility worker for any later scheduled activation. Operators should not
-edit service code, delete durable train records, or change policy as an
-emergency stop when the repository variables can disable the lane.
+For rollback, import a replacement policy record or restore the previous record
+with `scheduler.mutate = false`. To disarm the scheduled lane entirely, import a
+replacement active policy record with no `scheduler.enabled = true` repository
+policies; scheduled runs without an enabled DB target complete as no-ops before
+the admission call. Changing `scheduler.runner_mode` to `level1` returns the
+workflow to the Level 1 baseline after the next scheduled pass.
 
 Every rollout or rollback should leave evidence in the planning issue: the
-target repository/base branch, the scheduler variables, the relevant run IDs,
-the latest controller/admission state, whether PR feedback was delivered, and
-the post-merge Launchplane CI, Security, CodeQL, and deploy status that carried
+target repository/base branch, the scheduler policy settings, the relevant run
+IDs, the latest controller/admission state, whether PR feedback was delivered,
+and the post-merge Launchplane CI, Security, CodeQL, and deploy status that
+carried
 the rollout behavior.
 
 The merge step is allowed only from a fresh dry-run result whose next action is

@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,7 @@ from control_plane.contracts.driver_descriptor import DriverView
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     build_merge_train_policy_record_id,
+    merge_train_policy_sha256,
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
@@ -52,6 +54,147 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(codex_skills_policy.service_authz.action, "merge_train.run_once")
         self.assertEqual(codex_skills_policy.service_authz.product, "launchplane")
         self.assertEqual(codex_skills_policy.service_authz.context, "launchplane")
+        self.assertFalse(codex_skills_policy.scheduler.enabled)
+        self.assertEqual(codex_skills_policy.scheduler.runner_mode, "controller")
+        self.assertFalse(codex_skills_policy.scheduler.mutate)
+
+    def test_policy_can_enable_db_backed_scheduler_target(self) -> None:
+        policy = parse_merge_train_policy_toml(
+            textwrap.dedent(
+                """
+                schema_version = 1
+
+                [[policies]]
+                repository = "example/app"
+                base_branch = "main"
+                enqueue_label = "ready-to-merge"
+                blocked_label = "merge-blocked"
+                stack_child_disposition_label = "stack-landed"
+                merge_method = "merge"
+                failure_policy = "pause_train"
+                [policies.enqueue]
+                label_required = true
+                allowed_actor_roles = ["repo_owner"]
+                [policies.merge_identity]
+                kind = "github_app"
+                name = "launchplane"
+                [policies.scheduler]
+                enabled = true
+                runner_mode = "level1"
+                mutate = true
+                """
+            ).strip()
+        )
+
+        repository_policy = policy.find_repository_policy(
+            repository="example/app", base_branch="main"
+        )
+        self.assertTrue(repository_policy.scheduler.enabled)
+        self.assertEqual(repository_policy.scheduler.runner_mode, "level1")
+        self.assertTrue(repository_policy.scheduler.mutate)
+
+    def test_default_scheduler_policy_preserves_legacy_policy_digest(self) -> None:
+        legacy_payload = {
+            "schema_version": 1,
+            "policies": [
+                {
+                    "repository": "example/app",
+                    "base_branch": "main",
+                    "enqueue_label": "ready-to-merge",
+                    "blocked_label": "merge-blocked",
+                    "stack_child_disposition_label": "stack-landed",
+                    "merge_method": "merge",
+                    "failure_policy": "pause_train",
+                    "enqueue": {
+                        "label_required": True,
+                        "allowed_actor_roles": ["repo_owner"],
+                    },
+                    "merge_identity": {
+                        "kind": "github_app",
+                        "name": "launchplane",
+                    },
+                    "service_authz": {
+                        "action": "merge_train.run_once",
+                        "product": "launchplane",
+                        "context": "launchplane",
+                    },
+                    "github_token": {"env_var": "GH_TOKEN"},
+                }
+            ],
+        }
+        legacy_sha256 = hashlib.sha256(
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        policy = parse_merge_train_policy_toml(
+            textwrap.dedent(
+                """
+                schema_version = 1
+
+                [[policies]]
+                repository = "example/app"
+                base_branch = "main"
+                enqueue_label = "ready-to-merge"
+                blocked_label = "merge-blocked"
+                stack_child_disposition_label = "stack-landed"
+                merge_method = "merge"
+                failure_policy = "pause_train"
+                [policies.enqueue]
+                label_required = true
+                allowed_actor_roles = ["repo_owner"]
+                [policies.merge_identity]
+                kind = "github_app"
+                name = "launchplane"
+                [policies.service_authz]
+                action = "merge_train.run_once"
+                product = "launchplane"
+                context = "launchplane"
+                [policies.github_token]
+                env_var = "GH_TOKEN"
+                """
+            ).strip()
+        )
+
+        self.assertEqual(merge_train_policy_sha256(policy), legacy_sha256)
+        record = MergeTrainPolicyRecord(
+            record_id="merge-train-policy-legacy",
+            source="test",
+            updated_at="2026-05-13T21:00:00Z",
+            policy_sha256=merge_train_policy_sha256(policy),
+            policy=policy,
+        )
+        self.assertFalse(record.policy.policies[0].scheduler.enabled)
+
+    def test_enabled_scheduler_policy_changes_policy_digest(self) -> None:
+        disabled_policy = build_test_merge_train_policy()
+        enabled_policy = build_test_merge_train_policy(scheduler_enabled=True)
+
+        self.assertNotEqual(disabled_policy.policy_sha256, enabled_policy.policy_sha256)
+
+    def test_policy_rejects_multiline_repository_authority_values(self) -> None:
+        policy_toml = textwrap.dedent(
+            """
+            schema_version = 1
+
+            [[policies]]
+            repository = '''example/app
+            other/app'''
+            base_branch = "main"
+            enqueue_label = "ready-to-merge"
+            blocked_label = "merge-blocked"
+            stack_child_disposition_label = "stack-landed"
+            merge_method = "merge"
+            failure_policy = "pause_train"
+            [policies.enqueue]
+            label_required = true
+            allowed_actor_roles = ["repo_owner"]
+            [policies.merge_identity]
+            kind = "github_app"
+            name = "launchplane"
+            """
+        ).strip()
+
+        with self.assertRaisesRegex(ValidationError, "single line"):
+            parse_merge_train_policy_toml(policy_toml)
 
     def test_policy_record_validates_digest(self) -> None:
         policy = build_test_merge_train_policy_with_codex_skills()
@@ -95,6 +238,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
             summary["policy_keys"],
             ["cbusillo/sellyouroutboard:main", "cbusillo/codex-skills:main"],
         )
+        self.assertEqual(summary["scheduler_policy_keys"], [])
 
     def test_cli_choice_normalizers_share_trimmed_case_insensitive_choices(self) -> None:
         self.assertEqual(normalize_secret_scope(" Context "), "context")

@@ -162,6 +162,11 @@ def summarize_merge_train_policy_record(record: MergeTrainPolicyRecord) -> dict[
         "policy_keys": [
             repository_policy.policy_key for repository_policy in record.policy.policies
         ],
+        "scheduler_policy_keys": [
+            repository_policy.policy_key
+            for repository_policy in record.policy.policies
+            if repository_policy.scheduler.enabled
+        ],
     }
 
 
@@ -465,9 +470,7 @@ def authz_policies_grant_workflow(
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
 @click.option("--repository", required=True, help="GitHub owner/repo rule target.")
-@click.option(
-    "--workflow-ref", "workflow_refs", multiple=True, help="Exact workflow_ref pattern."
-)
+@click.option("--workflow-ref", "workflow_refs", multiple=True, help="Exact workflow_ref pattern.")
 @click.option(
     "--job-workflow-ref",
     "job_workflow_refs",
@@ -479,9 +482,7 @@ def authz_policies_grant_workflow(
 @click.option("--environment", "environments", multiple=True, help="Exact GitHub environment.")
 @click.option("--product", "products", multiple=True, required=True, help="Exact product.")
 @click.option("--context", "contexts", multiple=True, help="Exact Launchplane context.")
-@click.option(
-    "--action", "actions", multiple=True, required=True, help="Exact Launchplane action."
-)
+@click.option("--action", "actions", multiple=True, required=True, help="Exact Launchplane action.")
 @click.option("--reason", default="", help="Required audit reason when --apply is used.")
 @click.option(
     "--related-issue",
