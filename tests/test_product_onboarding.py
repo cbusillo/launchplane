@@ -742,6 +742,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
         self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
         self.assertIn("apply ingress canary", workflow_text)
+        self.assertIn("edge_endpoint_key:", workflow_text)
+        self.assertIn("EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}", workflow_text)
+        self.assertIn("edge_endpoint_key: $edge_endpoint_key", workflow_text)
         self.assertIn("CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}", workflow_text)
         self.assertIn(
             "CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}", workflow_text
@@ -750,7 +753,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertNotIn("      domain:", inputs_section)
         self.assertNotIn("      expected_host_id:", inputs_section)
-        self.assertIn('forward_scheme: "http"', workflow_text)
+        self.assertNotIn("CANARY_FORWARD_HOST", workflow_text)
+        self.assertNotIn("CANARY_FORWARD_PORT", workflow_text)
+        self.assertNotIn("forward_host: $forward_host", workflow_text)
+        self.assertNotIn("forward_port: $forward_port", workflow_text)
         self.assertIn("npmplus_noindex: true", workflow_text)
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertNotIn("route_options_json", workflow_text)

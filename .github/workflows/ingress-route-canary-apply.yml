@@ -12,6 +12,10 @@ name: Ingress Route Canary Apply
         description: Launchplane context authorized for the canary apply.
         required: true
         type: string
+      edge_endpoint_key:
+        description: Launchplane edge endpoint key for the canary upstream.
+        required: true
+        type: string
       reason:
         description: Operator reason recorded with the Launchplane request.
         required: true
@@ -42,10 +46,9 @@ jobs:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
       CONTEXT: ${{ inputs.context }}
+      EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}
       CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}
       CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}
-      CANARY_FORWARD_HOST: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST }}
-      CANARY_FORWARD_PORT: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_FORWARD_PORT }}
       CANARY_CERTIFICATE_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID }}
     steps:
       - name: Validate canary apply confirmation
@@ -73,10 +76,9 @@ jobs:
           set -euo pipefail
           : "${PRODUCT:?Missing canary product}"
           : "${CONTEXT:?Missing canary context}"
+          : "${EDGE_ENDPOINT_KEY:?Missing canary edge endpoint key}"
           : "${CANARY_DOMAIN:?Missing LAUNCHPLANE_INGRESS_CANARY_DOMAIN variable}"
           : "${CANARY_EXPECTED_HOST_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_HOST_ID variable}"
-          : "${CANARY_FORWARD_HOST:?Missing LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST variable}"
-          : "${CANARY_FORWARD_PORT:?Missing LAUNCHPLANE_INGRESS_CANARY_FORWARD_PORT variable}"
           : "${CANARY_CERTIFICATE_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID variable}"
 
           payload_file="$RUNNER_TEMP/ingress-route-canary-apply-request.json"
@@ -85,9 +87,8 @@ jobs:
             --arg context "$CONTEXT" \
             --arg domain "$CANARY_DOMAIN" \
             --arg reason "$REASON" \
-            --arg forward_host "$CANARY_FORWARD_HOST" \
+            --arg edge_endpoint_key "$EDGE_ENDPOINT_KEY" \
             --argjson expected_host_id "$CANARY_EXPECTED_HOST_ID" \
-            --argjson forward_port "$CANARY_FORWARD_PORT" \
             --argjson certificate_id "$CANARY_CERTIFICATE_ID" \
             '{
               schema_version: 1,
@@ -101,9 +102,7 @@ jobs:
                 reason: $reason,
                 route: {
                   domain_names: [$domain],
-                  forward_scheme: "http",
-                  forward_host: $forward_host,
-                  forward_port: $forward_port,
+                  edge_endpoint_key: $edge_endpoint_key,
                   certificate_id: $certificate_id,
                   enabled: true,
                   ssl_forced: true,
@@ -140,6 +139,7 @@ jobs:
             echo
             echo "- Product: $PRODUCT"
             echo "- Context: $CONTEXT"
+            echo "- Edge endpoint: $EDGE_ENDPOINT_KEY"
             echo "- Domain: $CANARY_DOMAIN"
             echo "- Status: $(jq -r '.result.status' "$result_file")"
             echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
