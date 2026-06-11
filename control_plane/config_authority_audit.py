@@ -251,6 +251,19 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
         "REQUESTED_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
     },
+    ".github/workflows/product-context-cutover.yml": {
+        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
+        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
+    },
+    ".github/workflows/product-context-cutover-audit.yml": {
+        "PREVIEW_CONTEXT": frozenset(("${{ inputs.preview_context }}",)),
+        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
+        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
+    },
+    ".github/workflows/product-legacy-context-cleanup.yml": {
+        "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
+        "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
+    },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),

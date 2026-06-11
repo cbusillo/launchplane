@@ -1236,6 +1236,46 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "",
                 )
 
+    def test_product_context_workflow_aliases_are_path_scoped(self) -> None:
+        workflow_aliases = (
+            (
+                ".github/workflows/product-context-cutover.yml",
+                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
+                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
+            ),
+            (
+                ".github/workflows/product-context-cutover-audit.yml",
+                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
+                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
+                ("PREVIEW_CONTEXT", "${{ inputs.preview_context }}"),
+            ),
+            (
+                ".github/workflows/product-legacy-context-cleanup.yml",
+                ("SOURCE_CONTEXT", "${{ inputs.source_context }}"),
+                ("TARGET_CONTEXT", "${{ inputs.target_context }}"),
+            ),
+        )
+
+        for path, *aliases in workflow_aliases:
+            for key, value in aliases:
+                with self.subTest(path=path, key=key):
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value=value),
+                        "operator_supplied_runtime_input",
+                    )
+                    self.assertEqual(
+                        _allow_reason(
+                            path=".github/workflows/generic-workflow.yml",
+                            key=key,
+                            value=value,
+                        ),
+                        "",
+                    )
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value="hard-coded-context"),
+                        "",
+                    )
+
     def test_artifact_publish_operator_aliases_are_path_scoped(self) -> None:
         for key, value in (
             ("INPUT_PRODUCT", "${{ inputs.product }}"),
