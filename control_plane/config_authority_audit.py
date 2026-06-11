@@ -906,6 +906,12 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         value=value,
     ):
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
+    if _is_launchplane_self_management_product_reference(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_workflow_mechanic_key_value(
         key=key,
         value=value,
@@ -957,6 +963,17 @@ def _is_launchplane_public_url_reference(*, key: str, value: object) -> bool:
     return (
         key == "LAUNCHPLANE_URL"
         and _string_value(value).strip() == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
+    )
+
+
+def _is_launchplane_self_management_product_reference(
+    *, path: str, key: str, value: object
+) -> bool:
+    value_text = _string_value(value).strip().rstrip(",")
+    return (
+        path == ".github/workflows/dokploy-target-setup.yml"
+        and key == "product"
+        and value_text in {'"launchplane"', "launchplane"}
     )
 
 

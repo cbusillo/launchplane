@@ -40,6 +40,12 @@ This category is only for Launchplane's own startup/root-of-trust wiring. It is
 not a general exception for product, tenant, repository, lane, provider,
 workflow, or operator configuration.
 
+Launchplane-owned self-management workflows may carry the fixed
+`product="launchplane"` value only when the paired service route itself rejects
+other products and authorizes the request against Launchplane's own product and
+service context. This exception does not apply to product-repo workflows,
+reusable workflow defaults, or routes that accept product-owned runtime targets.
+
 | Class                             | Current surface                                                                                                                           | Final authority                  | Notes                                                                                                                                                                                                                                                                                                |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Database connectivity             | `LAUNCHPLANE_DATABASE_URL`                                                                                                                | Bootstrap env                    | Required before Launchplane can read DB-backed config.                                                                                                                                                                                                                                               |
