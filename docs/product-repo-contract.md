@@ -230,25 +230,26 @@ own the manual dispatch confirmation and the source workspace, while
 artifact-record request, idempotency keys, and response mapping. The tenant
 workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
 `/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
-reusable workflow defaults the Launchplane product key to
-`odoo-tenant-${context}` with underscores normalized to dashes, so publish
-metadata resolves through the tenant product profile that owns the image
-repository and stable lanes. Reusable Odoo workflows read the Launchplane service
-URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the GitHub OIDC audience
-from that URL host unless the caller passes an explicit `launchplane_audience`
-input. The reusable jobs run on GitHub-hosted runners because they call the
-deployed Launchplane service over HTTPS; product repos do not need direct access
-to Launchplane self-hosted runners, and privileged provider mutations still run
-inside the Launchplane service boundary.
+tenant workflow must pass the Launchplane product key explicitly; reusable
+workflows do not derive product identity from context names. Odoo dependency
+repository identities for the devkit and shared addons are resolved by
+`/v1/drivers/odoo/artifact-publish-inputs` from Launchplane runtime records and
+returned as `devkit_repository` and `shared_addons_repository`, so product repos
+do not carry those checked-in defaults either. Reusable Odoo workflows read the
+Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the
+GitHub OIDC audience from that URL host unless the caller passes an explicit
+`launchplane_audience` input. The reusable jobs run on GitHub-hosted runners
+because they call the deployed Launchplane service over HTTPS; product repos do
+not need direct access to Launchplane self-hosted runners, and privileged
+provider mutations still run inside the Launchplane service boundary.
 
 Odoo testing deploys follow the same ownership shape. Tenant repos own the
 manual dispatch confirmation and pass an explicit stored `artifact_id` plus
 `source_git_ref` into `reusable-odoo-testing-deploy.yml`; the reusable workflow
-calls `/v1/drivers/odoo/target-replacement-apply` with product
-`odoo-tenant-${context}` by default. The Launchplane service owns the provider
-mutation, runtime identity injection, Odoo post-deploy extension, stable
-readiness checks, deployment and inventory records, and the testing release
-tuple.
+calls `/v1/drivers/odoo/target-replacement-apply` with the explicit product key
+provided by the caller. The Launchplane service owns the provider mutation,
+runtime identity injection, Odoo post-deploy extension, stable readiness checks,
+deployment and inventory records, and the testing release tuple.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,

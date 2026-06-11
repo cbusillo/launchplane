@@ -49,7 +49,11 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
         profile = LaunchplaneProductProfileRecord.model_validate(_profile_payload())
         with patch(
             "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
-            return_value={"ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19"},
+            return_value={
+                "ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19",
+                "ODOO_DEVKIT_REPOSITORY": "every/odoo-devkit",
+                "ODOO_SHARED_ADDONS_REPOSITORY": "every/odoo-shared-addons",
+            },
         ):
             payload = build_odoo_artifact_publish_inputs(
                 control_plane_root=Path("/launchplane"),
@@ -64,6 +68,8 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
         self.assertEqual(payload["product"], "odoo-tenant-cm")
         self.assertEqual(payload["repository"], "cbusillo/odoo-tenant-cm")
         self.assertEqual(payload["image_repository"], "ghcr.io/cbusillo/odoo-tenant-cm")
+        self.assertEqual(payload["devkit_repository"], "every/odoo-devkit")
+        self.assertEqual(payload["shared_addons_repository"], "every/odoo-shared-addons")
         self.assertEqual(payload["preview_slug"], "preview-28")
         self.assertEqual(payload["source_git_ref"], "abcdef1234567890")
         self.assertEqual(payload["image_tag"], "cm-preview-28-abcdef12-amd64")
@@ -85,7 +91,10 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
         }
         with patch(
             "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
-            return_value={},
+            return_value={
+                "ODOO_DEVKIT_REPOSITORY": "every/odoo-devkit",
+                "ODOO_SHARED_ADDONS_REPOSITORY": "every/odoo-shared-addons",
+            },
         ):
             payload = build_odoo_artifact_publish_inputs(
                 control_plane_root=Path("/launchplane"),
@@ -100,6 +109,26 @@ class OdooArtifactPublishInputsTests(unittest.TestCase):
 
         self.assertEqual(payload["preview_slug"], "pr-28")
         self.assertEqual(payload["image_tag"], "cm-pr-28-abcdef12-isolated-amd64")
+
+    def test_publish_inputs_require_dependency_repositories_for_profile_metadata(self) -> None:
+        with patch(
+            "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+            return_value={"ODOO_DEVKIT_REPOSITORY": "every/odoo-devkit"},
+        ):
+            with self.assertRaisesRegex(
+                click.ClickException,
+                "ODOO_SHARED_ADDONS_REPOSITORY",
+            ):
+                build_odoo_artifact_publish_inputs(
+                    control_plane_root=Path("/launchplane"),
+                    request=OdooArtifactPublishInputsRequest(
+                        context="cm",
+                        source_git_ref="abcdef1234567890",
+                    ),
+                    product_profile=LaunchplaneProductProfileRecord.model_validate(
+                        _profile_payload()
+                    ),
+                )
 
     def test_publish_inputs_require_product_profile_for_preview_metadata(self) -> None:
         with self.assertRaises(click.ClickException):

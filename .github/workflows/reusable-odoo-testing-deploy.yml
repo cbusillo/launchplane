@@ -9,11 +9,8 @@ name: Reusable Odoo Testing Deploy
         required: true
         type: string
       product:
-        description: >-
-          Optional Launchplane product key. Defaults to odoo-tenant-${context}
-          with underscores normalized to dashes.
-        required: false
-        default: ""
+        description: Launchplane product key.
+        required: true
         type: string
       artifact_id:
         description: Stored Launchplane artifact ID to deploy to testing.
@@ -95,10 +92,11 @@ jobs:
           PRODUCT_INPUT: ${{ inputs.product }}
           ARTIFACT_ID: ${{ inputs.artifact_id }}
         run: |
+          set -euo pipefail
           product="$PRODUCT_INPUT"
           if [ -z "$product" ]; then
-            context_slug="${CONTEXT_NAME//_/-}"
-            product="odoo-tenant-${context_slug}"
+            echo "product is required." >&2
+            exit 1
           fi
           run_scope="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
           {

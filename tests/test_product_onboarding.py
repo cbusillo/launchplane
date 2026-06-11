@@ -364,8 +364,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("product_repository:", workflow_text)
         self.assertIn("source_git_ref:", workflow_text)
         self.assertIn("PUBLISH LAUNCHPLANE ODOO ARTIFACT", workflow_text)
-        self.assertIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
-        self.assertIn('product="odoo-tenant-${context_slug}"', workflow_text)
+        self.assertIn("product is required.", workflow_text)
+        self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
+        self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish-inputs", workflow_text)
         self.assertIn("/v1/drivers/odoo/artifact-publish", workflow_text)
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
@@ -403,37 +404,63 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}",
             workflow_text,
         )
+        self.assertIn(
+            "RESOLVED_DEVKIT_REPOSITORY: >-\n"
+            "            ${{ steps.publish_inputs.outputs.devkit_repository }}",
+            workflow_text,
+        )
+        self.assertIn(
+            "RESOLVED_SHARED_ADDONS_REPOSITORY: >-\n"
+            "            ${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+            workflow_text,
+        )
+        self.assertIn("devkit_repository=result.devkit_repository", workflow_text)
+        self.assertIn(
+            "shared_addons_repository=result.shared_addons_repository",
+            workflow_text,
+        )
+        self.assertIn(
+            "repository: ${{ steps.publish_inputs.outputs.devkit_repository }}", workflow_text
+        )
+        self.assertIn(
+            "repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+            workflow_text,
+        )
         self.assertIn("publish.manifest=${{ steps.publish.outputs.manifest_file }}", workflow_text)
         self.assertNotIn("short_sha=", workflow_text)
         self.assertNotIn("IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}", workflow_text)
+        self.assertNotIn("repository: cbusillo/odoo-devkit", workflow_text)
+        self.assertNotIn("repository: cbusillo/odoo-shared-addons", workflow_text)
 
-    def test_reusable_odoo_testing_deploy_uses_tenant_product_scope(self) -> None:
+    def test_reusable_odoo_testing_deploy_requires_explicit_product_scope(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-testing-deploy.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("/v1/drivers/odoo/target-replacement-apply", workflow_text)
-        self.assertIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
-        self.assertIn('product="odoo-tenant-${context_slug}"', workflow_text)
+        self.assertIn("product is required.", workflow_text)
+        self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
+        self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
         self.assertIn('"instance": "testing"', workflow_text)
         self.assertIn("replacement.artifact_id=${{ inputs.artifact_id }}", workflow_text)
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
 
-    def test_reusable_odoo_post_deploy_uses_tenant_product_scope(self) -> None:
+    def test_reusable_odoo_post_deploy_requires_explicit_product_scope(self) -> None:
         workflow_text = Path(".github/workflows/reusable-odoo-post-deploy.yml").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("/v1/drivers/odoo/post-deploy", workflow_text)
-        self.assertIn('product="odoo-tenant-${context_slug}"', workflow_text)
-        self.assertIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
+        self.assertIn("product is required.", workflow_text)
+        self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
+        self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
         self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
         self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
         self.assertIn("website_bootstrap_included=result.website_bootstrap_included", workflow_text)
         self.assertNotIn('"product":"odoo"', workflow_text)
 
-    def test_reusable_odoo_prod_workflows_use_tenant_product_scope(self) -> None:
+    def test_reusable_odoo_prod_workflows_require_explicit_product_scope(self) -> None:
         workflow_paths = (
             Path(".github/workflows/reusable-odoo-prod-promotion.yml"),
             Path(".github/workflows/reusable-odoo-prod-rollback.yml"),
@@ -442,8 +469,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         for workflow_path in workflow_paths:
             with self.subTest(workflow=workflow_path.name):
                 workflow_text = workflow_path.read_text(encoding="utf-8")
-                self.assertIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
-                self.assertIn('product="odoo-tenant-${context_slug}"', workflow_text)
+                self.assertIn("product is required.", workflow_text)
+                self.assertNotIn('context_slug="${CONTEXT_NAME//_/-}"', workflow_text)
+                self.assertNotIn('product="odoo-tenant-${context_slug}"', workflow_text)
                 self.assertIn("product=${{ steps.product.outputs.product }}", workflow_text)
                 self.assertIn("${{ steps.product.outputs.idempotency_key }}", workflow_text)
                 self.assertNotIn('"product":"odoo"', workflow_text)
