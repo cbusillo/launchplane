@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
@@ -22,6 +23,7 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackDeployPlan,
     GenericWebRollbackPlanRecord,
 )
+from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
@@ -399,6 +401,79 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertFalse((state_dir / "cm-prod" / "dokploy.json").exists())
         self.assertEqual(loaded_record.endpoint_key, "../cm-prod/dokploy")
         self.assertEqual([record.endpoint_key for record in active_records], ["../cm-prod/dokploy"])
+
+    def test_write_read_and_list_ingress_canary_route_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            canary_record = IngressCanaryRouteRecord(
+                canary_key="ingress-canary",
+                product="launchplane",
+                context="reon-prod",
+                domain_name="ingress-canary.example.test",
+                expected_host_id=78,
+                edge_endpoint_key="ingress-canary-edge",
+                certificate_id=47,
+                status="active",
+                updated_at="2026-06-11T00:00:00Z",
+                source_label="test:ingress-canary",
+            )
+            disabled_record = canary_record.model_copy(
+                update={"canary_key": "disabled:canary", "status": "disabled"}
+            )
+
+            written_path = store.write_ingress_canary_route_record(canary_record)
+            store.write_ingress_canary_route_record(disabled_record)
+            loaded_record = store.read_ingress_canary_route_record("ingress-canary")
+            active_records = store.list_ingress_canary_route_records(
+                product="launchplane",
+                context_name="reon-prod",
+                status="active",
+            )
+
+        self.assertEqual(
+            written_path.parent.relative_to(state_dir).as_posix(),
+            "launchplane_ingress_canary_routes",
+        )
+        self.assertEqual(written_path.name, "ingress-canary.json")
+        self.assertFalse((state_dir / "ingress" / "canary.json").exists())
+        self.assertEqual(loaded_record.canary_key, "ingress-canary")
+        self.assertEqual([record.canary_key for record in active_records], ["ingress-canary"])
+
+    def test_ingress_canary_route_record_rejects_path_like_keys(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "single path-safe segment"):
+            IngressCanaryRouteRecord(
+                canary_key="../ingress/canary",
+                product="launchplane",
+                context="reon-prod",
+                domain_name="ingress-canary.example.test",
+                expected_host_id=78,
+                edge_endpoint_key="ingress-canary-edge",
+                certificate_id=47,
+                status="active",
+                updated_at="2026-06-11T00:00:00Z",
+                source_label="test:ingress-canary",
+            )
+
+    def test_ingress_canary_route_record_rejects_multi_domain_values(self) -> None:
+        for domain_name in (
+            "ingress-canary.example.test,other.example.test",
+            "ingress-canary.example.test:443",
+        ):
+            with self.subTest(domain_name=domain_name):
+                with self.assertRaisesRegex(ValidationError, "must be one domain name"):
+                    IngressCanaryRouteRecord(
+                        canary_key="ingress-canary",
+                        product="launchplane",
+                        context="reon-prod",
+                        domain_name=domain_name,
+                        expected_host_id=78,
+                        edge_endpoint_key="ingress-canary-edge",
+                        certificate_id=47,
+                        status="active",
+                        updated_at="2026-06-11T00:00:00Z",
+                        source_label="test:ingress-canary",
+                    )
 
     def test_write_and_list_runner_host_hygiene_audit_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

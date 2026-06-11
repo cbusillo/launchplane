@@ -97,6 +97,7 @@ WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
 WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
     (
         "APP_NAME",
+        "CANARY_KEY",
         "CONTEXT",
         "CONFIRMATION",
         "DEPLOY_TIMEOUT_SECONDS",

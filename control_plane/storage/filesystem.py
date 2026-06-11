@@ -23,6 +23,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
@@ -612,6 +613,43 @@ class FilesystemRecordStore:
 
     def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> Path:
         return self._write_model("launchplane_ingress_route_audits", record.record_id, record)
+
+    def write_ingress_canary_route_record(self, record: IngressCanaryRouteRecord) -> Path:
+        return self._write_model(
+            "launchplane_ingress_canary_routes",
+            _ingress_canary_route_record_id(record.canary_key),
+            record,
+        )
+
+    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:
+        return self._read_model(
+            IngressCanaryRouteRecord,
+            "launchplane_ingress_canary_routes",
+            _ingress_canary_route_record_id(canary_key),
+        )
+
+    def list_ingress_canary_route_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressCanaryRouteRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                IngressCanaryRouteRecord,
+                "launchplane_ingress_canary_routes",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.product, record.context, record.canary_key))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> Path:
         return self._write_model(
@@ -1468,3 +1506,7 @@ def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
 
 def _edge_endpoint_record_id(endpoint_key: str) -> str:
     return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
+
+
+def _ingress_canary_route_record_id(canary_key: str) -> str:
+    return canary_key.replace("/", "%2F").replace("\\", "%5C")

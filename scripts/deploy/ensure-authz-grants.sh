@@ -242,6 +242,46 @@ post_local_operator_product_config_grants() {
 	done
 }
 
+ingress_canary_route_scopes_json() {
+	if [ -n "${LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON:-}" ]; then
+		jq -c \
+			'if type != "array" then error("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON must be a JSON array") else . end
+       | map({product: (.product // ""), context: (.context // "")})
+       | map(select((.product | length) > 0 and (.context | length) > 0))
+       | unique_by(.product, .context)' \
+			<<<"${LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON}" ||
+			return 1
+		return 0
+	fi
+
+	jq -c -n '[{product: "launchplane", context: "launchplane"}]'
+}
+
+post_ingress_canary_route_apply_workflow_grants() {
+	local scopes_json scope_count product_name context_name scope_suffix
+
+	scopes_json="$(ingress_canary_route_scopes_json)"
+	scope_count="$(jq 'length' <<<"$scopes_json")"
+	if [ "$scope_count" = "0" ]; then
+		echo "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON resolved to no scopes; skipping ingress canary workflow grant reconciliation."
+		return 0
+	fi
+
+	jq -c '.[]' <<<"$scopes_json" | while IFS= read -r scope_json; do
+		product_name="$(jq -r '.product' <<<"$scope_json")"
+		context_name="$(jq -r '.context' <<<"$scope_json")"
+		scope_suffix="$(slugify "${product_name}-${context_name}")"
+		post_grant \
+			"$GITHUB_REPOSITORY" \
+			ingress-route-canary-apply.yml \
+			"$product_name" \
+			"$context_name" \
+			ingress_route.apply \
+			"deploy:ingress-route-canary-apply-workflow-${scope_suffix}" \
+			"ingress-route-canary-apply-workflow-${scope_suffix}"
+	done
+}
+
 post_product_config_human_grant() {
 	local action_name="$1"
 	local source_label="$2"
@@ -490,6 +530,7 @@ post_launchplane_service_grant \
 	edge_endpoint.read \
 	deploy:edge-endpoint-read-workflow-grant \
 	edge-endpoint-read-workflow
+post_ingress_canary_route_apply_workflow_grants
 post_terminal_agent_grant \
 	launchplane \
 	launchplane \
@@ -562,6 +603,20 @@ post_local_owner_grant \
 	edge_endpoint.read \
 	deploy:local-operator-edge-endpoint-read-grant \
 	local-operator-edge-endpoint-read
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
+	ingress_canary_route.apply \
+	deploy:local-operator-ingress-canary-route-apply-grant \
+	local-operator-ingress-canary-route-apply
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
+	ingress_canary_route.read \
+	deploy:local-operator-ingress-canary-route-read-grant \
+	local-operator-ingress-canary-route-read
 post_local_operator_product_config_grants \
 	product_config.plan \
 	deploy:local-operator-product-config-plan-grant \

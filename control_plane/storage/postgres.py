@@ -40,6 +40,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.merge_train_batch import (
@@ -576,6 +577,30 @@ class LaunchplaneEdgeEndpointRow(Base):
     upstream_host: Mapped[str] = mapped_column(String, nullable=False)
     upstream_scheme: Mapped[str] = mapped_column(String, nullable=False)
     upstream_port: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneIngressCanaryRouteRow(Base):
+    __tablename__ = "launchplane_ingress_canary_routes"
+    __table_args__ = (
+        Index(
+            "launchplane_ingress_canary_routes_lookup_idx",
+            "product",
+            "context",
+            "status",
+            "canary_key",
+        ),
+    )
+
+    canary_key: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    domain_name: Mapped[str] = mapped_column(String, nullable=False)
+    expected_host_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    edge_endpoint_key: Mapped[str] = mapped_column(String, nullable=False)
+    certificate_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -3009,6 +3034,56 @@ class PostgresRecordStore(HumanSessionStore):
                 updated_at=record.updated_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_ingress_canary_route_record(self, record: IngressCanaryRouteRecord) -> None:
+        self._write_row(
+            LaunchplaneIngressCanaryRouteRow(
+                canary_key=record.canary_key,
+                product=record.product,
+                context=record.context,
+                domain_name=record.domain_name,
+                expected_host_id=record.expected_host_id,
+                edge_endpoint_key=record.edge_endpoint_key,
+                certificate_id=str(record.certificate_id),
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord:
+        return self._read_model(
+            model_type=IngressCanaryRouteRecord,
+            orm_model=LaunchplaneIngressCanaryRouteRow,
+            filters=(LaunchplaneIngressCanaryRouteRow.canary_key == canary_key,),
+        )
+
+    def list_ingress_canary_route_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressCanaryRouteRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneIngressCanaryRouteRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneIngressCanaryRouteRow.context == context_name)
+        if status:
+            filters.append(LaunchplaneIngressCanaryRouteRow.status == status)
+        return self._list_models(
+            model_type=IngressCanaryRouteRecord,
+            orm_model=LaunchplaneIngressCanaryRouteRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneIngressCanaryRouteRow.product.asc(),
+                LaunchplaneIngressCanaryRouteRow.context.asc(),
+                LaunchplaneIngressCanaryRouteRow.canary_key.asc(),
+            ),
+            limit=limit,
         )
 
     def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord:

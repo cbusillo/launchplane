@@ -689,6 +689,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_workflow_operator_inputs_and_mechanics_are_classified(self) -> None:
         operator_inputs = (
             ("context", "${{ inputs.context }}"),
+            ("canary_key", "${{ inputs.canary_key }}"),
             ("product", "${{ inputs.product }}"),
             ("target_id", "${{ inputs.target_id }}"),
             ("environment_name", "${{ inputs.environment_name }}"),
@@ -712,6 +713,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         forwarded_variables = (
             ("context", "$context"),
+            ("canary_key", "$canary_key"),
             ("product", "$product,"),
             ("target_id", "$target_id"),
             ("edge_endpoint_key", "$edge_endpoint_key"),
