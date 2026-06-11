@@ -689,9 +689,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_workflow_operator_inputs_and_mechanics_are_classified(self) -> None:
         operator_inputs = (
             ("context", "${{ inputs.context }}"),
+            ("product", "${{ inputs.product }}"),
             ("target_id", "${{ inputs.target_id }}"),
             ("environment_name", "${{ inputs.environment_name }}"),
             ("compose_path", "${{ inputs.compose_path }}"),
+            ("edge_endpoint_key", "${{ inputs.edge_endpoint_key }}"),
             ("healthcheck_path", "${{ inputs.healthcheck_path }}"),
             ("repository", "${{ inputs.repository }}"),
             ("base_branch", "${{ inputs.base_branch }}"),
@@ -710,7 +712,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         forwarded_variables = (
             ("context", "$context"),
+            ("product", "$product,"),
             ("target_id", "$target_id"),
+            ("edge_endpoint_key", "$edge_endpoint_key"),
             ("environment_name", "$environment_name,"),
             ("repository", "$repository"),
             ("base_branch", "$base_branch,"),
@@ -743,7 +747,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
     def test_workflow_operator_input_allow_reasons_stay_narrow(self) -> None:
-        for key, value in (
+        generic_workflow_cases = (
             ("target_id", "dokploy-real-target"),
             ("target_id", "${{ vars.TARGET_ID }}"),
             ("target_id", "$provider_target_id"),
@@ -752,13 +756,17 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("base_branch", "main"),
             ("base_branch", "${{ inputs.base_branch || 'main' }}"),
             ("healthcheck_path", "${{ vars.HEALTHCHECK_PATH }}"),
+            ("product", "launchplane"),
+            ("product", "${{ vars.PRODUCT }}"),
+            ("domain_names", "[real.example.test]"),
             ("group", "dokploy-target-setup-${{ vars.CONTEXT }}"),
             ("path", "provider-target/live.json"),
-        ):
+        )
+        for key, value in generic_workflow_cases:
             with self.subTest(key=key, value=value):
                 self.assertEqual(
                     _allow_reason(
-                        path=".github/workflows/dokploy-target-setup.yml",
+                        path=".github/workflows/generic-workflow.yml",
                         key=key,
                         value=value,
                     ),
@@ -774,6 +782,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "launchplane_self_bootstrap",
         )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/ingress-route-apply.yml",
+                key="launchplane-url",
+                value="${{ env.LAUNCHPLANE_URL }}",
+            ),
+            "launchplane_self_bootstrap",
+        )
 
         for key, value in (
             ("LAUNCHPLANE_URL", "${{ vars.OTHER_URL }}"),
@@ -784,6 +800,66 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/merge-train-runner.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+    def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
+        for key, value in (
+            ("domain_names", "[$domain],"),
+            ("domain_names", "[ $domain ]"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/ingress-route-dry-run.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("npmplus_http3_support", "true,"),
+            ("npmplus_noindex", "false"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/ingress-route-dry-run.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("CANARY_PRODUCT", "launchplane"),
+            ("CANARY_CONTEXT", "reon-prod"),
+            ("domain_names", "[real.example.test]"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/ingress-route-canary-apply.yml",
                         key=key,
                         value=value,
                     ),

@@ -4,6 +4,14 @@ name: Ingress Route Canary Apply
 "on":
   workflow_dispatch:
     inputs:
+      product:
+        description: Launchplane product key authorized for the canary apply.
+        required: true
+        type: string
+      context:
+        description: Launchplane context authorized for the canary apply.
+        required: true
+        type: string
       reason:
         description: Operator reason recorded with the Launchplane request.
         required: true
@@ -32,8 +40,8 @@ jobs:
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-      CANARY_PRODUCT: launchplane
-      CANARY_CONTEXT: reon-prod
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
       CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}
       CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}
       CANARY_FORWARD_HOST: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST }}
@@ -63,8 +71,8 @@ jobs:
           REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
-          : "${CANARY_PRODUCT:?Missing canary product}"
-          : "${CANARY_CONTEXT:?Missing canary context}"
+          : "${PRODUCT:?Missing canary product}"
+          : "${CONTEXT:?Missing canary context}"
           : "${CANARY_DOMAIN:?Missing LAUNCHPLANE_INGRESS_CANARY_DOMAIN variable}"
           : "${CANARY_EXPECTED_HOST_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_HOST_ID variable}"
           : "${CANARY_FORWARD_HOST:?Missing LAUNCHPLANE_INGRESS_CANARY_FORWARD_HOST variable}"
@@ -73,8 +81,8 @@ jobs:
 
           payload_file="$RUNNER_TEMP/ingress-route-canary-apply-request.json"
           jq -n \
-            --arg product "$CANARY_PRODUCT" \
-            --arg context "$CANARY_CONTEXT" \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
             --arg domain "$CANARY_DOMAIN" \
             --arg reason "$REASON" \
             --arg forward_host "$CANARY_FORWARD_HOST" \
@@ -130,8 +138,8 @@ jobs:
           {
             echo '## Ingress route canary apply'
             echo
-            echo "- Product: $CANARY_PRODUCT"
-            echo "- Context: $CANARY_CONTEXT"
+            echo "- Product: $PRODUCT"
+            echo "- Context: $CONTEXT"
             echo "- Domain: $CANARY_DOMAIN"
             echo "- Status: $(jq -r '.result.status' "$result_file")"
             echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
