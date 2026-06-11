@@ -469,6 +469,68 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(findings[0]["allow_reason"], "schema_only")
         self.assertEqual(findings[0]["classification"], "allowed")
 
+    def test_artifact_publish_schema_constants_are_schema_only(self) -> None:
+        for key, value in (
+            ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"),
+            (
+                "PUBLISH_RUNTIME_ENVIRONMENT_KEYS",
+                (
+                    "ODOO_VERSION",
+                    "ODOO_BASE_RUNTIME_IMAGE",
+                    "ODOO_BASE_DEVTOOLS_IMAGE",
+                    "ODOO_ADDON_REPOSITORIES",
+                    "OPENUPGRADE_ADDON_REPOSITORY",
+                    "OPENUPGRADELIB_INSTALL_SPEC",
+                    "ODOO_PYTHON_SYNC_SKIP_ADDONS",
+                ),
+            ),
+            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "ODOO_VERSION"),
+            (
+                "PUBLISH_DEPENDENCY_REPOSITORY_KEYS",
+                {
+                    "devkit_repository": "ODOO_DEVKIT_REPOSITORY",
+                    "shared_addons_repository": "ODOO_SHARED_ADDONS_REPOSITORY",
+                },
+            ),
+            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS.devkit_repository", "ODOO_DEVKIT_REPOSITORY"),
+            ("instance", "testing"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path="control_plane/workflows/odoo_artifact_publish.py",
+                        key=key,
+                        value=value,
+                    ),
+                    "schema_only",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path="control_plane/workflows/other_publish.py",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY", "REAL_PRODUCT_ENVIRONMENT_JSON"),
+            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS", "ODOO_VERSION"),
+            ("PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]", "REAL_PRODUCT_DOMAIN"),
+            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS", "ODOO_DEVKIT_REPOSITORY"),
+            ("PUBLISH_DEPENDENCY_REPOSITORY_KEYS.devkit_repository", "real-owner/real-repo"),
+            ("instance", "prod"),
+        ):
+            with self.subTest(key=key, wrong_value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path="control_plane/workflows/odoo_artifact_publish.py",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
     def test_python_literal_with_tuple_keys_does_not_crash_scan(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -907,6 +969,14 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "launchplane_self_bootstrap",
         )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/reusable-odoo-artifact-publish.yml",
+                key="launchplane-url",
+                value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
+            ),
+            "launchplane_self_bootstrap",
+        )
 
         for key, value in (
             ("LAUNCHPLANE_URL", "${{ vars.OTHER_URL }}"),
@@ -979,12 +1049,42 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         thin_connectors = (
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "idempotency-key",
+                "${{ steps.product.outputs.publish_idempotency_key }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "idempotency-key",
+                "${{ steps.product.outputs.publish_inputs_idempotency_key }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "repository",
                 "${{ steps.source.outputs.repository }}",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "RESOLVED_IMAGE_REPOSITORY",
+                "${{ steps.publish_inputs.outputs.image_repository }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "RESOLVED_DEVKIT_REPOSITORY",
+                "${{ steps.publish_inputs.outputs.devkit_repository }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "RESOLVED_SHARED_ADDONS_REPOSITORY",
+                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
                 "token",
+                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "ODOO_SOURCE_GITHUB_TOKEN",
                 "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
             ),
             (
@@ -1022,8 +1122,11 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
+            ("idempotency-key", "${{ inputs.idempotency_key }}"),
             ("repository", "${{ vars.DEFAULT_REPOSITORY }}"),
             ("repository", "$repository"),
+            ("RESOLVED_IMAGE_REPOSITORY", "${{ vars.IMAGE_REPOSITORY }}"),
+            ("ODOO_SOURCE_GITHUB_TOKEN", "${{ secrets.OTHER_TOKEN }}"),
             ("token", "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || 'literal-token' }}"),
             ("GITHUB_TOKEN", "write"),
         ):
@@ -1031,6 +1134,30 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/reusable-odoo-artifact-publish.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+    def test_artifact_publish_operator_aliases_are_path_scoped(self) -> None:
+        for key, value in (
+            ("INPUT_PRODUCT", "${{ inputs.product }}"),
+            ("CONTEXT_NAME", "${{ inputs.context }}"),
+            ("INSTANCE_NAME", "${{ inputs.instance }}"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/reusable-odoo-artifact-publish.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
                         key=key,
                         value=value,
                     ),

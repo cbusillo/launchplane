@@ -162,6 +162,11 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
     ".github/workflows/preview-lifecycle.yml": {
         "LAUNCHPLANE_URL": frozenset(("${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}",))
     },
+    ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
@@ -223,6 +228,11 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
         "REQUESTED_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
     },
+    ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),
+        "INSTANCE_NAME": frozenset(("${{ inputs.instance }}",)),
+    },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "KEY_NAME": frozenset(("${{ inputs.key }}",))
     },
@@ -280,6 +290,24 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "GHCR_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
         "GHCR_USERNAME": frozenset(("${{ github.repository_owner }}",)),
         "INPUT_PRODUCT_REPOSITORY": frozenset(("${{ inputs.product_repository }}",)),
+        "ODOO_SOURCE_GITHUB_TOKEN": frozenset(
+            ("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)
+        ),
+        "RESOLVED_DEVKIT_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.devkit_repository }}",)
+        ),
+        "RESOLVED_IMAGE_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.image_repository }}",)
+        ),
+        "RESOLVED_SHARED_ADDONS_REPOSITORY": frozenset(
+            ("${{ steps.publish_inputs.outputs.shared_addons_repository }}",)
+        ),
+        "idempotency-key": frozenset(
+            (
+                "${{ steps.product.outputs.publish_idempotency_key }}",
+                "${{ steps.product.outputs.publish_inputs_idempotency_key }}",
+            )
+        ),
         "password": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
         "repository": frozenset(
             (
@@ -296,6 +324,44 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/runner-lane-registration.yml": {
         "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))
+    },
+}
+PYTHON_SCHEMA_ONLY_PATH_KEY_VALUES = {
+    "control_plane/workflows/odoo_artifact_publish.py": {
+        "DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY": frozenset(
+            ("ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON",)
+        ),
+        "PUBLISH_DEPENDENCY_REPOSITORY_KEYS.devkit_repository": frozenset(
+            ("ODOO_DEVKIT_REPOSITORY",)
+        ),
+        "PUBLISH_DEPENDENCY_REPOSITORY_KEYS.shared_addons_repository": frozenset(
+            ("ODOO_SHARED_ADDONS_REPOSITORY",)
+        ),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[0]": frozenset(("ODOO_VERSION",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[1]": frozenset(("ODOO_BASE_RUNTIME_IMAGE",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[2]": frozenset(("ODOO_BASE_DEVTOOLS_IMAGE",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[3]": frozenset(("ODOO_ADDON_REPOSITORIES",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[4]": frozenset(("OPENUPGRADE_ADDON_REPOSITORY",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[5]": frozenset(("OPENUPGRADELIB_INSTALL_SPEC",)),
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS[6]": frozenset(("ODOO_PYTHON_SYNC_SKIP_ADDONS",)),
+        "instance": frozenset(("testing",)),
+    },
+}
+PYTHON_SCHEMA_ONLY_PATH_CONTAINER_VALUES = {
+    "control_plane/workflows/odoo_artifact_publish.py": {
+        "PUBLISH_DEPENDENCY_REPOSITORY_KEYS": {
+            "devkit_repository": "ODOO_DEVKIT_REPOSITORY",
+            "shared_addons_repository": "ODOO_SHARED_ADDONS_REPOSITORY",
+        },
+        "PUBLISH_RUNTIME_ENVIRONMENT_KEYS": (
+            "ODOO_VERSION",
+            "ODOO_BASE_RUNTIME_IMAGE",
+            "ODOO_BASE_DEVTOOLS_IMAGE",
+            "ODOO_ADDON_REPOSITORIES",
+            "OPENUPGRADE_ADDON_REPOSITORY",
+            "OPENUPGRADELIB_INSTALL_SPEC",
+            "ODOO_PYTHON_SYNC_SKIP_ADDONS",
+        ),
     },
 }
 INGRESS_ROUTE_WORKFLOW_PATHS = frozenset(
@@ -1127,6 +1193,12 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         or "PATH_GLOBS" in key_text
     ):
         return ALLOW_REASON_SCHEMA_ONLY
+    if normalized.endswith(".py") and _is_python_path_schema_only_value(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_SCHEMA_ONLY
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_launchplane_public_url_reference(
@@ -1451,6 +1523,16 @@ def _is_click_option_metadata_key(key: str) -> bool:
         "envvar",
         "required",
     }
+
+
+def _is_python_path_schema_only_value(*, path: str, key: str, value: object) -> bool:
+    allowed_container_value = PYTHON_SCHEMA_ONLY_PATH_CONTAINER_VALUES.get(path, {}).get(key)
+    if allowed_container_value is not None and value == allowed_container_value:
+        return True
+    allowed_values = PYTHON_SCHEMA_ONLY_PATH_KEY_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    return _string_value(value).strip().strip("\"'") in allowed_values
 
 
 def _is_repo_metadata_ergonomics_key(key: str) -> bool:
