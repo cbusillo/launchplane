@@ -83,7 +83,15 @@ SHELL_ENV_PATTERN = re.compile(
     r"\b(?P<key>[A-Z][A-Z0-9_]{2,})\s*=\s*(?P<value>\"[^\"]*\"|'[^']*'|[^\s#]+)"
 )
 YAML_SCALAR_PATTERN = re.compile(r"^\s*(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.+?)\s*$")
-IGNORED_YAML_SCALAR_KEYS = frozenset(("id", "name", "run", "uses"))
+GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
+GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
+    r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
+)
+WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
+    ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
+)
+IGNORED_YAML_SCALAR_KEYS = frozenset(("description", "id", "name", "run", "uses"))
+YAML_BLOCK_SCALAR_OPENERS = frozenset(("|", "|-", "|+", ">", ">-", ">+"))
 DOCKER_ENV_PATTERN = re.compile(r"^\s*(?:ENV|ARG)\s+(?P<assignment>.+?)\s*$", re.I)
 
 IGNORED_DIR_NAMES = frozenset(
@@ -697,7 +705,7 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
         if match.group("key") in IGNORED_YAML_SCALAR_KEYS:
             continue
         value = _strip_inline_comment(match.group("value")).strip()
-        if value and value not in {"|", ">"}:
+        if value and value not in YAML_BLOCK_SCALAR_OPENERS:
             candidates.append((index, match.group("key"), _unquote(value)))
     return candidates
 
@@ -751,7 +759,7 @@ def _build_finding(
     parser: str,
 ) -> ConfigAuthorityFinding:
     rule_id = _rule_id(key=key, value=value)
-    allow_reason = _allow_reason(path=source_file.relative_path, key=key)
+    allow_reason = _allow_reason(path=source_file.relative_path, key=key, value=value)
     classification = "allowed" if allow_reason else "needs_classification"
     severity = "info" if allow_reason else _severity(rule_id=rule_id, key=key)
     evidence = _redacted_evidence(key=key, value=value)
@@ -785,6 +793,8 @@ def _candidate_is_interesting(*, key: str, value: object) -> bool:
     if _is_click_option_metadata_key(key):
         return True
     if _is_repo_metadata_ergonomics_key(key):
+        return True
+    if key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS:
         return True
     if not value_text.strip():
         return False
@@ -831,7 +841,7 @@ def _severity(*, rule_id: str, key: str) -> str:
     return "medium"
 
 
-def _allow_reason(*, path: str, key: str) -> str:
+def _allow_reason(*, path: str, key: str, value: object) -> str:
     normalized = path.replace("\\", "/")
     key_text = key.upper().replace(".", "_").replace("-", "_")
     if normalized.startswith("docs/") or normalized in {"README.md", "AGENTS.md", "handoff.md"}:
@@ -850,21 +860,45 @@ def _allow_reason(*, path: str, key: str) -> str:
         return ALLOW_REASON_SCHEMA_ONLY
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
-    if normalized.startswith(".github/workflows/") and "INPUT" in key_text:
+    if (
+        normalized.startswith(".github/workflows/")
+        and not _is_workflow_runtime_authority_key(key)
+        and _is_github_context_reference(value)
+    ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
-    if normalized.startswith(".github/workflows/") and key_text in {
-        "GITHUB_TOKEN",
-        "ID_TOKEN",
-        "LAUNCHPLANE_URL",
-        "LAUNCHPLANE_PRODUCT",
-        "ROUTE_PATH",
-    }:
+    if normalized.startswith(".github/workflows/") and _is_launchplane_service_route_path(
+        key=key,
+        value=value,
+    ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if key_text.startswith("--") and key_text.endswith(("REQUIRED", "DEFAULT")):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if _is_click_option_metadata_key(key):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     return ""
+
+
+def _is_github_context_reference(value: object) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    return bool(GITHUB_CONTEXT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
+def _is_workflow_runtime_authority_key(key: str) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    return key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS
+
+
+def _is_launchplane_service_route_path(*, key: str, value: object) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip()
+    return (
+        key_text == "ROUTE_PATH"
+        and value_text.startswith("/v1/")
+        and "${{" not in value_text
+        and " " not in value_text
+    )
 
 
 def _is_click_option_metadata_key(key: str) -> bool:
