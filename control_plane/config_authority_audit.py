@@ -87,10 +87,15 @@ GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
 GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
 )
+GITHUB_DIRECT_INPUT_REFERENCE_PATTERN = re.compile(
+    r"^(?:inputs|github\.event\.inputs)\.[A-Za-z0-9_.-]+$"
+)
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
-GITHUB_INPUT_REFERENCE_PATTERN = re.compile(r"^inputs\.[A-Za-z0-9_.-]+$")
+GITHUB_INPUT_REFERENCE_PATTERN = re.compile(
+    r"^(?:inputs|github\.event\.inputs)\.(?P<input_name>[A-Za-z0-9_.-]+)$"
+)
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
 )
@@ -901,19 +906,60 @@ def _toml_candidates(text: str) -> tuple[list[tuple[int, str, object]], str]:
 
 def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     candidates: list[tuple[int, str, object]] = []
-    for index, line in enumerate(text.splitlines(), start=1):
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line_number = index + 1
+        line = lines[index]
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+            index += 1
             continue
         match = YAML_SCALAR_PATTERN.match(line)
         if match is None:
+            index += 1
             continue
         if match.group("key") in IGNORED_YAML_SCALAR_KEYS:
+            index += 1
             continue
         value = _strip_inline_comment(match.group("value")).strip()
-        if value and value not in YAML_BLOCK_SCALAR_OPENERS:
-            candidates.append((index, match.group("key"), _unquote(value)))
+        if value in YAML_BLOCK_SCALAR_OPENERS:
+            block_lines, next_index = _yaml_block_scalar_lines(
+                lines=lines,
+                start_index=index + 1,
+                parent_indent=_leading_space_count(line),
+            )
+            block_value = " ".join(block_lines).strip()
+            if block_value:
+                candidates.append((line_number, match.group("key"), block_value))
+            index = next_index
+            continue
+        if value:
+            candidates.append((line_number, match.group("key"), _unquote(value)))
+        index += 1
     return candidates
+
+
+def _yaml_block_scalar_lines(
+    *, lines: Sequence[str], start_index: int, parent_indent: int
+) -> tuple[list[str], int]:
+    block_lines: list[str] = []
+    index = start_index
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            block_lines.append("")
+            index += 1
+            continue
+        if _leading_space_count(line) <= parent_indent:
+            break
+        block_lines.append(line.strip())
+        index += 1
+    return block_lines, index
+
+
+def _leading_space_count(text: str) -> int:
+    return len(text) - len(text.lstrip(" "))
 
 
 def _env_line_candidates(text: str) -> list[tuple[int, str, object]]:
@@ -1168,6 +1214,7 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         and not _is_route_path_key(key)
         and not _is_workflow_context_reference_restricted_key(key)
         and not _is_workflow_context_reference_restricted_value(value)
+        and not _is_github_direct_input_reference(value)
         and _is_github_context_reference(value)
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
@@ -1188,6 +1235,13 @@ def _is_github_context_reference(value: object) -> bool:
     if match is None:
         return False
     return bool(GITHUB_CONTEXT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
+def _is_github_direct_input_reference(value: object) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    return bool(GITHUB_DIRECT_INPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
 
 
 def _is_workflow_runtime_authority_key(key: str) -> bool:
@@ -1246,9 +1300,10 @@ def _is_workflow_operator_input_value(*, key: str, value: object) -> bool:
     if match is None:
         return False
     body = match.group("body").strip()
-    if not GITHUB_INPUT_REFERENCE_PATTERN.match(body):
+    input_match = GITHUB_INPUT_REFERENCE_PATTERN.match(body)
+    if input_match is None:
         return False
-    input_name = body.removeprefix("inputs.").upper().replace(".", "_").replace("-", "_")
+    input_name = input_match.group("input_name").upper().replace(".", "_").replace("-", "_")
     key_text = key.upper().replace(".", "_").replace("-", "_")
     return input_name == key_text
 
