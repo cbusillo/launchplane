@@ -756,7 +756,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("repository", "cbusillo/odoo-devkit"),
             ("repository", "${{ inputs.repository || vars.DEFAULT_REPOSITORY }}"),
             ("base_branch", "main"),
-            ("base_branch", "${{ inputs.base_branch || 'main' }}"),
+            (
+                "base_branch",
+                "${{ github.event_name == 'schedule' && vars.LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH || inputs.base_branch }}",
+            ),
             ("healthcheck_path", "${{ vars.HEALTHCHECK_PATH }}"),
             ("product", "launchplane"),
             ("product", "${{ vars.PRODUCT }}"),

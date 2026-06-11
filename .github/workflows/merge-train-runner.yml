@@ -14,7 +14,7 @@ name: Merge Train Runner
       base_branch:
         description: Base branch protected by the merge train
         required: false
-        default: main
+        default: ""
       mutate:
         description: >-
           Apply one worker mutation when admitted. Scheduled runs use
@@ -105,7 +105,12 @@ jobs:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MERGE_TRAIN_REPOSITORY: >-
         ${{ inputs.repository || vars.LAUNCHPLANE_MERGE_TRAIN_REPOSITORY }}
-      MERGE_TRAIN_BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
+      MERGE_TRAIN_BASE_BRANCH: >-
+        ${{
+          github.event_name == 'schedule' &&
+          vars.LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH ||
+          inputs.base_branch
+        }}
       MERGE_TRAIN_MUTATE: >-
         ${{
           (

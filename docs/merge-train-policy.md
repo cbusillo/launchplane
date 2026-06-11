@@ -564,14 +564,14 @@ To opt a repository into observation, set the scheduler repository variables in
 the Launchplane repo:
 
 - `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY=owner/name`
+- `LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH=<policy base branch>`
 - `LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE=controller`
 - `LAUNCHPLANE_MERGE_TRAIN_MUTATE=false`
 
-Scheduled runs currently use the workflow's default base branch input unless the
-workflow dispatch path supplies another base. Use a repository/base branch that
-is present in the active merge-train policy, and add explicit non-`main`
-scheduled-base support before relying on a non-default base branch for cron
-rollout.
+Scheduled runs use the `LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH` repository variable;
+manual workflow dispatches use the explicit `base_branch` input. Use a
+repository/base branch that is present in the active merge-train policy. Missing
+base branch input fails closed before any worker request.
 
 Observe at least two scheduled dry-run passes before enabling mutation. A healthy
 observation pass has a successful GitHub Actions run, an admitted or explicitly
