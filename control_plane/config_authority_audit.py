@@ -103,12 +103,14 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "DESCRIPTION",
         "DOMAIN",
         "COMPOSE_PATH",
+        "EDGE_ENDPOINT_KEY",
         "ENVIRONMENT_ID",
         "ENVIRONMENT_NAME",
         "HEALTHCHECK_PATH",
         "INSTANCE",
         "MODE",
         "OPERATION",
+        "PRODUCT",
         "PROJECT_ID",
         "PROJECT_NAME",
         "REASON",
@@ -121,6 +123,13 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "TARGET_ID",
         "TARGET_NAME",
         "TARGET_TYPE",
+    )
+)
+INGRESS_ROUTE_WORKFLOW_PATHS = frozenset(
+    (
+        ".github/workflows/ingress-route-apply.yml",
+        ".github/workflows/ingress-route-canary-apply.yml",
+        ".github/workflows/ingress-route-dry-run.yml",
     )
 )
 IGNORED_YAML_SCALAR_KEYS = frozenset(("description", "id", "name", "run", "uses"))
@@ -927,6 +936,18 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         value=value,
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_operator_array_forward(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_ingress_route_option_literal(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if (
         normalized.startswith(".github/workflows/")
         and not _is_workflow_runtime_authority_key(key)
@@ -960,10 +981,11 @@ def _is_workflow_runtime_authority_key(key: str) -> bool:
 
 
 def _is_launchplane_public_url_reference(*, key: str, value: object) -> bool:
-    return (
-        key == "LAUNCHPLANE_URL"
-        and _string_value(value).strip() == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
-    )
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip()
+    if key == "LAUNCHPLANE_URL":
+        return value_text == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
+    return key_text == "LAUNCHPLANE_URL" and value_text == "${{ env.LAUNCHPLANE_URL }}"
 
 
 def _is_launchplane_self_management_product_reference(
@@ -997,6 +1019,25 @@ def _is_workflow_operator_variable_forward(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip().rstrip(",")
     return value_text == f"${key_text.lower()}"
+
+
+def _is_workflow_operator_array_forward(*, path: str, key: str, value: object) -> bool:
+    if path not in INGRESS_ROUTE_WORKFLOW_PATHS:
+        return False
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip().rstrip(",").replace(" ", "")
+    return key_text == "DOMAIN_NAMES" and value_text == "[$domain]"
+
+
+def _is_ingress_route_option_literal(*, path: str, key: str, value: object) -> bool:
+    if path not in INGRESS_ROUTE_WORKFLOW_PATHS:
+        return False
+    key_text = key.lower().replace("-", "_")
+    value_text = _string_value(value).strip().rstrip(",")
+    return key_text in {"npmplus_http3_support", "npmplus_noindex"} and value_text in {
+        "false",
+        "true",
+    }
 
 
 def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:

@@ -46,6 +46,10 @@ other products and authorizes the request against Launchplane's own product and
 service context. This exception does not apply to product-repo workflows,
 reusable workflow defaults, or routes that accept product-owned runtime targets.
 
+Ingress route workflows may forward operator-supplied product, context, domain,
+and edge-endpoint intent to Launchplane. They must not carry fixed canary target
+topology or GitHub-variable-backed product/context authority in workflow code.
+
 | Class                             | Current surface                                                                                                                           | Final authority                  | Notes                                                                                                                                                                                                                                                                                                |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Database connectivity             | `LAUNCHPLANE_DATABASE_URL`                                                                                                                | Bootstrap env                    | Required before Launchplane can read DB-backed config.                                                                                                                                                                                                                                               |
