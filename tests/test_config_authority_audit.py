@@ -790,6 +790,35 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "",
                 )
 
+    def test_dokploy_target_setup_launchplane_product_is_self_management(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/dokploy-target-setup.yml",
+                key="product",
+                value="launchplane",
+            ),
+            "launchplane_self_bootstrap",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/dokploy-target-setup.yml",
+                key="product",
+                value='"launchplane",',
+            ),
+            "launchplane_self_bootstrap",
+        )
+
+        for path, value in (
+            (".github/workflows/other.yml", "launchplane"),
+            (".github/workflows/other.yml", '"launchplane",'),
+            (".github/workflows/dokploy-target-setup.yml", "other-product"),
+        ):
+            with self.subTest(path=path, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key="product", value=value),
+                    "",
+                )
+
     def test_cli_outputs_json_and_markdown(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
