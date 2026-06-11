@@ -542,6 +542,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "          public-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
                 "          client-secret: ${{ secrets.LAUNCHPLANE_CLIENT_SECRET }}\n"
                 "          product-input: ${{ inputs.product }}\n"
+                "          event-product-input: ${{ github.event.inputs.product }}\n"
                 "          mixed-url: https://${{ vars.LAUNCHPLANE_DOMAIN }}/health\n"
                 "          fallback-product: ${{ inputs.product || 'launchplane' }}\n"
                 "          input-fallback-product: ${{ inputs.product || 'launchplane' }}\n"
@@ -568,15 +569,19 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("description", keys)
         self.assertNotIn("uses", keys)
         self.assertNotIn("run", keys)
-        self.assertNotIn("folded-secret", keys)
         route_path = next(
             finding for finding in _findings(payload) if finding["key"] == "route-path"
         )
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
-        for key in ("public-url", "product-input"):
-            finding = next(finding for finding in _findings(payload) if finding["key"] == key)
-            self.assertEqual(finding["allow_reason"], "thin_connector_input")
+        public_url = next(
+            finding for finding in _findings(payload) if finding["key"] == "public-url"
+        )
+        self.assertEqual(public_url["allow_reason"], "thin_connector_input")
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in ("product-input", "event-product-input"):
+            finding = findings_by_key[key]
+            self.assertEqual(finding["classification"], "needs_classification")
+            self.assertEqual(finding["allow_reason"], "")
         for key in (
             "client-secret",
             "mixed-url",
@@ -590,6 +595,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "target-context",
             "literal-product",
             "literal-domain",
+            "folded-secret",
         ):
             finding = findings_by_key[key]
             self.assertEqual(finding["classification"], "needs_classification")
@@ -636,6 +642,38 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertEqual(route_path["classification"], "allowed")
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
+
+    def test_workflow_block_scalar_runtime_values_are_scanned(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "merge-train-runner.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Merge train\n"
+                "jobs:\n"
+                "  run:\n"
+                "    env:\n"
+                "      MERGE_TRAIN_REPOSITORY: >-\n"
+                "        ${{ inputs.repository || vars.LAUNCHPLANE_MERGE_TRAIN_REPOSITORY }}\n"
+                "      MERGE_TRAIN_BASE_BRANCH: >-\n"
+                "        ${{\n"
+                "          github.event_name == 'schedule' &&\n"
+                "          vars.LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH ||\n"
+                "          inputs.base_branch\n"
+                "        }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in ("MERGE_TRAIN_REPOSITORY", "MERGE_TRAIN_BASE_BRANCH"):
+            with self.subTest(key=key):
+                finding = findings_by_key[key]
+                self.assertEqual(finding["classification"], "needs_classification")
+                self.assertEqual(finding["allow_reason"], "")
 
     def test_workflow_operator_input_forwarding_is_scanned_and_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -718,9 +756,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
     def test_workflow_operator_inputs_and_mechanics_are_classified(self) -> None:
         operator_inputs = (
             ("context", "${{ inputs.context }}"),
+            ("context", "${{ github.event.inputs.context }}"),
             ("canary_key", "${{ inputs.canary_key }}"),
             ("product", "${{ inputs.product }}"),
+            ("product", "${{ github.event.inputs.product }}"),
             ("target_id", "${{ inputs.target_id }}"),
+            ("target_id", "${{ github.event.inputs.target_id }}"),
             ("environment_name", "${{ inputs.environment_name }}"),
             ("compose_path", "${{ inputs.compose_path }}"),
             ("edge_endpoint_key", "${{ inputs.edge_endpoint_key }}"),
@@ -799,6 +840,9 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("healthcheck_path", "${{ vars.HEALTHCHECK_PATH }}"),
             ("product", "launchplane"),
             ("product", "${{ vars.PRODUCT }}"),
+            ("product-input", "${{ inputs.product }}"),
+            ("event-product-input", "${{ github.event.inputs.product }}"),
+            ("product", "${{ github.event.inputs.context }}"),
             ("domain_names", "[real.example.test]"),
             ("group", "dokploy-target-setup-${{ vars.CONTEXT }}"),
             ("path", "provider-target/live.json"),
