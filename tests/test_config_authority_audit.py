@@ -609,6 +609,64 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "thin_connector_input",
                 )
 
+    def test_workflow_route_path_forwarding_is_scanned_and_allowed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "tracked-target-logs.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Tracked target logs\n"
+                "jobs:\n"
+                "  logs:\n"
+                "    steps:\n"
+                "      - id: route\n"
+                "        run: echo route_path=/v1/logs >> $GITHUB_OUTPUT\n"
+                "      - with:\n"
+                "          route-path: ${{ steps.route.outputs.route_path }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        route_path = next(
+            finding for finding in _findings(payload) if finding["key"] == "route-path"
+        )
+        self.assertEqual(route_path["classification"], "allowed")
+        self.assertEqual(route_path["allow_reason"], "thin_connector_input")
+
+    def test_workflow_operator_input_forwarding_is_scanned_and_allowed(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "target.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Target\n"
+                "jobs:\n"
+                "  setup:\n"
+                "    env:\n"
+                "      TARGET_ID: ${{ inputs.target_id }}\n"
+                "    steps:\n"
+                "      - with:\n"
+                "          target_id: $target_id,\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(
+            findings_by_key["TARGET_ID"]["allow_reason"],
+            "operator_supplied_runtime_input",
+        )
+        self.assertEqual(
+            findings_by_key["target_id"]["allow_reason"],
+            "operator_supplied_runtime_input",
+        )
+
     def test_workflow_route_path_fallbacks_stay_unclassified(self) -> None:
         for value in (
             "${{ inputs.route_path || '/v1/drivers/preview' }}",

@@ -541,7 +541,7 @@ def _scan_source_file(
             parser=parser,
         )
         for line, key, value in candidates
-        if _candidate_is_interesting(key=key, value=value)
+        if _candidate_is_interesting(path=source_file.relative_path, key=key, value=value)
     ]
     return findings, coverage_gaps
 
@@ -818,7 +818,8 @@ def _build_finding(
     )
 
 
-def _candidate_is_interesting(*, key: str, value: object) -> bool:
+def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
+    normalized = path.replace("\\", "/")
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value)
     if _is_click_option_metadata_key(key):
@@ -826,6 +827,13 @@ def _candidate_is_interesting(*, key: str, value: object) -> bool:
     if _is_repo_metadata_ergonomics_key(key):
         return True
     if key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS:
+        return True
+    if normalized.startswith(".github/workflows/") and (
+        _is_launchplane_service_route_path(key=key, value=value)
+        or _is_workflow_mechanic_key_value(key=key, value=value)
+        or _is_workflow_operator_input_value(key=key, value=value)
+        or _is_workflow_operator_variable_forward(key=key, value=value)
+    ):
         return True
     if not value_text.strip():
         return False
