@@ -14360,6 +14360,30 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                if not request_idempotency_key:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "idempotency_key_required",
+                                "message": "Ingress canary route apply requests require an Idempotency-Key header.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 try:
                     canary_record = _active_ingress_canary_route_record(
                         record_store=record_store,
@@ -14384,18 +14408,6 @@ def create_launchplane_service_app(
                     record=canary_record,
                     mode="apply",
                     reason=canary_apply_request.reason,
-                )
-                resolved_canary_payload = {
-                    "schema_version": 1,
-                    "product": canary_record.product,
-                    "context": canary_record.context,
-                    "canary_key": canary_record.canary_key,
-                    "record": canary_record.model_dump(mode="json"),
-                    "ingress": ingress_request.model_dump(mode="json"),
-                }
-                request_fingerprint = _idempotency_request_fingerprint(
-                    route_path=path,
-                    payload=resolved_canary_payload,
                 )
                 ingress_result = _handle_npmplus_ingress_apply(
                     NpmplusIngressApplyEnvelope(
