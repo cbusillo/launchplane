@@ -35,6 +35,10 @@ PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
     "OPENUPGRADELIB_INSTALL_SPEC",
     "ODOO_PYTHON_SYNC_SKIP_ADDONS",
 )
+PUBLISH_DEPENDENCY_REPOSITORY_KEYS = {
+    "devkit_repository": "ODOO_DEVKIT_REPOSITORY",
+    "shared_addons_repository": "ODOO_SHARED_ADDONS_REPOSITORY",
+}
 
 
 class OdooArtifactPublishEvidenceStore(Protocol):
@@ -233,6 +237,7 @@ def build_odoo_artifact_publish_inputs(
         payload["image_repository"] = product_profile.image.repository.strip().rstrip("/")
         payload["repository"] = product_profile.repository.strip()
         payload["product"] = product_profile.product.strip()
+        payload.update(_publish_dependency_repositories(environment_values))
     preview_slug = _publish_preview_slug(product_profile=product_profile, request=request)
     if preview_slug:
         payload["preview_slug"] = preview_slug
@@ -250,6 +255,24 @@ def build_odoo_artifact_publish_inputs(
         )
     result = GenericArtifactPublishInputsResult.model_validate(payload)
     return result.model_dump(exclude_defaults=True)
+
+
+def _publish_dependency_repositories(environment_values: dict[str, str]) -> dict[str, str]:
+    repositories = {
+        output_key: environment_values.get(environment_key, "").strip()
+        for output_key, environment_key in PUBLISH_DEPENDENCY_REPOSITORY_KEYS.items()
+    }
+    missing_keys = [
+        environment_key
+        for output_key, environment_key in PUBLISH_DEPENDENCY_REPOSITORY_KEYS.items()
+        if not repositories[output_key]
+    ]
+    if missing_keys:
+        raise click.ClickException(
+            "Odoo artifact publish inputs are missing dependency repository runtime "
+            f"record(s): {', '.join(sorted(missing_keys))}."
+        )
+    return repositories
 
 
 def _publish_metadata_requested(request: OdooArtifactPublishInputsRequest) -> bool:

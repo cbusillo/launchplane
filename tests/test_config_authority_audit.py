@@ -693,6 +693,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("environment_name", "${{ inputs.environment_name }}"),
             ("compose_path", "${{ inputs.compose_path }}"),
             ("healthcheck_path", "${{ inputs.healthcheck_path }}"),
+            ("repository", "${{ inputs.repository }}"),
+            ("base_branch", "${{ inputs.base_branch }}"),
             ("source_git_ref", "${{ inputs.source_git_ref }}"),
         )
         for key, value in operator_inputs:
@@ -710,6 +712,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("context", "$context"),
             ("target_id", "$target_id"),
             ("environment_name", "$environment_name,"),
+            ("repository", "$repository"),
+            ("base_branch", "$base_branch,"),
         )
         for key, value in forwarded_variables:
             with self.subTest(key=key, value=value):
@@ -743,6 +747,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("target_id", "dokploy-real-target"),
             ("target_id", "${{ vars.TARGET_ID }}"),
             ("target_id", "$provider_target_id"),
+            ("repository", "cbusillo/odoo-devkit"),
+            ("repository", "${{ inputs.repository || vars.DEFAULT_REPOSITORY }}"),
+            ("base_branch", "main"),
+            ("base_branch", "${{ inputs.base_branch || 'main' }}"),
             ("healthcheck_path", "${{ vars.HEALTHCHECK_PATH }}"),
             ("group", "dokploy-target-setup-${{ vars.CONTEXT }}"),
             ("path", "provider-target/live.json"),
@@ -751,6 +759,31 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 self.assertEqual(
                     _allow_reason(
                         path=".github/workflows/dokploy-target-setup.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+    def test_workflow_launchplane_public_url_reference_is_self_bootstrap(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/merge-train-runner.yml",
+                key="LAUNCHPLANE_URL",
+                value="${{ vars.LAUNCHPLANE_PUBLIC_URL }}",
+            ),
+            "launchplane_self_bootstrap",
+        )
+
+        for key, value in (
+            ("LAUNCHPLANE_URL", "${{ vars.OTHER_URL }}"),
+            ("LAUNCHPLANE_URL", "https://launchplane.example.invalid"),
+            ("launchplane-url", "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/merge-train-runner.yml",
                         key=key,
                         value=value,
                     ),

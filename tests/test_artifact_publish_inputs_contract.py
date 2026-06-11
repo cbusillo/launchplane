@@ -46,6 +46,31 @@ class GenericArtifactPublishInputsContractTests(unittest.TestCase):
                 image_tag="cm-pr-28-abcdef12-amd64",
             )
 
+    def test_result_dependency_repositories_must_be_valid_pair(self) -> None:
+        result = GenericArtifactPublishInputsResult(
+            context="cm",
+            instance="testing",
+            devkit_repository=" example/odoo-devkit ",
+            shared_addons_repository=" example/odoo-shared-addons ",
+        )
+
+        self.assertEqual(result.devkit_repository, "example/odoo-devkit")
+        self.assertEqual(result.shared_addons_repository, "example/odoo-shared-addons")
+
+        with self.assertRaises(ValidationError):
+            GenericArtifactPublishInputsResult(
+                context="cm",
+                instance="testing",
+                devkit_repository="example/odoo-devkit",
+            )
+        with self.assertRaises(ValidationError):
+            GenericArtifactPublishInputsResult(
+                context="cm",
+                instance="testing",
+                devkit_repository="example/odoo-devkit/extra",
+                shared_addons_repository="example/odoo-shared-addons",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

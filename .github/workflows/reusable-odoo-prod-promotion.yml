@@ -9,11 +9,8 @@ name: Reusable Odoo Prod Promotion
         required: true
         type: string
       product:
-        description: >-
-          Optional Launchplane product key. Defaults to odoo-tenant-${context}
-          with underscores normalized to dashes.
-        required: false
-        default: ""
+        description: Launchplane product key.
+        required: true
         type: string
       timeout-ms:
         description: Launchplane request timeout in milliseconds.
@@ -47,10 +44,11 @@ jobs:
           CONTEXT_NAME: ${{ inputs.context }}
           PRODUCT_INPUT: ${{ inputs.product }}
         run: |
+          set -euo pipefail
           product="$PRODUCT_INPUT"
           if [ -z "$product" ]; then
-            context_slug="${CONTEXT_NAME//_/-}"
-            product="odoo-tenant-${context_slug}"
+            echo "product is required." >&2
+            exit 1
           fi
           {
             echo "product=$product"

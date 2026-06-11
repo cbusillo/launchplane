@@ -13,11 +13,8 @@ name: Reusable Odoo Artifact Publish
         required: true
         type: string
       product:
-        description: >-
-          Launchplane product profile key. Defaults to odoo-tenant-${context}
-          with underscores normalized to dashes.
-        required: false
-        default: ""
+        description: Launchplane product profile key.
+        required: true
         type: string
       product_repository:
         description: >-
@@ -178,28 +175,41 @@ jobs:
             echo "source_git_ref=$source_git_ref"
           } >>"$GITHUB_OUTPUT"
 
+      - name: Resolve Launchplane product
+        id: product
+        env:
+          INPUT_PRODUCT: ${{ inputs.product }}
+          CONTEXT_NAME: ${{ inputs.context }}
+          INSTANCE_NAME: ${{ inputs.instance }}
+        run: |
+          set -euo pipefail
+          product="$INPUT_PRODUCT"
+          if [ -z "$product" ]; then
+            echo "product is required." >&2
+            exit 1
+          fi
+          publish_scope="${product}:${CONTEXT_NAME}:${INSTANCE_NAME}"
+          run_scope="run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          echo "product=$product" >>"$GITHUB_OUTPUT"
+          {
+            printf '%s=%s:%s:%s\n' \
+              publish_inputs_idempotency_key \
+              odoo-artifact-publish-inputs \
+              "$publish_scope" \
+              "$run_scope"
+            printf '%s=%s:%s:%s\n' \
+              publish_idempotency_key \
+              odoo-artifact-publish \
+              "$publish_scope" \
+              "$run_scope"
+          } >>"$GITHUB_OUTPUT"
+
       - name: Checkout tenant repo
         uses: actions/checkout@v6
         with:
           repository: ${{ steps.source.outputs.repository }}
           ref: ${{ steps.source.outputs.source_git_ref }}
           path: tenant
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
-          persist-credentials: false
-
-      - name: Checkout devkit repo
-        uses: actions/checkout@v6
-        with:
-          repository: cbusillo/odoo-devkit
-          path: odoo-devkit
-          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
-          persist-credentials: false
-
-      - name: Checkout shared addons repo
-        uses: actions/checkout@v6
-        with:
-          repository: cbusillo/odoo-shared-addons
-          path: odoo-shared-addons
           token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
           persist-credentials: false
 
@@ -220,35 +230,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}
-
-      - name: Resolve Launchplane product
-        id: product
-        env:
-          INPUT_PRODUCT: ${{ inputs.product }}
-          CONTEXT_NAME: ${{ inputs.context }}
-          INSTANCE_NAME: ${{ inputs.instance }}
-        run: |
-          set -euo pipefail
-          product="$INPUT_PRODUCT"
-          if [ -z "$product" ]; then
-            context_slug="${CONTEXT_NAME//_/-}"
-            product="odoo-tenant-${context_slug}"
-          fi
-          publish_scope="${product}:${CONTEXT_NAME}:${INSTANCE_NAME}"
-          run_scope="run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
-          echo "product=$product" >>"$GITHUB_OUTPUT"
-          {
-            printf '%s=%s:%s:%s\n' \
-              publish_inputs_idempotency_key \
-              odoo-artifact-publish-inputs \
-              "$publish_scope" \
-              "$run_scope"
-            printf '%s=%s:%s:%s\n' \
-              publish_idempotency_key \
-              odoo-artifact-publish \
-              "$publish_scope" \
-              "$run_scope"
-          } >>"$GITHUB_OUTPUT"
 
       - name: Resolve Launchplane publish inputs
         id: publish_inputs
@@ -275,7 +256,53 @@ jobs:
           output-paths: >-
             image_repository=result.image_repository,
             image_tag=result.image_tag,
-            preview_slug=result.preview_slug
+            preview_slug=result.preview_slug,
+            devkit_repository=result.devkit_repository,
+            shared_addons_repository=result.shared_addons_repository
+
+      - name: Validate Launchplane publish inputs
+        env:
+          RESOLVED_IMAGE_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.image_repository }}
+          RESOLVED_IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
+          RESOLVED_DEVKIT_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.devkit_repository }}
+          RESOLVED_SHARED_ADDONS_REPOSITORY: >-
+            ${{ steps.publish_inputs.outputs.shared_addons_repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RESOLVED_IMAGE_REPOSITORY" ]; then
+            echo "Launchplane publish inputs missing image_repository." >&2
+            exit 1
+          fi
+          if [ -z "$RESOLVED_IMAGE_TAG" ]; then
+            echo "Launchplane publish inputs missing image_tag." >&2
+            exit 1
+          fi
+          if ! [[ "$RESOLVED_DEVKIT_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "Launchplane publish inputs missing valid devkit_repository." >&2
+            exit 1
+          fi
+          if ! [[ "$RESOLVED_SHARED_ADDONS_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+            echo "Launchplane publish inputs missing valid shared_addons_repository." >&2
+            exit 1
+          fi
+
+      - name: Checkout devkit repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.publish_inputs.outputs.devkit_repository }}
+          path: odoo-devkit
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Checkout shared addons repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.publish_inputs.outputs.shared_addons_repository }}
+          path: odoo-shared-addons
+          token: ${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}
+          persist-credentials: false
 
       - name: Locate publish inputs file
         id: publish_inputs_file
@@ -314,14 +341,6 @@ jobs:
           '
           export ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON
           ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON="$(cat "$PUBLISH_INPUTS_FILE")"
-          if [ -z "$RESOLVED_IMAGE_REPOSITORY" ]; then
-            echo "Launchplane publish inputs missing image_repository." >&2
-            exit 1
-          fi
-          if [ -z "$RESOLVED_IMAGE_TAG" ]; then
-            echo "Launchplane publish inputs did not return image_tag." >&2
-            exit 1
-          fi
           output_file="$RUNNER_TEMP/${CONTEXT_NAME}-artifact.json"
           manifest_path="$PWD/workspace.toml"
           uv --directory ../odoo-devkit run platform runtime publish \

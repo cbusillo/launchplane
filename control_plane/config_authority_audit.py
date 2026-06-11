@@ -112,10 +112,12 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "PROJECT_ID",
         "PROJECT_NAME",
         "REASON",
+        "REPOSITORY",
         "RUNTIME_PORT",
         "SERVER_ID",
         "SOURCE_GIT_REF",
         "SOURCE_TYPE",
+        "BASE_BRANCH",
         "TARGET_ID",
         "TARGET_NAME",
         "TARGET_TYPE",
@@ -899,6 +901,11 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         return ALLOW_REASON_SCHEMA_ONLY
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
+    if normalized.startswith(".github/workflows/") and _is_launchplane_public_url_reference(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_workflow_mechanic_key_value(
         key=key,
         value=value,
@@ -944,6 +951,13 @@ def _is_github_context_reference(value: object) -> bool:
 def _is_workflow_runtime_authority_key(key: str) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     return key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS
+
+
+def _is_launchplane_public_url_reference(*, key: str, value: object) -> bool:
+    return (
+        key == "LAUNCHPLANE_URL"
+        and _string_value(value).strip() == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
+    )
 
 
 def _is_workflow_operator_input_value(*, key: str, value: object) -> bool:
