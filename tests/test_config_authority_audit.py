@@ -532,11 +532,29 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "  preview:\n"
                 "    steps:\n"
                 "      - name: Fetch Launchplane protected artifact inventory\n"
+                "        description: Store cbusillo/example-repo in Launchplane\n"
                 "        uses: cbusillo/launchplane/.github/actions/launchplane-request@main\n"
                 "      - run: echo https://display.example.test\n"
                 "        with:\n"
                 "          product: concrete-product\n"
-                "          route-path: /v1/drivers/preview\n",
+                "          route-path: /v1/drivers/preview\n"
+                "          public-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}\n"
+                "          client-secret: ${{ secrets.LAUNCHPLANE_CLIENT_SECRET }}\n"
+                "          product-input: ${{ inputs.product }}\n"
+                "          mixed-url: https://${{ vars.LAUNCHPLANE_DOMAIN }}/health\n"
+                "          fallback-product: ${{ inputs.product || 'launchplane' }}\n"
+                "          input-fallback-product: ${{ inputs.product || 'launchplane' }}\n"
+                "          LAUNCHPLANE_PRODUCT: ${{ inputs.product || 'launchplane' }}\n"
+                "          launchplane-product: ${{ inputs.product }}\n"
+                "          LAUNCHPLANE_URL: https://${{ vars.LAUNCHPLANE_DOMAIN }}\n"
+                "          launchplane-url: ${{ vars.LAUNCHPLANE_URL }}\n"
+                "          route-path-fallback: ${{ inputs.route_path || '/v1/drivers/preview' }}\n"
+                "          target-context: launchplane\n"
+                "          literal-product: concrete-product\n"
+                "          literal-domain: https://runtime.example.test\n"
+                "          default: launchplane\n"
+                "          folded-secret: >-\n"
+                "            ${{ secrets.FOLDED_SECRET }}\n",
                 encoding="utf-8",
             )
             _commit_all(root)
@@ -546,12 +564,33 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         keys = [finding["key"] for finding in _findings(payload)]
         self.assertIn("product", keys)
         self.assertNotIn("name", keys)
+        self.assertNotIn("description", keys)
         self.assertNotIn("uses", keys)
         self.assertNotIn("run", keys)
+        self.assertNotIn("folded-secret", keys)
         route_path = next(
             finding for finding in _findings(payload) if finding["key"] == "route-path"
         )
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
+        for key in ("public-url", "client-secret", "product-input"):
+            finding = next(finding for finding in _findings(payload) if finding["key"] == key)
+            self.assertEqual(finding["allow_reason"], "thin_connector_input")
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in (
+            "mixed-url",
+            "fallback-product",
+            "input-fallback-product",
+            "LAUNCHPLANE_PRODUCT",
+            "launchplane-product",
+            "LAUNCHPLANE_URL",
+            "launchplane-url",
+            "route-path-fallback",
+            "target-context",
+            "literal-product",
+            "literal-domain",
+        ):
+            finding = findings_by_key[key]
+            self.assertEqual(finding["classification"], "needs_classification")
 
     def test_cli_outputs_json_and_markdown(self) -> None:
         with TemporaryDirectory() as temp_dir:
