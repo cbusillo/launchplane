@@ -573,11 +573,12 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             finding for finding in _findings(payload) if finding["key"] == "route-path"
         )
         self.assertEqual(route_path["allow_reason"], "thin_connector_input")
-        for key in ("public-url", "client-secret", "product-input"):
+        for key in ("public-url", "product-input"):
             finding = next(finding for finding in _findings(payload) if finding["key"] == key)
             self.assertEqual(finding["allow_reason"], "thin_connector_input")
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
         for key in (
+            "client-secret",
             "mixed-url",
             "fallback-product",
             "input-fallback-product",
@@ -640,7 +641,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
-            workflow = root / ".github" / "workflows" / "target.yml"
+            workflow = root / ".github" / "workflows" / "dokploy-target-setup.yml"
             workflow.parent.mkdir(parents=True)
             workflow.write_text(
                 "name: Target\n"
@@ -666,6 +667,34 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             findings_by_key["target_id"]["allow_reason"],
             "operator_supplied_runtime_input",
         )
+
+    def test_workflow_restricted_context_references_are_scanned_unclassified(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "generic.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Generic\n"
+                "jobs:\n"
+                "  scan:\n"
+                "    steps:\n"
+                "      - with:\n"
+                "          alpha: ${{ secrets.PROD_TOKEN }}\n"
+                "          beta: ${{ github.repository }}\n"
+                "          gamma: ${{ github.token }}\n"
+                "          delta: ${{ vars.DEFAULT_REPOSITORY }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        for key in ("alpha", "beta", "gamma", "delta"):
+            with self.subTest(key=key):
+                self.assertEqual(findings_by_key[key]["classification"], "needs_classification")
+                self.assertEqual(findings_by_key[key]["allow_reason"], "")
 
     def test_workflow_route_path_fallbacks_stay_unclassified(self) -> None:
         for value in (
@@ -752,9 +781,16 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         generic_workflow_cases = (
             ("target_id", "dokploy-real-target"),
             ("target_id", "${{ vars.TARGET_ID }}"),
+            ("target_id", "${{ inputs.product }}"),
             ("target_id", "$provider_target_id"),
+            ("target_id", "$target_id"),
             ("repository", "cbusillo/odoo-devkit"),
             ("repository", "${{ inputs.repository || vars.DEFAULT_REPOSITORY }}"),
+            ("token", "${{ secrets.PROD_TOKEN }}"),
+            ("foo", "${{ secrets.PROD_TOKEN }}"),
+            ("foo", "${{ github.repository }}"),
+            ("foo", "${{ github.token }}"),
+            ("foo", "${{ vars.DEFAULT_REPOSITORY }}"),
             ("base_branch", "main"),
             (
                 "base_branch",
@@ -810,6 +846,238 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     ),
                     "",
                 )
+
+    def test_workflow_connector_findings_are_classified_narrowly(self) -> None:
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/provider-target-operations.yml",
+                key="product",
+                value='"launchplane"',
+            ),
+            "launchplane_self_bootstrap",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/generic-workflow.yml",
+                key="product",
+                value='"launchplane"',
+            ),
+            "",
+        )
+
+        service_env_payload = (
+            ("GHCR_USERNAME", "${{ secrets.GHCR_USERNAME }}"),
+            ("LAUNCHPLANE_GITHUB_CLIENT_ID", "$github_client_id,"),
+            ("LAUNCHPLANE_GITHUB_CLIENT_SECRET", "$github_client_secret,"),
+            ("LAUNCHPLANE_PUBLIC_URL", "$public_url,"),
+            ("LAUNCHPLANE_SESSION_SECRET", "$session_secret,"),
+            ("GH_TOKEN", "$work_graph_gh_token"),
+        )
+        for key, value in service_env_payload:
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/deploy-launchplane.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "launchplane_self_bootstrap",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/deploy-launchplane.yml",
+                        key=key,
+                        value="$unexpected_source,",
+                    ),
+                    "",
+                )
+
+        thin_connectors = (
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "repository",
+                "${{ steps.source.outputs.repository }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "token",
+                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "GITHUB_TOKEN",
+                "${{ github.token }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "GHCR_USERNAME",
+                "${{ github.repository_owner }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "username",
+                "${{ github.repository_owner }}",
+            ),
+            (".github/workflows/ci.yml", "context", "."),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "odoo-driver-route-smoke",
+                "${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}",
+            ),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "odoo-driver-route-smoke",
+                "${{ env.PRODUCT }}:${{",
+            ),
+        )
+        for path, key, value in thin_connectors:
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for key, value in (
+            ("repository", "${{ vars.DEFAULT_REPOSITORY }}"),
+            ("repository", "$repository"),
+            ("token", "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || 'literal-token' }}"),
+            ("GITHUB_TOKEN", "write"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/reusable-odoo-artifact-publish.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+    def test_workflow_jq_response_fields_are_classified_narrowly(self) -> None:
+        for key, value in (
+            ("environment", "$environment,"),
+            ("context", "$environment_detail.context,"),
+            ("target_type", "$target.target_type,"),
+            ("provider_target_type", "$target.provider_target_type,"),
+            ("target_id_recorded", "$target.target_id_recorded,"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/product-environment-evidence.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("environment", "$product,"),
+            ("target_type", "$target.provider_target_type,"),
+            ("context", "production"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/product-environment-evidence.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for path, key, value in (
+            (".github/workflows/product-context-cutover.yml", "source_context", "$source_context,"),
+            (".github/workflows/product-context-cutover.yml", "target_context", "$target_context,"),
+            (
+                ".github/workflows/product-legacy-context-cleanup.yml",
+                "source_context",
+                "$source_context,",
+            ),
+            (
+                ".github/workflows/product-legacy-context-cleanup.yml",
+                "target_context",
+                "$target_context,",
+            ),
+            (".github/workflows/provider-target-operations.yml", "provider_id", "$provider_id,"),
+            (".github/workflows/provider-target-operations.yml", "context", "$context,"),
+            (".github/workflows/provider-target-operations.yml", "instance", "$instance,"),
+        ):
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "operator_supplied_runtime_input",
+                )
+
+    def test_workflow_block_fields_are_classified_by_path_only(self) -> None:
+        for path, key, value in (
+            (".github/workflows/edge-endpoint-apply.yml", "endpoint_key", "$endpoint_key,"),
+            (".github/workflows/odoo-config-parameter-override.yml", "key", "$key,"),
+        ):
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "operator_supplied_runtime_input",
+                )
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value="hard-coded"),
+                    "",
+                )
+
+        for path, key, value in (
+            (
+                ".github/workflows/product-context-cutover-audit.yml",
+                "key",
+                'claims.get(key, "")',
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "GITHUB_TOKEN",
+                "${{ github.token }}",
+            ),
+        ):
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value="hard-coded"),
+                    "",
+                )
+
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/provider-target-operations.yml",
+                key="context",
+                value=".result.context,",
+            ),
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/other.yml",
+                key="endpoint_key",
+                value="$endpoint_key,",
+            ),
+            "",
+        )
 
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
         for key, value in (

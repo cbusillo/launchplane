@@ -126,6 +126,169 @@ WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
         "TARGET_TYPE",
     )
 )
+LAUNCHPLANE_SELF_MANAGEMENT_WORKFLOW_PATHS = frozenset(
+    (
+        ".github/workflows/dokploy-target-setup.yml",
+        ".github/workflows/provider-target-operations.yml",
+    )
+)
+WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
+    ".github/workflows/product-environment-evidence.yml": {
+        "context": frozenset(("$environment_detail.context",)),
+        "environment": frozenset(("$environment",)),
+        "provider_target_type": frozenset(("$target.provider_target_type",)),
+        "target_id_recorded": frozenset(("$target.target_id_recorded",)),
+        "target_type": frozenset(("$target.target_type",)),
+    },
+    ".github/workflows/provider-target-operations.yml": {
+        "context": frozenset((".result.context",)),
+        "instance": frozenset((".result.instance",)),
+    },
+}
+WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
+    ".github/workflows/product-context-cutover-audit.yml": {
+        "key": frozenset(('claims.get(key, "")',))
+    },
+    ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "GITHUB_TOKEN": frozenset(("${{ github.token }}",))
+    },
+}
+WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
+    ".github/workflows/preview-lifecycle.yml": {
+        "LAUNCHPLANE_URL": frozenset(("${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}",))
+    },
+}
+WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
+    ".github/workflows/deploy-launchplane.yml": {
+        "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
+        "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
+        "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
+        "LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST": frozenset(
+            ("${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}",)
+        ),
+        "LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN": frozenset(
+            ("${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}",)
+        ),
+        "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(
+            ("${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}",)
+        ),
+        "LAUNCHPLANE_IMAGE_REPOSITORY": frozenset(("${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}",)),
+        "LAUNCHPLANE_NPMPLUS_IDENTITY": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}",)),
+        "LAUNCHPLANE_NPMPLUS_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}",)),
+        "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": frozenset(
+            ("${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}",)
+        ),
+        "LAUNCHPLANE_SESSION_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_SESSION_SECRET }}",)),
+        "LAUNCHPLANE_WORK_GRAPH_GH_TOKEN": frozenset(
+            ("${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}",)
+        ),
+    },
+}
+WORKFLOW_JQ_OPERATOR_FIELD_PATH_KEYS = {
+    ".github/workflows/edge-endpoint-apply.yml": frozenset(("endpoint_key",)),
+    ".github/workflows/odoo-config-parameter-override.yml": frozenset(("key",)),
+    ".github/workflows/product-context-cutover.yml": frozenset(
+        ("source_context", "target_context")
+    ),
+    ".github/workflows/product-legacy-context-cleanup.yml": frozenset(
+        ("source_context", "target_context")
+    ),
+    ".github/workflows/provider-target-operations.yml": frozenset(
+        ("context", "instance", "provider_id")
+    ),
+}
+WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
+    ".github/workflows/edge-endpoint-apply.yml": {
+        "ENDPOINT_KEY": frozenset(("${{ inputs.endpoint_key }}",)),
+        "IDEMPOTENCY_KEY": frozenset(("${{ inputs.idempotency_key }}",)),
+        "idempotency-key": frozenset(("${{ inputs.idempotency_key }}",)),
+    },
+    ".github/workflows/ingress-route-apply.yml": {
+        "IDEMPOTENCY_KEY": frozenset(("${{ inputs.idempotency_key }}",)),
+        "idempotency-key": frozenset(("${{ inputs.idempotency_key }}",)),
+    },
+    ".github/workflows/ingress-route-canary-apply.yml": {
+        "IDEMPOTENCY_KEY": frozenset(("${{ inputs.idempotency_key }}",)),
+        "idempotency-key": frozenset(("${{ inputs.idempotency_key }}",)),
+    },
+    ".github/workflows/merge-train-policy-import.yml": {
+        "POLICY_REPOSITORY": frozenset(("${{ inputs.repository }}",))
+    },
+    ".github/workflows/odoo-config-parameter-override.yml": {
+        "KEY_NAME": frozenset(("${{ inputs.key }}",))
+    },
+    ".github/workflows/runner-lane-registration.yml": {
+        "AUDIT_RECORD_KEY": frozenset(("${{ inputs.audit_record_key }}",)),
+        "TARGET_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
+    },
+}
+WORKFLOW_OPERATOR_VARIABLE_FORWARD_PATHS = frozenset(
+    (
+        ".github/workflows/dokploy-target-setup.yml",
+        ".github/workflows/ingress-route-apply.yml",
+        ".github/workflows/ingress-route-canary-apply.yml",
+        ".github/workflows/ingress-route-dry-run.yml",
+        ".github/workflows/live-target-runtime.yml",
+        ".github/workflows/merge-train-runner.yml",
+        ".github/workflows/odoo-config-parameter-override.yml",
+        ".github/workflows/odoo-stable-bootstrap.yml",
+        ".github/workflows/odoo-target-replacement-apply.yml",
+        ".github/workflows/odoo-target-replacement-plan.yml",
+        ".github/workflows/odoo-website-bootstrap-override.yml",
+        ".github/workflows/product-context-cutover.yml",
+        ".github/workflows/product-environment-evidence.yml",
+        ".github/workflows/product-legacy-context-cleanup.yml",
+        ".github/workflows/tracked-target-logs.yml",
+    )
+)
+WORKFLOW_SERVICE_ENV_PAYLOAD_PATH_VALUES = {
+    ".github/workflows/deploy-launchplane.yml": {
+        "GH_TOKEN": frozenset(("$work_graph_gh_token",)),
+        "LAUNCHPLANE_GITHUB_CLIENT_ID": frozenset(("$github_client_id",)),
+        "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(("$github_client_secret",)),
+        "LAUNCHPLANE_PUBLIC_URL": frozenset(("$public_url",)),
+        "LAUNCHPLANE_SESSION_SECRET": frozenset(("$session_secret",)),
+    },
+}
+WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
+    ".github/workflows/ci.yml": {
+        "context": frozenset((".",)),
+        "password": frozenset(("${{ github.token }}",)),
+    },
+    ".github/workflows/deploy-launchplane.yml": {"context": frozenset((".",))},
+    ".github/workflows/odoo-driver-route-smoke.yml": {
+        "IMAGE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.image_repository }}",)),
+        "odoo-driver-route-smoke": frozenset(
+            (
+                "${{ env.PRODUCT }}:${{",
+                "${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}",
+            )
+        ),
+    },
+    ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "DEFAULT_REPOSITORY": frozenset(("${{ github.repository }}",)),
+        "GITHUB_TOKEN": frozenset(("${{ github.token }}",)),
+        "GHCR_TOKEN": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
+        "GHCR_USERNAME": frozenset(("${{ github.repository_owner }}",)),
+        "INPUT_PRODUCT_REPOSITORY": frozenset(("${{ inputs.product_repository }}",)),
+        "password": frozenset(("${{ secrets.ODOO_GHCR_PUBLISH_TOKEN }}",)),
+        "repository": frozenset(
+            (
+                "${{ steps.publish_inputs.outputs.devkit_repository }}",
+                "${{ steps.publish_inputs.outputs.shared_addons_repository }}",
+                "${{ steps.source.outputs.repository }}",
+            )
+        ),
+        "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)),
+        "username": frozenset(("${{ github.repository_owner }}",)),
+    },
+    ".github/workflows/runner-host-hygiene.yml": {
+        "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",))
+    },
+    ".github/workflows/runner-lane-registration.yml": {
+        "GH_TOKEN": frozenset(("${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}",))
+    },
+}
 INGRESS_ROUTE_WORKFLOW_PATHS = frozenset(
     (
         ".github/workflows/ingress-route-apply.yml",
@@ -844,7 +1007,12 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         _is_launchplane_service_route_path(key=key, value=value)
         or _is_workflow_mechanic_key_value(key=key, value=value)
         or _is_workflow_operator_input_value(key=key, value=value)
-        or _is_workflow_operator_variable_forward(key=key, value=value)
+        or _is_workflow_context_reference_restricted_value(value)
+        or _is_workflow_operator_variable_forward(
+            path=normalized,
+            key=key,
+            value=value,
+        )
     ):
         return True
     if not value_text.strip():
@@ -912,6 +1080,7 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_launchplane_public_url_reference(
+        path=normalized,
         key=key,
         value=value,
     ):
@@ -922,7 +1091,37 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         value=value,
     ):
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
+    if normalized.startswith(".github/workflows/") and _is_launchplane_bootstrap_context_reference(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
+    if normalized.startswith(".github/workflows/") and _is_workflow_service_env_payload(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_workflow_mechanic_key_value(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_thin_connector_key_value(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_response_summary_field(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_block_mechanic_field(
+        path=normalized,
         key=key,
         value=value,
     ):
@@ -932,12 +1131,25 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         value=value,
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_operator_input_reference(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_operator_variable_forward(
+        path=normalized,
         key=key,
         value=value,
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_operator_array_forward(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_jq_operator_field(
         path=normalized,
         key=key,
         value=value,
@@ -954,6 +1166,8 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         and not _is_workflow_runtime_authority_key(key)
         and not _is_workflow_operator_input_key(key)
         and not _is_route_path_key(key)
+        and not _is_workflow_context_reference_restricted_key(key)
+        and not _is_workflow_context_reference_restricted_value(value)
         and _is_github_context_reference(value)
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
@@ -981,12 +1195,21 @@ def _is_workflow_runtime_authority_key(key: str) -> bool:
     return key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS
 
 
-def _is_launchplane_public_url_reference(*, key: str, value: object) -> bool:
-    key_text = key.upper().replace(".", "_").replace("-", "_")
+def _is_launchplane_public_url_reference(*, path: str, key: str, value: object) -> bool:
     value_text = _string_value(value).strip()
+    if value_text in WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES.get(path, {}).get(
+        key, frozenset()
+    ):
+        return True
+    key_text = key.upper().replace(".", "_").replace("-", "_")
     if key == "LAUNCHPLANE_URL":
         return value_text == "${{ vars.LAUNCHPLANE_PUBLIC_URL }}"
-    return key_text == "LAUNCHPLANE_URL" and value_text == "${{ env.LAUNCHPLANE_URL }}"
+    if key_text == "LAUNCHPLANE_URL":
+        return value_text in {
+            "${{ env.LAUNCHPLANE_SERVICE_URL }}",
+            "${{ env.LAUNCHPLANE_URL }}",
+        }
+    return False
 
 
 def _is_launchplane_self_management_product_reference(
@@ -994,10 +1217,26 @@ def _is_launchplane_self_management_product_reference(
 ) -> bool:
     value_text = _string_value(value).strip().rstrip(",")
     return (
-        path == ".github/workflows/dokploy-target-setup.yml"
+        path in LAUNCHPLANE_SELF_MANAGEMENT_WORKFLOW_PATHS
         and key == "product"
         and value_text in {'"launchplane"', "launchplane"}
     )
+
+
+def _is_workflow_service_env_payload(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_SERVICE_ENV_PAYLOAD_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text in allowed_values
+
+
+def _is_launchplane_bootstrap_context_reference(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text in allowed_values
 
 
 def _is_workflow_operator_input_value(*, key: str, value: object) -> bool:
@@ -1006,7 +1245,12 @@ def _is_workflow_operator_input_value(*, key: str, value: object) -> bool:
     match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
     if match is None:
         return False
-    return bool(GITHUB_INPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+    body = match.group("body").strip()
+    if not GITHUB_INPUT_REFERENCE_PATTERN.match(body):
+        return False
+    input_name = body.removeprefix("inputs.").upper().replace(".", "_").replace("-", "_")
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    return input_name == key_text
 
 
 def _is_workflow_operator_input_key(key: str) -> bool:
@@ -1014,12 +1258,71 @@ def _is_workflow_operator_input_key(key: str) -> bool:
     return key_text in WORKFLOW_OPERATOR_INPUT_VALUE_KEYS
 
 
-def _is_workflow_operator_variable_forward(*, key: str, value: object) -> bool:
+def _is_workflow_operator_input_reference(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text in allowed_values
+
+
+def _is_workflow_context_reference_restricted_key(key: str) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    if any(part in key_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
+        return True
+    return any(part in key_text.split("_") for part in ("REPO", "REPOSITORY"))
+
+
+def _is_workflow_context_reference_restricted_value(value: object) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    body = match.group("body").strip()
+    if body.startswith("secrets."):
+        return True
+    if body in {"github.repository", "github.token"}:
+        return True
+    for segment in body.split("."):
+        segment_text = segment.upper().replace("-", "_")
+        segment_parts = segment_text.split("_")
+        if any(part in segment_parts for part in SECRET_SHAPED_KEY_PARTS):
+            return True
+        if any(part in segment_parts for part in ("REPO", "REPOSITORY")):
+            return True
+    return False
+
+
+def _is_workflow_operator_variable_forward(*, path: str, key: str, value: object) -> bool:
+    if path not in WORKFLOW_OPERATOR_VARIABLE_FORWARD_PATHS:
+        return False
     if not _is_workflow_operator_input_key(key):
         return False
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip().rstrip(",")
     return value_text == f"${key_text.lower()}"
+
+
+def _is_workflow_jq_operator_field(*, path: str, key: str, value: object) -> bool:
+    if key not in WORKFLOW_JQ_OPERATOR_FIELD_PATH_KEYS.get(path, frozenset()):
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text == f"${key}"
+
+
+def _is_workflow_response_summary_field(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text in allowed_values
+
+
+def _is_workflow_block_mechanic_field(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip()
+    return value_text in allowed_values
 
 
 def _is_workflow_operator_array_forward(*, path: str, key: str, value: object) -> bool:
@@ -1051,6 +1354,14 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
     return False
+
+
+def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object) -> bool:
+    allowed_values = WORKFLOW_THIN_CONNECTOR_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text in allowed_values
 
 
 def _is_route_path_key(key: str) -> bool:
