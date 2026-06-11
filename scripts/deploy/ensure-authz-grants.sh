@@ -18,10 +18,19 @@ oidc_token="$({
 require_non_empty() {
 	local value="$1"
 	local field_name="$2"
-	if [ -z "$(printf '%s' "$value" | xargs)" ]; then
+	if [[ -z "${value//[[:space:]]/}" ]]; then
 		echo "Configured authz grant is missing ${field_name}." >&2
 		return 1
 	fi
+}
+
+preflight_owner_authz_env() {
+	require_non_empty "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
+	require_non_empty "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL"
+	require_non_empty "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
+	require_non_empty "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL"
+	require_non_empty "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
+	require_non_empty "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
 }
 
 slugify() {
@@ -108,7 +117,12 @@ post_terminal_agent_grant() {
 	local action_name="$3"
 	local source_label="$4"
 	local idempotency_suffix="$5"
+	local terminal_agent_subject="${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}"
+	local terminal_agent_token_label="${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}"
 	local request_payload
+
+	require_non_empty "$terminal_agent_subject" "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
+	require_non_empty "$terminal_agent_token_label" "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL"
 
 	request_payload="$({
 		jq -n \
@@ -116,8 +130,8 @@ post_terminal_agent_grant() {
 			--arg context_name "$context_name" \
 			--arg action_name "$action_name" \
 			--arg source_label "$source_label" \
-			--arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-local-owner-agent}" \
-			--arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-local-owner-read}" \
+			--arg terminal_agent_subject "$terminal_agent_subject" \
+			--arg terminal_agent_token_label "$terminal_agent_token_label" \
 			'{
         schema_version: 1,
         product: "launchplane",
@@ -148,25 +162,25 @@ post_local_owner_grant() {
 	local action_name="$4"
 	local source_label="$5"
 	local idempotency_suffix="$6"
-	local subject_env_key token_label_env_key default_subject default_token_label route_path
+	local subject_env_key token_label_env_key route_path subject token_label
 	local request_payload
 
 	if [ "$principal" = "local-admin" ]; then
 		subject_env_key="LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
 		token_label_env_key="LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
-		default_subject="local-owner-admin"
-		default_token_label="local-owner-admin"
 		route_path="/v1/authz-policies/local-admins/grants"
 	elif [ "$principal" = "local-operator" ]; then
 		subject_env_key="LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
 		token_label_env_key="LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL"
-		default_subject="local-owner-agent"
-		default_token_label="local-owner-write"
 		route_path="/v1/authz-policies/local-operators/grants"
 	else
 		echo "Unsupported local owner grant principal ${principal}." >&2
 		return 1
 	fi
+	subject="${!subject_env_key:-}"
+	token_label="${!token_label_env_key:-}"
+	require_non_empty "$subject" "$subject_env_key"
+	require_non_empty "$token_label" "$token_label_env_key"
 
 	request_payload="$({
 		jq -n \
@@ -174,8 +188,8 @@ post_local_owner_grant() {
 			--arg context_name "$context_name" \
 			--arg action_name "$action_name" \
 			--arg source_label "$source_label" \
-			--arg subject "${!subject_env_key:-$default_subject}" \
-			--arg token_label "${!token_label_env_key:-$default_token_label}" \
+			--arg subject "$subject" \
+			--arg token_label "$token_label" \
 			--arg principal "$principal" \
 			'{
         schema_version: 1,
@@ -420,6 +434,8 @@ post_launchplane_service_grant() {
 		"$event_name"
 }
 
+preflight_owner_authz_env
+
 post_launchplane_service_grant \
 	public-ingress-monitor.yml \
 	public_ingress_monitor.run_once \
@@ -432,6 +448,7 @@ post_launchplane_service_grant \
 	deploy:public-ingress-monitor-manual-grant \
 	public-ingress-monitor-manual \
 	workflow_dispatch
+
 post_grant \
 	"$GITHUB_REPOSITORY" \
 	runner-host-hygiene.yml \

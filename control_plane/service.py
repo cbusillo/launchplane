@@ -7735,11 +7735,11 @@ def _terminal_agent_read_token_from_env() -> str:
 
 
 def _terminal_agent_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT", "local-owner-agent").strip()
+    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT", "").strip()
 
 
 def _terminal_agent_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "local-owner-read").strip()
+    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "").strip()
 
 
 def _local_operator_token_from_env() -> str:
@@ -7747,11 +7747,11 @@ def _local_operator_token_from_env() -> str:
 
 
 def _local_operator_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT", "local-owner-agent").strip()
+    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT", "").strip()
 
 
 def _local_operator_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "local-owner-write").strip()
+    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "").strip()
 
 
 def _local_admin_token_from_env() -> str:
@@ -7759,11 +7759,17 @@ def _local_admin_token_from_env() -> str:
 
 
 def _local_admin_subject_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_SUBJECT", "local-owner-admin").strip()
+    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_SUBJECT", "").strip()
 
 
 def _local_admin_token_label_from_env() -> str:
-    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL", "local-owner-admin").strip()
+    return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL", "").strip()
+
+
+def _required_bearer_identity_env_value(value: str, env_var_name: str) -> str:
+    if not value:
+        raise PermissionError(f"{env_var_name} is required for configured bearer auth.")
+    return value
 
 
 def _local_operator_identity_from_bearer(
@@ -7778,8 +7784,13 @@ def _local_operator_identity_from_bearer(
         return None
     if not secrets.compare_digest(provided_token, expected_token):
         return None
-    subject = _local_operator_subject_from_env() or "local-owner-agent"
-    token_label = _local_operator_token_label_from_env() or "local-owner-write"
+    subject = _required_bearer_identity_env_value(
+        _local_operator_subject_from_env(), "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
+    )
+    token_label = _required_bearer_identity_env_value(
+        _local_operator_token_label_from_env(),
+        "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
+    )
     return LocalOperatorIdentity(subject=subject, token_label=token_label)
 
 
@@ -7795,8 +7806,12 @@ def _local_admin_identity_from_bearer(
         return None
     if not secrets.compare_digest(provided_token, expected_token):
         return None
-    subject = _local_admin_subject_from_env() or "local-owner-admin"
-    token_label = _local_admin_token_label_from_env() or "local-owner-admin"
+    subject = _required_bearer_identity_env_value(
+        _local_admin_subject_from_env(), "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
+    )
+    token_label = _required_bearer_identity_env_value(
+        _local_admin_token_label_from_env(), "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
+    )
     return LocalAdminIdentity(subject=subject, token_label=token_label)
 
 
@@ -7812,8 +7827,13 @@ def _terminal_agent_identity_from_bearer(
         return None
     if not secrets.compare_digest(provided_token, expected_token):
         return None
-    subject = _terminal_agent_subject_from_env() or "local-owner-agent"
-    token_label = _terminal_agent_token_label_from_env() or "local-owner-read"
+    subject = _required_bearer_identity_env_value(
+        _terminal_agent_subject_from_env(), "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
+    )
+    token_label = _required_bearer_identity_env_value(
+        _terminal_agent_token_label_from_env(),
+        "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
+    )
     return TerminalAgentIdentity(subject=subject, token_label=token_label)
 
 
