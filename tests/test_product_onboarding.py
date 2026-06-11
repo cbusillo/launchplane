@@ -738,26 +738,25 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             encoding="utf-8"
         )
 
-        self.assertIn('mode: "apply"', workflow_text)
         self.assertIn("idempotency-key: ${{ inputs.idempotency_key }}", workflow_text)
         self.assertIn("CONFIRMATION: ${{ inputs.confirmation }}", workflow_text)
         self.assertIn("apply ingress canary", workflow_text)
-        self.assertIn("edge_endpoint_key:", workflow_text)
-        self.assertIn("EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}", workflow_text)
-        self.assertIn("edge_endpoint_key: $edge_endpoint_key", workflow_text)
-        self.assertIn("CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}", workflow_text)
-        self.assertIn(
-            "CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}", workflow_text
-        )
-        self.assertIn("require_exact_expected_host_domains: true", workflow_text)
+        self.assertIn("canary_key:", workflow_text)
+        self.assertIn("CANARY_KEY: ${{ inputs.canary_key }}", workflow_text)
+        self.assertIn("canary_key: $canary_key", workflow_text)
+        self.assertIn("route-path: /v1/ingress/canary-routes/apply", workflow_text)
         inputs_section = workflow_text.split("permissions:", maxsplit=1)[0]
         self.assertNotIn("      domain:", inputs_section)
         self.assertNotIn("      expected_host_id:", inputs_section)
+        self.assertNotIn("      edge_endpoint_key:", inputs_section)
+        self.assertNotIn("LAUNCHPLANE_INGRESS_CANARY", workflow_text)
         self.assertNotIn("CANARY_FORWARD_HOST", workflow_text)
         self.assertNotIn("CANARY_FORWARD_PORT", workflow_text)
+        self.assertNotIn("CANARY_DOMAIN", workflow_text)
+        self.assertNotIn("CANARY_EXPECTED_HOST_ID", workflow_text)
+        self.assertNotIn("CANARY_CERTIFICATE_ID", workflow_text)
         self.assertNotIn("forward_host: $forward_host", workflow_text)
         self.assertNotIn("forward_port: $forward_port", workflow_text)
-        self.assertIn("npmplus_noindex: true", workflow_text)
         self.assertIn("categories=\\($categories)", workflow_text)
         self.assertNotIn("route_options_json", workflow_text)
 
@@ -1146,6 +1145,20 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("deploy:local-operator-edge-endpoint-apply-grant", script_text)
         self.assertIn("deploy:local-operator-edge-endpoint-read-grant", script_text)
 
+    def test_deploy_authz_grants_include_ingress_canary_route_authority(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("ingress-route-canary-apply.yml", script_text)
+        self.assertIn("ingress_route.apply", script_text)
+        self.assertIn("ingress_canary_route.apply", script_text)
+        self.assertIn("ingress_canary_route.read", script_text)
+        self.assertIn("LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON", script_text)
+        self.assertIn("deploy:ingress-route-canary-apply-workflow-${scope_suffix}", script_text)
+        self.assertIn("deploy:local-operator-ingress-canary-route-apply-grant", script_text)
+        self.assertIn("deploy:local-operator-ingress-canary-route-read-grant", script_text)
+
     def test_deploy_authz_grants_skip_local_operator_product_config_without_scopes(
         self,
     ) -> None:
@@ -1356,6 +1369,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "GITHUB_SHA": "test-sha",
                 "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
                 "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON": configured_scopes,
                 "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": configured_scopes,
                 "CAPTURED_GRANTS": str(captured_grants),
                 "CAPTURED_RESPONSE_FILE": str(captured_response_file),
@@ -1389,6 +1403,17 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             (grant["products"][0], grant["contexts"][0], grant["actions"][0])
             for grant in product_config_grants
         }
+        canary_workflow_grants = [
+            grant
+            for grant in grants
+            if grant["actions"] == ["ingress_route.apply"]
+            and grant["workflow_refs"][0].endswith(
+                "/.github/workflows/ingress-route-canary-apply.yml@refs/heads/main"
+            )
+        ]
+        canary_scoped_grants = {
+            (grant["products"][0], grant["contexts"][0]) for grant in canary_workflow_grants
+        }
         expected_scopes = {
             ("discord-blue", "discord-blue"),
             ("verireel", "verireel"),
@@ -1402,11 +1427,18 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 for action in ("product_config.plan", "product_config.apply")
             },
         )
+        self.assertEqual(canary_scoped_grants, expected_scopes)
         for grant in product_config_grants:
             self.assertNotEqual(grant["products"], ["*"])
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
                 grant["source_label"].startswith("deploy:local-operator-product-config-")
+            )
+        for grant in canary_workflow_grants:
+            self.assertNotEqual(grant["products"], ["*"])
+            self.assertNotEqual(grant["contexts"], ["*"])
+            self.assertTrue(
+                grant["source_label"].startswith("deploy:ingress-route-canary-apply-workflow-")
             )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:

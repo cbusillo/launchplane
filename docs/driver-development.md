@@ -275,23 +275,23 @@ initial discovery, then enable it for reviewed update-only applies when exact
 domain ownership is known.
 
 The `Ingress Route Canary Apply` workflow is the matching apply proof path. It
-uses the same canary-scoped product/context grant, accepts an operator-supplied
-`edge_endpoint_key`, and requires an explicit idempotency key plus the
-confirmation phrase `apply ingress canary`. The service resolves that edge
-endpoint key through DB-backed Launchplane records and fails closed when the
-record is missing or disabled; the workflow must not pass raw canary upstream
-host or port values. The workflow fixes the current canary route toggles instead
-of accepting arbitrary provider options, and asks the service to reject the
-request unless the expected provider host's domain set exactly matches the
-requested canary domain set. Dry-run and apply responses write Launchplane-owned
-ingress route audit records that preserve the trace id, mode, status, requested
-domains, expected/provider host ids, edge endpoint key, operations, reason, and
-idempotency key. Each plan operation includes high-level change categories such
-as `route`, `upstream`, `certificate`, `tls`, `access_list`, `identity_access`,
-`provider_options`, and `enabled`; those categories make identity/access drift
-visible without storing provider topology or secret values in the public
-contract. Keep this workflow canary-scoped until broader route ownership and
-approval UX are explicit.
+uses the same canary-scoped product/context grant, accepts a canary route key,
+and requires an explicit idempotency key plus the confirmation phrase
+`apply ingress canary`. The service resolves the canary key through DB-backed
+Launchplane ingress canary route records. Those records own the canary domain,
+expected provider host id, certificate id, and edge endpoint key; the workflow
+must not pass those route topology values directly. The canary apply path fixes
+the provider toggles instead of accepting arbitrary provider options, and asks
+the service to reject the request unless the expected provider host's domain set
+exactly matches the stored canary domain set. Dry-run and apply responses write
+Launchplane-owned ingress route audit records that preserve the trace id, mode,
+status, requested domains, expected/provider host ids, edge endpoint key,
+operations, reason, and idempotency key. Each plan operation includes high-level
+change categories such as `route`, `upstream`, `certificate`, `tls`,
+`access_list`, `identity_access`, `provider_options`, and `enabled`; those
+categories make identity/access drift visible without storing provider topology
+or secret values in the public contract. Keep this workflow canary-scoped until
+broader route ownership and approval UX are explicit.
 
 Operators with `ingress_route.plan` for the target product/context can inspect
 those audit records through the service. List records with

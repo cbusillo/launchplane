@@ -225,6 +225,12 @@ an ORM column/table or remains only in the evidence payload.
   address for NPMplus-backed routes so a bad hostname cannot become a runtime
   Nginx startup dependency. Product repositories must not own provider topology,
   edge IPs, NPMplus host ids, or Dokploy server routing facts.
+- Ingress canary route: modeled fields are `canary_key`, `product`, `context`,
+  `domain_name`, `expected_host_id`, `edge_endpoint_key`, `certificate_id`,
+  `status`, and `updated_at`. The record is Launchplane-owned route authority
+  for canary applies; workflows pass the canary key and the service resolves the
+  stored domain, provider guard, certificate, and edge endpoint values before
+  calling the ingress provider.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

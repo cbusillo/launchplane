@@ -264,6 +264,14 @@ operator-reviewed routine write access; use local-admin grants for rare broader
 repair authority instead of widening routine local-operator access. Checked-in
 catalogs are not deploy-time authority for these operator scopes.
 
+The `Ingress Route Canary Apply` workflow grant is also scoped by operator input,
+not a checked-in product catalog. By default the deploy reconciliation grants the
+workflow `ingress_route.apply` only for `launchplane`/`launchplane`. Set
+`LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON` to an array of product/context
+objects when DB-backed canary route records are intentionally scoped elsewhere;
+the workflow still passes only the canary key while the service resolves route
+topology from records.
+
 Grant requests return only authz policy record metadata and rule counts; they do
 not echo workflow refs, human logins, or the full policy body.
 

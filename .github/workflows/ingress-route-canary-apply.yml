@@ -12,8 +12,8 @@ name: Ingress Route Canary Apply
         description: Launchplane context authorized for the canary apply.
         required: true
         type: string
-      edge_endpoint_key:
-        description: Launchplane edge endpoint key for the canary upstream.
+      canary_key:
+        description: Launchplane ingress canary route key to apply.
         required: true
         type: string
       reason:
@@ -46,10 +46,7 @@ jobs:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       PRODUCT: ${{ inputs.product }}
       CONTEXT: ${{ inputs.context }}
-      EDGE_ENDPOINT_KEY: ${{ inputs.edge_endpoint_key }}
-      CANARY_DOMAIN: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_DOMAIN }}
-      CANARY_EXPECTED_HOST_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_HOST_ID }}
-      CANARY_CERTIFICATE_ID: ${{ vars.LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID }}
+      CANARY_KEY: ${{ inputs.canary_key }}
     steps:
       - name: Validate canary apply confirmation
         shell: bash
@@ -76,42 +73,20 @@ jobs:
           set -euo pipefail
           : "${PRODUCT:?Missing canary product}"
           : "${CONTEXT:?Missing canary context}"
-          : "${EDGE_ENDPOINT_KEY:?Missing canary edge endpoint key}"
-          : "${CANARY_DOMAIN:?Missing LAUNCHPLANE_INGRESS_CANARY_DOMAIN variable}"
-          : "${CANARY_EXPECTED_HOST_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_HOST_ID variable}"
-          : "${CANARY_CERTIFICATE_ID:?Missing LAUNCHPLANE_INGRESS_CANARY_CERTIFICATE_ID variable}"
+          : "${CANARY_KEY:?Missing canary route key}"
 
           payload_file="$RUNNER_TEMP/ingress-route-canary-apply-request.json"
           jq -n \
             --arg product "$PRODUCT" \
             --arg context "$CONTEXT" \
-            --arg domain "$CANARY_DOMAIN" \
+            --arg canary_key "$CANARY_KEY" \
             --arg reason "$REASON" \
-            --arg edge_endpoint_key "$EDGE_ENDPOINT_KEY" \
-            --argjson expected_host_id "$CANARY_EXPECTED_HOST_ID" \
-            --argjson certificate_id "$CANARY_CERTIFICATE_ID" \
             '{
               schema_version: 1,
               product: $product,
               context: $context,
-              ingress: {
-                schema_version: 1,
-                mode: "apply",
-                expected_host_id: $expected_host_id,
-                require_exact_expected_host_domains: true,
-                reason: $reason,
-                route: {
-                  domain_names: [$domain],
-                  edge_endpoint_key: $edge_endpoint_key,
-                  certificate_id: $certificate_id,
-                  enabled: true,
-                  ssl_forced: true,
-                  http2_support: true,
-                  npmplus_http3_support: true,
-                  npmplus_noindex: true,
-                  access_list_id: 0
-                }
-              }
+              canary_key: $canary_key,
+              reason: $reason
             }' >"$payload_file"
           echo "payload_file=$payload_file" >>"$GITHUB_OUTPUT"
 
@@ -121,7 +96,7 @@ jobs:
         with:
           launchplane-url: ${{ env.LAUNCHPLANE_URL }}
           method: POST
-          route-path: /v1/drivers/ingress/route-apply
+          route-path: /v1/ingress/canary-routes/apply
           payload-file: ${{ steps.payload.outputs.payload_file }}
           idempotency-key: ${{ inputs.idempotency_key }}
           timeout-ms: "30000"
@@ -139,8 +114,7 @@ jobs:
             echo
             echo "- Product: $PRODUCT"
             echo "- Context: $CONTEXT"
-            echo "- Edge endpoint: $EDGE_ENDPOINT_KEY"
-            echo "- Domain: $CANARY_DOMAIN"
+            echo "- Canary route: $CANARY_KEY"
             echo "- Status: $(jq -r '.result.status' "$result_file")"
             echo "- Dry run: $(jq -r '.result.dry_run' "$result_file")"
             echo

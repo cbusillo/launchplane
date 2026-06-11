@@ -43,6 +43,7 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackDeployPlan,
     GenericWebRollbackPlanRecord,
 )
+from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
@@ -463,6 +464,25 @@ def _edge_endpoint_record(
         status=status,
         updated_at="2026-06-07T00:00:00Z",
         source_label="test:edge-endpoint",
+    )
+
+
+def _ingress_canary_route_record(
+    *,
+    canary_key: str = "ingress-canary",
+    status: str = "active",
+) -> IngressCanaryRouteRecord:
+    return IngressCanaryRouteRecord(
+        canary_key=canary_key,
+        product="launchplane",
+        context="reon-prod",
+        domain_name="ingress-canary.example.test",
+        expected_host_id=78,
+        edge_endpoint_key="ingress-canary-edge",
+        certificate_id=47,
+        status=status,  # type: ignore[arg-type]
+        updated_at="2026-06-11T00:00:00Z",
+        source_label="test:ingress-canary",
     )
 
 
@@ -996,11 +1016,17 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_provider_target_record(provider_target)
             edge_endpoint = _edge_endpoint_record()
             store.write_edge_endpoint_record(edge_endpoint)
+            ingress_canary_route = _ingress_canary_route_record()
+            store.write_ingress_canary_route_record(ingress_canary_route)
             inspect_engine = create_engine(database_url)
             inspector = inspect(inspect_engine)
             table_names = set(inspector.get_table_names())
             edge_endpoint_columns = {
                 column["name"] for column in inspector.get_columns("launchplane_edge_endpoints")
+            }
+            ingress_canary_route_columns = {
+                column["name"]
+                for column in inspector.get_columns("launchplane_ingress_canary_routes")
             }
             provider_target_columns = {
                 column["name"] for column in inspector.get_columns("launchplane_provider_targets")
@@ -1014,6 +1040,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 instance_name="prod",
             )
             loaded_edge_endpoint = store.read_edge_endpoint_record(edge_endpoint.endpoint_key)
+            loaded_ingress_canary_route = store.read_ingress_canary_route_record(
+                ingress_canary_route.canary_key
+            )
             audit_records = store.list_ingress_route_audit_records(
                 product="launchplane", context_name="reon-prod"
             )
@@ -1024,7 +1053,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded.image.digest, "sha256:image123")
         self.assertEqual(loaded_provider_target.target_id, provider_target.target_id)
         self.assertEqual(loaded_edge_endpoint.upstream_host, edge_endpoint.upstream_host)
+        self.assertEqual(loaded_ingress_canary_route.domain_name, "ingress-canary.example.test")
         self.assertIn("launchplane_edge_endpoints", table_names)
+        self.assertIn("launchplane_ingress_canary_routes", table_names)
         self.assertGreaterEqual(
             edge_endpoint_columns,
             {
@@ -1034,6 +1065,21 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 "upstream_host",
                 "upstream_scheme",
                 "upstream_port",
+                "status",
+                "updated_at",
+                "payload",
+            },
+        )
+        self.assertGreaterEqual(
+            ingress_canary_route_columns,
+            {
+                "canary_key",
+                "product",
+                "context",
+                "domain_name",
+                "expected_host_id",
+                "edge_endpoint_key",
+                "certificate_id",
                 "status",
                 "updated_at",
                 "payload",
