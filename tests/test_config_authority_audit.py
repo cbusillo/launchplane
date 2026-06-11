@@ -53,6 +53,15 @@ def _gaps(payload: dict[str, object]) -> list[dict[str, object]]:
 
 
 class ConfigAuthorityAuditTest(unittest.TestCase):
+    def test_merge_train_runner_uses_policy_targets_for_scheduled_authority(self) -> None:
+        workflow_text = Path(".github/workflows/merge-train-runner.yml").read_text(encoding="utf-8")
+
+        self.assertIn("/v1/work-graph/merge-train/policy-targets", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_REPOSITORY", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_BASE_BRANCH", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_MUTATE", workflow_text)
+        self.assertNotIn("LAUNCHPLANE_MERGE_TRAIN_RUNNER_MODE", workflow_text)
+
     def test_python_repo_policy_default_is_reported_and_redacted(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -705,6 +714,29 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             findings_by_key["target_id"]["allow_reason"],
             "operator_supplied_runtime_input",
         )
+
+    def test_merge_train_runner_manual_input_aliases_are_path_scoped(self) -> None:
+        for key, value in (
+            ("REQUESTED_REPOSITORY", "${{ inputs.repository }}"),
+            ("REQUESTED_BASE_BRANCH", "${{ inputs.base_branch }}"),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/merge-train-runner.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/other.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
 
     def test_workflow_restricted_context_references_are_scanned_unclassified(self) -> None:
         with TemporaryDirectory() as temp_dir:

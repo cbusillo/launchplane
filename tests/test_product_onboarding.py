@@ -240,6 +240,9 @@ class ProductOnboardingTests(unittest.TestCase):
 
         self.assertIn("deploy:merge-train-runner-manual-grant", script_text)
         self.assertIn("merge-train-runner-manual", script_text)
+        self.assertIn("merge_train.policy_targets", script_text)
+        self.assertIn("deploy:merge-train-runner-policy-targets-schedule-grant", script_text)
+        self.assertIn("merge-train-runner-policy-targets-schedule", script_text)
         self.assertIn("deploy:merge-train-runner-schedule-grant", script_text)
         self.assertIn("merge-train-runner-schedule", script_text)
         self.assertIn("schedule", script_text)

@@ -861,7 +861,22 @@ def _seed_merge_train_policy(
     return record
 
 
-def _merge_train_policy_table(repository: str, base_branch: str = "main") -> str:
+def _merge_train_policy_table(
+    repository: str,
+    base_branch: str = "main",
+    *,
+    scheduler_enabled: bool = False,
+    scheduler_runner_mode: str = "controller",
+    scheduler_mutate: bool = False,
+) -> str:
+    scheduler_table = ""
+    if scheduler_enabled:
+        scheduler_table = f"""
+[policies.scheduler]
+enabled = true
+runner_mode = "{scheduler_runner_mode}"
+mutate = {str(scheduler_mutate).lower()}
+"""
     return f"""[[policies]]
 repository = "{repository}"
 base_branch = "{base_branch}"
@@ -886,6 +901,7 @@ context = "launchplane"
 
 [policies.github_token]
 env_var = "GH_TOKEN"
+{scheduler_table}
 """
 
 
@@ -7939,7 +7955,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             (
                                 "schema_version = 1",
                                 _merge_train_policy_table("cbusillo/sellyouroutboard", "release"),
-                                _merge_train_policy_table("cbusillo/codex-skills", "main"),
+                                _merge_train_policy_table(
+                                    "cbusillo/codex-skills",
+                                    "main",
+                                    scheduler_enabled=True,
+                                    scheduler_runner_mode="level1",
+                                    scheduler_mutate=True,
+                                ),
                             )
                         )
                     ),
@@ -7971,6 +7993,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "repository": "cbusillo/codex-skills",
                     "base_branch": "main",
                     "policy_key": "cbusillo/codex-skills:main",
+                    "scheduler": {
+                        "enabled": True,
+                        "mutate": True,
+                        "runner_mode": "level1",
+                    },
                     "service_authz": {
                         "action": "merge_train.run_once",
                         "product": "launchplane",
@@ -7981,6 +8008,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "repository": "cbusillo/sellyouroutboard",
                     "base_branch": "release",
                     "policy_key": "cbusillo/sellyouroutboard:release",
+                    "scheduler": {
+                        "enabled": False,
+                        "mutate": False,
+                        "runner_mode": "controller",
+                    },
                     "service_authz": {
                         "action": "merge_train.run_once",
                         "product": "launchplane",
