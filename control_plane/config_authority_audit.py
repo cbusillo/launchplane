@@ -167,6 +167,29 @@ WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
             ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
         )
     },
+    ".github/workflows/reusable-odoo-post-deploy.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-odoo-prod-promotion.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-odoo-prod-rollback.yml": {
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
+    ".github/workflows/reusable-odoo-testing-deploy.yml": {
+        "LAUNCHPLANE_URL": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        ),
+        "launchplane-url": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        ),
+    },
 }
 WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
@@ -232,6 +255,22 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
         "INPUT_PRODUCT": frozenset(("${{ inputs.product }}",)),
         "INSTANCE_NAME": frozenset(("${{ inputs.instance }}",)),
+    },
+    ".github/workflows/reusable-odoo-post-deploy.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
+    },
+    ".github/workflows/reusable-odoo-prod-promotion.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
+    },
+    ".github/workflows/reusable-odoo-prod-rollback.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
+    },
+    ".github/workflows/reusable-odoo-testing-deploy.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
     },
     ".github/workflows/odoo-config-parameter-override.yml": {
         "KEY_NAME": frozenset(("${{ inputs.key }}",))
@@ -318,6 +357,18 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         ),
         "token": frozenset(("${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || github.token }}",)),
         "username": frozenset(("${{ github.repository_owner }}",)),
+    },
+    ".github/workflows/reusable-odoo-post-deploy.yml": {
+        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/reusable-odoo-prod-promotion.yml": {
+        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/reusable-odoo-prod-rollback.yml": {
+        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/reusable-odoo-testing-deploy.yml": {
+        "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
     },
     ".github/workflows/runner-host-hygiene.yml": {
         "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",))
