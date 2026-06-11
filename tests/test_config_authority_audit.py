@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import render_config_authority_markdown
+from control_plane.config_authority_audit import _allow_reason
 
 
 CLI_MAIN = cast(Command, main)
@@ -591,6 +592,41 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         ):
             finding = findings_by_key[key]
             self.assertEqual(finding["classification"], "needs_classification")
+
+    def test_workflow_route_path_forwarding_is_thin_connector_input(self) -> None:
+        for value in (
+            "${{ steps.route.outputs.route_path }}",
+            "${{ steps.resolve-route.outputs.api_path }}",
+            "${{ inputs.route_path }}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/tracked-target-logs.yml",
+                        key="route-path",
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+    def test_workflow_route_path_fallbacks_stay_unclassified(self) -> None:
+        for value in (
+            "${{ inputs.route_path || '/v1/drivers/preview' }}",
+            "${{ steps.route.outputs.route_path || '/v1/logs' }}",
+            "/v1/${{ inputs.route_path }}",
+            "${{ vars.ROUTE_PATH }}",
+            "${{ env.ROUTE_PATH }}",
+            "${{ secrets.ROUTE_PATH }}",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/tracked-target-logs.yml",
+                        key="route-path",
+                        value=value,
+                    ),
+                    "",
+                )
 
     def test_cli_outputs_json_and_markdown(self) -> None:
         with TemporaryDirectory() as temp_dir:

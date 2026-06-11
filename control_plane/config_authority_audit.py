@@ -87,6 +87,9 @@ GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
 GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
 )
+GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
+    r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
+)
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
 )
@@ -863,6 +866,7 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
     if (
         normalized.startswith(".github/workflows/")
         and not _is_workflow_runtime_authority_key(key)
+        and not _is_route_path_key(key)
         and _is_github_context_reference(value)
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
@@ -890,15 +894,25 @@ def _is_workflow_runtime_authority_key(key: str) -> bool:
     return key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS
 
 
+def _is_route_path_key(key: str) -> bool:
+    return key.upper().replace(".", "_").replace("-", "_") == "ROUTE_PATH"
+
+
 def _is_launchplane_service_route_path(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip()
-    return (
-        key_text == "ROUTE_PATH"
-        and value_text.startswith("/v1/")
-        and "${{" not in value_text
-        and " " not in value_text
-    )
+    if key_text != "ROUTE_PATH":
+        return False
+    if value_text.startswith("/v1/") and "${{" not in value_text and " " not in value_text:
+        return True
+    return _is_github_route_path_forwarding_reference(value)
+
+
+def _is_github_route_path_forwarding_reference(value: object) -> bool:
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    return bool(GITHUB_ROUTE_PATH_FORWARDING_PATTERN.match(match.group("body").strip()))
 
 
 def _is_click_option_metadata_key(key: str) -> bool:
