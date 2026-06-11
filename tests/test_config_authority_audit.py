@@ -628,6 +628,77 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "",
                 )
 
+    def test_workflow_operator_inputs_and_mechanics_are_classified(self) -> None:
+        operator_inputs = (
+            ("context", "${{ inputs.context }}"),
+            ("target_id", "${{ inputs.target_id }}"),
+            ("environment_name", "${{ inputs.environment_name }}"),
+            ("compose_path", "${{ inputs.compose_path }}"),
+            ("healthcheck_path", "${{ inputs.healthcheck_path }}"),
+            ("source_git_ref", "${{ inputs.source_git_ref }}"),
+        )
+        for key, value in operator_inputs:
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/dokploy-target-setup.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+
+        forwarded_variables = (
+            ("context", "$context"),
+            ("target_id", "$target_id"),
+            ("environment_name", "$environment_name,"),
+        )
+        for key, value in forwarded_variables:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/dokploy-target-setup.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "operator_supplied_runtime_input",
+                )
+
+        mechanics = (
+            ("id-token", "write"),
+            ("group", "dokploy-target-setup-${{ inputs.context }}-${{ inputs.instance }}"),
+            ("path", "dokploy-target-setup.json"),
+        )
+        for key, value in mechanics:
+            with self.subTest(key=key):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/dokploy-target-setup.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+    def test_workflow_operator_input_allow_reasons_stay_narrow(self) -> None:
+        for key, value in (
+            ("target_id", "dokploy-real-target"),
+            ("target_id", "${{ vars.TARGET_ID }}"),
+            ("target_id", "$provider_target_id"),
+            ("healthcheck_path", "${{ vars.HEALTHCHECK_PATH }}"),
+            ("group", "dokploy-target-setup-${{ vars.CONTEXT }}"),
+            ("path", "provider-target/live.json"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/dokploy-target-setup.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
     def test_cli_outputs_json_and_markdown(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -86,7 +86,7 @@ name: Dokploy Target Setup
       source_git_ref:
         description: Source ref to store in the Launchplane target record.
         required: false
-        default: origin/main
+        default: ""
         type: string
       source_type:
         description: Source type to store for compose targets.
@@ -111,7 +111,7 @@ name: Dokploy Target Setup
       healthcheck_path:
         description: Optional target healthcheck path.
         required: false
-        default: /web/health
+        default: ""
         type: string
       deploy_timeout_seconds:
         description: Optional deploy timeout to store.

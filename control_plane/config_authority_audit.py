@@ -90,8 +90,36 @@ GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
+GITHUB_INPUT_REFERENCE_PATTERN = re.compile(r"^inputs\.[A-Za-z0-9_.-]+$")
 WORKFLOW_RUNTIME_AUTHORITY_KEYS = frozenset(
     ("GITHUB_TOKEN", "ID_TOKEN", "LAUNCHPLANE_PRODUCT", "LAUNCHPLANE_URL")
+)
+WORKFLOW_OPERATOR_INPUT_VALUE_KEYS = frozenset(
+    (
+        "APP_NAME",
+        "CONTEXT",
+        "CONFIRMATION",
+        "DEPLOY_TIMEOUT_SECONDS",
+        "DESCRIPTION",
+        "DOMAIN",
+        "COMPOSE_PATH",
+        "ENVIRONMENT_ID",
+        "ENVIRONMENT_NAME",
+        "HEALTHCHECK_PATH",
+        "INSTANCE",
+        "MODE",
+        "OPERATION",
+        "PROJECT_ID",
+        "PROJECT_NAME",
+        "REASON",
+        "RUNTIME_PORT",
+        "SERVER_ID",
+        "SOURCE_GIT_REF",
+        "SOURCE_TYPE",
+        "TARGET_ID",
+        "TARGET_NAME",
+        "TARGET_TYPE",
+    )
 )
 IGNORED_YAML_SCALAR_KEYS = frozenset(("description", "id", "name", "run", "uses"))
 YAML_BLOCK_SCALAR_OPENERS = frozenset(("|", "|-", "|+", ">", ">-", ">+"))
@@ -863,9 +891,25 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         return ALLOW_REASON_SCHEMA_ONLY
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
+    if normalized.startswith(".github/workflows/") and _is_workflow_mechanic_key_value(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_operator_input_value(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_operator_variable_forward(
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     if (
         normalized.startswith(".github/workflows/")
         and not _is_workflow_runtime_authority_key(key)
+        and not _is_workflow_operator_input_key(key)
         and not _is_route_path_key(key)
         and _is_github_context_reference(value)
     ):
@@ -892,6 +936,40 @@ def _is_github_context_reference(value: object) -> bool:
 def _is_workflow_runtime_authority_key(key: str) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     return key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS
+
+
+def _is_workflow_operator_input_value(*, key: str, value: object) -> bool:
+    if not _is_workflow_operator_input_key(key):
+        return False
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    return bool(GITHUB_INPUT_REFERENCE_PATTERN.match(match.group("body").strip()))
+
+
+def _is_workflow_operator_input_key(key: str) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    return key_text in WORKFLOW_OPERATOR_INPUT_VALUE_KEYS
+
+
+def _is_workflow_operator_variable_forward(*, key: str, value: object) -> bool:
+    if not _is_workflow_operator_input_key(key):
+        return False
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip().rstrip(",")
+    return value_text == f"${key_text.lower()}"
+
+
+def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    value_text = _string_value(value).strip()
+    if key_text == "ID_TOKEN" and value_text == "write":
+        return True
+    if key_text == "GROUP" and "${{ inputs." in value_text and "${{ vars." not in value_text:
+        return True
+    if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
+        return True
+    return False
 
 
 def _is_route_path_key(key: str) -> bool:
