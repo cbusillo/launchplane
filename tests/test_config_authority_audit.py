@@ -12,6 +12,7 @@ from control_plane.cli import main
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import render_config_authority_markdown
 from control_plane.config_authority_audit import _allow_reason
+from control_plane.config_authority_audit import _workflow_path_key_values
 
 
 CLI_MAIN = cast(Command, main)
@@ -1027,6 +1028,70 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(
             findings_by_key["payload-fields.replacement.branch"][0]["allow_reason"],
             "test_fixture",
+        )
+
+    def test_workflow_payload_field_allowlist_matches_scanned_key_prefix(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "reusable-odoo-prod-promotion.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Reusable prod promotion\n"
+                "on:\n"
+                "  workflow_call:\n"
+                "jobs:\n"
+                "  promote:\n"
+                "    steps:\n"
+                "      - uses: cbusillo/launchplane/.github/actions/launchplane-request@main\n"
+                "        with:\n"
+                "          payload-fields: |-\n"
+                "            run.request_id=${{ github.run_id }}-${{ github.run_attempt }}\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings = [
+            finding
+            for finding in _findings(payload)
+            if finding["key"] == "payload-fields.run.request_id"
+        ]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["classification"], "allowed")
+        self.assertEqual(findings[0]["allow_reason"], "thin_connector_input")
+
+    def test_workflow_path_key_values_bridges_payload_field_prefix(self) -> None:
+        path_values = {
+            ".github/workflows/example.yml": {
+                "run.request_id": frozenset(("${{ github.run_id }}",)),
+                "payload-fields.run.context": frozenset(("${{ inputs.context }}",)),
+            }
+        }
+
+        self.assertEqual(
+            _workflow_path_key_values(
+                path_values,
+                path=".github/workflows/example.yml",
+                key="payload-fields.run.request_id",
+            ),
+            frozenset(("${{ github.run_id }}",)),
+        )
+        self.assertEqual(
+            _workflow_path_key_values(
+                path_values,
+                path=".github/workflows/example.yml",
+                key="run.context",
+            ),
+            frozenset(("${{ inputs.context }}",)),
+        )
+        self.assertIsNone(
+            _workflow_path_key_values(
+                path_values,
+                path=".github/workflows/other.yml",
+                key="payload-fields.run.request_id",
+            )
         )
 
     def test_workflow_operator_input_forwarding_is_scanned_and_allowed(self) -> None:
