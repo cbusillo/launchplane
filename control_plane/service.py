@@ -219,12 +219,14 @@ from control_plane.drivers.generic_web_dispatch import (
     GenericWebRollbackPlanEnvelope as GenericWebRollbackPlanEnvelope,
     GenericWebStableVerificationEnvelope as GenericWebStableVerificationEnvelope,
     GenericWebStableVerificationRequest as GenericWebStableVerificationRequest,
+    GenericWebSourceRefDeployEnvelope as GenericWebSourceRefDeployEnvelope,
     _GENERIC_WEB_DEPLOY_ROUTE as _GENERIC_WEB_DEPLOY_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_ROUTE as _GENERIC_WEB_PROD_PROMOTION_ROUTE,
     _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE as _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
     _GENERIC_WEB_ROLLBACK_PLAN_ROUTE as _GENERIC_WEB_ROLLBACK_PLAN_ROUTE,
     _GENERIC_WEB_ROLLBACK_ROUTE as _GENERIC_WEB_ROLLBACK_ROUTE,
     _GENERIC_WEB_STABLE_VERIFICATION_ROUTE as _GENERIC_WEB_STABLE_VERIFICATION_ROUTE,
+    _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE as _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
     _apply_generic_web_stable_verification_records as _apply_generic_web_stable_verification_records,
     _generic_web_post_deploy_executor_for_profile as _generic_web_post_deploy_executor_for_profile,
     _handle_generic_web_deploy as _handle_generic_web_deploy,
@@ -233,8 +235,10 @@ from control_plane.drivers.generic_web_dispatch import (
     _handle_generic_web_rollback as _handle_generic_web_rollback,
     _handle_generic_web_rollback_plan as _handle_generic_web_rollback_plan,
     _handle_generic_web_stable_verification as _handle_generic_web_stable_verification,
+    _handle_generic_web_source_ref_deploy as _handle_generic_web_source_ref_deploy,
     _stable_verification_health_evidence as _stable_verification_health_evidence,
     _reject_human_live_generic_web_prod_promotion as _reject_human_live_generic_web_prod_promotion,
+    _validate_generic_web_source_ref_deploy_lane as _validate_generic_web_source_ref_deploy_lane,
     _validate_stable_verification_request as _validate_stable_verification_request,
     _validate_generic_web_prod_promotion_lanes as _validate_generic_web_prod_promotion_lanes,
 )
@@ -1135,6 +1139,7 @@ _PREVIEW_DESTROY_IDEMPOTENCY_ROUTE_PATHS = frozenset(
 _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS = frozenset(
     {
         _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,
@@ -3693,6 +3698,17 @@ def _descriptor_driver_dispatch_routes(
             ),
             handler=_handle_generic_web_deploy,
         ),
+        _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
+            execution_metadata=_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE,
+            context_resolver=lambda request: _DescriptorDriverDispatchContext(
+                product=request.product,
+                context=request.deploy.context,
+                instance=request.deploy.instance,
+                require_profile=True,
+            ),
+            pre_idempotency_validator=_validate_generic_web_source_ref_deploy_lane,
+            handler=_handle_generic_web_source_ref_deploy,
+        ),
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -4079,6 +4095,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
     return frozenset(
         (
             _GENERIC_WEB_DEPLOY_ROUTE.route_path,
+            _GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
             _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
             _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
             _GENERIC_WEB_ROLLBACK_PLAN_ROUTE.route_path,

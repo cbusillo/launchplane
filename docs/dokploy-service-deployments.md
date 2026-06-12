@@ -101,6 +101,27 @@ deploys. If a later slice adds generic artifact-manifest resolution for this
 path, the manifest must still resolve to the same `repository@sha256:digest`
 identity before Dokploy is mutated.
 
+Some inherited services still deploy an existing Dokploy compose target directly
+from a Git source ref instead of an immutable image. Use this as a migration
+bridge only when the existing provider target cannot yet be switched to image
+deploy. Product repos may call
+`POST /v1/drivers/generic-web/source-ref-deploy` with the tested commit SHA as
+`source_git_ref` and a provider deploy branch/ref as `provider_source_ref`.
+During this bridge, `source_git_ref` is caller-attested evidence: Launchplane
+does not resolve the provider branch tip before triggering Dokploy. Prefer a
+unique provider ref per tested commit, such as
+`refs/heads/launchplane-deploy/<sha>`, over a shared long-lived branch.
+Launchplane resolves the DB-backed product lane and Dokploy target records,
+temporarily pins the compose target's source branch/ref, triggers the deploy,
+waits for completion, and restores the original source ref only while the live
+target still points at the requested provider ref. Product repos must not keep
+Dokploy host, token, compose id, or provider mutation scripts for this mode.
+
+The long-term target is still immutable image deploy. The source-ref bridge does
+not write generic-web deployment records; its durable replay surface is the
+service idempotency record. Treat it as a bounded replacement for legacy direct
+Dokploy workflows only while the product is moved to image publishing.
+
 Launchplane also injects a non-secret runtime identity into Dokploy env during
 Launchplane-owned deploys. The standard keys are
 `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
@@ -167,6 +188,14 @@ A normal service deploy does this:
 3. Launchplane resolves the product profile lane and DB-backed Dokploy target.
 4. Launchplane updates the Dokploy application image and triggers deployment.
 5. Launchplane writes a deployment record with the resolved target and status.
+
+A source-ref compose bridge deploy keeps the same authority split but uses a
+tested commit SHA and provider deploy branch/ref instead of an image reference.
+The product workflow may still create or move its own deploy ref to the tested
+SHA, but Launchplane resolves the Dokploy compose target and owns the provider
+source pin, deployment trigger, provider polling, and restore behavior. Repeated
+requests should reuse the same `Idempotency-Key`; a retry with a new key is a
+new provider mutation request.
 
 Generic-web deploy records post-deploy evidence as `skipped` by default. A
 driver that inherits from generic-web can provide a product post-deploy

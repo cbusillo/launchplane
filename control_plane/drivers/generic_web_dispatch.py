@@ -6,6 +6,7 @@ from typing import Protocol, cast
 import click
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     GenericWebRollbackPlanStore,
@@ -36,6 +37,11 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployExecutor,
     execute_generic_web_deploy,
+)
+from control_plane.workflows.dokploy_deploy import (
+    DokployComposeSourceRefDeployRequest,
+    DokployComposeSourceRefDeployStore,
+    execute_dokploy_compose_source_ref_deploy,
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
@@ -154,6 +160,27 @@ _GENERIC_WEB_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=GenericWebDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the generic web deploy driver for the requested product/context."
+    ),
+)
+
+
+class GenericWebSourceRefDeployEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    deploy: DokployComposeSourceRefDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebSourceRefDeployEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web source-ref deploy requires product")
+        return self
+
+
+_GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/source-ref-deploy",
+    envelope_model=GenericWebSourceRefDeployEnvelope,
+    denial_message=(
+        "Workflow cannot execute the generic web source-ref deploy driver"
+        " for the requested product/context."
     ),
 )
 
@@ -390,6 +417,60 @@ def _handle_generic_web_deploy(
     )
     return _DescriptorDriverDispatchResult(
         result={"deployment_record_id": driver_result.deployment_record_id},
+        driver_result=driver_result,
+    )
+
+
+def _validate_generic_web_source_ref_deploy_lane(
+    request: GenericWebSourceRefDeployEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> None:
+    del record_store, control_plane_root_path
+    if resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web source-ref deploy requires a product profile lane."
+        )
+    if request.deploy.context != resolved_context.lane.context:
+        raise ProductDriverMismatchError(
+            "Generic web source-ref deploy context does not match the product profile lane."
+        )
+    if request.deploy.instance != resolved_context.lane.instance:
+        raise ProductDriverMismatchError(
+            "Generic web source-ref deploy instance does not match the product profile lane."
+        )
+
+
+def _handle_generic_web_source_ref_deploy(
+    request: GenericWebSourceRefDeployEnvelope,
+    resolved_context: _ResolvedProductDriverContext,
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _DescriptorDriverDispatchResult:
+    if resolved_context.profile is None or resolved_context.lane is None:
+        raise ProductDriverMismatchError(
+            "Generic web source-ref deploy requires a product profile lane."
+        )
+    host, token = control_plane_dokploy.read_dokploy_config(
+        control_plane_root=control_plane_root_path
+    )
+    driver_result = execute_dokploy_compose_source_ref_deploy(
+        host=host,
+        token=token,
+        record_store=cast(DokployComposeSourceRefDeployStore, record_store),
+        request=request.deploy,
+    )
+    return _DescriptorDriverDispatchResult(
+        result={
+            "context": driver_result.context,
+            "instance": driver_result.instance,
+            "target_id": driver_result.target_id,
+            "source_git_ref": driver_result.source_git_ref,
+            "provider_source_ref": driver_result.provider_source_ref,
+            "restored_source_ref": driver_result.restored_source_ref,
+            "deploy_status": driver_result.deploy_status,
+        },
         driver_result=driver_result,
     )
 
