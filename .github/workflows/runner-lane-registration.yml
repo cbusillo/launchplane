@@ -19,8 +19,7 @@ name: Runner Lane Registration
         type: string
       labels:
         description: Comma-separated runner labels.
-        required: false
-        default: self-hosted,launchplane,launchplane-managed
+        required: true
         type: string
       audit_record_key:
         description: Launchplane audit record key.
@@ -50,8 +49,7 @@ jobs:
   runner-lane-registration:
     runs-on:
       - self-hosted
-      - launchplane
-      - chris-testing-ops-gate
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       RUNNER_REGISTRATION_HOST: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
       RUNNER_REGISTRATION_EXECUTION_LANE: >-

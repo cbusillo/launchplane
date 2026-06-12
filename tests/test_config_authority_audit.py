@@ -671,6 +671,213 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             finding = findings_by_key[key]
             self.assertEqual(finding["classification"], "needs_classification")
 
+    def test_workflow_input_defaults_preserve_input_context(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "provider.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                '"on":\n'
+                "  workflow_dispatch:\n"
+                '    "inputs":\n'
+                "      provider_id:\n"
+                "        description: Provider id\n"
+                "        required: false\n"
+                "        default: dokploy\n"
+                "        type: string\n"
+                "      base_branch:\n"
+                "        description: Base branch\n"
+                "        required: false\n"
+                "        default: main\n"
+                "        type: string\n"
+                "  workflow_call:\n"
+                "    inputs: # reusable workflow inputs\n"
+                "      instance:\n"
+                "        required: false\n"
+                "        default: testing\n"
+                "        type: string\n"
+                "      runtime_port:\n"
+                "        required: false\n"
+                '        default: "8069"\n'
+                "        type: string\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(
+            findings_by_key["inputs.provider_id.default"]["classification"],
+            "needs_classification",
+        )
+        self.assertEqual(
+            findings_by_key["inputs.provider_id.default"]["rule_id"],
+            "provider_target_authority",
+        )
+        self.assertEqual(
+            findings_by_key["inputs.base_branch.default"]["classification"],
+            "needs_classification",
+        )
+        self.assertEqual(
+            findings_by_key["inputs.base_branch.default"]["rule_id"],
+            "runtime_config_authority",
+        )
+        self.assertEqual(
+            findings_by_key["inputs.instance.default"]["classification"],
+            "needs_classification",
+        )
+        self.assertEqual(
+            findings_by_key["inputs.runtime_port.default"]["classification"],
+            "needs_classification",
+        )
+
+    def test_explicit_directory_paths_are_scanned(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "provider.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                '"on":\n'
+                "  workflow_dispatch:\n"
+                "    inputs:\n"
+                "      provider_id:\n"
+                "        default: dokploy\n"
+                "        type: string\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(
+                control_plane_root=root,
+                paths=(Path(".github/workflows"),),
+            )
+
+        self.assertTrue(
+            any(finding["key"] == "inputs.provider_id.default" for finding in _findings(payload))
+        )
+
+    def test_workflow_input_mechanic_defaults_are_path_scoped(self) -> None:
+        mechanic_defaults = (
+            (
+                ".github/workflows/public-ingress-monitor.yml",
+                "inputs.timeout_seconds.default",
+                "10",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.action.default",
+                "prune_docker_cache",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.minimum_free_disk_bytes.default",
+                "0",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.prune_until.default",
+                "168h",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.timeout_seconds.default",
+                "300",
+            ),
+        )
+        for path, key, value in mechanic_defaults:
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+
+        for path, key, value in (
+            (
+                ".github/workflows/generic-workflow.yml",
+                "inputs.timeout_seconds.default",
+                "10",
+            ),
+            (
+                ".github/workflows/public-ingress-monitor.yml",
+                "inputs.runtime_port.default",
+                "10",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.action.default",
+                "remove_buildkit_state_volumes",
+            ),
+            (
+                ".github/workflows/runner-host-hygiene.yml",
+                "inputs.timeout_seconds.default",
+                "600",
+            ),
+            (
+                ".github/workflows/provider-target-operations.yml",
+                "inputs.provider_id.default",
+                "auto",
+            ),
+            (
+                ".github/workflows/provider-target-operations.yml",
+                "inputs.context.default",
+                "single",
+            ),
+        ):
+            with self.subTest(path=path, key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "",
+                )
+
+    def test_workflow_runs_on_list_items_are_scanned(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "runner.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on:\n"
+                "      - self-hosted\n"
+                "      - ubuntu-latest\n"
+                "      - launchplane\n"
+                "      - chris-testing-ops-gate\n"
+                "      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}\n"
+                "      - ${{ vars.OTHER_RUNNER_LABEL }}\n"
+                "    steps:\n"
+                "      - run: echo ok\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        lane_findings = [
+            finding
+            for finding in _findings(payload)
+            if finding["key"] == "runs-on" and finding["rule_id"] == "runtime_config_authority"
+        ]
+        findings_by_evidence = {finding["evidence"]: finding for finding in lane_findings}
+        for allowed_value in (
+            "self-hosted",
+            "ubuntu-latest",
+            "${{ vars.LAUNCHPLANE_RUNNER_LABEL }}",
+        ):
+            self.assertEqual(findings_by_evidence[allowed_value]["classification"], "allowed")
+        for blocked_value in (
+            "launchplane",
+            "chris-testing-ops-gate",
+            "${{ vars.OTHER_RUNNER_LABEL }}",
+        ):
+            self.assertEqual(
+                findings_by_evidence[blocked_value]["classification"],
+                "needs_classification",
+            )
+
     def test_workflow_route_path_forwarding_is_thin_connector_input(self) -> None:
         for value in (
             "${{ steps.route.outputs.route_path }}",
@@ -745,6 +952,34 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 finding = findings_by_key[key]
                 self.assertEqual(finding["classification"], "needs_classification")
                 self.assertEqual(finding["allow_reason"], "")
+
+    def test_workflow_run_blocks_are_not_parsed_as_yaml_mappings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "merge-train-runner.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Merge train\n"
+                "jobs:\n"
+                "  run:\n"
+                "    steps:\n"
+                "      - name: Forward operator payload\n"
+                "        run: |\n"
+                "          payload = {\n"
+                '              "repository": env.REPOSITORY,\n'
+                '              "base_branch": env.BASE_BRANCH,\n'
+                "          }\n"
+                "          print(payload)\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        keys = {finding["key"] for finding in _findings(payload)}
+        self.assertNotIn("repository", keys)
+        self.assertNotIn("base_branch", keys)
 
     def test_workflow_operator_input_forwarding_is_scanned_and_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -978,6 +1213,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             "launchplane_self_bootstrap",
         )
         for path, key in (
+            (".github/workflows/odoo-driver-route-smoke.yml", "LAUNCHPLANE_URL"),
             (".github/workflows/reusable-odoo-post-deploy.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-prod-promotion.yml", "launchplane-url"),
             (".github/workflows/reusable-odoo-prod-rollback.yml", "launchplane-url"),
@@ -993,6 +1229,15 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     ),
                     "launchplane_self_bootstrap",
                 )
+
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/generic-workflow.yml",
+                key="LAUNCHPLANE_URL",
+                value="${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",
+            ),
+            "",
+        )
 
         for key, value in (
             ("LAUNCHPLANE_URL", "${{ vars.OTHER_URL }}"),
@@ -1276,6 +1521,60 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                         "",
                     )
 
+    def test_remaining_workflow_aliases_are_path_scoped(self) -> None:
+        workflow_aliases = (
+            (
+                ".github/workflows/merge-train-policy-import.yml",
+                ("POLICY_BASE_BRANCH", "${{ inputs.base_branch }}"),
+            ),
+            (
+                ".github/workflows/odoo-config-parameter-override.yml",
+                ("CONTEXT_NAME", "${{ inputs.context }}"),
+            ),
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                ("CONTEXT_NAME", "${{ inputs.context }}"),
+            ),
+            (
+                ".github/workflows/odoo-website-bootstrap-override.yml",
+                ("CONTEXT_NAME", "${{ inputs.context }}"),
+            ),
+            (
+                ".github/workflows/product-environment-evidence.yml",
+                ("TARGET_SET", "${{ inputs.target_set }}"),
+                ("PROVIDER_ID", "${{ inputs.provider_id }}"),
+            ),
+            (
+                ".github/workflows/provider-target-operations.yml",
+                ("TARGET_SET", "${{ inputs.target_set }}"),
+                ("PROVIDER_ID", "${{ inputs.provider_id }}"),
+            ),
+            (
+                ".github/workflows/runner-lane-registration.yml",
+                ("LANE_NAME", "${{ inputs.lane_name }}"),
+            ),
+        )
+
+        for path, *aliases in workflow_aliases:
+            for key, value in aliases:
+                with self.subTest(path=path, key=key):
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value=value),
+                        "operator_supplied_runtime_input",
+                    )
+                    self.assertEqual(
+                        _allow_reason(
+                            path=".github/workflows/generic-workflow.yml",
+                            key=key,
+                            value=value,
+                        ),
+                        "",
+                    )
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value="hard-coded-value"),
+                        "",
+                    )
+
     def test_artifact_publish_operator_aliases_are_path_scoped(self) -> None:
         for key, value in (
             ("INPUT_PRODUCT", "${{ inputs.product }}"),
@@ -1381,9 +1680,21 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
 
         for path, key, value in (
             (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "ROUTE_PATHS",
+                "/v1/drivers/odoo/artifact-publish-inputs "
+                "/v1/drivers/odoo/preview-apply-inputs "
+                "/v1/drivers/odoo/preview-apply /v1/previews/pr-feedback",
+            ),
+            (
                 ".github/workflows/product-context-cutover-audit.yml",
                 "key",
                 'claims.get(key, "")',
+            ),
+            (
+                ".github/workflows/provider-target-operations.yml",
+                "path",
+                "provider-target-routes.json provider-target-operation-results/*.json",
             ),
             (
                 ".github/workflows/reusable-odoo-artifact-publish.yml",
@@ -1417,6 +1728,43 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ),
             "",
         )
+
+    def test_remaining_workflow_generated_idempotency_keys_are_path_scoped(
+        self,
+    ) -> None:
+        route_smoke_key = (
+            "odoo-driver-route-smoke:${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}:${{ "
+            "env.INSTANCE }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
+        )
+        for path, key, value in (
+            (
+                ".github/workflows/odoo-driver-route-smoke.yml",
+                "idempotency-key",
+                route_smoke_key,
+            ),
+            (
+                ".github/workflows/public-ingress-monitor.yml",
+                "idempotency-key",
+                "public-ingress-monitor:${{ github.run_id }}:${{ github.run_attempt }}",
+            ),
+        ):
+            with self.subTest(path=path, key=key):
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value=value),
+                    "thin_connector_input",
+                )
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+                self.assertEqual(
+                    _allow_reason(path=path, key=key, value="${{ inputs.idempotency_key }}"),
+                    "",
+                )
 
     def test_ingress_workflow_jq_forwards_and_route_options_are_narrow(self) -> None:
         for key, value in (

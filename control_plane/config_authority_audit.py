@@ -82,7 +82,10 @@ ENV_ASSIGNMENT_PATTERN = re.compile(
 SHELL_ENV_PATTERN = re.compile(
     r"\b(?P<key>[A-Z][A-Z0-9_]{2,})\s*=\s*(?P<value>\"[^\"]*\"|'[^']*'|[^\s#]+)"
 )
-YAML_SCALAR_PATTERN = re.compile(r"^\s*(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.+?)\s*$")
+YAML_KEY_PATTERN = r"(?:[A-Za-z0-9_.-]+|\"[^\"]+\"|'[^']+')"
+YAML_SCALAR_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?P<value>.+?)\s*$")
+YAML_EMPTY_MAPPING_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?:#.*)?$")
+YAML_LIST_ITEM_PATTERN = re.compile(r"^\s*-\s*(?P<value>.+?)\s*$")
 GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
 GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
@@ -151,14 +154,137 @@ WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES = {
     },
 }
 WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
+    ".github/workflows/odoo-driver-route-smoke.yml": {
+        "ROUTE_PATHS": frozenset(
+            (
+                "/v1/drivers/odoo/artifact-publish-inputs "
+                "/v1/drivers/odoo/preview-apply-inputs "
+                "/v1/drivers/odoo/preview-apply /v1/previews/pr-feedback",
+            )
+        )
+    },
     ".github/workflows/product-context-cutover-audit.yml": {
         "key": frozenset(('claims.get(key, "")',))
+    },
+    ".github/workflows/provider-target-operations.yml": {
+        "path": frozenset(("provider-target-routes.json provider-target-operation-results/*.json",))
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",))
     },
 }
+WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
+    ".github/workflows/deploy-launchplane.yml": {
+        "inputs.omit_every_code_env.default": frozenset(("false",)),
+        "inputs.omit_npmplus_env.default": frozenset(("false",)),
+        "inputs.omit_owner_agent_env.default": frozenset(("false",)),
+        "inputs.omit_terminal_agent_env.default": frozenset(("false",)),
+    },
+    ".github/workflows/dokploy-target-setup.yml": {
+        "inputs.mode.default": frozenset(("dry-run",)),
+    },
+    ".github/workflows/edge-endpoint-apply.yml": {
+        "inputs.mode.default": frozenset(("dry-run",)),
+    },
+    ".github/workflows/ingress-route-audit-read.yml": {
+        "inputs.limit.default": frozenset(("25",)),
+    },
+    ".github/workflows/live-target-runtime.yml": {
+        "inputs.deploy.default": frozenset(("false",)),
+        "inputs.mode.default": frozenset(("dry-run",)),
+        "inputs.no_cache.default": frozenset(("false",)),
+    },
+    ".github/workflows/merge-train-policy-import.yml": {
+        "inputs.apply.default": frozenset(("false",)),
+    },
+    ".github/workflows/merge-train-runner.yml": {
+        "inputs.batch_candidate_mode.default": frozenset(("none",)),
+        "inputs.batch_landing_mode.default": frozenset(("none",)),
+        "inputs.mutate.default": frozenset(("false",)),
+        "inputs.runner_mode.default": frozenset(("level1",)),
+        "inputs.stack_collapse_mode.default": frozenset(("none",)),
+    },
+    ".github/workflows/odoo-stable-bootstrap.yml": {
+        "inputs.verify_canonical.default": frozenset(("true",)),
+        "inputs.verify_health.default": frozenset(("true",)),
+        "inputs.verify_logo.default": frozenset(("true",)),
+    },
+    ".github/workflows/odoo-target-replacement-apply.yml": {
+        "inputs.allow_empty_data.default": frozenset(("false",)),
+        "inputs.no_cache.default": frozenset(("false",)),
+        "inputs.verify_canonical.default": frozenset(("true",)),
+        "inputs.verify_health.default": frozenset(("true",)),
+        "inputs.verify_logo.default": frozenset(("true",)),
+    },
+    ".github/workflows/odoo-target-replacement-plan.yml": {
+        "inputs.allow_empty_data.default": frozenset(("false",)),
+    },
+    ".github/workflows/preview-lifecycle.yml": {
+        "inputs.apply.default": frozenset(("false",)),
+    },
+    ".github/workflows/product-context-cutover.yml": {
+        "inputs.dry_run.default": frozenset(("true",)),
+    },
+    ".github/workflows/product-environment-evidence.yml": {
+        "inputs.routes_json.default": frozenset(("[]",)),
+        "inputs.target_set.default": frozenset(("configured-json",)),
+    },
+    ".github/workflows/product-legacy-context-cleanup.yml": {
+        "inputs.dry_run.default": frozenset(("true",)),
+    },
+    ".github/workflows/provider-target-operations.yml": {
+        "inputs.mode.default": frozenset(("audit",)),
+        "inputs.routes_json.default": frozenset(("[]",)),
+        "inputs.target_set.default": frozenset(("single",)),
+    },
+    ".github/workflows/public-ingress-monitor.yml": {
+        "inputs.notify.default": frozenset(("true",)),
+        "inputs.timeout_seconds.default": frozenset(("10",)),
+    },
+    ".github/workflows/reusable-odoo-artifact-publish.yml": {
+        "inputs.timeout-ms.default": frozenset(("600000",)),
+    },
+    ".github/workflows/reusable-odoo-post-deploy.yml": {
+        "inputs.timeout-ms.default": frozenset(("600000",)),
+    },
+    ".github/workflows/reusable-odoo-prod-promotion.yml": {
+        "inputs.timeout-ms.default": frozenset(("2700000",)),
+    },
+    ".github/workflows/reusable-odoo-prod-rollback.yml": {
+        "inputs.timeout-ms.default": frozenset(("1800000",)),
+    },
+    ".github/workflows/reusable-odoo-testing-deploy.yml": {
+        "inputs.timeout-ms.default": frozenset(("2700000",)),
+    },
+    ".github/workflows/runner-host-hygiene.yml": {
+        "inputs.action.default": frozenset(("prune_docker_cache",)),
+        "inputs.minimum_free_disk_bytes.default": frozenset(("0",)),
+        "inputs.mutate.default": frozenset(("false",)),
+        "inputs.prune_until.default": frozenset(("168h",)),
+        "inputs.timeout_seconds.default": frozenset(("300",)),
+    },
+    ".github/workflows/runner-lane-registration.yml": {
+        "inputs.mutate.default": frozenset(("false",)),
+        "inputs.registration_root.default": frozenset(("auto",)),
+    },
+    ".github/workflows/tracked-target-logs.yml": {
+        "inputs.lines.default": frozenset(("200",)),
+        "inputs.since.default": frozenset(("1h",)),
+    },
+}
+WORKFLOW_RUNS_ON_MECHANIC_VALUES = frozenset(
+    (
+        "self-hosted",
+        "ubuntu-latest",
+        "${{ vars.LAUNCHPLANE_RUNNER_LABEL }}",
+    )
+)
 WORKFLOW_LAUNCHPLANE_URL_REFERENCE_PATH_VALUES = {
+    ".github/workflows/odoo-driver-route-smoke.yml": {
+        "LAUNCHPLANE_URL": frozenset(
+            ("${{ inputs.launchplane_url || vars.LAUNCHPLANE_PUBLIC_URL }}",)
+        )
+    },
     ".github/workflows/preview-lifecycle.yml": {
         "LAUNCHPLANE_URL": frozenset(("${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}",))
     },
@@ -245,7 +371,8 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "idempotency-key": frozenset(("${{ inputs.idempotency_key }}",)),
     },
     ".github/workflows/merge-train-policy-import.yml": {
-        "POLICY_REPOSITORY": frozenset(("${{ inputs.repository }}",))
+        "POLICY_BASE_BRANCH": frozenset(("${{ inputs.base_branch }}",)),
+        "POLICY_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
     },
     ".github/workflows/merge-train-runner.yml": {
         "REQUESTED_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
@@ -260,9 +387,17 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
         "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
     },
+    ".github/workflows/product-environment-evidence.yml": {
+        "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
+        "TARGET_SET": frozenset(("${{ inputs.target_set }}",)),
+    },
     ".github/workflows/product-legacy-context-cleanup.yml": {
         "SOURCE_CONTEXT": frozenset(("${{ inputs.source_context }}",)),
         "TARGET_CONTEXT": frozenset(("${{ inputs.target_context }}",)),
+    },
+    ".github/workflows/provider-target-operations.yml": {
+        "PROVIDER_ID": frozenset(("${{ inputs.provider_id }}",)),
+        "TARGET_SET": frozenset(("${{ inputs.target_set }}",)),
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
@@ -286,10 +421,18 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
         "PRODUCT_INPUT": frozenset(("${{ inputs.product }}",)),
     },
     ".github/workflows/odoo-config-parameter-override.yml": {
-        "KEY_NAME": frozenset(("${{ inputs.key }}",))
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",)),
+        "KEY_NAME": frozenset(("${{ inputs.key }}",)),
+    },
+    ".github/workflows/odoo-driver-route-smoke.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",))
+    },
+    ".github/workflows/odoo-website-bootstrap-override.yml": {
+        "CONTEXT_NAME": frozenset(("${{ inputs.context }}",))
     },
     ".github/workflows/runner-lane-registration.yml": {
         "AUDIT_RECORD_KEY": frozenset(("${{ inputs.audit_record_key }}",)),
+        "LANE_NAME": frozenset(("${{ inputs.lane_name }}",)),
         "TARGET_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
     },
 }
@@ -329,6 +472,12 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {"context": frozenset((".",))},
     ".github/workflows/odoo-driver-route-smoke.yml": {
         "IMAGE_REPOSITORY": frozenset(("${{ steps.publish_inputs.outputs.image_repository }}",)),
+        "idempotency-key": frozenset(
+            (
+                "odoo-driver-route-smoke:${{ env.PRODUCT }}:${{ env.CONTEXT_NAME }}:${{ "
+                "env.INSTANCE }}:run-${{ github.run_id }}-attempt-${{ github.run_attempt }}",
+            )
+        ),
         "odoo-driver-route-smoke": frozenset(
             (
                 "${{ env.PRODUCT }}:${{",
@@ -382,6 +531,11 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
     },
     ".github/workflows/reusable-odoo-testing-deploy.yml": {
         "idempotency-key": frozenset(("${{ steps.product.outputs.idempotency_key }}",))
+    },
+    ".github/workflows/public-ingress-monitor.yml": {
+        "idempotency-key": frozenset(
+            ("public-ingress-monitor:${{ github.run_id }}:${{ github.run_attempt }}",)
+        )
     },
     ".github/workflows/runner-host-hygiene.yml": {
         "RUNNER_REPOSITORY_SCOPE": frozenset(("${{ github.repository }}",))
@@ -767,9 +921,12 @@ def _candidate_paths(
     if paths:
         return sorted(
             {
-                _resolve_scan_path(root=root, path=path)
+                discovered_path
                 for path in paths
-                if _resolve_scan_path(root=root, path=path).is_file()
+                for discovered_path in _explicit_scan_paths(
+                    root=root,
+                    path=_resolve_scan_path(root=root, path=path),
+                )
             }
         )
     if mode == "changed-files-gate":
@@ -791,6 +948,17 @@ def _candidate_paths(
             root / relative_path for relative_path in _git_untracked_relative_paths(root)
         )
     return sorted(discovered_paths)
+
+
+def _explicit_scan_paths(*, root: Path, path: Path) -> Iterable[Path]:
+    if path.is_file():
+        yield path
+        return
+    if not path.is_dir():
+        return
+    for candidate in sorted(path.rglob("*")):
+        if candidate.is_file() and root in (candidate, *candidate.parents):
+            yield candidate
 
 
 def _scan_source_file(
@@ -1042,36 +1210,89 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     candidates: list[tuple[int, str, object]] = []
     lines = text.splitlines()
     index = 0
+    context_stack: list[tuple[int, str]] = []
     while index < len(lines):
         line_number = index + 1
         line = lines[index]
         stripped = line.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+        if not stripped or stripped.startswith("#"):
+            index += 1
+            continue
+        indent = _leading_space_count(line)
+        context_stack = _yaml_context_for_indent(context_stack, indent=indent)
+        list_match = YAML_LIST_ITEM_PATTERN.match(line)
+        if list_match is not None:
+            list_key = _yaml_list_candidate_key(context_stack)
+            if list_key:
+                candidates.append((line_number, list_key, _unquote(list_match.group("value"))))
+            index += 1
+            continue
+        empty_match = YAML_EMPTY_MAPPING_PATTERN.match(line)
+        if empty_match is not None:
+            context_stack.append((indent, _unquote(empty_match.group("key"))))
             index += 1
             continue
         match = YAML_SCALAR_PATTERN.match(line)
         if match is None:
             index += 1
             continue
-        if match.group("key") in IGNORED_YAML_SCALAR_KEYS:
-            index += 1
-            continue
+        yaml_key = _unquote(match.group("key"))
+        key = _yaml_candidate_key(context_stack, yaml_key)
         value = _strip_inline_comment(match.group("value")).strip()
         if value in YAML_BLOCK_SCALAR_OPENERS:
             block_lines, next_index = _yaml_block_scalar_lines(
                 lines=lines,
                 start_index=index + 1,
-                parent_indent=_leading_space_count(line),
+                parent_indent=indent,
             )
+            if yaml_key in IGNORED_YAML_SCALAR_KEYS:
+                index = next_index
+                continue
             block_value = " ".join(block_lines).strip()
             if block_value:
-                candidates.append((line_number, match.group("key"), block_value))
+                candidates.append((line_number, key, block_value))
             index = next_index
             continue
+        if yaml_key in IGNORED_YAML_SCALAR_KEYS:
+            index += 1
+            continue
         if value:
-            candidates.append((line_number, match.group("key"), _unquote(value)))
+            candidates.append((line_number, key, _unquote(value)))
         index += 1
     return candidates
+
+
+def _yaml_context_for_indent(
+    context_stack: Sequence[tuple[int, str]], *, indent: int
+) -> list[tuple[int, str]]:
+    return [
+        (context_indent, key) for context_indent, key in context_stack if context_indent < indent
+    ]
+
+
+def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> str:
+    if key == "default":
+        input_name = _yaml_workflow_input_name(context_stack)
+        if input_name:
+            return f"inputs.{input_name}.default"
+    return key
+
+
+def _yaml_list_candidate_key(context_stack: Sequence[tuple[int, str]]) -> str:
+    if context_stack and context_stack[-1][1] == "runs-on":
+        return "runs-on"
+    return ""
+
+
+def _yaml_workflow_input_name(context_stack: Sequence[tuple[int, str]]) -> str:
+    keys = [key for _, key in context_stack]
+    for index in range(len(keys) - 2):
+        if keys[index : index + 2] in (
+            ["workflow_dispatch", "inputs"],
+            ["workflow_call", "inputs"],
+        ):
+            return keys[index + 2]
+    return ""
 
 
 def _yaml_block_scalar_lines(
@@ -1177,6 +1398,11 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
     normalized = path.replace("\\", "/")
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value)
+    if normalized.startswith(".github/workflows/") and _is_empty_workflow_input_default(
+        key=key,
+        value=value,
+    ):
+        return False
     if _is_click_option_metadata_key(key):
         return True
     if _is_repo_metadata_ergonomics_key(key):
@@ -1184,7 +1410,9 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
     if key_text in WORKFLOW_RUNTIME_AUTHORITY_KEYS:
         return True
     if normalized.startswith(".github/workflows/") and (
-        _is_launchplane_service_route_path(key=key, value=value)
+        key_text == "RUNS_ON"
+        or _is_workflow_input_default_key(key)
+        or _is_launchplane_service_route_path(key=key, value=value)
         or _is_workflow_mechanic_key_value(key=key, value=value)
         or _is_workflow_operator_input_value(key=key, value=value)
         or _is_workflow_context_reference_restricted_value(value)
@@ -1214,22 +1442,45 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
 
 def _rule_id(*, key: str, value: object) -> str:
     leaf_text = _semantic_leaf_text(key)
+    full_key_text = key.upper().replace(".", "_").replace("-", "_")
+    semantic_key_text = full_key_text if _is_workflow_input_default_key(key) else leaf_text
     value_text = _string_value(value)
-    if any(part in leaf_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
+    if any(part in semantic_key_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
         return "secret_binding_identity"
-    if URL_PATTERN.search(value_text) or "DOMAIN" in leaf_text or "URL" in leaf_text:
+    if (
+        URL_PATTERN.search(value_text)
+        or "DOMAIN" in semantic_key_text
+        or "URL" in semantic_key_text
+    ):
         return "domain_or_url_authority"
-    if OWNER_REPO_PATTERN.search(value_text) or "REPO" in leaf_text or "REPOSITORY" in leaf_text:
+    if (
+        OWNER_REPO_PATTERN.search(value_text)
+        or "REPO" in semantic_key_text
+        or "REPOSITORY" in semantic_key_text
+    ):
         return "repository_authority"
-    if "AUTHZ" in leaf_text or "OPERATOR" in leaf_text or "SUBJECT" in leaf_text:
+    if (
+        "AUTHZ" in semantic_key_text
+        or "OPERATOR" in semantic_key_text
+        or "SUBJECT" in semantic_key_text
+    ):
         return "authz_or_operator_authority"
     if (
-        "TARGET" in leaf_text
-        or "PROVIDER" in leaf_text
+        "TARGET" in semantic_key_text
+        or "PROVIDER" in semantic_key_text
         or PROVIDER_TARGET_PATTERN.search(value_text)
     ):
         return "provider_target_authority"
     return "runtime_config_authority"
+
+
+def _is_workflow_input_default_key(key: str) -> bool:
+    return key.startswith("inputs.") and key.endswith(".default")
+
+
+def _is_empty_workflow_input_default(*, key: str, value: object) -> bool:
+    value_text = _string_value(value).strip()
+    return _is_workflow_input_default_key(key) and value_text in {"", "[]"}
 
 
 def _severity(*, rule_id: str, key: str) -> str:
@@ -1294,6 +1545,12 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_input_mechanic_default(
+        path=normalized,
+        key=key,
+        value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_thin_connector_key_value(
         path=normalized,
         key=key,
@@ -1351,6 +1608,7 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         normalized.startswith(".github/workflows/")
         and not _is_workflow_runtime_authority_key(key)
         and not _is_workflow_operator_input_key(key)
+        and key_text != "RUNS_ON"
         and not _is_route_path_key(key)
         and not _is_workflow_context_reference_restricted_key(key)
         and not _is_workflow_context_reference_restricted_value(value)
@@ -1542,6 +1800,8 @@ def _is_ingress_route_option_literal(*, path: str, key: str, value: object) -> b
 def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     key_text = key.upper().replace(".", "_").replace("-", "_")
     value_text = _string_value(value).strip()
+    if key_text == "RUNS_ON":
+        return value_text in WORKFLOW_RUNS_ON_MECHANIC_VALUES
     if key_text == "ID_TOKEN" and value_text == "write":
         return True
     if key_text == "GROUP" and "${{ inputs." in value_text and "${{ vars." not in value_text:
@@ -1549,6 +1809,16 @@ def _is_workflow_mechanic_key_value(*, key: str, value: object) -> bool:
     if key_text == "PATH" and re.fullmatch(r"[A-Za-z0-9_.-]+\.json", value_text):
         return True
     return False
+
+
+def _is_workflow_input_mechanic_default(*, path: str, key: str, value: object) -> bool:
+    if not _is_workflow_input_default_key(key):
+        return False
+    allowed_values = WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES.get(path, {}).get(key)
+    if allowed_values is None:
+        return False
+    value_text = _string_value(value).strip()
+    return value_text in allowed_values
 
 
 def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object) -> bool:

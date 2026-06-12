@@ -22,7 +22,6 @@ name: Odoo Config Parameter Override
       key:
         description: Odoo config parameter key.
         required: true
-        default: web.base.url
         type: choice
         options:
           - web.base.url

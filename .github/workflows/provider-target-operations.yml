@@ -40,8 +40,7 @@ name: Provider Target Operations
         type: string
       provider_id:
         description: Provider id to inspect/backfill.
-        required: false
-        default: dokploy
+        required: true
         type: string
       confirmation:
         description: Exact apply confirmation text.

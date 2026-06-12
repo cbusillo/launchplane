@@ -10,23 +10,19 @@ name: Merge Train Policy Import
         type: string
       base_branch:
         description: Base branch protected by the merge train
-        required: false
-        default: main
+        required: true
         type: string
       enqueue_label:
         description: Label required before a pull request can enter the train
-        required: false
-        default: ready-to-merge
+        required: true
         type: string
       blocked_label:
         description: Label Launchplane applies when a pull request blocks
-        required: false
-        default: merge-blocked
+        required: true
         type: string
       merge_method:
         description: GitHub merge method
-        required: false
-        default: merge
+        required: true
         type: choice
         options:
           - merge
@@ -34,21 +30,18 @@ name: Merge Train Policy Import
           - rebase
       failure_policy:
         description: Worker behavior after a blocking pull request
-        required: false
-        default: pause_train
+        required: true
         type: choice
         options:
           - pause_train
           - continue_after_blocking_pr
       source_label:
         description: Source label stored on the policy record
-        required: false
-        default: workflow:merge-train-policy-import
+        required: true
         type: string
       reason:
         description: Audit reason used when apply is true
         required: false
-        default: Configure merge train policy for requested repository.
         type: string
       apply:
         description: Apply after the service dry-run succeeds

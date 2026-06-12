@@ -80,11 +80,7 @@ name: Reusable Odoo Artifact Publish
       instance:
         description: Odoo instance whose artifact should be published.
         required: true
-        default: testing
-        type: choice
-        options:
-          - testing
-          - prod
+        type: string
       product_repository:
         description: Product source repository, formatted as owner/name.
         required: true
