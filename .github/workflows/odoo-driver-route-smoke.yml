@@ -45,11 +45,7 @@ name: Odoo Driver Route Smoke
       instance:
         description: Odoo instance whose publish inputs should resolve.
         required: true
-        default: testing
-        type: choice
-        options:
-          - testing
-          - prod
+        type: string
       source_git_ref:
         description: Source ref attached to the smoke request.
         required: true

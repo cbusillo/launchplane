@@ -11,15 +11,10 @@ name: Odoo Target Replacement Apply
       instance:
         description: Stable Odoo instance to recreate in place.
         required: true
-        default: testing
-        type: choice
-        options:
-          - testing
-          - prod
+        type: string
       strategy:
         description: Replacement strategy to apply.
         required: true
-        default: recreate-in-place
         type: choice
         options:
           - recreate-in-place
@@ -46,7 +41,6 @@ name: Odoo Target Replacement Apply
       data_source_mode:
         description: Prelaunch rebuild data authority for resettable targets.
         required: true
-        default: existing
         type: choice
         options:
           - existing

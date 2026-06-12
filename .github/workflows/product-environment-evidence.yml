@@ -21,7 +21,6 @@ name: Product Environment Evidence
       provider_id:
         description: Expected provider id for recorded target authority.
         required: true
-        default: dokploy
         type: string
 
 permissions:

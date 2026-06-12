@@ -46,7 +46,6 @@ name: Ingress Route Dry Run
       forward_scheme:
         description: Upstream scheme.
         required: true
-        default: http
         type: choice
         options:
           - http
@@ -58,7 +57,6 @@ name: Ingress Route Dry Run
       route_options_json:
         description: Optional JSON object for route toggles and provider options.
         required: true
-        default: "{}"
         type: string
 permissions:
   contents: read

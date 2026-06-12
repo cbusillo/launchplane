@@ -15,7 +15,6 @@ name: Dokploy Target Setup
       operation:
         description: Target setup operation.
         required: true
-        default: create-compose
         type: choice
         options:
           - adopt
@@ -33,7 +32,6 @@ name: Dokploy Target Setup
       target_type:
         description: Target type when operation=adopt.
         required: false
-        default: compose
         type: choice
         options:
           - compose
@@ -91,12 +89,10 @@ name: Dokploy Target Setup
       source_type:
         description: Source type to store for compose targets.
         required: false
-        default: raw
         type: string
       compose_path:
         description: Compose path to store for compose targets.
         required: false
-        default: docker-compose.yml
         type: string
       domain:
         description: Optional comma-separated domain hosts to store/reconcile.
@@ -116,7 +112,6 @@ name: Dokploy Target Setup
       deploy_timeout_seconds:
         description: Optional deploy timeout to store.
         required: false
-        default: "900"
         type: string
       confirmation:
         description: Type APPLY DOKPLOY TARGET SETUP when mode=apply.

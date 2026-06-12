@@ -130,11 +130,12 @@ the required pre/post host evidence.
 ## Approved Ops-Lane Executor
 
 The first live executor is `.github/workflows/runner-host-hygiene.yml`. It runs
-on a dedicated self-hosted ops lane with labels `self-hosted`, `launchplane`,
-and `chris-testing-ops-gate`, authenticates back to Launchplane with GitHub
-Actions OIDC, and executes on the runner host as the constrained service user.
-The workflow runs daily on a schedule in dry-run mode and can also be manually
-dispatched for approved mutations. Scheduled runs generate an audit key under
+on a dedicated self-hosted ops lane selected by the operator-managed
+`LAUNCHPLANE_RUNNER_LABEL` repository variable, authenticates back to
+Launchplane with GitHub Actions OIDC, and executes on the runner host as the
+constrained service user. The workflow runs daily on a schedule in dry-run mode
+and can also be manually dispatched for approved mutations. Scheduled runs
+generate an audit key under
 `runner-host-hygiene/<date>/<host>-scheduled-report-<run-id>` and always pass
 `--dry-run`, even if a future workflow default changes.
 It supports `prune_docker_cache`, implemented as a bounded BuildKit prune:

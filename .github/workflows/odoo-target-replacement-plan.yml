@@ -11,15 +11,10 @@ name: Odoo Target Replacement Plan
       instance:
         description: Stable Odoo instance to inspect.
         required: true
-        default: testing
-        type: choice
-        options:
-          - testing
-          - prod
+        type: string
       strategy:
         description: Future replacement strategy to plan around.
         required: true
-        default: recreate-in-place
         type: choice
         options:
           - recreate-in-place
@@ -32,7 +27,6 @@ name: Odoo Target Replacement Plan
       data_source_mode:
         description: Prelaunch rebuild data authority for resettable targets.
         required: true
-        default: existing
         type: choice
         options:
           - existing

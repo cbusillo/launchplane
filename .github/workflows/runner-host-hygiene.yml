@@ -57,8 +57,7 @@ jobs:
   runner-host-hygiene:
     runs-on:
       - self-hosted
-      - launchplane
-      - chris-testing-ops-gate
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       RUNNER_HOST_NAME: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}

@@ -27,7 +27,6 @@ name: Edge Endpoint Apply
       upstream_scheme:
         description: Upstream scheme passed to the edge provider.
         required: true
-        default: https
         type: choice
         options:
           - http
@@ -35,12 +34,10 @@ name: Edge Endpoint Apply
       upstream_port:
         description: Upstream port passed to the edge provider.
         required: true
-        default: 443
         type: number
       status:
         description: Edge endpoint lifecycle status.
         required: true
-        default: active
         type: choice
         options:
           - active
