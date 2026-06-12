@@ -838,12 +838,15 @@ Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
 and writes the full Launchplane-owned bundle: product profile, existing
 Dokploy-backed target records, target-id records, runtime-environment records,
-and managed secret binding placeholders. Manifests must use neutral
-`provider_targets`; obsolete `dokploy_targets` input is rejected with a clear
-validation error. The route is restricted to `product_onboarding.apply`
-authority for product/context `launchplane`, requires DB-backed storage,
-and returns only sanitized `provider_target*` summaries. Product records are not
-loaded from checked-in catalogs or product repos.
+and managed secret binding placeholders. The manual `Product Onboarding`
+workflow is the supported shared and production caller: operators pass the
+manifest as runtime workflow input, and product-specific onboarding JSON stays
+out of checked-in catalogs. Manifests must use neutral `provider_targets`;
+obsolete `dokploy_targets` input is rejected with a clear validation error. The
+route is restricted to `product_onboarding.apply` authority for product/context
+`launchplane`, requires DB-backed storage, and returns only sanitized
+`provider_target*` summaries. Product records are not loaded from checked-in
+catalogs or product repos.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
 deleted runtime identity records under neutral `provider_targets` and

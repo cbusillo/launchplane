@@ -1,0 +1,176 @@
+---
+name: Product Onboarding
+
+"on":
+  workflow_dispatch:
+    inputs:
+      manifest_base64:
+        description: Base64-encoded product onboarding JSON manifest.
+        required: true
+        type: string
+      confirmation:
+        description: Type APPLY PRODUCT ONBOARDING to apply records.
+        required: true
+        type: string
+      reason:
+        description: Operator reason for applying onboarding records.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: product-onboarding
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      MANIFEST_BASE64: ${{ inputs.manifest_base64 }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      REASON: ${{ inputs.reason }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve service endpoint
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          origin="${LAUNCHPLANE_URL%/}"
+          without_scheme="${origin#*://}"
+          audience="${without_scheme%%/*}"
+          audience="${audience%%:*}"
+          if [ -z "$audience" ] || [ "$audience" = "$origin" ]; then
+            echo "LAUNCHPLANE_URL must be an absolute URL." >&2
+            exit 1
+          fi
+          {
+            echo "origin=$origin"
+            echo "audience=$audience"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate apply guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "APPLY PRODUCT ONBOARDING" ]; then
+            echo "Exact confirmation text is required." >&2
+            exit 1
+          fi
+          if [ -z "$(printf '%s' "$REASON" | xargs)" ]; then
+            echo "reason is required." >&2
+            exit 1
+          fi
+
+      - name: Build onboarding request
+        id: onboarding
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${MANIFEST_BASE64:?Missing manifest_base64 input}"
+          manifest_file="${RUNNER_TEMP}/product-onboarding-manifest.json"
+          request_file="${RUNNER_TEMP}/product-onboarding-request.json"
+          python3 - <<'PY' > "$manifest_file"
+          import base64
+          import binascii
+          import os
+          import sys
+
+          try:
+              sys.stdout.buffer.write(
+                  base64.b64decode(
+                      os.environ["MANIFEST_BASE64"].encode("ascii"), validate=True
+                  )
+              )
+          except (binascii.Error, UnicodeEncodeError) as error:
+              raise SystemExit(f"manifest_base64 must be valid base64: {error}")
+          PY
+          jq -e 'type == "object"' "$manifest_file" >/dev/null
+          product="$(jq -r '.product // empty' "$manifest_file")"
+          if [ -z "$product" ]; then
+            echo "Product onboarding manifest requires product." >&2
+            exit 1
+          fi
+          jq -n \
+            --slurpfile manifest "$manifest_file" \
+            '{schema_version: 1, product: "launchplane", manifest: $manifest[0]}' \
+            > "$request_file"
+          {
+            echo "request_file=$request_file"
+            echo "product=$product"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Request product onboarding apply
+        env:
+          SERVICE_ORIGIN: ${{ steps.service.outputs.origin }}
+          SERVICE_AUDIENCE: ${{ steps.service.outputs.audience }}
+          REQUEST_FILE: ${{ steps.onboarding.outputs.request_file }}
+          PRODUCT: ${{ steps.onboarding.outputs.product }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token value." >&2
+            exit 1
+          fi
+
+          status_code="$({
+            curl -sS \
+              -o product-onboarding.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: product-onboarding:${PRODUCT}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data @"$REQUEST_FILE" \
+              "${SERVICE_ORIGIN%/}/v1/product-onboarding/apply"
+          })"
+          if [ "$status_code" != "202" ]; then
+            cat product-onboarding.json >&2
+            echo "Product onboarding failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+          jq . product-onboarding.json
+
+      - name: Upload onboarding evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: product-onboarding-result
+          path: product-onboarding.json
+          if-no-files-found: error
+
+      - name: Summarize onboarding
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Product onboarding"
+            echo
+            echo "- Product: ${{ steps.onboarding.outputs.product }}"
+            echo "- Evidence artifact: product-onboarding-result"
+            if [ -f product-onboarding.json ]; then
+              echo "- Status: $(jq -r '.status // "unknown"' product-onboarding.json)"
+              echo "- Trace: $(jq -r '.trace_id // ""' product-onboarding.json)"
+              echo "- Product profile: $(jq -r '.records.product_profile // ""' product-onboarding.json)"
+              echo "- Provider targets: $(jq -r '.records.provider_target_count // "0"' product-onboarding.json)"
+              echo "- Provider target IDs: $(jq -r '.records.provider_target_id_count // "0"' product-onboarding.json)"
+              echo "- Runtime environments: $(jq -r '.records.runtime_environment_record_count // "0"' product-onboarding.json)"
+              echo "- Secret bindings: $(jq -r '.records.secret_binding_count // "0"' product-onboarding.json)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

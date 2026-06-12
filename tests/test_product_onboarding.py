@@ -1060,6 +1060,26 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("authz-policy-grant-maintenance-run", script_text)
         self.assertIn("workflow_run", script_text)
 
+    def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
+        workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("/v1/product-onboarding/apply", workflow_text)
+        self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
+        self.assertIn("manifest_base64", workflow_text)
+        self.assertIn("product-onboarding:${PRODUCT}:${GITHUB_RUN_ID}", workflow_text)
+        self.assertIn("product-onboarding-result", workflow_text)
+
+    def test_deploy_authz_grants_include_product_onboarding_apply(self) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("product-onboarding.yml", script_text)
+        self.assertIn("product_onboarding.apply", script_text)
+        self.assertIn("deploy:product-onboarding-grant", script_text)
+
     def test_deploy_authz_grants_do_not_restore_stale_import_self_deploy_rules(
         self,
     ) -> None:

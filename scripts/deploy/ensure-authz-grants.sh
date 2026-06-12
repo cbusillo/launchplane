@@ -546,6 +546,14 @@ post_grant \
 	dokploy_target.setup \
 	deploy:dokploy-target-setup-grant \
 	dokploy-target-setup
+post_grant \
+	"$GITHUB_REPOSITORY" \
+	product-onboarding.yml \
+	launchplane \
+	launchplane \
+	product_onboarding.apply \
+	deploy:product-onboarding-grant \
+	product-onboarding
 post_launchplane_service_grant \
 	edge-endpoint-apply.yml \
 	edge_endpoint.apply \
