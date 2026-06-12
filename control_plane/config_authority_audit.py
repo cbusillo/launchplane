@@ -1845,7 +1845,11 @@ def _is_workflow_jq_operator_field(*, path: str, key: str, value: object) -> boo
 
 
 def _is_workflow_response_summary_field(*, path: str, key: str, value: object) -> bool:
-    allowed_values = WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES.get(path, {}).get(key)
+    allowed_values = _workflow_path_key_values(
+        WORKFLOW_RESPONSE_SUMMARY_PATH_VALUES,
+        path=path,
+        key=key,
+    )
     if allowed_values is None:
         return False
     value_text = _string_value(value).strip().rstrip(",")
@@ -1853,7 +1857,11 @@ def _is_workflow_response_summary_field(*, path: str, key: str, value: object) -
 
 
 def _is_workflow_block_mechanic_field(*, path: str, key: str, value: object) -> bool:
-    allowed_values = WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES.get(path, {}).get(key)
+    allowed_values = _workflow_path_key_values(
+        WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES,
+        path=path,
+        key=key,
+    )
     if allowed_values is None:
         return False
     value_text = _string_value(value).strip()
@@ -1904,11 +1912,33 @@ def _is_workflow_input_mechanic_default(*, path: str, key: str, value: object) -
 
 
 def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object) -> bool:
-    allowed_values = WORKFLOW_THIN_CONNECTOR_PATH_VALUES.get(path, {}).get(key)
+    allowed_values = _workflow_path_key_values(
+        WORKFLOW_THIN_CONNECTOR_PATH_VALUES,
+        path=path,
+        key=key,
+    )
     if allowed_values is None:
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _workflow_path_key_values(
+    path_values: Mapping[str, Mapping[str, frozenset[str]]],
+    *,
+    path: str,
+    key: str,
+) -> frozenset[str] | None:
+    keyed_values = path_values.get(path, {})
+    allowed_values = keyed_values.get(key)
+    if allowed_values is not None:
+        return allowed_values
+    # The YAML block parser emits payload-fields.<field>, while small
+    # path allowlists may describe the inner field name directly.
+    if key.startswith("payload-fields."):
+        return keyed_values.get(key.removeprefix("payload-fields."))
+    payload_field_key = f"payload-fields.{key}"
+    return keyed_values.get(payload_field_key)
 
 
 def _is_workflow_payload_field_forward(*, key: str, value: object) -> bool:
