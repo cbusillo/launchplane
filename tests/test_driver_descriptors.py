@@ -217,13 +217,31 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(descriptor.base_driver_id, "")
         self.assertEqual(descriptor.context_patterns, ())
         self.assertIn("image_deployable", capability_ids)
+        self.assertIn("legacy_source_ref_deployable", capability_ids)
         self.assertIn("health_checked", capability_ids)
         self.assertIn("previewable", capability_ids)
         self.assertIn("preview_inventory_managed", capability_ids)
         self.assertIn("pr_feedback", capability_ids)
+        capabilities = {
+            capability.capability_id: capability for capability in descriptor.capabilities
+        }
+        self.assertNotIn("source_ref_deploy", capabilities["image_deployable"].actions)
+        self.assertEqual(
+            capabilities["legacy_source_ref_deployable"].actions,
+            ("source_ref_deploy",),
+        )
         actions = {action.action_id: action for action in descriptor.actions}
         self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
         self.assertEqual(actions["stable_deploy"].safety, "mutation")
+        self.assertEqual(
+            actions["source_ref_deploy"].route_path,
+            "/v1/drivers/generic-web/source-ref-deploy",
+        )
+        self.assertEqual(actions["source_ref_deploy"].safety, "mutation")
+        self.assertEqual(
+            actions["source_ref_deploy"].authz_action,
+            "generic_web_source_ref_deploy.execute",
+        )
         self.assertEqual(
             actions["prod_rollback_plan"].route_path,
             "/v1/drivers/generic-web/prod-rollback-plan",
@@ -658,6 +676,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertIn(
             control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
+            dispatch_routes,
+        )
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+
+    def test_generic_web_source_ref_deploy_registered_in_descriptor_dispatch(self) -> None:
+        dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
+
+        self.assertIn(
+            control_plane_service._GENERIC_WEB_SOURCE_REF_DEPLOY_ROUTE.route_path,
             dispatch_routes,
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)

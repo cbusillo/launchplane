@@ -188,6 +188,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.dokploy_deploy import DokployComposeSourceRefDeployResult
 from control_plane.workflows.generic_web_rollback import GenericWebRollbackApplyResult
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
@@ -18630,6 +18631,101 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
         deploy.assert_not_called()
 
+    def test_generic_web_source_ref_deploy_route_uses_distinct_authz_and_replays(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_source_ref_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = DokployComposeSourceRefDeployResult(
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="compose-syo-testing",
+                target_name="syo-testing-compose",
+                source_git_ref="abc123",
+                provider_source_ref="refs/heads/launchplane-deploy/abc123",
+                original_source_ref="main",
+                restored_source_ref="main",
+                deploy_status="pass",
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "deploy": {
+                    "schema_version": 1,
+                    "context": "sellyouroutboard-testing",
+                    "instance": "testing",
+                    "source_git_ref": "abc123",
+                    "provider_source_ref": "refs/heads/launchplane-deploy/abc123",
+                },
+            }
+
+            with (
+                patch(
+                    "control_plane.drivers.generic_web_dispatch.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.drivers.generic_web_dispatch.execute_dokploy_compose_source_ref_deploy",
+                    return_value=driver_result,
+                ) as deploy,
+            ):
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/source-ref-deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-source-ref-syo-testing"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/source-ref-deploy",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-source-ref-syo-testing"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["records"]["target_id"], "compose-syo-testing")
+        self.assertEqual(first_payload["result"]["source_git_ref"], "abc123")
+        self.assertEqual(
+            first_payload["result"]["provider_source_ref"],
+            "refs/heads/launchplane-deploy/abc123",
+        )
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(first_payload["result"], second_payload["result"])
+        deploy.assert_called_once()
+        _, kwargs = deploy.call_args
+        self.assertEqual(kwargs["request"].context, "sellyouroutboard-testing")
+        self.assertEqual(kwargs["request"].instance, "testing")
+
     def test_generic_web_deploy_route_accepts_padded_lane_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -20477,8 +20573,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(driver["driver_id"], "sellyouroutboard")
         self.assertEqual(driver["descriptor"]["base_driver_id"], "generic-web")
         self.assertEqual(driver["descriptor"]["product"], "sellyouroutboard")
+        available_actions = {action["action_id"]: action for action in driver["available_actions"]}
         self.assertEqual(
-            driver["available_actions"][1]["route_path"], "/v1/drivers/generic-web/prod-promotion"
+            available_actions["prod_promotion"]["route_path"],
+            "/v1/drivers/generic-web/prod-promotion",
         )
 
     def test_generic_web_preview_desired_state_route_uses_profile_context(self) -> None:
