@@ -647,7 +647,7 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         public_url = next(
             finding for finding in _findings(payload) if finding["key"] == "public-url"
         )
-        self.assertEqual(public_url["allow_reason"], "thin_connector_input")
+        self.assertEqual(public_url["allow_reason"], "")
         findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
         for key in ("product-input", "event-product-input"):
             finding = findings_by_key[key]
@@ -981,6 +981,54 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotIn("repository", keys)
         self.assertNotIn("base_branch", keys)
 
+    def test_workflow_block_scalar_payload_fields_are_scanned_individually(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "testing-deploy.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Testing deploy\n"
+                "jobs:\n"
+                "  testing-deploy:\n"
+                "    steps:\n"
+                "      - id: lp\n"
+                "        with:\n"
+                "          payload-fields: |-\n"
+                "            product=${{ steps.product.outputs.product }}\n"
+                "            replacement.product=${{ steps.product.outputs.product }}\n"
+                "            replacement.artifact_id=${{ inputs.artifact_id }}\n"
+                "            replacement.source_git_ref=${{ github.event.inputs.source_git_ref }}\n"
+                "            replacement.reason=${{ env.REASON }}\n"
+                "            replacement.branch=main\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        findings_by_key: dict[str, list[dict[str, object]]] = {}
+        for finding in _findings(payload):
+            findings_by_key.setdefault(str(finding["key"]), []).append(finding)
+        for key in (
+            "payload-fields.product",
+            "payload-fields.replacement.product",
+            "payload-fields.replacement.artifact_id",
+            "payload-fields.replacement.source_git_ref",
+            "payload-fields.replacement.reason",
+            "payload-fields.replacement.branch",
+        ):
+            self.assertIn(key, findings_by_key)
+            self.assertEqual(len(findings_by_key[key]), 1)
+        self.assertEqual(
+            findings_by_key["payload-fields.replacement.branch"][0]["evidence"],
+            "<redacted-runtime-identity>",
+        )
+        self.assertEqual(
+            findings_by_key["payload-fields.replacement.branch"][0]["allow_reason"],
+            "test_fixture",
+        )
+
     def test_workflow_operator_input_forwarding_is_scanned_and_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1171,12 +1219,72 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("product", "${{ vars.PRODUCT }}"),
             ("product-input", "${{ inputs.product }}"),
             ("event-product-input", "${{ github.event.inputs.product }}"),
+            ("replacement.product", "launchplane"),
+            ("replacement.product", "${{ vars.PRODUCT }}"),
+            ("payload-fields.replacement.product", "${{ vars.PRODUCT }}"),
             ("product", "${{ github.event.inputs.context }}"),
             ("domain_names", "[real.example.test]"),
             ("group", "dokploy-target-setup-${{ vars.CONTEXT }}"),
             ("path", "provider-target/live.json"),
         )
         for key, value in generic_workflow_cases:
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "",
+                )
+
+        for key, value in (
+            ("payload-fields.product", "${{ steps.product.outputs.product }}"),
+            ("payload-fields.product", "${{ env.PRODUCT }}"),
+            ("payload-fields.replacement.product", "${{ inputs.product }}"),
+            ("payload-fields.replacement.product", "${{ github.event.inputs.product }}"),
+            ("payload-fields.replacement.product", "${{ steps.product.outputs.product }}"),
+            ("payload-fields.replacement.product", "${{ env.PRODUCT }}"),
+            ("payload-fields.replacement.source_git_ref", "${{ inputs.source_git_ref }}"),
+            ("payload-fields.replacement.artifact_id", "${{ steps.artifact.outputs.artifact_id }}"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.assertEqual(
+                    _allow_reason(
+                        path=".github/workflows/generic-workflow.yml",
+                        key=key,
+                        value=value,
+                    ),
+                    "thin_connector_input",
+                )
+
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/reusable-odoo-prod-promotion.yml",
+                key="payload-fields.run.request_id",
+                value="${{ github.run_id }}-${{ github.run_attempt }}",
+            ),
+            "thin_connector_input",
+        )
+        self.assertEqual(
+            _allow_reason(
+                path=".github/workflows/generic-workflow.yml",
+                key="payload-fields.run.request_id",
+                value="${{ github.run_id }}-${{ github.run_attempt }}",
+            ),
+            "",
+        )
+
+        for key, value in (
+            ("payload-fields.replacement.product", "${{ env.PRODUCT || vars.PRODUCT }}"),
+            (
+                "payload-fields.replacement.product",
+                "${{ steps.product.outputs.product || vars.PRODUCT }}",
+            ),
+            ("payload-fields.replacement.product", "${{ vars.PRODUCT }}"),
+            ("payload-fields.replacement.source_git_ref", "main"),
+            ("payload-fields.replacement.artifact_id", "${{ vars.ARTIFACT_ID }}"),
+        ):
             with self.subTest(key=key, value=value):
                 self.assertEqual(
                     _allow_reason(
