@@ -326,11 +326,14 @@ profile that maps those app facts into preview, deploy, promotion, and evidence
 behavior.
 
 Simple service products deployed as Dokploy applications use the same product
-profile shape. For a bot or worker service, `runtime_port` is the internal HTTP
-port used for a bridge or health endpoint, `health_path` names the product-level
-health route, and lane `health_url` can point at an internal URL reachable by
-Launchplane. See [dokploy-service-deployments.md](dokploy-service-deployments.md)
-for the service-specific contract.
+profile shape. For a bot or worker service with an HTTP bridge or health
+endpoint, `runtime_port` is the internal HTTP port, `health_path` names the
+product-level health route, and lane `health_url` can point at an internal URL
+reachable by Launchplane. Source-backed workers without an HTTP surface use
+`runtime_port=0` and empty image/health fields only when preview, public ingress
+monitoring, and provider health checks are disabled. See
+[dokploy-service-deployments.md](dokploy-service-deployments.md) for the
+service-specific contract.
 
 The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes

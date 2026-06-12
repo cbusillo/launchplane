@@ -192,6 +192,11 @@ def normalize_generic_web_artifact_id(
     image_repository = profile.image.repository.strip().rstrip("/")
     if not normalized_artifact_id:
         raise click.ClickException("Generic web deploy requires artifact_id.")
+    if not image_repository:
+        raise click.ClickException(
+            "Generic web image deploy requires product image.repository. "
+            "Use a source-ref deploy route for source-backed worker targets."
+        )
     if normalized_artifact_id.startswith(
         f"{image_repository}@"
     ) or normalized_artifact_id.startswith(f"{image_repository}:"):
@@ -290,16 +295,18 @@ def _fallback_ship_request(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     deploy_provider: GenericWebDeployProvider,
+    artifact_id: str = "",
 ) -> ShipRequest:
     provider_id = deploy_provider.provider_id.strip().lower()
     if not provider_id:
         raise click.ClickException("Generic web deploy provider requires provider_id.")
     deploy_mode = f"{provider_id}-application-api"
+    resolved_artifact_id = artifact_id.strip() or normalize_generic_web_artifact_id(
+        profile=profile,
+        artifact_id=request.artifact_id,
+    )
     return ShipRequest(
-        artifact_id=normalize_generic_web_artifact_id(
-            profile=profile,
-            artifact_id=request.artifact_id,
-        ),
+        artifact_id=resolved_artifact_id,
         context=lane.context,
         instance=lane.instance,
         source_git_ref=request.source_git_ref,
@@ -368,14 +375,15 @@ def execute_generic_web_deploy(
         instance_name=resolved_lane.instance,
     )
     started_at = utc_now_timestamp()
-    fallback_request = _fallback_ship_request(
-        request=request,
-        profile=resolved_profile,
-        lane=resolved_lane,
-        deploy_provider=resolved_deploy_provider,
-    )
+    fallback_request: ShipRequest | None = None
 
     try:
+        fallback_request = _fallback_ship_request(
+            request=request,
+            profile=resolved_profile,
+            lane=resolved_lane,
+            deploy_provider=resolved_deploy_provider,
+        )
         resolved_deploy_target = _resolve_deploy_target(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -388,6 +396,16 @@ def execute_generic_web_deploy(
         resolved_target = resolved_deploy_target.resolved_target
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
+        if fallback_request is None:
+            if resolved_profile.image.repository.strip():
+                raise
+            fallback_request = _fallback_ship_request(
+                request=request,
+                profile=resolved_profile,
+                lane=resolved_lane,
+                deploy_provider=resolved_deploy_provider,
+                artifact_id=request.artifact_id,
+            )
         record_store.write_deployment_record(
             build_deployment_record(
                 request=fallback_request,

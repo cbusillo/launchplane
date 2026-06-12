@@ -146,9 +146,9 @@ class ProductOnboardingManifest(BaseModel):
     display_name: str
     repository: str
     driver_id: str = "generic-web"
-    image_repository: str
-    runtime_port: int = Field(ge=1, le=65535)
-    health_path: str
+    image_repository: str = ""
+    runtime_port: int = Field(default=0, ge=0, le=65535)
+    health_path: str = ""
     lanes: tuple[ProductOnboardingLaneManifest, ...]
     historical_contexts: tuple[str, ...] = ()
     preview: ProductOnboardingPreviewManifest = Field(
@@ -191,12 +191,25 @@ class ProductOnboardingManifest(BaseModel):
             raise ValueError("product onboarding manifest requires repository")
         if not self.driver_id.strip():
             raise ValueError("product onboarding manifest requires driver_id")
-        if not self.image_repository.strip():
-            raise ValueError("product onboarding manifest requires image_repository")
-        if not self.health_path.startswith("/"):
+        self.image_repository = self.image_repository.strip()
+        self.health_path = self.health_path.strip()
+        if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product onboarding manifest health_path must start with /")
+        if self.runtime_port == 0 and self.health_path:
+            raise ValueError(
+                "product onboarding manifest with runtime_port=0 cannot set health_path"
+            )
+        if self.runtime_port > 0 and not self.health_path:
+            raise ValueError("product onboarding manifest with runtime_port requires health_path")
         if not self.lanes:
             raise ValueError("product onboarding manifest requires at least one stable lane")
+        if self.preview.enabled:
+            if not self.image_repository:
+                raise ValueError("enabled product preview requires image_repository")
+            if self.runtime_port <= 0:
+                raise ValueError("enabled product preview requires runtime_port")
+            if not self.health_path:
+                raise ValueError("enabled product preview requires health_path")
 
         lane_routes = {(lane.context.strip(), lane.instance.strip()) for lane in self.lanes}
         if len(lane_routes) != len(self.lanes):
@@ -205,6 +218,19 @@ class ProductOnboardingManifest(BaseModel):
         if len(set(lane_instances)) != len(lane_instances):
             raise ValueError("product onboarding lanes must be unique by instance")
         ProductPreviewProfile.model_validate(self.preview.model_dump(mode="json"))
+        for lane in self.lanes:
+            if not lane.public_ingress_monitoring.enabled:
+                continue
+            if lane.health_url.strip():
+                continue
+            if not lane.base_url.strip():
+                raise ValueError(
+                    "public ingress monitoring requires base_url or explicit health_url"
+                )
+            if not self.health_path:
+                raise ValueError(
+                    "public ingress monitoring for lane with base_url requires health_path"
+                )
 
         for target in self.provider_targets:
             route = (target.context.strip(), target.instance.strip())
@@ -213,6 +239,52 @@ class ProductOnboardingManifest(BaseModel):
                     "product onboarding target must match a stable lane: "
                     f"{target.context}/{target.instance}"
                 )
+            if target.healthcheck_enabled and not (
+                target.healthcheck_path.strip() or self.health_path
+            ):
+                raise ValueError(
+                    "enabled provider target healthcheck requires healthcheck_path or health_path"
+                )
+
+        if not self.image_repository:
+            if self.runtime_port != 0 or self.health_path:
+                raise ValueError(
+                    "image-less product onboarding requires runtime_port=0 and empty health_path"
+                )
+            if not self.provider_targets:
+                raise ValueError(
+                    "image-less product onboarding requires source-backed compose provider target"
+                )
+            for lane in self.lanes:
+                if (
+                    lane.base_url.strip()
+                    or lane.health_url.strip()
+                    or lane.public_ingress_monitoring.enabled
+                ):
+                    raise ValueError(
+                        "image-less product onboarding requires disabled HTTP surfaces"
+                    )
+            for target in self.provider_targets:
+                if target.target_type != "compose":
+                    raise ValueError(
+                        "image-less product onboarding requires compose provider targets"
+                    )
+                if target.source_type.strip().lower() != "git" or not target.custom_git_url.strip():
+                    raise ValueError(
+                        "image-less product onboarding requires source-backed compose provider target"
+                    )
+                if not target.custom_git_branch.strip():
+                    raise ValueError("image-less product onboarding requires custom_git_branch")
+                if not target.compose_path.strip():
+                    raise ValueError("image-less product onboarding requires compose_path")
+                if target.domains:
+                    raise ValueError(
+                        "image-less product onboarding requires provider targets without domains"
+                    )
+                if target.healthcheck_enabled:
+                    raise ValueError(
+                        "image-less product onboarding requires disabled provider healthcheck"
+                    )
 
         allowed_contexts = {self.product.strip()}
         allowed_contexts.update(lane.context.strip() for lane in self.lanes)
