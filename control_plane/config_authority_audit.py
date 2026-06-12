@@ -86,12 +86,17 @@ YAML_KEY_PATTERN = r"(?:[A-Za-z0-9_.-]+|\"[^\"]+\"|'[^']+')"
 YAML_SCALAR_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?P<value>.+?)\s*$")
 YAML_EMPTY_MAPPING_PATTERN = re.compile(rf"^\s*(?P<key>{YAML_KEY_PATTERN})\s*:\s*(?:#.*)?$")
 YAML_LIST_ITEM_PATTERN = re.compile(r"^\s*-\s*(?P<value>.+?)\s*$")
+YAML_BLOCK_ASSIGNMENT_PATTERN = re.compile(r"^(?P<key>[A-Za-z0-9_.-]+)\s*=\s*(?P<value>.+?)\s*$")
 GITHUB_EXPRESSION_PATTERN = re.compile(r"^\$\{\{\s*(?P<body>[^}]+?)\s*\}\}$")
 GITHUB_CONTEXT_REFERENCE_PATTERN = re.compile(
     r"^(?:env|github|inputs|matrix|needs|secrets|steps|vars)\.[A-Za-z0-9_.-]+$"
 )
 GITHUB_DIRECT_INPUT_REFERENCE_PATTERN = re.compile(
     r"^(?:inputs|github\.event\.inputs)\.[A-Za-z0-9_.-]+$"
+)
+GITHUB_ENV_REFERENCE_PATTERN = re.compile(r"^env\.[A-Za-z0-9_.-]+$")
+GITHUB_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
+    r"^steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+$"
 )
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
@@ -168,6 +173,11 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
     },
     ".github/workflows/provider-target-operations.yml": {
         "path": frozenset(("provider-target-routes.json provider-target-operation-results/*.json",))
+    },
+    ".github/workflows/reusable-odoo-prod-promotion.yml": {
+        "payload-fields.run.request_id": frozenset(
+            ("${{ github.run_id }}-${{ github.run_attempt }}",)
+        )
     },
     ".github/workflows/reusable-odoo-artifact-publish.yml": {
         "GITHUB_TOKEN": frozenset(("${{ github.token }}",))
@@ -322,18 +332,41 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
         "DEFAULT_GITHUB_TOKEN": frozenset(("${{ secrets.GITHUB_TOKEN }}",)),
         "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
         "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
+        "LAUNCHPLANE_AUTHZ_GRANTS_JSON": frozenset(("${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}",)),
+        "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": frozenset(
+            ("${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}",)
+        ),
+        "LAUNCHPLANE_DOKPLOY_TARGET_ID": frozenset(("${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_ID }}",)),
+        "LAUNCHPLANE_DOKPLOY_TARGET_TYPE": frozenset(
+            ("${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_TYPE }}",)
+        ),
         "LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST": frozenset(
             ("${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}",)
         ),
         "LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN": frozenset(
             ("${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}",)
         ),
+        "LAUNCHPLANE_GITHUB_CLIENT_ID": frozenset(("${{ vars.LAUNCHPLANE_GITHUB_CLIENT_ID }}",)),
         "LAUNCHPLANE_GITHUB_CLIENT_SECRET": frozenset(
             ("${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}",)
         ),
         "LAUNCHPLANE_IMAGE_REPOSITORY": frozenset(("${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}",)),
+        "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": frozenset(
+            ("${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}",)
+        ),
+        "LAUNCHPLANE_NPMPLUS_BASE_URL": frozenset(("${{ vars.LAUNCHPLANE_NPMPLUS_BASE_URL }}",)),
         "LAUNCHPLANE_NPMPLUS_IDENTITY": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_IDENTITY }}",)),
         "LAUNCHPLANE_NPMPLUS_SECRET": frozenset(("${{ secrets.LAUNCHPLANE_NPMPLUS_SECRET }}",)),
+        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS": frozenset(
+            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}",)
+        ),
+        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS": frozenset(
+            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS }}",)
+        ),
+        "LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS": frozenset(
+            ("${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}",)
+        ),
+        "LAUNCHPLANE_PUBLIC_URL": frozenset(("${{ vars.LAUNCHPLANE_PUBLIC_URL }}",)),
         "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN": frozenset(
             ("${{ secrets.LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN }}",)
         ),
@@ -433,7 +466,15 @@ WORKFLOW_OPERATOR_INPUT_REFERENCE_PATH_VALUES = {
     ".github/workflows/runner-lane-registration.yml": {
         "AUDIT_RECORD_KEY": frozenset(("${{ inputs.audit_record_key }}",)),
         "LANE_NAME": frozenset(("${{ inputs.lane_name }}",)),
+        "RUNNER_REGISTRATION_EXECUTION_LANE": frozenset(
+            ("${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}",)
+        ),
         "TARGET_REPOSITORY": frozenset(("${{ inputs.repository }}",)),
+    },
+    ".github/workflows/runner-host-hygiene.yml": {
+        "RUNNER_EXECUTION_LANE": frozenset(
+            ("${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}",)
+        ),
     },
 }
 WORKFLOW_OPERATOR_VARIABLE_FORWARD_PATHS = frozenset(
@@ -1248,6 +1289,15 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             if yaml_key in IGNORED_YAML_SCALAR_KEYS:
                 index = next_index
                 continue
+            if yaml_key == "payload-fields":
+                candidates.extend(
+                    _yaml_block_scalar_assignment_candidates(
+                        block_lines=block_lines,
+                        start_line=line_number + 1,
+                    )
+                )
+                index = next_index
+                continue
             block_value = " ".join(block_lines).strip()
             if block_value:
                 candidates.append((line_number, key, block_value))
@@ -1311,6 +1361,25 @@ def _yaml_block_scalar_lines(
         block_lines.append(line.strip())
         index += 1
     return block_lines, index
+
+
+def _yaml_block_scalar_assignment_candidates(
+    *, block_lines: Sequence[str], start_line: int
+) -> list[tuple[int, str, object]]:
+    candidates: list[tuple[int, str, object]] = []
+    for offset, line in enumerate(block_lines):
+        stripped = _strip_inline_comment(line).strip()
+        if not stripped:
+            continue
+        match = YAML_BLOCK_ASSIGNMENT_PATTERN.match(stripped)
+        if match is None:
+            continue
+        value = _strip_inline_comment(match.group("value")).strip()
+        if value:
+            candidates.append(
+                (start_line + offset, f"payload-fields.{match.group('key')}", _unquote(value))
+            )
+    return candidates
 
 
 def _leading_space_count(text: str) -> int:
@@ -1421,6 +1490,7 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
             key=key,
             value=value,
         )
+        or _is_workflow_payload_field_key(key)
     ):
         return True
     if not value_text.strip():
@@ -1610,10 +1680,17 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
         and not _is_workflow_operator_input_key(key)
         and key_text != "RUNS_ON"
         and not _is_route_path_key(key)
+        and not _is_workflow_payload_field_key(key)
         and not _is_workflow_context_reference_restricted_key(key)
+        and not _is_workflow_runtime_authority_key_shape(key)
         and not _is_workflow_context_reference_restricted_value(value)
         and not _is_github_direct_input_reference(value)
         and _is_github_context_reference(value)
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_workflow_payload_field_forward(
+        key=key,
+        value=value,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_launchplane_service_route_path(
@@ -1726,6 +1803,11 @@ def _is_workflow_context_reference_restricted_key(key: str) -> bool:
     return any(part in key_text.split("_") for part in ("REPO", "REPOSITORY"))
 
 
+def _is_workflow_runtime_authority_key_shape(key: str) -> bool:
+    key_text = key.upper().replace(".", "_").replace("-", "_")
+    return any(pattern.search(key_text) for pattern in RUNTIME_IDENTITY_KEY_PATTERNS)
+
+
 def _is_workflow_context_reference_restricted_value(value: object) -> bool:
     match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
     if match is None:
@@ -1827,6 +1909,24 @@ def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object)
         return False
     value_text = _string_value(value).strip().rstrip(",")
     return value_text in allowed_values
+
+
+def _is_workflow_payload_field_forward(*, key: str, value: object) -> bool:
+    if not _is_workflow_payload_field_key(key):
+        return False
+    match = GITHUB_EXPRESSION_PATTERN.match(_string_value(value).strip())
+    if match is None:
+        return False
+    body = match.group("body").strip()
+    return bool(
+        GITHUB_DIRECT_INPUT_REFERENCE_PATTERN.match(body)
+        or GITHUB_STEP_OUTPUT_REFERENCE_PATTERN.match(body)
+        or GITHUB_ENV_REFERENCE_PATTERN.match(body)
+    )
+
+
+def _is_workflow_payload_field_key(key: str) -> bool:
+    return key.startswith("payload-fields.")
 
 
 def _is_route_path_key(key: str) -> bool:
