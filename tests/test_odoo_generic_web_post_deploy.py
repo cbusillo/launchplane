@@ -128,7 +128,13 @@ def _store(root: Path) -> FilesystemRecordStore:
             image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
             runtime_port=8069,
             health_path="/web/health",
-            lanes=(ProductLaneProfile(instance="prod", context="cm"),),
+            lanes=(
+                ProductLaneProfile(
+                    instance="prod",
+                    context="cm",
+                    base_url="https://cm.example.test",
+                ),
+            ),
             updated_at="2026-05-26T00:00:00Z",
             source="test",
         )

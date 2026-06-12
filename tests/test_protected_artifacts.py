@@ -82,8 +82,16 @@ def _profile() -> LaunchplaneProductProfileRecord:
         runtime_port=3000,
         health_path="/api/health",
         lanes=(
-            ProductLaneProfile(instance="testing", context="verireel"),
-            ProductLaneProfile(instance="prod", context="verireel"),
+            ProductLaneProfile(
+                instance="testing",
+                context="verireel",
+                base_url="https://testing.verireel.example.test",
+            ),
+            ProductLaneProfile(
+                instance="prod",
+                context="verireel",
+                base_url="https://verireel.example.test",
+            ),
         ),
         preview=ProductPreviewProfile(enabled=True, context="verireel-testing"),
         updated_at="2026-06-03T20:00:00Z",

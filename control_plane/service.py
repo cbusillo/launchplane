@@ -14734,6 +14734,22 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                try:
+                    product_profile_request.validate_write_contract()
+                except ValueError as error:
+                    message = str(error).strip() or "Product profile request failed validation."
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_request",
+                                "message": message,
+                            },
+                        },
+                    )
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,

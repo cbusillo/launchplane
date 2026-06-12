@@ -94,7 +94,13 @@ def _write_odoo_product_profile_record(*, store: PostgresRecordStore) -> None:
             image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
             runtime_port=8069,
             health_path="/web/health",
-            lanes=(ProductLaneProfile(instance="testing", context="cm"),),
+            lanes=(
+                ProductLaneProfile(
+                    instance="testing",
+                    context="cm",
+                    base_url="https://cm-testing.shinycomputers.com",
+                ),
+            ),
             preview=ProductPreviewProfile(enabled=True, context="cm"),
             updated_at="2026-05-09T00:00:00Z",
             source="test",
@@ -121,7 +127,13 @@ def _write_live_target_product_profile_record(
                 "image": {"repository": "ghcr.io/cbusillo/sellyouroutboard"},
                 "runtime_port": 3000,
                 "health_path": "/api/health",
-                "lanes": ({"instance": instance, "context": context},),
+                "lanes": (
+                    {
+                        "instance": instance,
+                        "context": context,
+                        "base_url": f"https://{context}.example.test",
+                    },
+                ),
                 "expected_config": {
                     "runtime_environment_keys": tuple(
                         {"key": key, "context": context, "instance": instance}
@@ -2631,12 +2643,12 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup gate")
         script = str(schedule_payloads[0]["script"])
         self.assertIn("docker stop", script)
-        self.assertIn('trap exit_trap EXIT', script)
+        self.assertIn("trap exit_trap EXIT", script)
         self.assertIn('local exit_status="$?"', script)
         self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
-        self.assertIn('start_web_container\ntrap - EXIT', script)
-        self.assertNotIn('restart_web_on_exit', script)
+        self.assertIn("start_web_container\ntrap - EXIT", script)
+        self.assertNotIn("restart_web_on_exit", script)
         self.assertIn("pg_dump", script)
         self.assertIn("tar -C", script)
         self.assertIn("manifest.json", script)
@@ -3200,13 +3212,13 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
         self.assertIn("Missing required Odoo override environment key", script)
         self.assertIn("Protected Shopify store key is not allowed on this Dokploy lane.", script)
-        self.assertIn('trap exit_trap EXIT', script)
-        self.assertIn('exit_trap() {', script)
+        self.assertIn("trap exit_trap EXIT", script)
+        self.assertIn("exit_trap() {", script)
         self.assertIn('local exit_status="$?"', script)
         self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
-        self.assertIn('start_web_container\ntrap - EXIT', script)
-        self.assertNotIn('restart_web_on_success', script)
+        self.assertIn("start_web_container\ntrap - EXIT", script)
+        self.assertNotIn("restart_web_on_success", script)
         self.assertIn('"${workflow_environment[@]}"', script)
 
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
