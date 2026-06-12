@@ -13841,6 +13841,56 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["sellyouroutboard"],
         )
 
+    def test_product_profile_endpoint_rejects_inert_public_ingress_monitoring(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane", "sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            profile_payload = _product_profile_payload()
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "sellyouroutboard-testing",
+                },
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles",
+                payload=profile_payload,
+                headers={"Idempotency-Key": "profile-sellyouroutboard"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "public ingress monitoring requires base_url or explicit health_url",
+        )
+
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -13896,6 +13946,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             {
                                 "instance": "prod",
                                 "context": "discord-blue",
+                                "base_url": "https://discord-blue.example.test",
                             }
                         ],
                         "provider_targets": [
@@ -14029,7 +14080,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "runtime_port": 8787,
                         "health_path": "/health",
                         "lanes": [
-                            {"instance": "prod", "context": "discord-blue"},
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                                "base_url": "https://discord-blue.example.test",
+                            },
                         ],
                         "provider_targets": [
                             {
@@ -14108,6 +14163,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             {
                                 "instance": "prod",
                                 "context": "discord-blue",
+                                "base_url": "https://discord-blue.example.test",
                             }
                         ],
                         "updated_at": "2026-05-04T18:00:00Z",

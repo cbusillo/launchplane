@@ -11,12 +11,11 @@ OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    repository: str
+    repository: str = ""
 
     @model_validator(mode="after")
     def _validate_image(self) -> "ProductImageProfile":
-        if not self.repository.strip():
-            raise ValueError("product image profile requires repository")
+        self.repository = self.repository.strip()
         return self
 
 
@@ -365,8 +364,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
     repository: str
     driver_id: str
     image: ProductImageProfile
-    runtime_port: int = Field(ge=1, le=65535)
-    health_path: str
+    runtime_port: int = Field(default=0, ge=0, le=65535)
+    health_path: str = ""
     lanes: tuple[ProductLaneProfile, ...] = ()
     historical_contexts: tuple[str, ...] = ()
     preview: ProductPreviewProfile = Field(default_factory=ProductPreviewProfile)
@@ -389,8 +388,20 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile requires repository")
         if not self.driver_id.strip():
             raise ValueError("product profile requires driver_id")
-        if not self.health_path.startswith("/"):
+        self.health_path = self.health_path.strip()
+        if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")
+        if self.runtime_port == 0 and self.health_path:
+            raise ValueError("product profile with runtime_port=0 cannot set health_path")
+        if self.runtime_port > 0 and not self.health_path:
+            raise ValueError("product profile with runtime_port requires health_path")
+        if self.preview.enabled:
+            if not self.image.repository.strip():
+                raise ValueError("enabled product preview requires image repository")
+            if self.runtime_port <= 0:
+                raise ValueError("enabled product preview requires runtime_port")
+            if not self.health_path:
+                raise ValueError("enabled product preview requires health_path")
         if not self.updated_at.strip():
             raise ValueError("product profile requires updated_at")
         if not self.source.strip():
@@ -403,4 +414,20 @@ class LaunchplaneProductProfileRecord(BaseModel):
             if context not in normalized_historical_contexts:
                 normalized_historical_contexts.append(context)
         self.historical_contexts = tuple(normalized_historical_contexts)
+        return self
+
+    def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        for lane in self.lanes:
+            if not lane.public_ingress_monitoring.enabled:
+                continue
+            if lane.health_url.strip():
+                continue
+            if not lane.base_url.strip():
+                raise ValueError(
+                    "public ingress monitoring requires base_url or explicit health_url"
+                )
+            if not self.health_path:
+                raise ValueError(
+                    "public ingress monitoring for lane with base_url requires health_path"
+                )
         return self

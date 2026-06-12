@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
+    ProductPublicIngressMonitoringPolicy,
     ProductSecretConfigRequirement,
 )
 from control_plane.contracts.promotion_record import (
@@ -157,7 +158,13 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
         image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
         runtime_port=8069,
         health_path="/web/health",
-        lanes=(ProductLaneProfile(instance="testing", context="cm"),),
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="cm",
+                public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+            ),
+        ),
         preview=ProductPreviewProfile(enabled=True, context="cm"),
         updated_at="2026-05-09T00:00:00Z",
         source="test",
@@ -224,6 +231,7 @@ def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductPr
                     allowed_rebuild_sources=("upstream_restore",) if enabled else (),
                     upstream_source="odoo-tenant-opw/opw/prod-upstream" if enabled else "",
                 ),
+                base_url="https://opw-prod.shinycomputers.com",
             ),
         ),
         updated_at="2026-05-10T00:00:00Z",
@@ -930,7 +938,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             timeout_seconds=180,
             retry_interval_seconds=5,
         )
-        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health")
+        self.assertEqual(
+            result.health_url, "https://cm-testing.shinycomputers.com/launchplane/health"
+        )
         self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
         self.assertEqual(
             result.logo_urls,

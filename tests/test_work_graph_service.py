@@ -34,9 +34,7 @@ def _work_request(**overrides: object) -> EveryCodeWorkRequestRecord:
 
 
 class _EmptyProductStore:
-    def __init__(
-        self, records: tuple[LaunchplaneProductProfileRecord, ...] = ()
-    ) -> None:
+    def __init__(self, records: tuple[LaunchplaneProductProfileRecord, ...] = ()) -> None:
         self.records = records
 
     def list_product_profile_records(
@@ -98,8 +96,16 @@ class WorkGraphServiceTests(unittest.TestCase):
                             "runtime_port": 3000,
                             "health_path": "/healthz",
                             "lanes": (
-                                {"instance": "testing", "context": "example-site"},
-                                {"instance": "prod", "context": "example-site"},
+                                {
+                                    "instance": "testing",
+                                    "context": "example-site",
+                                    "base_url": "https://testing.example-site.example.test",
+                                },
+                                {
+                                    "instance": "prod",
+                                    "context": "example-site",
+                                    "base_url": "https://example-site.example.test",
+                                },
                             ),
                             "historical_contexts": ("example-site-legacy",),
                             "preview": {"enabled": True, "context": "example-site-preview"},
@@ -216,7 +222,13 @@ class WorkGraphServiceTests(unittest.TestCase):
                 "image": {"repository": "ghcr.io/every/example-site"},
                 "runtime_port": 3000,
                 "health_path": "/healthz",
-                "lanes": ({"instance": "prod", "context": "example-site"},),
+                "lanes": (
+                    {
+                        "instance": "prod",
+                        "context": "example-site",
+                        "base_url": "https://example-site.example.test",
+                    },
+                ),
                 "updated_at": "2026-05-02T22:30:00Z",
                 "source": "test",
             }
@@ -225,9 +237,7 @@ class WorkGraphServiceTests(unittest.TestCase):
         payload = build_work_graph_snapshot_service_payload(
             generated_at="2026-05-06T02:05:00Z",
             product_store=_EmptyProductStore((product,)),
-            work_request_store=_WorkRequestStore(
-                (_work_request(repository="every/example-site"),)
-            ),
+            work_request_store=_WorkRequestStore((_work_request(repository="every/example-site"),)),
             action_allowed=lambda _action, _product, _context: False,
             planning_facts_provider=None,
         )

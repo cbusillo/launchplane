@@ -724,7 +724,13 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
                 runtime_port=3000,
                 health_path="/api/health",
-                lanes=(ProductLaneProfile(instance="testing", context="sellyouroutboard"),),
+                lanes=(
+                    ProductLaneProfile(
+                        instance="testing",
+                        context="sellyouroutboard",
+                        base_url="https://testing.sellyouroutboard.example.test",
+                    ),
+                ),
                 preview=ProductPreviewProfile(
                     enabled=True,
                     context="sellyouroutboard-testing",

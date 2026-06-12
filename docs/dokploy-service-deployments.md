@@ -45,10 +45,13 @@ must declare:
 - `repository`: owning GitHub repo, for example `cbusillo/discord-blue`
 - `driver_id`: `generic-web`
 - `image.repository`: immutable image repository, for example
-  `ghcr.io/cbusillo/discord-blue`
-- `runtime_port`: the service's internal HTTP port when it exposes one
-- `health_path`: a path beginning with `/`, even when the lane uses an explicit
-  `health_url` or skips health verification
+  `ghcr.io/cbusillo/discord-blue`; leave it empty only for source-backed
+  worker targets that cannot use image deploy yet
+- `runtime_port`: the service's internal HTTP port when it exposes one, or `0`
+  when the product has no HTTP runtime surface
+- `health_path`: a path beginning with `/` when Launchplane, Dokploy, or public
+  ingress monitoring should verify HTTP health; leave it empty only for
+  non-HTTP workers with health checks and public ingress monitoring disabled
 - `lanes`: stable instances such as `testing` and `prod`, each with a
   Launchplane context and optional `base_url` or `health_url`
 
@@ -116,6 +119,13 @@ temporarily pins the compose target's source branch/ref, triggers the deploy,
 waits for completion, and restores the original source ref only while the live
 target still points at the requested provider ref. Product repos must not keep
 Dokploy host, token, compose id, or provider mutation scripts for this mode.
+If the compose target is a background worker with no HTTP listener, its product
+profile may leave `image.repository` and `health_path` empty and set
+`runtime_port=0`, but every stable lane must disable public ingress monitoring
+and omit HTTP URLs, and every provider target must omit domains and disable
+Dokploy health checks. Image deploy, preview creation, public ingress
+monitoring, provider domains, and provider health checks still require real image
+and HTTP health metadata before they can mutate provider state.
 
 The long-term target is still immutable image deploy. The source-ref bridge does
 not write generic-web deployment records; its durable replay surface is the

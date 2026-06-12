@@ -15,6 +15,7 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductLaneProfile,
     ProductPreviewProfile,
+    ProductPublicIngressMonitoringPolicy,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -159,6 +160,33 @@ def _profile(*, driver_id: str = "generic-web") -> LaunchplaneProductProfileReco
     )
 
 
+def _source_ref_worker_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="repairshopr-sync",
+        display_name="RepairShopr Sync",
+        repository="cbusillo/repairshopr_api",
+        driver_id="generic-web",
+        image=ProductImageProfile(),
+        lanes=(
+            ProductLaneProfile(
+                instance="prod",
+                context="repairshopr-sync",
+                public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+            ),
+        ),
+        updated_at="2026-06-12T20:00:00Z",
+        source="test",
+    )
+
+
+def _source_ref_worker_lane() -> ProductLaneProfile:
+    return ProductLaneProfile(
+        instance="prod",
+        context="repairshopr-sync",
+        public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+    )
+
+
 def _request(instance: str = "testing") -> GenericWebDeployRequest:
     return GenericWebDeployRequest(
         product="sellyouroutboard",
@@ -259,6 +287,89 @@ class GenericWebDeployTests(unittest.TestCase):
                 artifact_id="ghcr.io/cbusillo/other-app:sha-abc123",
             )
 
+    def test_normalize_generic_web_artifact_id_rejects_worker_profile_without_image(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(click.ClickException, "requires product image.repository"):
+            normalize_generic_web_artifact_id(
+                profile=_source_ref_worker_profile(),
+                artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+            )
+
+    def test_product_profile_write_contract_rejects_inert_public_ingress_monitoring(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord(
+            product="repairshopr-sync",
+            display_name="RepairShopr Sync",
+            repository="cbusillo/repairshopr_api",
+            driver_id="generic-web",
+            image=ProductImageProfile(),
+            lanes=(
+                ProductLaneProfile(
+                    instance="prod",
+                    context="repairshopr-sync",
+                ),
+            ),
+            updated_at="2026-06-12T20:00:00Z",
+            source="test",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires base_url or explicit health_url"):
+            profile.validate_write_contract()
+
+    def test_product_profile_write_contract_rejects_base_url_without_health_path(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord(
+            product="repairshopr-sync",
+            display_name="RepairShopr Sync",
+            repository="cbusillo/repairshopr_api",
+            driver_id="generic-web",
+            image=ProductImageProfile(),
+            lanes=(
+                ProductLaneProfile(
+                    instance="prod",
+                    context="repairshopr-sync",
+                    base_url="https://repairshopr-sync.example.test",
+                ),
+            ),
+            updated_at="2026-06-12T20:00:00Z",
+            source="test",
+        )
+
+        with self.assertRaisesRegex(ValueError, "base_url requires health_path"):
+            profile.validate_write_contract()
+
+    def test_product_profile_rejects_zero_runtime_port_with_health_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime_port=0 cannot set health_path"):
+            LaunchplaneProductProfileRecord(
+                product="repairshopr-sync",
+                display_name="RepairShopr Sync",
+                repository="cbusillo/repairshopr_api",
+                driver_id="generic-web",
+                image=ProductImageProfile(),
+                runtime_port=0,
+                health_path="/health",
+                lanes=(_source_ref_worker_lane(),),
+                updated_at="2026-06-12T20:00:00Z",
+                source="test",
+            )
+
+    def test_product_profile_rejects_runtime_port_without_health_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "runtime_port requires health_path"):
+            LaunchplaneProductProfileRecord(
+                product="repairshopr-sync",
+                display_name="RepairShopr Sync",
+                repository="cbusillo/repairshopr_api",
+                driver_id="generic-web",
+                image=ProductImageProfile(),
+                runtime_port=8000,
+                lanes=(_source_ref_worker_lane(),),
+                updated_at="2026-06-12T20:00:00Z",
+                source="test",
+            )
+
     def test_execute_generic_web_deploy_writes_pass_record_for_profile_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
         deploy_provider = _FakeGenericWebDeployProvider()
@@ -326,6 +437,35 @@ class GenericWebDeployTests(unittest.TestCase):
             deploy_provider.runtime_identities[0].deployment_record_id,
             store.deployments[0].record_id,
         )
+
+    def test_execute_generic_web_deploy_records_failure_for_source_ref_worker_profile(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_source_ref_worker_profile())
+        deploy_provider = _FakeGenericWebDeployProvider()
+
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=store,
+            request=GenericWebDeployRequest(
+                product="repairshopr-sync",
+                instance="prod",
+                artifact_id="refs/heads/main",
+                source_git_ref="abc123",
+            ),
+            deploy_provider=deploy_provider,
+        )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertIn("requires product image.repository", result.error_message)
+        self.assertEqual(len(store.deployments), 1)
+        self.assertEqual(store.deployments[0].deploy.status, "fail")
+        self.assertEqual(store.deployments[0].context, "repairshopr-sync")
+        self.assertEqual(store.deployments[0].instance, "prod")
+        artifact_identity = store.deployments[0].artifact_identity
+        assert artifact_identity is not None
+        self.assertEqual(artifact_identity.artifact_id, "refs/heads/main")
+        self.assertEqual(deploy_provider.resolved_targets, [])
 
     def test_execute_generic_web_deploy_runs_post_deploy_extension_when_supplied(
         self,
@@ -552,10 +692,18 @@ class GenericWebDeployTests(unittest.TestCase):
         result = execute_generic_web_deploy(
             control_plane_root=Path("."),
             record_store=store,
-            request=_request(),
+            request=GenericWebDeployRequest(
+                product="sellyouroutboard",
+                instance="testing",
+                artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                source_git_ref="2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+            ),
             deploy_provider=FailingResolveProvider(),
         )
 
+        expected_artifact_id = (
+            "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c"
+        )
         self.assertEqual(result.deploy_status, "fail")
         self.assertEqual(result.error_message, "target missing")
         self.assertEqual(len(store.deployments), 1)
@@ -569,6 +717,30 @@ class GenericWebDeployTests(unittest.TestCase):
             store.deployments[0].deploy.provider_deploy_mode,
             "fake-cloud-application-api",
         )
+        artifact_identity = store.deployments[0].artifact_identity
+        assert artifact_identity is not None
+        self.assertEqual(artifact_identity.artifact_id, expected_artifact_id)
+        self.assertEqual(store.inventories, [])
+
+    def test_execute_generic_web_deploy_rejects_invalid_image_artifact_without_record(
+        self,
+    ) -> None:
+        store = _GenericWebDeployStore(_profile())
+
+        with self.assertRaisesRegex(click.ClickException, "must use the product image repository"):
+            execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebDeployRequest(
+                    product="sellyouroutboard",
+                    instance="testing",
+                    artifact_id="ghcr.io/cbusillo/other-app:sha-abc123",
+                    source_git_ref="abc123",
+                ),
+                deploy_provider=_FakeGenericWebDeployProvider(),
+            )
+
+        self.assertEqual(store.deployments, [])
         self.assertEqual(store.inventories, [])
 
     def test_dokploy_provider_resolves_target_without_generic_web_dokploy_imports(

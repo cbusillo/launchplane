@@ -78,7 +78,13 @@ class ProductOnboardingServiceTests(unittest.TestCase):
                 "image_repository": "ghcr.io/cbusillo/discord-blue",
                 "runtime_port": 8787,
                 "health_path": "/health",
-                "lanes": [{"instance": "prod", "context": "discord-blue"}],
+                "lanes": [
+                    {
+                        "instance": "prod",
+                        "context": "discord-blue",
+                        "base_url": "https://discord-blue.example.test",
+                    }
+                ],
                 "provider_targets": [
                     {
                         "context": "discord-blue",
