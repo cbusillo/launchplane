@@ -32,6 +32,7 @@ class ServiceCliCallbacks:
     verify_healthcheck_urls: Callable[..., None]
     inspect_local_launchplane_config_boundary: Callable[..., dict[str, object]]
     build_config_authority_audit: Callable[..., dict[str, object]]
+    evaluate_config_authority_gate: Callable[..., dict[str, object]]
     render_config_authority_markdown: Callable[..., str]
 
 
@@ -567,6 +568,19 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     multiple=True,
     help="Limit the audit to one or more files. Relative paths resolve from the control-plane root.",
 )
+@click.option(
+    "--fail-on-findings",
+    is_flag=True,
+    default=False,
+    help="Exit non-zero when unallowed config-authority findings are present.",
+)
+@click.option(
+    "--gate-profile",
+    type=click.Choice(["default", "product-repo"]),
+    default="default",
+    show_default=True,
+    help="Policy profile used when --fail-on-findings is enabled.",
+)
 def service_audit_config_authority(
     control_plane_root: Path | None,
     mode: str,
@@ -574,6 +588,8 @@ def service_audit_config_authority(
     include_untracked: bool,
     include_ignored: bool,
     scan_paths: tuple[Path, ...],
+    fail_on_findings: bool,
+    gate_profile: str,
 ) -> None:
     callbacks = _service_callbacks()
     launchplane_root = control_plane_root or _control_plane_root()
@@ -584,10 +600,18 @@ def service_audit_config_authority(
         include_ignored=include_ignored,
         paths=scan_paths,
     )
+    gate = None
+    if fail_on_findings:
+        gate = callbacks.evaluate_config_authority_gate(payload, profile=gate_profile)
+        payload = {**payload, "gate": gate}
     if output_format == "markdown":
         click.echo(callbacks.render_config_authority_markdown(payload))
-        return
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    if gate is not None and gate.get("status") == "fail":
+        raise click.ClickException(
+            "Config authority audit found unallowed checked-in runtime authority."
+        )
 
 
 @service.command("inspect-data-freshness")

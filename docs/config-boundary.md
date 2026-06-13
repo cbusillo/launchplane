@@ -234,6 +234,29 @@ uv run launchplane service audit-config-authority --control-plane-root .
 The initial audit is report-only. Use it to classify findings and understand the
 baseline before adding changed-file enforcement.
 
+After the baseline is clean for a repo, enforce only the changed files in CI or
+review workflows:
+
+```bash
+uv run launchplane service audit-config-authority \
+  --control-plane-root . \
+  --mode changed-files-gate \
+  --fail-on-findings \
+  --gate-profile product-repo
+```
+
+`--fail-on-findings` preserves the JSON or Markdown report, adds a JSON `gate`
+summary when enforcement is enabled, and then exits non-zero when the selected
+gate profile rejects a finding. Allowed docs, tests, schema examples,
+Launchplane self-bootstrap wiring, operator-supplied inputs, and thin connector
+mechanics keep explicit allow reasons and do not fail the default gate. The
+`product-repo` profile also rejects test fixtures that carry Launchplane
+lifecycle authority such as authz, runtime-environment, provider target,
+target-id, managed-secret, route-batch, or topology material. Product repos
+should use this changed-file gate to reject reintroduced
+Launchplane-owned authz, route, provider-target, domain, runtime-environment,
+managed-secret, topology, or workflow-default fixtures before merge.
+
 When operators need to inspect or mutate tracked Dokploy target records, use the
 DB-backed Launchplane CLI surface rather than editing any repo-local file:
 

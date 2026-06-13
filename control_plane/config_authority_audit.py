@@ -28,6 +28,7 @@ ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
+GATE_PROFILES = ("default", "product-repo")
 
 SECRET_SHAPED_KEY_PARTS = frozenset(("PASSWORD", "TOKEN", "SECRET", "KEY"))
 BOOTSTRAP_ENV_KEYS = frozenset(
@@ -54,6 +55,45 @@ BOOTSTRAP_ENV_KEYS = frozenset(
         "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN",
         "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT",
         "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
+    )
+)
+PRODUCT_REPO_REJECTED_TEST_FIXTURE_RULE_IDS = frozenset(
+    (
+        "authz_or_operator_authority",
+        "provider_target_authority",
+        "secret_binding_identity",
+    )
+)
+PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PARTS = frozenset(
+    (
+        "AUTHZ",
+        "CATALOG",
+        "COMPOSE_ID",
+        "OPERATOR",
+        "POLICY",
+        "ROUTE_BATCH",
+        "ROUTES",
+        "SECRET",
+        "SECRETS",
+        "SUBJECT",
+        "TARGET_ID",
+        "TARGETS",
+        "TOPOLOGY",
+    )
+)
+PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PHRASES = frozenset(
+    (
+        ("AUTHZ",),
+        ("COMPOSE", "ID"),
+        ("MANAGED", "SECRET"),
+        ("OPERATOR",),
+        ("POLICY",),
+        ("PROVIDER", "TARGET"),
+        ("ROUTE", "BATCH"),
+        ("RUNTIME", "ENVIRONMENT"),
+        ("SECRET", "BINDING"),
+        ("TARGET", "ID"),
+        ("TOPOLOGY",),
     )
 )
 
@@ -807,6 +847,38 @@ def build_config_authority_audit(
     return payload
 
 
+def evaluate_config_authority_gate(
+    payload: Mapping[str, object], *, profile: str = "default"
+) -> dict[str, object]:
+    if profile not in GATE_PROFILES:
+        raise ValueError(f"Unsupported config authority gate profile: {profile}")
+
+    rejected_findings: list[dict[str, object]] = []
+    for finding in _list_payload(payload.get("findings")):
+        if not isinstance(finding, dict):
+            continue
+        rejection_reason = _gate_rejection_reason(finding, profile=profile)
+        if rejection_reason:
+            rejected_findings.append(
+                {
+                    "finding_id": finding.get("finding_id", ""),
+                    "path": finding.get("path", ""),
+                    "line": finding.get("line", 0),
+                    "rule_id": finding.get("rule_id", ""),
+                    "key": finding.get("key", ""),
+                    "classification": finding.get("classification", ""),
+                    "allow_reason": finding.get("allow_reason", ""),
+                    "rejection_reason": rejection_reason,
+                }
+            )
+    return {
+        "profile": profile,
+        "status": "fail" if rejected_findings else "pass",
+        "rejected_finding_count": len(rejected_findings),
+        "rejected_findings": rejected_findings,
+    }
+
+
 def render_config_authority_markdown(payload: Mapping[str, object]) -> str:
     coverage = _mapping_payload(payload.get("coverage"))
     hashes = _mapping_payload(payload.get("hashes"))
@@ -1508,6 +1580,56 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         or OWNER_REPO_PATTERN.search(value_text)
         or PROVIDER_TARGET_PATTERN.search(value_text)
     )
+
+
+def _gate_rejection_reason(finding: Mapping[str, object], *, profile: str) -> str:
+    if finding.get("classification") == "needs_classification":
+        return "finding_needs_classification"
+    if profile != "product-repo":
+        return ""
+    if finding.get("allow_reason") != ALLOW_REASON_TEST_FIXTURE:
+        return ""
+    if _is_product_repo_lifecycle_fixture_finding(finding):
+        return "launchplane_lifecycle_test_fixture"
+    return ""
+
+
+def _is_product_repo_lifecycle_fixture_finding(finding: Mapping[str, object]) -> bool:
+    rule_id = str(finding.get("rule_id") or "")
+    if rule_id in PRODUCT_REPO_REJECTED_TEST_FIXTURE_RULE_IDS:
+        return True
+    key_parts = _authority_key_parts(str(finding.get("key") or ""))
+    if frozenset(key_parts) & PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PARTS:
+        return True
+    for phrase in PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PHRASES:
+        if _contains_key_phrase(key_parts, phrase):
+            return True
+    path = str(finding.get("path") or "").lower().replace("\\", "/")
+    return any(
+        marker in path
+        for marker in (
+            "authz",
+            "managed-secret",
+            "provider-target",
+            "route-batch",
+            "runtime-environment",
+            "target-id",
+            "topology",
+        )
+    )
+
+
+def _authority_key_parts(key: str) -> frozenset[str]:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    normalized = separated.upper().replace(".", "_").replace("-", "_")
+    return frozenset(part for part in re.split(r"[^A-Z0-9]+", normalized) if part)
+
+
+def _contains_key_phrase(key_parts: Iterable[str], phrase: tuple[str, ...]) -> bool:
+    parts = tuple(key_parts)
+    if not phrase or len(phrase) > len(parts):
+        return False
+    return any(parts[index : index + len(phrase)] == phrase for index in range(len(parts)))
 
 
 def _rule_id(*, key: str, value: object) -> str:

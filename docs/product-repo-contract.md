@@ -81,6 +81,43 @@ Do not replace hard-coded lifecycle authority in code with the same authority in
 JSON, TOML, YAML, workflow defaults, or repo metadata. Moving the value changes
 the hiding place, not the ownership boundary.
 
+Allowed metadata examples:
+
+- quality gate commands such as `npm test` or `uv run python -m unittest`
+- important workflow display names used for operator navigation
+- the GitHub variable name that supplies the Launchplane service URL
+- a reusable Launchplane workflow reference or shared request action reference
+- public-safe related repository links used for docs or operator orientation
+
+Disallowed metadata examples:
+
+- concrete product domains, lane URLs, health URLs, or preview URL templates
+- provider target ids, Dokploy compose/application ids, or edge endpoint ids
+- runtime-environment records, managed secret bindings, or secret key maps
+- authz grants, operator subjects, token labels, or workflow policy catalogs
+- Launchplane route batches, idempotency catalogs, or copied provider payloads
+
+Product repositories should run Launchplane's changed-file authority gate before
+merge once the local baseline is clean:
+
+```bash
+uv run launchplane service audit-config-authority \
+  --control-plane-root . \
+  --mode changed-files-gate \
+  --fail-on-findings \
+  --gate-profile product-repo
+```
+
+The gate prints the same redacted audit report as the full scanner, adds a JSON
+`gate` summary when enforcement is enabled, then exits non-zero for findings
+that still need classification. Docs, tests, schema fixtures, bootstrap wiring,
+and explicitly allowed thin connector mechanics are reported with allow reasons
+instead of blocking the default gate. The `product-repo` profile keeps ordinary
+product-owned test fixtures allowed, but also rejects test fixtures that carry
+Launchplane lifecycle authority such as authz policy, provider target,
+runtime-environment, managed secret, route batch, topology, or target-id
+material.
+
 ## What Product Repos Own
 
 - Application source code and product-owned business behavior.

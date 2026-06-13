@@ -81,6 +81,7 @@ from control_plane.cli_storage_secrets import register_storage_secret_commands
 from control_plane.cli_work_graph import register_work_graph_core_commands
 from control_plane.config_authority_audit import (
     build_config_authority_audit,
+    evaluate_config_authority_gate,
     render_config_authority_markdown,
 )
 from control_plane.launchplane_rendering import (
@@ -3840,6 +3841,7 @@ register_service_commands(
         verify_healthcheck_urls=_verify_healthcheck_urls,
         inspect_local_launchplane_config_boundary=_inspect_local_launchplane_config_boundary,
         build_config_authority_audit=build_config_authority_audit,
+        evaluate_config_authority_gate=evaluate_config_authority_gate,
         render_config_authority_markdown=render_config_authority_markdown,
     ),
 )
