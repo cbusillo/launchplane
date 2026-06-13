@@ -62,6 +62,24 @@ ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
+ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
+    {
+        "odoo_instance_overrides_payload_present",
+        "website_bootstrap_domain_set",
+        "website_bootstrap_domain_matches_canonical",
+        "website_bootstrap_homepage_url_set",
+        "website_bootstrap_homepage_url_matches",
+        "website_bootstrap_homepage_page_found",
+        "website_bootstrap_primary_page_xmlid_found",
+        "website_bootstrap_homepage_matches_page",
+        "website_bootstrap_logo_present",
+        "website_bootstrap_applied",
+    }
+)
+ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset({"website_bootstrap_website_id"})
+ODOO_POST_DEPLOY_READBACK_MARKERS = (
+    ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+)
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
     r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|DATABASE_URL)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
 )
@@ -2157,12 +2175,17 @@ def extract_odoo_post_deploy_readback_markers(deployment: JsonObject | None) -> 
             continue
         normalized_key = key.strip()
         normalized_value = raw_value.strip().lower()
-        if (
-            normalized_key != "odoo_instance_overrides_payload_present"
-            and not normalized_key.startswith("website_bootstrap_")
-        ):
+        if normalized_key not in ODOO_POST_DEPLOY_READBACK_MARKERS:
             continue
-        if normalized_value not in {"true", "false"} and not normalized_value.isdigit():
+        if normalized_key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS and normalized_value not in {
+            "true",
+            "false",
+        }:
+            continue
+        if (
+            normalized_key in ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+            and not normalized_value.isdigit()
+        ):
             continue
         markers[normalized_key] = normalized_value
     return markers
@@ -2315,6 +2338,7 @@ def _build_dokploy_data_workflow_script(
     }
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
+    readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2477,7 +2501,7 @@ workflow_exit_status=${{PIPESTATUS[0]}}
 set -e
 
 echo "Odoo {workflow_label} readback markers:"
-grep -E '^(odoo_instance_overrides_payload_present|website_bootstrap_[a-z0-9_]+)=' "$workflow_output_file" \
+grep -E '^({readback_marker_patterns})=' "$workflow_output_file" \
     | sort -u \
     || true
 rm -f "$workflow_output_file"
