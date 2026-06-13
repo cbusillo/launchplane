@@ -52,6 +52,16 @@ POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
     "ODOO_FILESTORE_PATH",
     "ODOO_DATA_WORKFLOW_LOCK_FILE",
 }
+ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
+LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
+ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS = frozenset(
+    {
+        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+        LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+    }
+)
 ODOO_UPSTREAM_RESTORE_WORKFLOW_ENV_KEYS = (
     "ODOO_UPSTREAM_HOST",
     "ODOO_UPSTREAM_USER",
@@ -214,6 +224,9 @@ x-odoo-env: &odoo-env
   ODOO_DEV_MODE: ${{ODOO_DEV_MODE:-}}
   ODOO_INSTALL_MODULES: ${{ODOO_INSTALL_MODULES:-}}
   ODOO_UPDATE_MODULES: ${{ODOO_UPDATE_MODULES:-AUTO}}
+  ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64: ${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64:-}}
+  LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED: ${{LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED:-}}
+  LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED: ${{LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED:-}}
   ODOO_ADDONS_PATH: ${{ODOO_ADDONS_PATH:-/opt/project/addons,/opt/extra_addons,/opt/launchplane/addons,/opt/enterprise,/odoo/addons}}
   ODOO_SERVER_WIDE_MODULES: ${{ODOO_SERVER_WIDE_MODULES:-base,web,launchplane_runtime_health}}
   ODOO_DATA_WORKFLOW_LOCK_FILE: ${{ODOO_DATA_WORKFLOW_LOCK_FILE:-/volumes/data/.data_workflow_in_progress}}
@@ -1661,6 +1674,14 @@ def run_compose_post_deploy_update(
     )
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     resolved_required_workflow_environment_keys = tuple(required_workflow_environment_keys)
+    runtime_override_target_environment = {
+        key: value
+        for key, value in resolved_workflow_environment_overrides.items()
+        if key in ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS
+    }
+    for key in ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
+        desired_env_map.pop(key, None)
+    desired_env_map.update(runtime_override_target_environment)
     if run_destructive_restore:
         upstream_restore_environment = _resolve_upstream_restore_workflow_environment(
             desired_env_map=desired_env_map,
@@ -1707,6 +1728,23 @@ def run_compose_post_deploy_update(
             before_key=deployment_key(latest_compose_deployment),
             timeout_seconds=schedule_timeout_seconds,
         )
+        target_payload = fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        refreshed_env_map = parse_dokploy_env_text(str(target_payload.get("env") or ""))
+        missing_runtime_override_keys = sorted(
+            key
+            for key, value in runtime_override_target_environment.items()
+            if refreshed_env_map.get(key, "") != value
+        )
+        if missing_runtime_override_keys:
+            raise click.ClickException(
+                "Compose post-deploy update did not persist runtime override key(s): "
+                + ", ".join(missing_runtime_override_keys)
+            )
 
     database_name = desired_env_map.get("ODOO_DB_NAME", "").strip()
     if not database_name:

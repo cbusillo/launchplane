@@ -13,6 +13,8 @@ from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkf
 from control_plane.contracts.runtime_environment_record import ScalarValue
 
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
+LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
 SHOPIFY_ADDON_NAME = "shopify"
 SHOPIFY_ACTION_SETTING = "action"
@@ -274,6 +276,10 @@ def build_post_deploy_environment(
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
     }
+    if payload.config_parameters or payload.addon_settings:
+        inline_environment[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY] = "true"
+    if payload.website_bootstrap_included:
+        inline_environment[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY] = "true"
     return PostDeployOverrideEnvironment(
         inline_environment=inline_environment,
         required_container_environment_keys=payload.required_container_environment_keys,
