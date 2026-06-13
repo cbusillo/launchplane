@@ -1568,27 +1568,89 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "odoo-driver-route-smoke",
                 "${{ env.PRODUCT }}:${{",
             ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "checkout.repository[1]",
+                "${{ github.repository_owner }}/launchplane",
+                {"launchplane_tool_checkout_pinned_blocks": {"1"}},
+            ),
         )
-        for path, key, value in thin_connectors:
+        for case in thin_connectors:
+            path, key, value, *context = case
+            allow_context = context[0] if context else None
             with self.subTest(path=path, key=key):
                 self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
+                    _allow_reason(
+                        path=path,
+                        key=key,
+                        value=value,
+                        allow_context=allow_context,
+                    ),
                     "thin_connector_input",
                 )
 
-        for key, value in (
-            ("idempotency-key", "${{ inputs.idempotency_key }}"),
-            ("repository", "${{ vars.DEFAULT_REPOSITORY }}"),
-            ("repository", "$repository"),
-            ("RESOLVED_IMAGE_REPOSITORY", "${{ vars.IMAGE_REPOSITORY }}"),
-            ("ODOO_SOURCE_GITHUB_TOKEN", "${{ secrets.OTHER_TOKEN }}"),
-            ("token", "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || 'literal-token' }}"),
-            ("GITHUB_TOKEN", "write"),
-        ):
-            with self.subTest(key=key, value=value):
+        rejected_thin_connectors = (
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "idempotency-key",
+                "${{ inputs.idempotency_key }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "repository",
+                "${{ vars.DEFAULT_REPOSITORY }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "repository",
+                "$repository",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "RESOLVED_IMAGE_REPOSITORY",
+                "${{ vars.IMAGE_REPOSITORY }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "ODOO_SOURCE_GITHUB_TOKEN",
+                "${{ secrets.OTHER_TOKEN }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "token",
+                "${{ secrets.ODOO_SOURCE_GITHUB_TOKEN || 'literal-token' }}",
+            ),
+            (
+                ".github/workflows/reusable-odoo-artifact-publish.yml",
+                "GITHUB_TOKEN",
+                "write",
+            ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "checkout.repository[1]",
+                "cbusillo/launchplane",
+            ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "checkout.repository[1]",
+                "${{ github.repository_owner }}/other-tool",
+            ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "repository",
+                "${{ github.repository_owner }}/launchplane",
+            ),
+            (
+                ".github/workflows/launchplane-config-authority.yml",
+                "checkout.repository[1]",
+                "${{ github.repository_owner }}/launchplane",
+            ),
+        )
+        for path, key, value in rejected_thin_connectors:
+            with self.subTest(path=path, key=key, value=value):
                 self.assertEqual(
                     _allow_reason(
-                        path=".github/workflows/reusable-odoo-artifact-publish.yml",
+                        path=path,
                         key=key,
                         value=value,
                     ),
@@ -2278,6 +2340,341 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("PRODUCT_DOMAIN", result.output)
         self.assertIn("needs_classification", result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_allows_launchplane_tool_checkout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "---\n"
+                "name: Launchplane Config Authority\n\n"
+                '"on":\n'
+                "  pull_request:\n"
+                "  workflow_dispatch:\n\n"
+                "permissions:\n"
+                "  contents: read\n\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n\n"
+                "    steps:\n"
+                "      - name: Check out repository\n"
+                "        uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          path: product-repo\n"
+                "          fetch-depth: 0\n\n"
+                "      - name: Check out Launchplane\n"
+                "        uses: actions/checkout@v6\n"
+                "        id: launchplane\n"
+                "        with:\n"
+                "          repository: ${{ github.repository_owner }}/launchplane\n"
+                "          ref: 65d5695e48db61d3e491762e957a9f8101c3bf81\n"
+                "          path: launchplane\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+
+    def test_cli_product_repo_gate_allows_compact_launchplane_tool_checkout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          repository: ${{ github.repository_owner }}/launchplane\n"
+                "          ref: 65d5695e48db61d3e491762e957a9f8101c3bf81\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "pass")
+
+    def test_cli_product_repo_gate_rejects_hardcoded_launchplane_tool_checkout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          repository: cbusillo/launchplane\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("repository", result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_rejects_mutable_launchplane_tool_checkout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          repository: ${{ github.repository_owner }}/launchplane\n"
+                "          ref: main\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_rejects_mutable_launchplane_with_other_pinned_checkout(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - name: Other pinned checkout\n"
+                "        uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          repository: ${{ github.repository }}\n"
+                "          ref: 65d5695e48db61d3e491762e957a9f8101c3bf81\n"
+                "      - name: Mutable Launchplane checkout\n"
+                "        uses: actions/checkout@v6\n"
+                "        with:\n"
+                "          repository: ${{ github.repository_owner }}/launchplane\n"
+                "          ref: main\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_rejects_non_checkout_launchplane_repository(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "env:\n"
+                "  repository: ${{ github.repository_owner }}/launchplane\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_rejects_nested_launchplane_repository_with_block(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "launchplane-config-authority.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Launchplane Config Authority\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/config-authority-gate")
+            workflow.write_text(
+                "name: Launchplane Config Authority\n"
+                "jobs:\n"
+                "  launchplane-config-authority:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - name: Check out Launchplane\n"
+                "        uses: actions/checkout@v6\n"
+                "        env:\n"
+                "          with:\n"
+                "            repository: ${{ github.repository_owner }}/launchplane\n"
+                "            ref: 65d5695e48db61d3e491762e957a9f8101c3bf81\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
         payload = json.loads(result.output.split("Error:", 1)[0])
         gate = cast("dict[str, object]", payload["gate"])
         self.assertEqual(gate["status"], "fail")

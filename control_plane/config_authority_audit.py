@@ -135,6 +135,7 @@ GITHUB_ENV_REFERENCE_PATTERN = re.compile(r"^env\.[A-Za-z0-9_.-]+$")
 GITHUB_STEP_OUTPUT_REFERENCE_PATTERN = re.compile(
     r"^steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+$"
 )
+GIT_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 GITHUB_ROUTE_PATH_FORWARDING_PATTERN = re.compile(
     r"^(?:inputs\.[A-Za-z0-9_.-]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_.-]+)$"
 )
@@ -1124,6 +1125,10 @@ def _scan_source_file(
     else:
         candidates.extend(_script_line_candidates(text))
 
+    allow_context = _allow_context_for_candidates(
+        path=source_file.relative_path,
+        candidates=candidates,
+    )
     findings = [
         _build_finding(
             source_file=source_file,
@@ -1131,6 +1136,7 @@ def _scan_source_file(
             key=key,
             value=value,
             parser=parser,
+            allow_context=allow_context,
         )
         for line, key, value in candidates
         if _candidate_is_interesting(path=source_file.relative_path, key=key, value=value)
@@ -1321,6 +1327,8 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
     lines = text.splitlines()
     index = 0
     context_stack: list[tuple[int, str]] = []
+    checkout_uses_indent: int | None = None
+    checkout_with_count = 0
     while index < len(lines):
         line_number = index + 1
         line = lines[index]
@@ -1329,17 +1337,38 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             index += 1
             continue
         indent = _leading_space_count(line)
+        if (
+            checkout_uses_indent is not None
+            and indent < checkout_uses_indent
+            and not YAML_EMPTY_MAPPING_PATTERN.match(line)
+        ):
+            checkout_uses_indent = None
         context_stack = _yaml_context_for_indent(context_stack, indent=indent)
         list_match = YAML_LIST_ITEM_PATTERN.match(line)
         if list_match is not None:
-            list_key = _yaml_list_candidate_key(context_stack)
-            if list_key:
-                candidates.append((line_number, list_key, _unquote(list_match.group("value"))))
+            list_value = _unquote(list_match.group("value"))
+            list_scalar = YAML_SCALAR_PATTERN.match(list_value)
+            if list_scalar is not None:
+                yaml_key = _unquote(list_scalar.group("key"))
+                scalar_value = _unquote(
+                    _strip_inline_comment(list_scalar.group("value")).strip()
+                )
+                if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
+                    checkout_uses_indent = indent + 2
+            else:
+                list_key = _yaml_list_candidate_key(context_stack)
+                if list_key:
+                    candidates.append((line_number, list_key, list_value))
             index += 1
             continue
         empty_match = YAML_EMPTY_MAPPING_PATTERN.match(line)
         if empty_match is not None:
-            context_stack.append((indent, _unquote(empty_match.group("key"))))
+            yaml_key = _unquote(empty_match.group("key"))
+            if yaml_key == "with" and checkout_uses_indent is not None and indent == checkout_uses_indent:
+                checkout_with_count += 1
+                yaml_key = f"checkout.with[{checkout_with_count}]"
+                checkout_uses_indent = None
+            context_stack.append((indent, yaml_key))
             index += 1
             continue
         match = YAML_SCALAR_PATTERN.match(line)
@@ -1372,11 +1401,14 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
                 candidates.append((line_number, key, block_value))
             index = next_index
             continue
-        if yaml_key in IGNORED_YAML_SCALAR_KEYS:
-            index += 1
-            continue
         if value:
-            candidates.append((line_number, key, _unquote(value)))
+            scalar_value = _unquote(value)
+            if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
+                checkout_uses_indent = indent
+            if yaml_key in IGNORED_YAML_SCALAR_KEYS:
+                index += 1
+                continue
+            candidates.append((line_number, key, scalar_value))
         index += 1
     return candidates
 
@@ -1394,6 +1426,11 @@ def _yaml_candidate_key(context_stack: Sequence[tuple[int, str]], key: str) -> s
         input_name = _yaml_workflow_input_name(context_stack)
         if input_name:
             return f"inputs.{input_name}.default"
+    checkout_block = _yaml_checkout_with_block(context_stack)
+    if key == "repository" and checkout_block:
+        return f"checkout.repository[{checkout_block}]"
+    if key == "ref" and checkout_block:
+        return f"checkout.ref[{checkout_block}]"
     return key
 
 
@@ -1412,6 +1449,15 @@ def _yaml_workflow_input_name(context_stack: Sequence[tuple[int, str]]) -> str:
         ):
             return keys[index + 2]
     return ""
+
+
+def _yaml_checkout_with_block(context_stack: Sequence[tuple[int, str]]) -> str:
+    if not context_stack:
+        return ""
+    key = context_stack[-1][1]
+    if not key.startswith("checkout.with[") or not key.endswith("]"):
+        return ""
+    return key.removeprefix("checkout.with[").removesuffix("]")
 
 
 def _yaml_block_scalar_lines(
@@ -1449,6 +1495,29 @@ def _yaml_block_scalar_assignment_candidates(
                 (start_line + offset, f"payload-fields.{match.group('key')}", _unquote(value))
             )
     return candidates
+
+
+def _allow_context_for_candidates(
+    *, path: str, candidates: Sequence[tuple[int, str, object]]
+) -> Mapping[str, object]:
+    if path != ".github/workflows/launchplane-config-authority.yml":
+        return {}
+    pinned_checkout_blocks = {
+        _checkout_candidate_block(key)
+        for _, key, value in candidates
+        if key.startswith("checkout.ref[")
+        and GIT_COMMIT_SHA_PATTERN.fullmatch(_string_value(value).strip()) is not None
+    }
+    return {
+        "launchplane_tool_checkout_pinned_blocks": pinned_checkout_blocks,
+    }
+
+
+def _checkout_candidate_block(key: str) -> str:
+    match = re.search(r"\[(?P<block>\d+)\]$", key)
+    if match is None:
+        return ""
+    return match.group("block")
 
 
 def _leading_space_count(text: str) -> int:
@@ -1502,9 +1571,15 @@ def _build_finding(
     key: str,
     value: object,
     parser: str,
+    allow_context: Mapping[str, object],
 ) -> ConfigAuthorityFinding:
     rule_id = _rule_id(key=key, value=value)
-    allow_reason = _allow_reason(path=source_file.relative_path, key=key, value=value)
+    allow_reason = _allow_reason(
+        path=source_file.relative_path,
+        key=key,
+        value=value,
+        allow_context=allow_context,
+    )
     classification = "allowed" if allow_reason else "needs_classification"
     severity = "info" if allow_reason else _severity(rule_id=rule_id, key=key)
     evidence = _redacted_evidence(key=key, value=value)
@@ -1534,7 +1609,7 @@ def _build_finding(
 
 def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
     normalized = path.replace("\\", "/")
-    key_text = key.upper().replace(".", "_").replace("-", "_")
+    key_text = _semantic_full_key_text(key)
     value_text = _string_value(value)
     if normalized.startswith(".github/workflows/") and _is_empty_workflow_input_default(
         key=key,
@@ -1631,7 +1706,7 @@ def _contains_key_phrase(key_parts: Iterable[str], phrase: tuple[str, ...]) -> b
 
 def _rule_id(*, key: str, value: object) -> str:
     leaf_text = _semantic_leaf_text(key)
-    full_key_text = key.upper().replace(".", "_").replace("-", "_")
+    full_key_text = _semantic_full_key_text(key)
     semantic_key_text = full_key_text if _is_workflow_input_default_key(key) else leaf_text
     value_text = _string_value(value)
     if any(part in semantic_key_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
@@ -1680,9 +1755,16 @@ def _severity(*, rule_id: str, key: str) -> str:
     return "medium"
 
 
-def _allow_reason(*, path: str, key: str, value: object) -> str:
+def _allow_reason(
+    *,
+    path: str,
+    key: str,
+    value: object,
+    allow_context: Mapping[str, object] | None = None,
+) -> str:
+    allow_context = allow_context or {}
     normalized = path.replace("\\", "/")
-    key_text = key.upper().replace(".", "_").replace("-", "_")
+    key_text = _semantic_full_key_text(key)
     if normalized.startswith("docs/") or normalized in {"README.md", "AGENTS.md", "handoff.md"}:
         return ALLOW_REASON_DOCS_EXAMPLE
     if normalized.startswith("tests/") or "/test" in normalized:
@@ -1732,6 +1814,13 @@ def _allow_reason(*, path: str, key: str, value: object) -> str:
     if normalized.startswith(".github/workflows/") and _is_workflow_mechanic_key_value(
         key=key,
         value=value,
+    ):
+        return ALLOW_REASON_THIN_CONNECTOR_INPUT
+    if normalized.startswith(".github/workflows/") and _is_launchplane_tool_checkout_reference(
+        path=normalized,
+        key=key,
+        value=value,
+        allow_context=allow_context,
     ):
         return ALLOW_REASON_THIN_CONNECTOR_INPUT
     if normalized.startswith(".github/workflows/") and _is_workflow_input_mechanic_default(
@@ -2028,6 +2117,23 @@ def _is_workflow_input_mechanic_default(*, path: str, key: str, value: object) -
         return False
     value_text = _string_value(value).strip()
     return value_text in allowed_values
+
+
+def _is_launchplane_tool_checkout_reference(
+    *, path: str, key: str, value: object, allow_context: Mapping[str, object]
+) -> bool:
+    if path != ".github/workflows/launchplane-config-authority.yml":
+        return False
+    key_text = _semantic_full_key_text(key)
+    checkout_block = _checkout_candidate_block(key)
+    pinned_blocks = allow_context.get("launchplane_tool_checkout_pinned_blocks")
+    value_text = _string_value(value).strip()
+    return (
+        key_text == "CHECKOUT_REPOSITORY"
+        and value_text == "${{ github.repository_owner }}/launchplane"
+        and isinstance(pinned_blocks, set)
+        and checkout_block in pinned_blocks
+    )
 
 
 def _is_workflow_thin_connector_key_value(*, path: str, key: str, value: object) -> bool:
@@ -2338,7 +2444,7 @@ def _unquote(value: str) -> str:
 def _redacted_evidence(*, key: str, value: object) -> str:
     value_text = _string_value(value)
     leaf_text = _semantic_leaf_text(key)
-    full_key_text = key.upper().replace(".", "_").replace("-", "_")
+    full_key_text = _semantic_full_key_text(key)
     if any(part in leaf_text.split("_") for part in SECRET_SHAPED_KEY_PARTS):
         return "<redacted-secret-shaped-value>"
     if "REPOSITORY" in leaf_text or "REPO" in leaf_text:
@@ -2376,6 +2482,10 @@ def _semantic_leaf_text(key: str) -> str:
     leaf = key.rsplit(".", 1)[-1]
     leaf = leaf.split("[", 1)[0]
     return leaf.upper().replace("-", "_")
+
+
+def _semantic_full_key_text(key: str) -> str:
+    return re.sub(r"\[\d+\]", "", key).upper().replace(".", "_").replace("-", "_")
 
 
 def _raw_finding_payload(finding: ConfigAuthorityFinding) -> dict[str, object]:
