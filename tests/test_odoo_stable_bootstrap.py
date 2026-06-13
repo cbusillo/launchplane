@@ -154,6 +154,7 @@ class _Store:
         self.missing_target_record = False
         self.missing_target_id_record = False
         self.missing_inventory = False
+        self.odoo_instance_override_records: list[OdooInstanceOverrideRecord] = []
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -196,7 +197,14 @@ class _Store:
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord:
+        if self.odoo_instance_override_records:
+            record = self.odoo_instance_override_records[-1]
+            if (context_name, instance_name) == (record.context, record.instance):
+                return record
         raise FileNotFoundError(f"{context_name}/{instance_name}")
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+        self.odoo_instance_override_records.append(record)
 
 
 class OdooStableBootstrapTests(unittest.TestCase):
@@ -390,6 +398,111 @@ class OdooStableBootstrapTests(unittest.TestCase):
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",
         )
+
+    def test_execute_overlays_stable_canonical_before_post_deploy(self) -> None:
+        store = _Store()
+        store.odoo_instance_override_records.append(
+            OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                apply_on=("deploy",),
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    tenant="cm",
+                    name="Cell Mechanic",
+                    homepage_url="/cell-mechanic",
+                    logo_path="addons/cm_website/static/src/img/logo.png",
+                    logo_alt="Cell Mechanic",
+                    routes=(
+                        OdooWebsiteBootstrapRoute(
+                            name="Cell Mechanic",
+                            url="/cell-mechanic",
+                            module="cm_website",
+                            homepage=True,
+                        ),
+                    ),
+                ),
+                updated_at="2026-05-10T00:00:00Z",
+            )
+        )
+        captured_bootstrap_runs: list[dict[str, object]] = []
+
+        def post_deploy_side_effect(**_: object) -> OdooPostDeployResult:
+            record = store.odoo_instance_override_records[-1]
+            self.assertIsNotNone(record.website_bootstrap)
+            assert record.website_bootstrap is not None
+            self.assertEqual(
+                record.website_bootstrap.canonical_url,
+                "https://cm-testing.shinycomputers.com",
+            )
+            return OdooPostDeployResult(
+                context="cm",
+                instance="testing",
+                phase="deploy",
+                post_deploy_status="pass",
+            )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                side_effect=post_deploy_side_effect,
+            ) as post_deploy_mock,
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
+            )
+
+        self.assertEqual(result.bootstrap_status, "pass")
+        self.assertEqual(len(store.odoo_instance_override_records), 2)
+        updated_record = store.odoo_instance_override_records[-1]
+        self.assertIsNotNone(updated_record.website_bootstrap)
+        assert updated_record.website_bootstrap is not None
+        self.assertEqual(
+            updated_record.website_bootstrap.canonical_url,
+            "https://cm-testing.shinycomputers.com",
+        )
+        self.assertEqual(updated_record.updated_at, "2026-05-10T02:00:00Z")
+        self.assertEqual(updated_record.source_label, "odoo-stable-bootstrap")
+        workflow_environment = cast(
+            "dict[str, str]", captured_bootstrap_runs[0]["workflow_environment_overrides"]
+        )
+        decoded_payload = json.loads(
+            base64.b64decode(workflow_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]).decode(
+                "utf-8"
+            )
+        )
+        self.assertEqual(
+            decoded_payload["website_bootstrap"]["canonical_url"],
+            "https://cm-testing.shinycomputers.com",
+        )
+        post_deploy_mock.assert_called_once()
 
     def test_execute_proves_bootstrap_domain_from_live_target(self) -> None:
         store = _Store()
