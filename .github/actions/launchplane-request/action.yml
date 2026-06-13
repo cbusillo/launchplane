@@ -174,6 +174,8 @@ outputs:
     description: Dynamic output exposed by output-paths.
   source_commit:
     description: Dynamic output exposed by output-paths.
+  source_repository:
+    description: Dynamic output exposed by output-paths.
   trace_id:
     description: Dynamic output exposed by output-paths.
   website_bootstrap_included:

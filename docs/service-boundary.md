@@ -1097,11 +1097,18 @@ public probes and fails when a registered route returns the Launchplane
 route-missing response. It then uses the shared request action and GitHub OIDC to
 resolve `/v1/drivers/odoo/artifact-publish-inputs` for the caller's product,
 context, instance, and source ref. That response includes the image publish
-coordinates plus the Odoo devkit and shared-addons repository identities resolved
-from Launchplane runtime records; product repos should not keep those dependency
-repo defaults in workflow files. Product repos should use that reusable smoke or
-Launchplane-owned reusable workflows instead of adding repo-local route setup or
-copied driver request contracts.
+coordinates plus the Odoo devkit, shared-addons, and product repository
+identities resolved from Launchplane runtime records; product repos should not
+keep those dependency repo defaults in workflow files. The smoke also sends
+authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
+`/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`. Mutation-capable
+routes are proven by pre-mutation classification: preview apply uses a blocked
+destroy plan and rejects any non-blocked acceptance, while preview feedback uses
+the route's `dry_run` request mode so Launchplane evaluates the same
+`preview_pr_feedback.write` authorization without writing records or comments.
+Product repos should use that reusable smoke or Launchplane-owned reusable
+workflows instead of adding repo-local route setup or copied driver request
+contracts.
 
 The product-neutral preview lifecycle route should become the common boundary
 for preview desired/current-state comparison. Product-specific driver routes can

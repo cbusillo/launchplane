@@ -151,14 +151,206 @@ jobs:
           output-paths: >-
             trace_id=trace_id,
             preview_slug=result.preview_slug,
+            source_repository=result.repository,
             image_repository=result.image_repository,
             image_tag=result.image_tag,
             error_message=result.error_message
+
+      - name: Classify authenticated Odoo route responses
+        env:
+          PRODUCT_REPOSITORY: ${{ steps.publish_inputs.outputs.source_repository }}
+          ROUTE_PROBES: |-
+            [
+              {
+                "route_path": "/v1/drivers/odoo/preview-apply-inputs",
+                "classification": "preview-apply-inputs",
+                "expected_statuses": ["202", "403", "503"],
+                "payload": {
+                  "schema_version": 1,
+                  "product": "${PRODUCT}",
+                  "inputs": {
+                    "schema_version": 1,
+                    "product": "${PRODUCT}",
+                    "operation": "destroy",
+                    "pr_number": 1,
+                    "source_git_ref": "${SOURCE_GIT_REF}"
+                  }
+                }
+              },
+              {
+                "route_path": "/v1/drivers/odoo/preview-apply",
+                "classification": "preview-apply",
+                "expected_statuses": ["202", "403", "503"],
+                "payload": {
+                  "schema_version": 1,
+                  "product": "${PRODUCT}",
+                  "apply": {
+                    "dry_run_plan": {
+                      "status": "blocked",
+                      "operation": "destroy",
+                      "product": "${PRODUCT}",
+                      "repository": "${PRODUCT_REPOSITORY}",
+                      "preview_slug": "route-smoke",
+                      "preview_url": "",
+                      "domain_host": "",
+                      "compose_ref": "route-smoke",
+                      "compose_name": "route-smoke",
+                      "blockers": [
+                        {
+                          "code": "runtime_plan_not_ready",
+                          "message": "Route smoke intentionally blocks apply."
+                        }
+                      ],
+                      "summary": "route smoke only"
+                    },
+                    "wait_for_deploy": false,
+                    "smoke_check": false
+                  }
+                }
+              },
+              {
+                "route_path": "/v1/previews/pr-feedback",
+                "classification": "preview-pr-feedback",
+                "expected_statuses": ["202"],
+                "payload": {
+                  "schema_version": 1,
+                  "product": "${PRODUCT}",
+                  "context": "${CONTEXT_NAME}",
+                  "source": "odoo-driver-route-smoke",
+                  "repository": "${GITHUB_REPOSITORY}",
+                  "anchor_repo": "${GITHUB_REPOSITORY}",
+                  "anchor_pr_number": 1,
+                  "anchor_pr_url": "https://github.com/${GITHUB_REPOSITORY}/pull/1",
+                  "status": "unsupported",
+                  "failure_summary": "route smoke only",
+                  "dry_run": true
+                }
+              }
+            ]
+        run: |
+          set -euo pipefail
+          if [ -z "$LAUNCHPLANE_URL" ]; then
+            echo "LAUNCHPLANE_PUBLIC_URL or launchplane_url is required." >&2
+            exit 1
+          fi
+          if [ -z "$PRODUCT_REPOSITORY" ]; then
+            echo "Artifact publish inputs did not include the product repository." >&2
+            exit 1
+          fi
+
+          service_origin="${LAUNCHPLANE_URL%/}"
+          service_audience="$LAUNCHPLANE_AUDIENCE"
+          if [ -z "$service_audience" ]; then
+            service_audience="$(
+              printf '%s' "$service_origin" \
+                | sed -E 's#^[^:]+://([^/:]+).*#\1#'
+            )"
+          fi
+          if [ -z "$service_audience" ] \
+            || [ "$service_audience" = "$service_origin" ]; then
+            echo "LAUNCHPLANE_URL must be an absolute URL." >&2
+            exit 1
+          fi
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              -G \
+              --data-urlencode "audience=${service_audience}" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL" \
+            | jq -r '.value'
+          })"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token value." >&2
+            exit 1
+          fi
+
+          results_file="odoo-driver-route-smoke-results.jsonl"
+          : > "$results_file"
+          jq -c '.[]' <<< "$ROUTE_PROBES" | while read -r probe; do
+            route_path="$(jq -r '.route_path' <<< "$probe")"
+            classification="$(jq -r '.classification' <<< "$probe")"
+            expected_statuses="$(jq -r '.expected_statuses | join(" ")' <<< "$probe")"
+            payload="$(
+              jq -c \
+                --arg product "$PRODUCT" \
+                --arg context_name "$CONTEXT_NAME" \
+                --arg source_git_ref "$SOURCE_GIT_REF" \
+                --arg repository "$GITHUB_REPOSITORY" \
+                --arg product_repository "$PRODUCT_REPOSITORY" \
+                '(.payload | walk(
+                  if type == "string" then
+                    gsub("\\$\\{PRODUCT\\}"; $product)
+                    | gsub("\\$\\{CONTEXT_NAME\\}"; $context_name)
+                    | gsub("\\$\\{SOURCE_GIT_REF\\}"; $source_git_ref)
+                    | gsub("\\$\\{GITHUB_REPOSITORY\\}"; $repository)
+                    | gsub("\\$\\{PRODUCT_REPOSITORY\\}"; $product_repository)
+                  else . end
+                ))' <<< "$probe"
+            )"
+            route_slug="${route_path//\//-}"
+            response_file="$RUNNER_TEMP/oidc-route-smoke-${GITHUB_RUN_ID}"
+            response_file="${response_file}-${GITHUB_RUN_ATTEMPT}-${route_slug}.json"
+            status_code="$(curl -sS \
+              --connect-timeout 10 \
+              --max-time 30 \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'content-type: application/json' \
+              -H "Idempotency-Key: odoo-driver-route-smoke:${classification}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data "$payload" \
+              "${service_origin}${route_path}")"
+            error_code="$(jq -r '.error.code // ""' "$response_file" 2>/dev/null || true)"
+            trace_id="$(jq -r '.trace_id // ""' "$response_file" 2>/dev/null || true)"
+            jq -n \
+              --arg route_path "$route_path" \
+              --arg classification "$classification" \
+              --arg status_code "$status_code" \
+              --arg error_code "$error_code" \
+              --arg trace_id "$trace_id" \
+              '{route_path:$route_path, classification:$classification, http_status:$status_code, error_code:$error_code, trace_id:$trace_id}' \
+              | tee -a "$results_file"
+            case "$status_code" in
+              401)
+                echo "${route_path} rejected the GitHub OIDC token." >&2
+                cat "$response_file" >&2
+                exit 1
+                ;;
+              404)
+                echo "${route_path} is not registered on Launchplane." >&2
+                cat "$response_file" >&2
+                exit 1
+                ;;
+            esac
+            if ! grep -Eq "(^| )${status_code}( |$)" <<< "$expected_statuses"; then
+              echo "${route_path} returned unexpected HTTP ${status_code}." >&2
+              cat "$response_file" >&2
+              exit 1
+            fi
+            if [ "$classification" = "preview-apply" ] \
+              && [ "$status_code" = "202" ] \
+              && [ "$(jq -r '.result.status // ""' "$response_file" 2>/dev/null || true)" != "blocked" ]; then
+              echo "${route_path} accepted a non-blocked apply probe." >&2
+              cat "$response_file" >&2
+              exit 1
+            fi
+            if [ "$classification" = "preview-pr-feedback" ] \
+              && [ "$status_code" = "202" ] \
+              && { [ "$(jq -r '.result.dry_run // false' "$response_file" 2>/dev/null || true)" != "true" ] \
+                || [ "$(jq -r '.result.preview_pr_feedback // ""' "$response_file" 2>/dev/null || true)" != "authorized" ]; }; then
+              echo "${route_path} accepted a non-dry-run feedback probe." >&2
+              cat "$response_file" >&2
+              exit 1
+            fi
+          done
 
       - name: Report route smoke
         env:
           TRACE_ID: ${{ steps.publish_inputs.outputs.trace_id }}
           PREVIEW_SLUG: ${{ steps.publish_inputs.outputs.preview_slug }}
+          SOURCE_REPOSITORY: ${{ steps.publish_inputs.outputs.source_repository }}
           IMAGE_REPOSITORY: ${{ steps.publish_inputs.outputs.image_repository }}
           IMAGE_TAG: ${{ steps.publish_inputs.outputs.image_tag }}
           ERROR_MESSAGE: ${{ steps.publish_inputs.outputs.error_message }}
@@ -173,5 +365,9 @@ jobs:
           fi
           echo "trace_id=$TRACE_ID"
           echo "preview_slug=$PREVIEW_SLUG"
+          echo "source_repository=$SOURCE_REPOSITORY"
           echo "image_repository=$IMAGE_REPOSITORY"
           echo "image_tag=$IMAGE_TAG"
+          if [ -f odoo-driver-route-smoke-results.jsonl ]; then
+            cat odoo-driver-route-smoke-results.jsonl
+          fi

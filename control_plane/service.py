@@ -1292,6 +1292,7 @@ class PreviewPrFeedbackEnvelope(BaseModel):
     revision: str = ""
     run_url: str = ""
     failure_summary: str = ""
+    dry_run: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
@@ -14981,6 +14982,24 @@ def create_launchplane_service_app(
                                 context=preview_pr_feedback_request.context,
                             ),
                         },
+                    )
+                if preview_pr_feedback_request.dry_run:
+                    preview_pr_feedback_dry_run_result: dict[str, object] = {
+                        "dry_run": True,
+                        "preview_pr_feedback": "authorized",
+                        "product": preview_pr_feedback_request.product,
+                        "context": preview_pr_feedback_request.context,
+                        "status": preview_pr_feedback_request.status,
+                        "anchor_pr_number": preview_pr_feedback_request.anchor_pr_number,
+                    }
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=202,
+                        payload=_accepted_payload(
+                            trace_id=request_trace_id,
+                            result=preview_pr_feedback_dry_run_result,
+                            driver_result=preview_pr_feedback_dry_run_result,
+                        ),
                     )
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
