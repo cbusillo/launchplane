@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import click
+from control_plane.odoo_instance_overrides import LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
+from control_plane.odoo_instance_overrides import LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.odoo_instance_overrides import render_post_deploy_payload
@@ -25,6 +27,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideApplyResult,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.ship_request import ShipRequest
@@ -168,6 +171,43 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             ).decode("utf-8")
         )
         self.assertEqual(decoded_payload, environment.payload.to_wire_dict())
+        self.assertEqual(
+            environment.inline_environment[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY],
+            "true",
+        )
+        self.assertNotIn(
+            LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+            environment.inline_environment,
+        )
+
+    def test_build_post_deploy_environment_sets_website_bootstrap_required_flag(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="cm",
+            instance="testing",
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="cm",
+                name="Cell Mechanic",
+                canonical_url="https://cm-testing.example.com",
+            ),
+            updated_at="2026-06-13T18:00:00Z",
+        )
+
+        environment = build_post_deploy_environment(record)
+
+        decoded_payload = json.loads(
+            base64.b64decode(
+                environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+        self.assertIn("website_bootstrap", decoded_payload)
+        self.assertEqual(
+            environment.inline_environment[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
+            "true",
+        )
+        self.assertNotIn(
+            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+            environment.inline_environment,
+        )
 
     def test_cli_put_config_param_does_not_echo_plaintext_value(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

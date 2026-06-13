@@ -8,6 +8,7 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -1132,6 +1133,36 @@ def execute_odoo_stable_target_replacement_apply(
         and normalized_override_record is not odoo_override_record
     ):
         record_store.write_odoo_instance_override_record(normalized_override_record)
+    runtime_override_environment: dict[str, str] = {}
+    runtime_override_payload = None
+    if normalized_override_record is not None and "deploy" in normalized_override_record.apply_on:
+        runtime_override = control_plane_odoo_instance_overrides.build_post_deploy_environment(
+            normalized_override_record,
+            workflow_intent="deploy",
+            protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
+        )
+        runtime_override_environment = runtime_override.inline_environment
+        runtime_override_payload = runtime_override.payload
+        runtime_source.update(
+            {
+                "runtime_override_payload_rendered": "true",
+                "runtime_override_payload_sha256": runtime_override_payload.wire_sha256,
+                "runtime_override_count": str(runtime_override_payload.override_count),
+                "runtime_override_website_bootstrap_included": str(
+                    runtime_override_payload.website_bootstrap_included
+                ).lower(),
+                "runtime_override_instance_required": runtime_override_environment.get(
+                    control_plane_odoo_instance_overrides.LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+                    "false",
+                ),
+                "runtime_override_website_bootstrap_required": runtime_override_environment.get(
+                    control_plane_odoo_instance_overrides.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY,
+                    "false",
+                ),
+            }
+        )
+    else:
+        runtime_source["runtime_override_payload_rendered"] = "false"
 
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
@@ -1245,7 +1276,21 @@ def execute_odoo_stable_target_replacement_apply(
             str(target_payload.get("env") or "")
         )
         desired_env_map = dict(current_env_map)
+        for key in control_plane_dokploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
+            desired_env_map.pop(key, None)
         desired_env_map.update(runtime_environment_values)
+        desired_env_map.update(runtime_override_environment)
+        if runtime_override_payload is not None:
+            missing_override_secret_keys = tuple(
+                key
+                for key in runtime_override_payload.required_container_environment_keys
+                if not desired_env_map.get(key, "").strip()
+            )
+            if missing_override_secret_keys:
+                raise click.ClickException(
+                    "Odoo target replacement requires override secret env key(s) before deployment: "
+                    + ", ".join(missing_override_secret_keys)
+                )
         if desired_env_map.get("ODOO_WEB_COMMAND", "").strip() == "/odoo/odoo-bin":
             desired_env_map.pop("ODOO_WEB_COMMAND", None)
         desired_env_map["PLATFORM_CONTEXT"] = plan.context

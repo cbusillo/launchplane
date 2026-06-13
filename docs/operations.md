@@ -840,7 +840,15 @@ context only, and `context_instance` has both context and instance.
 - `odoo-overrides mark-apply` updates the latest apply status metadata for a
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase overrides from these records
-  and pass them to the Odoo data-workflow runner as one typed payload env var.
+  and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
+  persisted to the Dokploy compose target environment before the web container
+  is redeployed, and the same payload is passed to the Odoo data-workflow
+  runner for post-deploy maintenance.
+- When a deploy-phase payload is expected, Launchplane also persists generic
+  runtime assertion flags that tell the Odoo runtime to fail closed if managed
+  instance overrides or website bootstrap data are missing. Launchplane re-reads
+  the provider target environment after writing it and fails the operation if
+  the typed payload or assertion flags did not persist.
 - Target replacement requests with `data_source_mode="upstream_restore"` use the
   guarded post-deploy schedule in destructive restore mode after image deploy so
   the devkit restore path performs restore sanitization, website bootstrap,

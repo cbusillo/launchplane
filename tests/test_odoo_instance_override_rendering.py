@@ -6,6 +6,7 @@ from typing import cast
 import click
 
 from control_plane.odoo_instance_overrides import (
+    LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
     ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
     build_post_deploy_environment,
     render_post_deploy_payload,
@@ -99,7 +100,15 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
 
         self.assertEqual(decoded_payload, render_post_deploy_payload(record).to_wire_dict())
         self.assertEqual(
-            set(environment.inline_environment), {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}
+            set(environment.inline_environment),
+            {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
+            },
+        )
+        self.assertEqual(
+            environment.inline_environment[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY],
+            "true",
         )
 
     def test_render_post_deploy_payload_preserves_website_bootstrap(self) -> None:
