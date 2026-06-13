@@ -107,6 +107,10 @@ def _write_odoo_instance_override_apply_result(
     return updated_record
 
 
+def _prefix_post_deploy_readback_evidence(markers: dict[str, str]) -> dict[str, str]:
+    return {f"post_deploy_readback_{key}": value for key, value in markers.items()}
+
+
 def _require_record_store(record_store: object) -> OdooPostDeployStore:
     required_methods = (
         "read_odoo_instance_override_record",
@@ -179,7 +183,7 @@ def execute_odoo_post_deploy(
         "restore" if run_destructive_restore else "deploy"
     )
     override_payload: OdooPostDeployPayload | None = None
-    post_deploy_readback_evidence: dict[str, str] = {}
+    post_deploy_readback_markers: dict[str, str] = {}
 
     target_definition = _resolve_compose_target_definition(
         control_plane_root=control_plane_root,
@@ -226,7 +230,7 @@ def execute_odoo_post_deploy(
         host, token = control_plane_dokploy.read_dokploy_config(
             control_plane_root=control_plane_root
         )
-        post_deploy_readback_evidence = (
+        post_deploy_readback_markers = (
             control_plane_dokploy.run_compose_post_deploy_update(
                 host=host,
                 token=token,
@@ -270,7 +274,7 @@ def execute_odoo_post_deploy(
             override_evidence=(
                 {
                     **(override_payload.redacted_evidence() if override_payload else {}),
-                    **post_deploy_readback_evidence,
+                    **_prefix_post_deploy_readback_evidence(post_deploy_readback_markers),
                 }
             ),
             error_message=str(error),
@@ -321,7 +325,7 @@ def execute_odoo_post_deploy(
         required_container_environment_keys=required_workflow_environment_keys,
         override_evidence={
             **(override_payload.redacted_evidence() if override_payload else {}),
-            **post_deploy_readback_evidence,
+            **_prefix_post_deploy_readback_evidence(post_deploy_readback_markers),
         },
         applied_at=applied_at,
     )

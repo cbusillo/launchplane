@@ -3233,10 +3233,11 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn("workflow_output_file=$(mktemp)", script)
         self.assertIn("workflow_exit_status=${PIPESTATUS[0]}", script)
         self.assertIn("Odoo post-deploy maintenance readback markers:", script)
-        self.assertIn(
-            "grep -E '^(odoo_instance_overrides_payload_present|website_bootstrap_[a-z0-9_]+)='",
-            script,
-        )
+        self.assertIn("grep -E '^(", script)
+        self.assertIn("odoo_instance_overrides_payload_present", script)
+        self.assertIn("website_bootstrap_applied", script)
+        self.assertIn("website_bootstrap_domain_matches_canonical", script)
+        self.assertNotIn("website_bootstrap_[a-z0-9_]+", script)
         self.assertIn('if [ "$workflow_exit_status" -ne 0 ]; then', script)
         self.assertIn("start_web_container\ntrap - EXIT", script)
         self.assertNotIn("restart_web_on_success", script)
@@ -3251,6 +3252,9 @@ actions = ["launchplane_service_deploy.execute"]
                         "website_bootstrap_website_id=1",
                         "odoo_instance_overrides_payload_present=true",
                         "website_bootstrap_secret=token-value",
+                        "website_bootstrap_secret=123456",
+                        "website_bootstrap_included=false",
+                        "website_bootstrap_domain_set=123",
                         "ODOO_DB_PASSWORD=secret",
                         "random_line=true",
                     )

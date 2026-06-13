@@ -107,13 +107,18 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.override_evidence["workflow_intent"], "deploy")
             self.assertEqual(result.override_evidence["config_parameter_count"], "1")
             self.assertEqual(
-                result.override_evidence["odoo_instance_overrides_payload_present"],
+                result.override_evidence[
+                    "post_deploy_readback_odoo_instance_overrides_payload_present"
+                ],
                 "true",
             )
             self.assertEqual(
-                result.override_evidence["website_bootstrap_domain_matches_canonical"],
+                result.override_evidence[
+                    "post_deploy_readback_website_bootstrap_domain_matches_canonical"
+                ],
                 "true",
             )
+            self.assertNotIn("website_bootstrap_domain_matches_canonical", result.override_evidence)
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
