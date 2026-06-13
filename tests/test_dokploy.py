@@ -3230,6 +3230,14 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertIn('local exit_status="$?"', script)
         self.assertIn('if [ "${web_was_running}" != "1" ]; then', script)
         self.assertIn('docker start "${web_container_id}" >/dev/null || true', script)
+        self.assertIn("workflow_output_file=$(mktemp)", script)
+        self.assertIn("workflow_exit_status=${PIPESTATUS[0]}", script)
+        self.assertIn("Odoo post-deploy maintenance readback markers:", script)
+        self.assertIn(
+            "grep -E '^(odoo_instance_overrides_payload_present|website_bootstrap_[a-z0-9_]+)='",
+            script,
+        )
+        self.assertIn('if [ "$workflow_exit_status" -ne 0 ]; then', script)
         self.assertIn("start_web_container\ntrap - EXIT", script)
         self.assertNotIn("restart_web_on_success", script)
         self.assertIn('"${workflow_environment[@]}"', script)

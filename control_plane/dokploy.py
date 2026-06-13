@@ -2437,12 +2437,26 @@ workflow_identity_key=$(docker exec -u root \
     ')
 
 echo "Running Odoo {workflow_label} in container ${{script_runner_container_id}}"
+workflow_output_file=$(mktemp)
+set +e
 docker exec \
     -e DATA_WORKFLOW_SSH_DIR="${{workflow_ssh_dir}}" \
     -e DATA_WORKFLOW_SSH_KEY="$workflow_identity_key" \
     "${{workflow_environment[@]}}" \
     "${{script_runner_container_id}}" \
-    python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}"
+    python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
+    2>&1 | tee "$workflow_output_file"
+workflow_exit_status=${{PIPESTATUS[0]}}
+set -e
+
+echo "Odoo {workflow_label} readback markers:"
+grep -E '^(odoo_instance_overrides_payload_present|website_bootstrap_[a-z0-9_]+)=' "$workflow_output_file" \
+    | sort -u \
+    || true
+rm -f "$workflow_output_file"
+if [ "$workflow_exit_status" -ne 0 ]; then
+    exit "$workflow_exit_status"
+fi
 
 if [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
     echo "Checking protected Shopify store keys for ${{database_name}}"
