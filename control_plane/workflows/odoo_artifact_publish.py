@@ -51,6 +51,21 @@ class OdooArtifactPublishStore(
     pass
 
 
+class OdooArtifactPublishInputsDependencyNotFoundError(click.ClickException):
+    pass
+
+
+def _is_missing_runtime_environment_dependency(error: click.ClickException) -> bool:
+    message = str(error).strip()
+    return (
+        message == "Missing DB-backed Launchplane runtime environment records."
+        or message
+        == "Missing Launchplane runtime environment authority. Configure DB-backed runtime environment records."
+        or message.startswith("Runtime environments file has no context definition for ")
+        or message.startswith("Runtime environments file has no instance definition for ")
+    )
+
+
 def _normalize_publish_scope(context: str, instance: str) -> tuple[str, str]:
     normalized_context = context.strip().lower()
     normalized_instance = instance.strip().lower()
@@ -218,11 +233,18 @@ def build_odoo_artifact_publish_inputs(
             "Odoo artifact publish metadata requires a product profile. "
             "Use a product-specific Odoo driver id instead of the generic 'odoo' driver."
         )
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=request.context,
-        instance_name=request.instance,
-    )
+    try:
+        environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except click.ClickException as error:
+        if not _is_missing_runtime_environment_dependency(error):
+            raise
+        raise OdooArtifactPublishInputsDependencyNotFoundError(
+            "Odoo artifact publish inputs require runtime environment records."
+        ) from error
     publish_environment = {
         env_key: environment_values[env_key]
         for env_key in PUBLISH_RUNTIME_ENVIRONMENT_KEYS
@@ -268,7 +290,7 @@ def _publish_dependency_repositories(environment_values: dict[str, str]) -> dict
         if not repositories[output_key]
     ]
     if missing_keys:
-        raise click.ClickException(
+        raise OdooArtifactPublishInputsDependencyNotFoundError(
             "Odoo artifact publish inputs are missing dependency repository runtime "
             f"record(s): {', '.join(sorted(missing_keys))}."
         )
