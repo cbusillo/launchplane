@@ -1099,7 +1099,10 @@ resolve `/v1/drivers/odoo/artifact-publish-inputs` for the caller's product,
 context, instance, and source ref. That response includes the image publish
 coordinates plus the Odoo devkit, shared-addons, and product repository
 identities resolved from Launchplane runtime records; product repos should not
-keep those dependency repo defaults in workflow files. The smoke also sends
+keep those dependency repo defaults in workflow files. Missing runtime records
+for those artifact-publish inputs are classified as
+`driver_route_dependency_not_found`, not as route-missing or generic invalid
+requests. The smoke also sends
 authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
 `/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`. Mutation-capable
 routes are proven by pre-mutation classification: preview apply uses a blocked

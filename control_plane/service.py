@@ -442,6 +442,7 @@ from control_plane.workflows.launchplane import (
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceStore,
     OdooArtifactPublishEvidenceRequest,
+    OdooArtifactPublishInputsDependencyNotFoundError,
     OdooArtifactPublishInputsRequest,
     build_odoo_artifact_publish_inputs,
     ingest_odoo_artifact_publish_evidence,
@@ -2581,11 +2582,14 @@ def _handle_odoo_artifact_publish_inputs(
     control_plane_root_path: Path,
 ) -> _DescriptorDriverDispatchResult:
     del record_store
-    driver_result = build_odoo_artifact_publish_inputs(
-        control_plane_root=control_plane_root_path,
-        request=request.inputs,
-        product_profile=resolved_context.profile,
-    )
+    try:
+        driver_result = build_odoo_artifact_publish_inputs(
+            control_plane_root=control_plane_root_path,
+            request=request.inputs,
+            product_profile=resolved_context.profile,
+        )
+    except OdooArtifactPublishInputsDependencyNotFoundError as error:
+        raise DriverRouteDependencyNotFoundError from error
     return _DescriptorDriverDispatchResult(result=driver_result, driver_result=driver_result)
 
 
