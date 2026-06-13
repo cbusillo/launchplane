@@ -336,6 +336,39 @@ class DokployConfigTests(unittest.TestCase):
         )
         self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
 
+    def test_fetch_deployment_logs_calls_dokploy_read_logs_endpoint(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def capture_request(**kwargs: object) -> dict[str, str]:
+            requests.append(kwargs)
+            return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=capture_request,
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_deployment_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                deployment_id="deploy-123",
+                line_count=2,
+            )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["path"], "/api/deployment.readLogs")
+        self.assertEqual(requests[0]["query"], {"deploymentId": "deploy-123", "tail": 2})
+        self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
+
+    def test_fetch_deployment_logs_requires_deployment_id(self) -> None:
+        with self.assertRaises(click.ClickException) as error_context:
+            control_plane_dokploy.fetch_dokploy_deployment_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                deployment_id=" ",
+            )
+
+        self.assertIn("deployment id", str(error_context.exception))
+
     def test_fetch_compose_logs_prefers_web_container_name_variants(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -2437,7 +2470,11 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
                 patch(
                     "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                    side_effect=lambda **_kwargs: None,
+                    return_value="schedule-after",
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                    return_value=(),
                 ),
                 patch(
                     "control_plane.dokploy.dokploy_request",
@@ -2461,6 +2498,73 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertNotIn("--update-only", str(schedule_payloads[0]["script"]))
         self.assertIn("/api/compose.deploy", request_paths)
         self.assertIn("/api/schedule.runManually", request_paths)
+
+    def test_run_compose_post_deploy_update_returns_readback_markers_from_schedule_logs(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+
+        def capture_schedule_payload(**_kwargs: object) -> dict[str, str]:
+            return {"scheduleId": "schedule-123"}
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-prod-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                side_effect=capture_schedule_payload,
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                return_value="schedule-after",
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                return_value=(
+                    "website_bootstrap_domain_matches_canonical=true",
+                    "website_bootstrap_website_id=7",
+                    "website_bootstrap_secret=123456",
+                ),
+            ) as fetch_logs_mock,
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            markers = control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+        self.assertEqual(
+            markers,
+            {
+                "website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_website_id": "7",
+            },
+        )
 
     def test_run_compose_post_deploy_update_can_run_destructive_restore_workflow(
         self,
@@ -2507,7 +2611,11 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
+                return_value="schedule-after",
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                return_value=(),
             ),
             patch(
                 "control_plane.dokploy.dokploy_request",

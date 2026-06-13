@@ -974,6 +974,27 @@ def fetch_dokploy_compose_logs(
     return lines[-normalized_line_count:]
 
 
+def fetch_dokploy_deployment_logs(
+    *,
+    host: str,
+    token: str,
+    deployment_id: str,
+    line_count: int = DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+) -> tuple[str, ...]:
+    normalized_deployment_id = deployment_id.strip()
+    if not normalized_deployment_id:
+        raise click.ClickException("Dokploy deployment logs require a deployment id.")
+    normalized_line_count = normalize_dokploy_log_line_count(line_count)
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/deployment.readLogs",
+        query={"deploymentId": normalized_deployment_id, "tail": normalized_line_count},
+    )
+    lines = normalize_dokploy_log_payload(payload)
+    return lines[-normalized_line_count:]
+
+
 def _select_compose_log_container(containers: list[JsonObject]) -> JsonObject:
     for container in containers:
         if _compose_log_container_has_web_service(container):
@@ -1775,19 +1796,20 @@ def run_compose_post_deploy_update(
         payload={"scheduleId": schedule_id},
         timeout_seconds=schedule_timeout_seconds,
     )
-    wait_for_dokploy_schedule_deployment(
+    completed_schedule_deployment_key = wait_for_dokploy_schedule_deployment(
         host=host,
         token=token,
         schedule_id=schedule_id,
         before_key=deployment_key(latest_schedule_deployment),
         timeout_seconds=schedule_timeout_seconds,
     )
-    completed_schedule_deployment = latest_deployment_for_schedule(
+    deployment_log_lines = fetch_dokploy_deployment_logs(
         host=host,
         token=token,
-        schedule_id=schedule_id,
+        deployment_id=completed_schedule_deployment_key,
+        line_count=MAX_DOKPLOY_LOG_LINE_COUNT,
     )
-    return extract_odoo_post_deploy_readback_markers(completed_schedule_deployment)
+    return extract_odoo_post_deploy_readback_markers({"logs": list(deployment_log_lines)})
 
 
 def run_compose_odoo_stable_bootstrap(
