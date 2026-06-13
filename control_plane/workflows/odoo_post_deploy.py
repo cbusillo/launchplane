@@ -179,6 +179,7 @@ def execute_odoo_post_deploy(
         "restore" if run_destructive_restore else "deploy"
     )
     override_payload: OdooPostDeployPayload | None = None
+    post_deploy_readback_evidence: dict[str, str] = {}
 
     target_definition = _resolve_compose_target_definition(
         control_plane_root=control_plane_root,
@@ -225,15 +226,18 @@ def execute_odoo_post_deploy(
         host, token = control_plane_dokploy.read_dokploy_config(
             control_plane_root=control_plane_root
         )
-        control_plane_dokploy.run_compose_post_deploy_update(
-            host=host,
-            token=token,
-            target_definition=target_definition,
-            env_file=env_file,
-            workflow_environment_overrides=workflow_environment_overrides,
-            required_workflow_environment_keys=required_workflow_environment_keys,
-            protected_shopify_store_keys=protected_shopify_store_keys,
-            run_destructive_restore=run_destructive_restore,
+        post_deploy_readback_evidence = (
+            control_plane_dokploy.run_compose_post_deploy_update(
+                host=host,
+                token=token,
+                target_definition=target_definition,
+                env_file=env_file,
+                workflow_environment_overrides=workflow_environment_overrides,
+                required_workflow_environment_keys=required_workflow_environment_keys,
+                protected_shopify_store_keys=protected_shopify_store_keys,
+                run_destructive_restore=run_destructive_restore,
+            )
+            or {}
         )
     except click.ClickException as error:
         if odoo_override_record is not None and override_should_apply:
@@ -264,7 +268,10 @@ def execute_odoo_post_deploy(
             workflow_intent=workflow_intent,
             required_container_environment_keys=required_workflow_environment_keys,
             override_evidence=(
-                override_payload.redacted_evidence() if override_payload else {}
+                {
+                    **(override_payload.redacted_evidence() if override_payload else {}),
+                    **post_deploy_readback_evidence,
+                }
             ),
             error_message=str(error),
         )
@@ -303,13 +310,18 @@ def execute_odoo_post_deploy(
             workflow_environment_overrides or required_workflow_environment_keys
         ),
         override_payload_sha256=override_payload.wire_sha256 if override_payload else "",
-        override_payload_schema_version=(override_payload.schema_version if override_payload else None),
+        override_payload_schema_version=(
+            override_payload.schema_version if override_payload else None
+        ),
         override_count=override_payload.override_count if override_payload else 0,
         website_bootstrap_included=(
             override_payload.website_bootstrap_included if override_payload else False
         ),
         workflow_intent=workflow_intent,
         required_container_environment_keys=required_workflow_environment_keys,
-        override_evidence=override_payload.redacted_evidence() if override_payload else {},
+        override_evidence={
+            **(override_payload.redacted_evidence() if override_payload else {}),
+            **post_deploy_readback_evidence,
+        },
         applied_at=applied_at,
     )

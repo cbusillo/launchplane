@@ -3242,6 +3242,31 @@ actions = ["launchplane_service_deploy.execute"]
         self.assertNotIn("restart_web_on_success", script)
         self.assertIn('"${workflow_environment[@]}"', script)
 
+    def test_extract_odoo_post_deploy_readback_markers_allows_only_safe_marker_values(self) -> None:
+        markers = control_plane_dokploy.extract_odoo_post_deploy_readback_markers(
+            {
+                "logs": "\n".join(
+                    (
+                        "website_bootstrap_domain_matches_canonical=true",
+                        "website_bootstrap_website_id=1",
+                        "odoo_instance_overrides_payload_present=true",
+                        "website_bootstrap_secret=token-value",
+                        "ODOO_DB_PASSWORD=secret",
+                        "random_line=true",
+                    )
+                )
+            }
+        )
+
+        self.assertEqual(
+            markers,
+            {
+                "website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_website_id": "1",
+                "odoo_instance_overrides_payload_present": "true",
+            },
+        )
+
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
         runner = CliRunner()
         captured_env_updates: list[dict[str, object]] = []
