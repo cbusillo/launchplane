@@ -61,6 +61,13 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 )
             )
 
+            def capture_post_deploy_run(**kwargs: object) -> dict[str, str]:
+                captured_runs.append(kwargs)
+                return {
+                    "odoo_instance_overrides_payload_present": "true",
+                    "website_bootstrap_domain_matches_canonical": "true",
+                }
+
             with (
                 patch(
                     "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
@@ -72,13 +79,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: (
-                        captured_runs.append(kwargs)
-                        or {
-                            "odoo_instance_overrides_payload_present": "true",
-                            "website_bootstrap_domain_matches_canonical": "true",
-                        }
-                    ),
+                    side_effect=capture_post_deploy_run,
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.utc_now_timestamp",
