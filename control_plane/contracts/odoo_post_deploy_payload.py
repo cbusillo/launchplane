@@ -127,9 +127,7 @@ class OdooPostDeployPayload(BaseModel):
         if not self.instance:
             raise ValueError("Odoo post-deploy payload requires instance")
         if self.workflow_intent == "restore" and self.website_bootstrap is not None:
-            raise ValueError(
-                "restore Odoo post-deploy payloads must not include website_bootstrap"
-            )
+            raise ValueError("restore Odoo post-deploy payloads must not include website_bootstrap")
         return self
 
     @property
@@ -157,9 +155,7 @@ class OdooPostDeployPayload(BaseModel):
             "schema_version": self.schema_version,
             "context": self.context,
             "instance": self.instance,
-            "config_parameters": [
-                override.to_wire_dict() for override in self.config_parameters
-            ],
+            "config_parameters": [override.to_wire_dict() for override in self.config_parameters],
             "addon_settings": [override.to_wire_dict() for override in self.addon_settings],
         }
         if self.website_bootstrap is not None:
@@ -167,16 +163,16 @@ class OdooPostDeployPayload(BaseModel):
         return payload
 
     def to_wire_json_bytes(self) -> bytes:
-        return json.dumps(
-            self.to_wire_dict(), separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
+        return json.dumps(self.to_wire_dict(), separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
 
     @property
     def wire_sha256(self) -> str:
         return hashlib.sha256(self.to_wire_json_bytes()).hexdigest()
 
     def redacted_evidence(self) -> dict[str, str]:
-        return {
+        evidence = {
             "workflow_intent": self.workflow_intent,
             "payload_schema_version": str(self.schema_version),
             "payload_sha256": self.wire_sha256,
@@ -187,3 +183,29 @@ class OdooPostDeployPayload(BaseModel):
                 self.required_container_environment_keys
             ),
         }
+        if self.website_bootstrap is not None:
+            homepage_route_count = sum(
+                1 for route in self.website_bootstrap.routes if route.homepage
+            )
+            evidence.update(
+                {
+                    "website_bootstrap_name_present": str(
+                        bool(self.website_bootstrap.name.strip())
+                    ).lower(),
+                    "website_bootstrap_canonical_url_present": str(
+                        bool(self.website_bootstrap.canonical_url.strip())
+                    ).lower(),
+                    "website_bootstrap_homepage_url_present": str(
+                        bool(self.website_bootstrap.homepage_url.strip())
+                    ).lower(),
+                    "website_bootstrap_logo_path_present": str(
+                        bool(self.website_bootstrap.logo_path.strip())
+                    ).lower(),
+                    "website_bootstrap_logo_alt_present": str(
+                        bool(self.website_bootstrap.logo_alt.strip())
+                    ).lower(),
+                    "website_bootstrap_route_count": str(len(self.website_bootstrap.routes)),
+                    "website_bootstrap_homepage_route_count": str(homepage_route_count),
+                }
+            )
+        return evidence

@@ -147,11 +147,39 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         website_bootstrap = cast("dict[str, object]", wire_payload["website_bootstrap"])
         routes = cast("list[dict[str, object]]", website_bootstrap["routes"])
         self.assertEqual(website_bootstrap["name"], "Example Site")
-        self.assertEqual(
-            website_bootstrap["canonical_url"], "https://example-testing.example.com"
-        )
+        self.assertEqual(website_bootstrap["canonical_url"], "https://example-testing.example.com")
         self.assertEqual(routes[0]["url"], "/home")
+        evidence = payload.redacted_evidence()
+        self.assertEqual(evidence["website_bootstrap_name_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_canonical_url_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_homepage_url_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_logo_path_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_logo_alt_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_route_count"], "1")
+        self.assertEqual(evidence["website_bootstrap_homepage_route_count"], "1")
         self.assertEqual(decoded_payload, wire_payload)
+
+    def test_website_bootstrap_evidence_reports_incomplete_public_identity(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="example",
+            instance="testing",
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="example",
+                name="Example Site",
+            ),
+            updated_at="2026-05-16T00:00:00Z",
+        )
+
+        evidence = render_post_deploy_payload(record).redacted_evidence()
+
+        self.assertEqual(evidence["website_bootstrap_included"], "true")
+        self.assertEqual(evidence["website_bootstrap_name_present"], "true")
+        self.assertEqual(evidence["website_bootstrap_canonical_url_present"], "false")
+        self.assertEqual(evidence["website_bootstrap_homepage_url_present"], "false")
+        self.assertEqual(evidence["website_bootstrap_logo_path_present"], "false")
+        self.assertEqual(evidence["website_bootstrap_logo_alt_present"], "false")
+        self.assertEqual(evidence["website_bootstrap_route_count"], "0")
+        self.assertEqual(evidence["website_bootstrap_homepage_route_count"], "0")
 
     def test_restore_intent_suppresses_website_bootstrap(self) -> None:
         record = OdooInstanceOverrideRecord(

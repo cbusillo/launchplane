@@ -16,6 +16,8 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -24,7 +26,6 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyPhase
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementApplyResult,
@@ -64,9 +65,15 @@ class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
 
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
 
@@ -168,18 +175,14 @@ class _ApplyResultBase(BaseModel):
             release_tuple_id=release_tuple_id,
             deploy_status=deploy_status,
             post_deploy_status=post_deploy_status,
-            post_deploy_override_status=getattr(
-                post_deploy_payload, "override_status", "skipped"
-            ),
+            post_deploy_override_status=getattr(post_deploy_payload, "override_status", "skipped"),
             post_deploy_override_record_found=bool(
                 getattr(post_deploy_payload, "override_record_found", False)
             ),
             post_deploy_override_payload_rendered=bool(
                 getattr(post_deploy_payload, "override_payload_rendered", False)
             ),
-            post_deploy_override_count=int(
-                getattr(post_deploy_payload, "override_count", 0) or 0
-            ),
+            post_deploy_override_count=int(getattr(post_deploy_payload, "override_count", 0) or 0),
             post_deploy_website_bootstrap_included=bool(
                 getattr(post_deploy_payload, "website_bootstrap_included", False)
             ),
@@ -591,6 +594,40 @@ def _target_health_url(
     ):
         return lane_health_url
     return default_odoo_health_url(base_url=base_url)
+
+
+def _read_odoo_instance_override_record(
+    *, record_store: OdooStableTargetReplacementStore, context: str, instance: str
+) -> OdooInstanceOverrideRecord | None:
+    try:
+        return record_store.read_odoo_instance_override_record(
+            context_name=context,
+            instance_name=instance,
+        )
+    except FileNotFoundError:
+        return None
+
+
+def _record_with_target_replacement_canonical(
+    *,
+    record: OdooInstanceOverrideRecord | None,
+    canonical_url: str,
+    updated_at: str,
+) -> OdooInstanceOverrideRecord | None:
+    normalized_canonical_url = canonical_url.strip().rstrip("/")
+    if record is None or record.website_bootstrap is None or not normalized_canonical_url:
+        return record
+    if record.website_bootstrap.canonical_url == normalized_canonical_url:
+        return record
+    return record.model_copy(
+        update={
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": normalized_canonical_url}
+            ),
+            "updated_at": updated_at,
+            "source_label": "odoo-stable-target-replacement",
+        }
+    )
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1079,6 +1116,22 @@ def execute_odoo_stable_target_replacement_apply(
         image_reference=image_reference,
     )
     runtime_source: dict[str, str] = {}
+    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
+    odoo_override_record = _read_odoo_instance_override_record(
+        record_store=record_store,
+        context=plan.context,
+        instance=plan.instance,
+    )
+    normalized_override_record = _record_with_target_replacement_canonical(
+        record=odoo_override_record,
+        canonical_url=base_url,
+        updated_at=started_at,
+    )
+    if (
+        normalized_override_record is not None
+        and normalized_override_record is not odoo_override_record
+    ):
+        record_store.write_odoo_instance_override_record(normalized_override_record)
 
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
@@ -1387,7 +1440,6 @@ def execute_odoo_stable_target_replacement_apply(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
     health_url = _target_health_url(profile=profile, lane=lane, domains=plan.expected_domain_hosts)
     verification = verify_odoo_stable_readiness(
         base_url=base_url,
