@@ -1796,13 +1796,17 @@ def run_compose_post_deploy_update(
         payload={"scheduleId": schedule_id},
         timeout_seconds=schedule_timeout_seconds,
     )
-    completed_schedule_deployment_key = wait_for_dokploy_schedule_deployment(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-        before_key=deployment_key(latest_schedule_deployment),
-        timeout_seconds=schedule_timeout_seconds,
+    completed_schedule_deployment_key = deployment_key_from_wait_result(
+        wait_for_dokploy_schedule_deployment(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            before_key=deployment_key(latest_schedule_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+        )
     )
+    if not completed_schedule_deployment_key:
+        raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
     deployment_log_lines = fetch_dokploy_deployment_logs(
         host=host,
         token=token,
@@ -2092,6 +2096,14 @@ def deployment_key(deployment: JsonObject | None) -> str:
         value = deployment.get(key_name)
         if value:
             return str(value)
+    return ""
+
+
+def deployment_key_from_wait_result(wait_result: str) -> str:
+    for token in wait_result.split():
+        key, separator, value = token.partition("=")
+        if key == "deployment" and separator and value:
+            return value
     return ""
 
 
