@@ -118,6 +118,13 @@ Launchplane lifecycle authority such as authz policy, provider target,
 runtime-environment, managed secret, route batch, topology, or target-id
 material.
 
+When a product repository runs the gate from GitHub Actions, use a dedicated
+`.github/workflows/launchplane-config-authority.yml` workflow. Its Launchplane
+tool checkout may reference only `${{ github.repository_owner }}/launchplane`
+and must pin `ref` to a 40-character commit SHA; hard-coded owners, mutable
+branches, and non-checkout `repository` values are rejected by the product-repo
+profile.
+
 ## What Product Repos Own
 
 - Application source code and product-owned business behavior.
