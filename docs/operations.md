@@ -1018,12 +1018,16 @@ target, explicit Odoo volume env keys, and expected hostnames; the operation
 worker re-syncs the Launchplane-rendered compose source, reconciles each expected
 Dokploy compose domain route to the `web` service on the product runtime port,
 renders the matching HTTP and HTTPS Traefik router labels into the raw compose,
-injects the runtime identity breadcrumb, triggers Dokploy deploy, runs Odoo
-post-deploy, verifies health/canonical/logo, and writes deployment plus
-inventory records. The explicit raw-compose routers keep the runtime reachable
-even when Dokploy stores the compose domain record separately from the raw source
-update. By default it deploys the artifact already recorded in current
-inventory. Operators may supply both `artifact_id` and `source_git_ref` to deploy
+defaults the web process to the devkit startup wrapper so public runtimes write
+their generated config, initialize the selected database, and pin HTTP DB
+selection to `ODOO_DB_NAME`, injects the platform context/instance and runtime
+identity breadcrumb, triggers Dokploy deploy, runs Odoo post-deploy, verifies
+health/canonical/logo, and
+writes deployment plus inventory records. The explicit raw-compose routers keep
+the runtime reachable even when Dokploy stores the compose domain record
+separately from the raw source update. By default it deploys the artifact
+already recorded in current inventory. Operators may supply both `artifact_id`
+and `source_git_ref` to deploy
 a newly published stored artifact before it has become inventory; the service
 refuses mismatches against the stored artifact manifest. Do not manually delete
 canonical stable targets as a replacement shortcut; add the missing Launchplane

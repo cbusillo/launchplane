@@ -1173,6 +1173,10 @@ def execute_odoo_stable_target_replacement_apply(
         )
         desired_env_map = dict(current_env_map)
         desired_env_map.update(runtime_environment_values)
+        if desired_env_map.get("ODOO_WEB_COMMAND", "").strip() == "/odoo/odoo-bin":
+            desired_env_map.pop("ODOO_WEB_COMMAND", None)
+        desired_env_map["PLATFORM_CONTEXT"] = plan.context
+        desired_env_map["PLATFORM_INSTANCE"] = plan.instance
         desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference
         desired_env_map.update(runtime_identity_env(runtime_identity))
         control_plane_dokploy.update_dokploy_target_env(
