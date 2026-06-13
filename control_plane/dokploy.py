@@ -2257,8 +2257,20 @@ def _build_dokploy_data_workflow_script(
     workflow_environment_lines = _render_docker_exec_environment_lines(
         workflow_environment_overrides or {}
     )
+    effective_required_workflow_environment_keys = tuple(
+        sorted(
+            {
+                *required_workflow_environment_keys,
+                *(
+                    tuple(workflow_environment_overrides or {})
+                    if workflow_environment_overrides
+                    else ()
+                ),
+            }
+        )
+    )
     required_workflow_environment_lines = _render_required_environment_key_lines(
-        required_workflow_environment_keys
+        effective_required_workflow_environment_keys
     )
     protected_shopify_store_key_lines = _render_bash_array_assignment_lines(
         "protected_shopify_store_keys",
@@ -2360,7 +2372,10 @@ if [ "${{web_status}}" = "running" ]; then
 fi
 
 if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then
-    docker exec "${{script_runner_container_id}}" /bin/bash -lc '
+    docker exec \
+        "${{workflow_environment[@]}}" \
+        "${{script_runner_container_id}}" \
+        /bin/bash -lc '
         set -euo pipefail
         for key_name in "$@"; do
             if [ -z "${{!key_name+x}}" ]; then
@@ -2368,6 +2383,9 @@ if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then
                 exit 1
             fi
         done
+        if [ -n "${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64:-}}" ]; then
+            echo "odoo_instance_overrides_payload_present=true"
+        fi
     ' _ "${{required_workflow_environment_keys[@]}}"
 fi
 

@@ -821,6 +821,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             instance="testing",
             phase="deploy",
             post_deploy_status="pass",
+            override_status="pass",
+            override_record_found=True,
+            override_payload_rendered=True,
+            override_count=2,
+            website_bootstrap_included=True,
+            override_evidence={"config_parameter_count": "1", "website_bootstrap_included": "true"},
         )
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
@@ -901,6 +907,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(result.post_deploy_status, "pass")
+        self.assertEqual(result.post_deploy_override_status, "pass")
+        self.assertTrue(result.post_deploy_override_record_found)
+        self.assertTrue(result.post_deploy_override_payload_rendered)
+        self.assertEqual(result.post_deploy_override_count, 2)
+        self.assertTrue(result.post_deploy_website_bootstrap_included)
+        self.assertEqual(
+            result.post_deploy_override_evidence["config_parameter_count"], "1"
+        )
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(result.canonical_status, "pass")
         self.assertEqual(result.logo_status, "pass")

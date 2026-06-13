@@ -146,6 +146,7 @@ class _ApplyResultBase(BaseModel):
         deploy_status: Literal["pass", "fail"],
         release_tuple_id: str = "",
         post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped",
+        post_deploy_result: object | None = None,
         health_status: Literal["pass", "fail", "skipped"] = "skipped",
         canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
         logo_status: Literal["pass", "fail", "skipped"] = "skipped",
@@ -157,6 +158,7 @@ class _ApplyResultBase(BaseModel):
         runtime_source: dict[str, str] | None = None,
         error_message: str = "",
     ) -> OdooStableTargetReplacementApplyResult:
+        post_deploy_payload = post_deploy_result
         return OdooStableTargetReplacementApplyResult(
             product=self.product,
             context=self.context,
@@ -166,6 +168,24 @@ class _ApplyResultBase(BaseModel):
             release_tuple_id=release_tuple_id,
             deploy_status=deploy_status,
             post_deploy_status=post_deploy_status,
+            post_deploy_override_status=getattr(
+                post_deploy_payload, "override_status", "skipped"
+            ),
+            post_deploy_override_record_found=bool(
+                getattr(post_deploy_payload, "override_record_found", False)
+            ),
+            post_deploy_override_payload_rendered=bool(
+                getattr(post_deploy_payload, "override_payload_rendered", False)
+            ),
+            post_deploy_override_count=int(
+                getattr(post_deploy_payload, "override_count", 0) or 0
+            ),
+            post_deploy_website_bootstrap_included=bool(
+                getattr(post_deploy_payload, "website_bootstrap_included", False)
+            ),
+            post_deploy_override_evidence=dict(
+                getattr(post_deploy_payload, "override_evidence", {}) or {}
+            ),
             health_status=health_status,
             canonical_status=canonical_status,
             logo_status=logo_status,
@@ -1361,6 +1381,7 @@ def execute_odoo_stable_target_replacement_apply(
         return base_result.result(
             deploy_status="fail",
             post_deploy_status=post_deploy_result.post_deploy_status,
+            post_deploy_result=post_deploy_result,
             runtime_identity_injected=True,
             runtime_source=runtime_source,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
@@ -1401,6 +1422,7 @@ def execute_odoo_stable_target_replacement_apply(
         return base_result.result(
             deploy_status="fail",
             post_deploy_status="pass",
+            post_deploy_result=post_deploy_result,
             health_status=health_status if health_status == "pass" else "fail",
             canonical_status=canonical_status if canonical_status == "pass" else "fail",
             logo_status=logo_status if logo_status == "pass" else "fail",
@@ -1448,6 +1470,7 @@ def execute_odoo_stable_target_replacement_apply(
         deploy_status="pass",
         release_tuple_id=release_tuple_id,
         post_deploy_status="pass",
+        post_deploy_result=post_deploy_result,
         health_status=health_status,
         canonical_status=canonical_status,
         logo_status=logo_status,
