@@ -66,6 +66,12 @@ class OdooStableTargetReplacementApplyResult(BaseModel):
     release_tuple_id: str = ""
     deploy_status: Literal["pass", "fail"]
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
+    post_deploy_override_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
+    post_deploy_override_record_found: bool = False
+    post_deploy_override_payload_rendered: bool = False
+    post_deploy_override_count: int = 0
+    post_deploy_website_bootstrap_included: bool = False
+    post_deploy_override_evidence: dict[str, str] = Field(default_factory=dict)
     health_status: Literal["pass", "fail", "skipped"] = "skipped"
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
     logo_status: Literal["pass", "fail", "skipped"] = "skipped"

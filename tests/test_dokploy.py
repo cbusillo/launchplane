@@ -3215,6 +3215,13 @@ actions = ["launchplane_service_deploy.execute"]
             "required_workflow_environment_keys+=(ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN)",
             script,
         )
+        self.assertIn(
+            f"required_workflow_environment_keys+=({ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY})",
+            script,
+        )
+        self.assertIn('docker exec         "${workflow_environment[@]}"', script)
+        self.assertIn('"${script_runner_container_id}"         /bin/bash -lc', script)
+        self.assertIn("odoo_instance_overrides_payload_present=true", script)
         self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
         self.assertIn("Missing required Odoo override environment key", script)
         self.assertIn("Protected Shopify store key is not allowed on this Dokploy lane.", script)
