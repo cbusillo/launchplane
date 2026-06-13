@@ -60,6 +60,10 @@ class OdooStableBootstrapStore(Protocol):
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
 
+    def write_odoo_instance_override_record(
+        self, record: OdooInstanceOverrideRecord
+    ) -> object: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -292,6 +296,28 @@ def _read_odoo_instance_override_record(
         return None
 
 
+def _record_with_stable_bootstrap_canonical(
+    *,
+    record: OdooInstanceOverrideRecord | None,
+    canonical_url: str,
+    updated_at: str,
+) -> OdooInstanceOverrideRecord | None:
+    normalized_canonical_url = canonical_url.strip().rstrip("/")
+    if record is None or record.website_bootstrap is None or not normalized_canonical_url:
+        return record
+    if record.website_bootstrap.canonical_url == normalized_canonical_url:
+        return record
+    return record.model_copy(
+        update={
+            "website_bootstrap": record.website_bootstrap.model_copy(
+                update={"canonical_url": normalized_canonical_url}
+            ),
+            "updated_at": updated_at,
+            "source_label": "odoo-stable-bootstrap",
+        }
+    )
+
+
 def execute_odoo_stable_bootstrap(
     *,
     control_plane_root: Path,
@@ -354,11 +380,21 @@ def execute_odoo_stable_bootstrap(
         target_record=target_record,
         domain_hosts=resolved_domains,
     )
+    base_url = _target_base_url(lane=lane, domains=resolved_domains)
 
     deployment_record_id = generate_deployment_record_id(
         context_name=request.context, instance_name=request.instance
     )
     started_at = utc_now_timestamp()
+    normalized_override_record = _record_with_stable_bootstrap_canonical(
+        record=odoo_override_record,
+        canonical_url=base_url,
+        updated_at=started_at,
+    )
+    if normalized_override_record is not None and normalized_override_record is not odoo_override_record:
+        record_store.write_odoo_instance_override_record(normalized_override_record)
+        odoo_override_record = normalized_override_record
+
     ship_request = _build_bootstrap_ship_request(
         context=request.context,
         instance=request.instance,
@@ -544,7 +580,6 @@ def execute_odoo_stable_bootstrap(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    base_url = _target_base_url(lane=lane, domains=resolved_domains)
     health_url = _target_health_url(profile=profile, lane=lane, domains=resolved_domains)
     health_timeout_seconds = (
         request.health_timeout_seconds

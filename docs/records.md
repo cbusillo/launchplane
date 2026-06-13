@@ -676,6 +676,10 @@ state/
   including site identity, canonical URL, logo path, source metadata, and route
   definitions. Product repos remain the source of that intent; Launchplane
   persists the typed payload and renders it during Odoo post-deploy.
+- Stable bootstrap normalizes the persisted `website_bootstrap.canonical_url`
+  to the Launchplane-resolved stable target base URL before post-deploy renders
+  the payload, so local tenant bootstrap defaults do not become stable lane URL
+  authority.
 - `apply_on` records the phases where the override is intended to apply, and
   `last_apply` records the latest driver result without making the addon layer
   the durable audit surface.
