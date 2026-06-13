@@ -143,7 +143,7 @@ jobs:
           if [ -z "$source_git_ref" ]; then
             source_git_ref="$DEFAULT_SOURCE_GIT_REF"
           fi
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ -n "$CONFIRMATION" ]; then
             if [ "$CONFIRMATION" != "PUBLISH LAUNCHPLANE ODOO ARTIFACT" ]; then
               echo "confirmation must be PUBLISH LAUNCHPLANE ODOO ARTIFACT" >&2
               exit 1
