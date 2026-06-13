@@ -2185,6 +2185,62 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(_findings(payload), [])
         self.assertEqual(product_repo_gate["status"], "pass")
 
+    def test_product_repo_gate_allows_product_owned_service_password_fixtures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "tests.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text(
+                "name: Tests\n"
+                "jobs:\n"
+                "  mysql:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    services:\n"
+                "      mysql:\n"
+                "        image: mysql:8.0\n"
+                "        env:\n"
+                "          MYSQL_ROOT_PASSWORD: root\n"
+                "    steps:\n"
+                "      - run: echo ok\n"
+                "        env:\n"
+                "          MYSQL_PASSWORD: root\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertTrue(
+            any(finding["rule_id"] == "secret_binding_identity" for finding in _findings(payload))
+        )
+        self.assertEqual(product_repo_gate["status"], "pass")
+
+    def test_product_repo_gate_rejects_managed_secret_binding_fixtures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            fixture = root / "tests" / "fixtures" / "config.json"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(
+                json.dumps({"managedSecretBinding": "DOKPLOY_TOKEN"}),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(product_repo_gate["status"], "fail")
+        rejected = cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])
+        self.assertTrue(
+            any(
+                finding["rejection_reason"] == "launchplane_lifecycle_test_fixture"
+                for finding in rejected
+            )
+        )
+
     def test_cli_changed_files_gate_fails_on_new_product_repo_fixture(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

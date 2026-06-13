@@ -61,7 +61,6 @@ PRODUCT_REPO_REJECTED_TEST_FIXTURE_RULE_IDS = frozenset(
     (
         "authz_or_operator_authority",
         "provider_target_authority",
-        "secret_binding_identity",
     )
 )
 PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PARTS = frozenset(
@@ -73,8 +72,6 @@ PRODUCT_REPO_REJECTED_TEST_FIXTURE_KEY_PARTS = frozenset(
         "POLICY",
         "ROUTE_BATCH",
         "ROUTES",
-        "SECRET",
-        "SECRETS",
         "SUBJECT",
         "TARGET_ID",
         "TARGETS",
@@ -1619,10 +1616,10 @@ def _is_product_repo_lifecycle_fixture_finding(finding: Mapping[str, object]) ->
     )
 
 
-def _authority_key_parts(key: str) -> frozenset[str]:
+def _authority_key_parts(key: str) -> tuple[str, ...]:
     separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
     normalized = separated.upper().replace(".", "_").replace("-", "_")
-    return frozenset(part for part in re.split(r"[^A-Z0-9]+", normalized) if part)
+    return tuple(part for part in re.split(r"[^A-Z0-9]+", normalized) if part)
 
 
 def _contains_key_phrase(key_parts: Iterable[str], phrase: tuple[str, ...]) -> bool:
