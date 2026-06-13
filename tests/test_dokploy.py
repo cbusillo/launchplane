@@ -2828,6 +2828,12 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
         self.assertIn("image: ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123", compose_file)
         self.assertIn("\n  web:", compose_file)
+        self.assertIn(
+            "${ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}",
+            compose_file,
+        )
+        self.assertIn("PLATFORM_CONTEXT: ${PLATFORM_CONTEXT:-}", compose_file)
+        self.assertIn("PLATFORM_INSTANCE: ${PLATFORM_INSTANCE:-}", compose_file)
         self.assertIn('- "${ODOO_WEB_HOST_PORT:-8069}:8069"', compose_file)
         self.assertIn('- "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"', compose_file)
         self.assertIn("\n  database:", compose_file)

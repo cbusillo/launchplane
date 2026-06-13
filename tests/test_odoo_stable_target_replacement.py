@@ -355,6 +355,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                            "ODOO_WEB_COMMAND=/odoo/odoo-bin",
                         )
                     ),
                 },
@@ -950,6 +951,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertIn("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=", persisted_env)
         self.assertIn("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=", persisted_env)
         self.assertIn("LAUNCHPLANE_ARTIFACT_ID=artifact-cm-testing", persisted_env)
+        self.assertIn("PLATFORM_CONTEXT=cm", persisted_env)
+        self.assertIn("PLATFORM_INSTANCE=testing", persisted_env)
+        self.assertNotIn("ODOO_WEB_COMMAND=/odoo/odoo-bin", persisted_env)
         self.assertIn("ODOO_WORKERS=2", persisted_env)
         self.assertGreaterEqual(len(store.deployment_records), 2)
         final_deployment = store.deployment_records[-1]

@@ -175,6 +175,8 @@ def render_odoo_raw_compose_file(
 x-odoo-env: &odoo-env
   ODOO_STACK_NAME: ${{ODOO_STACK_NAME:-}}
   ODOO_PROJECT_NAME: ${{ODOO_PROJECT_NAME:-}}
+  PLATFORM_CONTEXT: ${{PLATFORM_CONTEXT:-}}
+  PLATFORM_INSTANCE: ${{PLATFORM_INSTANCE:-}}
   ODOO_DB_HOST: database
   ODOO_DB_PORT: "5432"
   ODOO_DB_NAME: ${{ODOO_DB_NAME:?missing}}
@@ -211,7 +213,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - ${{ODOO_WEB_COMMAND:-/odoo/odoo-bin}}
+      - ${{ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}}
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs
