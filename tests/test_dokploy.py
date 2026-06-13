@@ -2534,7 +2534,10 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.latest_deployment_for_schedule",
-                return_value={"deploymentId": "schedule-before"},
+                side_effect=(
+                    {"deploymentId": "schedule-before"},
+                    {"deploymentId": "schedule-after", "status": "done"},
+                ),
             ),
             patch(
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
@@ -2569,9 +2572,78 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertEqual(
             markers,
             {
+                "schedule_id": "schedule-123",
+                "schedule_deployment_key": "schedule-after",
+                "schedule_deployment_id": "schedule-after",
                 "log_available": "true",
                 "website_bootstrap_domain_matches_canonical": "true",
                 "website_bootstrap_website_id": "7",
+            },
+        )
+
+    def test_run_compose_post_deploy_update_reads_inline_schedule_log_markers(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-prod-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                side_effect=(
+                    {"deploymentId": "schedule-before"},
+                    {
+                        "deploymentId": "schedule-after",
+                        "status": "done",
+                        "logs": (
+                            "website_bootstrap_domain_matches_canonical=true\n"
+                            "website_bootstrap_website_id=9\n"
+                        ),
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=done",
+            ),
+            patch("control_plane.dokploy.fetch_dokploy_deployment_logs") as fetch_logs_mock,
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            markers = control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        fetch_logs_mock.assert_not_called()
+        self.assertEqual(
+            markers,
+            {
+                "schedule_id": "schedule-123",
+                "schedule_deployment_key": "schedule-after",
+                "schedule_deployment_id": "schedule-after",
+                "log_available": "true",
+                "website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_website_id": "9",
             },
         )
 
@@ -2599,7 +2671,10 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.latest_deployment_for_schedule",
-                return_value={"deploymentId": "schedule-before"},
+                side_effect=(
+                    {"deploymentId": "schedule-before"},
+                    {"deploymentId": "schedule-after", "status": "done"},
+                ),
             ),
             patch(
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
@@ -2621,7 +2696,71 @@ domains = ["cm-testing.shinycomputers.com"]
                 env_file=None,
             )
 
-        self.assertEqual(markers, {"log_available": "false"})
+        self.assertEqual(
+            markers,
+            {
+                "schedule_id": "schedule-123",
+                "schedule_deployment_key": "schedule-after",
+                "schedule_deployment_id": "schedule-after",
+                "log_available": "false",
+            },
+        )
+
+    def test_run_compose_post_deploy_update_does_not_read_logs_without_deployment_id(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-prod-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                side_effect=(
+                    {"id": "schedule-before", "status": "done"},
+                    {"id": "schedule-row-after", "status": "done"},
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-row-after status=done",
+            ),
+            patch("control_plane.dokploy.fetch_dokploy_deployment_logs") as fetch_logs_mock,
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            markers = control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        fetch_logs_mock.assert_not_called()
+        self.assertEqual(
+            markers,
+            {
+                "schedule_id": "schedule-123",
+                "schedule_deployment_key": "schedule-row-after",
+                "log_available": "false",
+            },
+        )
 
     def test_run_compose_post_deploy_update_can_run_destructive_restore_workflow(
         self,
