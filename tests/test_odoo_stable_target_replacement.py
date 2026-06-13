@@ -15,6 +15,8 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapPayload
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductExpectedConfigProfile,
@@ -63,6 +65,7 @@ class _Store:
         inventory: EnvironmentInventory | None = None,
         artifact_manifest: ArtifactIdentityManifest | None = None,
         artifact_manifests: tuple[ArtifactIdentityManifest, ...] = (),
+        odoo_instance_override_record: OdooInstanceOverrideRecord | None = None,
     ) -> None:
         self.profile = profile or _profile()
         self.target_record = target_record
@@ -77,6 +80,7 @@ class _Store:
         self.release_tuples: list[object] = []
         self.secret_bindings: tuple[SecretBinding, ...] = ()
         self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
+        self.odoo_instance_override_record = odoo_instance_override_record
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -109,11 +113,21 @@ class _Store:
             raise FileNotFoundError(artifact_id)
         return self.artifact_manifests[artifact_id]
 
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord:
+        if self.odoo_instance_override_record is None:
+            raise FileNotFoundError(f"{context_name}/{instance_name}")
+        return self.odoo_instance_override_record
+
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployment_records.append(record)
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+        self.odoo_instance_override_record = record
 
     def write_release_tuple_record(self, record: object) -> None:
         self.release_tuples.append(record)
@@ -717,6 +731,20 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    tenant="cm",
+                    name="Cell Mechanic",
+                    canonical_url="https://cm-website-local.shinycomputers.com",
+                    homepage_url="/cell-mechanic",
+                    primary_page_xmlid="cm_website.website_page_cell_mechanic",
+                    logo_path="addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+                    logo_alt="Cell Mechanic",
+                ),
+                updated_at="2026-06-13T18:00:00Z",
+            ),
         )
         persisted_env = ""
         persisted_compose_file = "services: {}"
@@ -912,9 +940,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertTrue(result.post_deploy_override_payload_rendered)
         self.assertEqual(result.post_deploy_override_count, 2)
         self.assertTrue(result.post_deploy_website_bootstrap_included)
-        self.assertEqual(
-            result.post_deploy_override_evidence["config_parameter_count"], "1"
-        )
+        self.assertEqual(result.post_deploy_override_evidence["config_parameter_count"], "1")
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(result.canonical_status, "pass")
         self.assertEqual(result.logo_status, "pass")
@@ -944,6 +970,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
         self.assertFalse(post_deploy.call_args.kwargs["run_destructive_restore"])
+        self.assertIsNotNone(store.odoo_instance_override_record)
+        assert store.odoo_instance_override_record is not None
+        self.assertIsNotNone(store.odoo_instance_override_record.website_bootstrap)
+        assert store.odoo_instance_override_record.website_bootstrap is not None
+        self.assertEqual(
+            store.odoo_instance_override_record.website_bootstrap.canonical_url,
+            "https://cm-testing.shinycomputers.com",
+        )
         verify_readiness.assert_called_once_with(
             base_url="https://cm-testing.shinycomputers.com",
             health_url="https://cm-testing.shinycomputers.com/launchplane/health",
