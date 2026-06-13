@@ -64,6 +64,7 @@ DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
+        "log_available",
         "odoo_instance_overrides_payload_present",
         "website_bootstrap_domain_set",
         "website_bootstrap_domain_matches_canonical",
@@ -1807,13 +1808,11 @@ def run_compose_post_deploy_update(
     )
     if not completed_schedule_deployment_key:
         raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
-    deployment_log_lines = fetch_dokploy_deployment_logs(
+    return _read_odoo_post_deploy_log_markers(
         host=host,
         token=token,
         deployment_id=completed_schedule_deployment_key,
-        line_count=MAX_DOKPLOY_LOG_LINE_COUNT,
     )
-    return extract_odoo_post_deploy_readback_markers({"logs": list(deployment_log_lines)})
 
 
 def run_compose_odoo_stable_bootstrap(
@@ -2223,6 +2222,22 @@ def extract_odoo_post_deploy_readback_markers(deployment: JsonObject | None) -> 
             continue
         markers[normalized_key] = normalized_value
     return markers
+
+
+def _read_odoo_post_deploy_log_markers(
+    *, host: str, token: str, deployment_id: str
+) -> dict[str, str]:
+    try:
+        deployment_log_lines = fetch_dokploy_deployment_logs(
+            host=host,
+            token=token,
+            deployment_id=deployment_id,
+            line_count=MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+    except click.ClickException:
+        return {"log_available": "false"}
+    markers = extract_odoo_post_deploy_readback_markers({"logs": list(deployment_log_lines)})
+    return {"log_available": "true", **markers}
 
 
 def _collect_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:

@@ -2569,10 +2569,59 @@ domains = ["cm-testing.shinycomputers.com"]
         self.assertEqual(
             markers,
             {
+                "log_available": "true",
                 "website_bootstrap_domain_matches_canonical": "true",
                 "website_bootstrap_website_id": "7",
             },
         )
+
+    def test_run_compose_post_deploy_update_does_not_fail_when_schedule_logs_are_unavailable(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-prod-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after status=done",
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                side_effect=click.ClickException("not found"),
+            ),
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            markers = control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        self.assertEqual(markers, {"log_available": "false"})
 
     def test_run_compose_post_deploy_update_can_run_destructive_restore_workflow(
         self,
