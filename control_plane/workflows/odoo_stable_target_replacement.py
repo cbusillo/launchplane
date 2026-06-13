@@ -1391,6 +1391,7 @@ def execute_odoo_stable_target_replacement_apply(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             destination_health=HealthcheckEvidence(status="skipped"),
         )
@@ -1419,6 +1420,7 @@ def execute_odoo_stable_target_replacement_apply(
         status=post_deploy_result.post_deploy_status,
         detail=post_deploy_result.error_message
         or "Odoo post-deploy completed after stable target replacement apply.",
+        evidence=post_deploy_result.override_evidence,
     )
     if post_deploy_result.post_deploy_status != "pass":
         _write_failed_deployment(
@@ -1427,6 +1429,7 @@ def execute_odoo_stable_target_replacement_apply(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             post_deploy_update=post_deploy_evidence,
             destination_health=HealthcheckEvidence(status="skipped"),

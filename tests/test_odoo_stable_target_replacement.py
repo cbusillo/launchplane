@@ -854,7 +854,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             override_payload_rendered=True,
             override_count=2,
             website_bootstrap_included=True,
-            override_evidence={"config_parameter_count": "1", "website_bootstrap_included": "true"},
+            override_evidence={
+                "config_parameter_count": "1",
+                "post_deploy_readback_log_available": "true",
+                "post_deploy_readback_website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_included": "true",
+            },
         )
         rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
@@ -941,6 +946,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(result.post_deploy_override_count, 2)
         self.assertTrue(result.post_deploy_website_bootstrap_included)
         self.assertEqual(result.post_deploy_override_evidence["config_parameter_count"], "1")
+        self.assertEqual(
+            result.post_deploy_override_evidence[
+                "post_deploy_readback_website_bootstrap_domain_matches_canonical"
+            ],
+            "true",
+        )
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(result.canonical_status, "pass")
         self.assertEqual(result.logo_status, "pass")
@@ -1006,6 +1017,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertGreaterEqual(len(store.deployment_records), 2)
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.deploy.status, "pass")
+        self.assertEqual(
+            final_deployment.post_deploy_update.evidence,
+            post_deploy_result.override_evidence,
+        )
+        self.assertEqual(
+            final_deployment.post_deploy_update.evidence["post_deploy_readback_log_available"],
+            "true",
+        )
         self.assertEqual(
             final_deployment.runtime_source["rendered_traefik_router_label_count"], "8"
         )
@@ -1082,6 +1101,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(
             store.environment_inventories[0].deployment_record_id,
             final_deployment.record_id,
+        )
+        self.assertEqual(
+            store.environment_inventories[0].post_deploy_update.evidence,
+            post_deploy_result.override_evidence,
         )
 
     def test_apply_can_deploy_explicit_stored_artifact(self) -> None:
@@ -1198,6 +1221,153 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
         self.assertEqual(final_deployment.runtime_identity.source_git_ref, "feed123")
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
+
+    def test_apply_persists_post_deploy_failure_evidence(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                source_label="test",
+                config_parameters=(),
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    tenant="cm",
+                    name="Cell Mechanic",
+                    canonical_url="https://old.example.com",
+                    homepage_url="/cell-mechanic",
+                    primary_page_xmlid="cm_website.website_page_cell_mechanic",
+                    logo_path="addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+                    logo_alt="Cell Mechanic",
+                ),
+                updated_at="2026-06-13T18:00:00Z",
+            ),
+        )
+        persisted_env = ""
+        rendered_compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
+        )
+        post_deploy_result = OdooPostDeployResult(
+            context="cm",
+            instance="testing",
+            phase="deploy",
+            post_deploy_status="fail",
+            override_status="fail",
+            override_record_found=True,
+            override_payload_rendered=True,
+            error_message="Odoo post-deploy readback failed.",
+            override_evidence={
+                "post_deploy_readback_log_available": "true",
+                "post_deploy_readback_website_bootstrap_domain_matches_canonical": "false",
+            },
+        )
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "cm-testing",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": rendered_compose_file,
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+                "appName": "cm-testing",
+                "serverId": "server-123",
+                "deployments": [{"deploymentId": "deploy-123", "status": "done"}],
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        def _wait_for_deploy(**_: object) -> None:
+            return None
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source",
+                return_value={"source_type": "raw", "changed": "true"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
+                return_value=rendered_compose_file,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_converted_compose_file",
+                return_value=rendered_compose_file,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment",
+                side_effect=_wait_for_deploy,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=post_deploy_result,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness"
+            ) as verify_readiness,
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm", instance="testing"
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(result.runtime_source["post_deploy_latest_deployment_key"], "deploy-123")
+        verify_readiness.assert_not_called()
+        final_deployment = store.deployment_records[-1]
+        self.assertEqual(final_deployment.deploy.status, "fail")
+        self.assertEqual(final_deployment.runtime_source, result.runtime_source)
+        self.assertEqual(
+            final_deployment.post_deploy_update.evidence,
+            post_deploy_result.override_evidence,
+        )
+        self.assertEqual(
+            final_deployment.post_deploy_update.evidence[
+                "post_deploy_readback_website_bootstrap_domain_matches_canonical"
+            ],
+            "false",
+        )
 
     def test_apply_requests_destructive_restore_for_upstream_restore_mode(self) -> None:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
