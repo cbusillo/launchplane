@@ -1808,10 +1808,19 @@ def run_compose_post_deploy_update(
     )
     if not completed_schedule_deployment_key:
         raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
+    completed_schedule_deployment = latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    completed_schedule_deployment_log_id = deployment_log_id(completed_schedule_deployment)
     return _read_odoo_post_deploy_log_markers(
         host=host,
         token=token,
-        deployment_id=completed_schedule_deployment_key,
+        schedule_id=schedule_id,
+        schedule_deployment_key=completed_schedule_deployment_key,
+        deployment_id=completed_schedule_deployment_log_id,
+        deployment=completed_schedule_deployment,
     )
 
 
@@ -2098,6 +2107,16 @@ def deployment_key(deployment: JsonObject | None) -> str:
     return ""
 
 
+def deployment_log_id(deployment: JsonObject | None) -> str:
+    if deployment is None:
+        return ""
+    for key_name in ("deploymentId", "deployment_id"):
+        value = deployment.get(key_name)
+        if value:
+            return str(value)
+    return ""
+
+
 def deployment_key_from_wait_result(wait_result: str) -> str:
     for token in wait_result.split():
         key, separator, value = token.partition("=")
@@ -2225,8 +2244,29 @@ def extract_odoo_post_deploy_readback_markers(deployment: JsonObject | None) -> 
 
 
 def _read_odoo_post_deploy_log_markers(
-    *, host: str, token: str, deployment_id: str
+    *,
+    host: str,
+    token: str,
+    schedule_id: str,
+    schedule_deployment_key: str,
+    deployment_id: str,
+    deployment: JsonObject | None = None,
 ) -> dict[str, str]:
+    evidence = {
+        "schedule_id": schedule_id,
+        "schedule_deployment_key": schedule_deployment_key,
+    }
+    if deployment_id:
+        evidence["schedule_deployment_id"] = deployment_id
+    inline_log_lines = normalize_dokploy_log_payload(deployment) if deployment else ()
+    if inline_log_lines:
+        return {
+            **evidence,
+            "log_available": "true",
+            **extract_odoo_post_deploy_readback_markers({"logs": list(inline_log_lines)}),
+        }
+    if not deployment_id:
+        return {**evidence, "log_available": "false"}
     try:
         deployment_log_lines = fetch_dokploy_deployment_logs(
             host=host,
@@ -2235,9 +2275,9 @@ def _read_odoo_post_deploy_log_markers(
             line_count=MAX_DOKPLOY_LOG_LINE_COUNT,
         )
     except click.ClickException:
-        return {"log_available": "false"}
+        return {**evidence, "log_available": "false"}
     markers = extract_odoo_post_deploy_readback_markers({"logs": list(deployment_log_lines)})
-    return {"log_available": "true", **markers}
+    return {**evidence, "log_available": "true", **markers}
 
 
 def _collect_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:
