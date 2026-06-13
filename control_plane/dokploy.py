@@ -1598,7 +1598,7 @@ def run_compose_post_deploy_update(
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
-) -> None:
+) -> dict[str, str]:
     compose_id = target_definition.target_id.strip()
     compose_name = (
         target_definition.target_name.strip()
@@ -1764,6 +1764,12 @@ def run_compose_post_deploy_update(
         before_key=deployment_key(latest_schedule_deployment),
         timeout_seconds=schedule_timeout_seconds,
     )
+    completed_schedule_deployment = latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    return extract_odoo_post_deploy_readback_markers(completed_schedule_deployment)
 
 
 def run_compose_odoo_stable_bootstrap(
@@ -2139,6 +2145,27 @@ def extract_deployments(raw_payload: JsonValue) -> list[JsonObject]:
             if isinstance(nested_items, list):
                 return _collect_object_items(nested_items)
     return []
+
+
+def extract_odoo_post_deploy_readback_markers(deployment: JsonObject | None) -> dict[str, str]:
+    if deployment is None:
+        return {}
+    markers: dict[str, str] = {}
+    for line in normalize_dokploy_log_payload(deployment):
+        key, separator, raw_value = line.partition("=")
+        if not separator:
+            continue
+        normalized_key = key.strip()
+        normalized_value = raw_value.strip().lower()
+        if (
+            normalized_key != "odoo_instance_overrides_payload_present"
+            and not normalized_key.startswith("website_bootstrap_")
+        ):
+            continue
+        if normalized_value not in {"true", "false"} and not normalized_value.isdigit():
+            continue
+        markers[normalized_key] = normalized_value
+    return markers
 
 
 def _collect_object_items(raw_items: list[JsonValue]) -> list[JsonObject]:

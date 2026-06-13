@@ -72,7 +72,13 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.control_plane_dokploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: captured_runs.append(kwargs),
+                    side_effect=lambda **kwargs: (
+                        captured_runs.append(kwargs)
+                        or {
+                            "odoo_instance_overrides_payload_present": "true",
+                            "website_bootstrap_domain_matches_canonical": "true",
+                        }
+                    ),
                 ),
                 patch(
                     "control_plane.workflows.odoo_post_deploy.utc_now_timestamp",
@@ -99,6 +105,14 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.override_evidence["workflow_intent"], "deploy")
             self.assertEqual(result.override_evidence["config_parameter_count"], "1")
+            self.assertEqual(
+                result.override_evidence["odoo_instance_overrides_payload_present"],
+                "true",
+            )
+            self.assertEqual(
+                result.override_evidence["website_bootstrap_domain_matches_canonical"],
+                "true",
+            )
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
@@ -240,9 +254,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.workflow_intent, "restore")
             self.assertEqual(result.override_count, 1)
             self.assertFalse(result.website_bootstrap_included)
-            self.assertEqual(
-                result.override_evidence["website_bootstrap_included"], "false"
-            )
+            self.assertEqual(result.override_evidence["website_bootstrap_included"], "false")
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
