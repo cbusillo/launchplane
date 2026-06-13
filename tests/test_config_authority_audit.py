@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.config_authority_audit import build_config_authority_audit
+from control_plane.config_authority_audit import evaluate_config_authority_gate
 from control_plane.config_authority_audit import render_config_authority_markdown
 from control_plane.config_authority_audit import _allow_reason
 from control_plane.config_authority_audit import _workflow_path_key_values
@@ -2069,16 +2070,207 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                     "changed-files-gate",
                 ],
             )
+            fail_on_findings_result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--fail-on-findings",
+                ],
+            )
 
         self.assertEqual(json_result.exit_code, 0, json_result.output)
         self.assertEqual(markdown_result.exit_code, 0, markdown_result.output)
         self.assertEqual(changed_files_result.exit_code, 0, changed_files_result.output)
+        self.assertNotEqual(fail_on_findings_result.exit_code, 0)
+        self.assertIn(
+            "Config authority audit found unallowed checked-in runtime authority.",
+            fail_on_findings_result.output,
+        )
         self.assertEqual(json.loads(json_result.output)["mode"], "full-audit")
         self.assertEqual(
             json.loads(changed_files_result.output)["mode"],
             "changed-files-gate",
         )
         self.assertIn("# Config Authority Audit", markdown_result.output)
+
+    def test_cli_fail_on_findings_allows_documented_examples(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            docs = root / "docs" / "product-repo-contract.md"
+            docs.parent.mkdir()
+            docs.write_text(
+                "Example rejected product repo fixture: PRODUCT_DOMAIN=example.test\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--fail-on-findings",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["findings"])
+        self.assertTrue(
+            all(finding["classification"] == "allowed" for finding in payload["findings"])
+        )
+
+    def test_product_repo_gate_rejects_launchplane_lifecycle_test_fixtures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            fixture = root / "tests" / "fixtures" / "launchplane-runtime.json"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(
+                json.dumps(
+                    {
+                        "runtimeEnvironment": {
+                            "product": "real-product",
+                            "providerTargetId": "dokploy-target-123",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            default_gate = evaluate_config_authority_gate(payload)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(default_gate["status"], "pass")
+        self.assertEqual(product_repo_gate["status"], "fail")
+        rejected = cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])
+        self.assertTrue(rejected)
+        self.assertTrue(
+            all(
+                finding["rejection_reason"] == "launchplane_lifecycle_test_fixture"
+                for finding in rejected
+            )
+        )
+
+    def test_product_repo_gate_allows_product_owned_test_fixtures(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            fixture = root / "tests" / "fixtures" / "checkout-flow.json"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text(
+                json.dumps(
+                    {
+                        "cartTotal": 42,
+                        "shippingDomain": "checkout.example.test",
+                        "browserEnvironment": "mobile",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+
+        self.assertEqual(_findings(payload), [])
+        self.assertEqual(product_repo_gate["status"], "pass")
+
+    def test_cli_changed_files_gate_fails_on_new_product_repo_fixture(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            workflow = root / ".github" / "workflows" / "deploy.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("name: Deploy\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/product-fixture")
+            workflow.write_text(
+                "name: Deploy\n"
+                "env:\n"
+                "  PRODUCT_DOMAIN: https://real-product.example.test\n",
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("PRODUCT_DOMAIN", result.output)
+        self.assertIn("needs_classification", result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+
+    def test_cli_product_repo_gate_fails_on_changed_lifecycle_fixture(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            fixture = root / "tests" / "fixtures" / "launchplane-runtime.json"
+            fixture.parent.mkdir(parents=True)
+            fixture.write_text("{}\n", encoding="utf-8")
+            _commit_all(root)
+            _git(root, "branch", "-M", "main")
+            _checkout_branch(root, "feature/product-fixture")
+            fixture.write_text(
+                '{"runtimeEnvironment":{"providerTargetId":"dokploy-target-123"}}\n',
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            runner = CliRunner()
+            result = runner.invoke(
+                CLI_MAIN,
+                [
+                    "service",
+                    "audit-config-authority",
+                    "--control-plane-root",
+                    str(root),
+                    "--mode",
+                    "changed-files-gate",
+                    "--fail-on-findings",
+                    "--gate-profile",
+                    "product-repo",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("providerTargetId", result.output)
+        self.assertIn("test_fixture", result.output)
+        payload = json.loads(result.output.split("Error:", 1)[0])
+        gate = cast("dict[str, object]", payload["gate"])
+        self.assertEqual(gate["status"], "fail")
+        rejected = cast("list[dict[str, object]]", gate["rejected_findings"])
+        self.assertTrue(
+            any(
+                finding["rejection_reason"] == "launchplane_lifecycle_test_fixture"
+                for finding in rejected
+            )
+        )
 
     def test_markdown_renderer_handles_empty_report(self) -> None:
         markdown = render_config_authority_markdown(
