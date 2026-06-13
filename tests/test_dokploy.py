@@ -369,6 +369,14 @@ class DokployConfigTests(unittest.TestCase):
 
         self.assertIn("deployment id", str(error_context.exception))
 
+    def test_deployment_key_from_wait_result_reads_deployment_token(self) -> None:
+        self.assertEqual(
+            control_plane_dokploy.deployment_key_from_wait_result(
+                "deployment=schedule-after status=done"
+            ),
+            "schedule-after",
+        )
+
     def test_fetch_compose_logs_prefers_web_container_name_variants(self) -> None:
         requests: list[dict[str, object]] = []
 
@@ -2470,7 +2478,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 ),
                 patch(
                     "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                    return_value="schedule-after",
+                    return_value="deployment=schedule-after status=done",
                 ),
                 patch(
                     "control_plane.dokploy.fetch_dokploy_deployment_logs",
@@ -2530,7 +2538,7 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                return_value="schedule-after",
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.fetch_dokploy_deployment_logs",
@@ -2611,7 +2619,7 @@ domains = ["cm-testing.shinycomputers.com"]
             ),
             patch(
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                return_value="schedule-after",
+                return_value="deployment=schedule-after status=done",
             ),
             patch(
                 "control_plane.dokploy.fetch_dokploy_deployment_logs",
