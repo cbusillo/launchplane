@@ -13597,7 +13597,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
-                    return_value=("ok", "contact form submitted", "RESEND_API_KEY=[redacted]"),
+                    return_value=("contact form submitted",),
                 ) as logs_mock,
             ):
                 app = create_launchplane_service_app(
@@ -13619,9 +13619,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             host="https://dokploy.example.com",
             token="secret-token",
             application_id="app-123",
-            line_count=1000,
+            line_count=2,
             since="5m",
-            search="",
+            search="contact",
         )
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
@@ -13704,7 +13704,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["logs"]["lines"], ["booting", "ODOO_ADMIN_PASSWORD=[redacted]"])
         self.assertNotIn("secret-token", json.dumps(payload))
 
-    def test_tracked_target_logs_endpoint_filters_compose_logs_without_provider_search(
+    def test_tracked_target_logs_endpoint_delegates_compose_log_search_to_provider(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -13745,11 +13745,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
-                    return_value=(
-                        "booting",
-                        "website_bootstrap_applied name=Cell Mechanic",
-                        "canonical probe served",
-                    ),
+                    return_value=("website_bootstrap_applied name=Cell Mechanic",),
                 ) as logs_mock,
             ):
                 app = create_launchplane_service_app(
@@ -13773,9 +13769,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             compose_id="compose-123",
             app_name="cm-website-testing-iul0ql",
             server_id="server-1",
-            line_count=1000,
+            line_count=2,
             since="2h",
-            search="",
+            search="website_bootstrap_applied",
         )
         self.assertEqual(
             payload["request"],

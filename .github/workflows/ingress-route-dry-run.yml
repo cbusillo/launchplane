@@ -31,9 +31,9 @@ name: Ingress Route Dry Run
         required: true
         type: number
       certificate_id:
-        description: Existing provider certificate id.
+        description: Existing provider certificate id, or new for provider-managed issuance.
         required: true
-        type: number
+        type: string
       expected_host_id:
         description: Optional existing provider host id that must own the domain.
         required: false
@@ -105,8 +105,16 @@ jobs:
             --arg route_options_json "$ROUTE_OPTIONS_JSON" \
             --arg expected_host_id "$EXPECTED_HOST_ID" \
             --argjson forward_port "$FORWARD_PORT" \
-            --argjson certificate_id "$CERTIFICATE_ID" \
+            --arg certificate_id "$CERTIFICATE_ID" \
             '($route_options_json | fromjson) as $options |
+            ($certificate_id | gsub("^\\s+|\\s+$"; "")) as $certificate_id_text |
+            (if $certificate_id_text == "new" then
+              "new"
+            else
+              try ($certificate_id_text | tonumber) catch error(
+                "certificate_id must be an integer or new"
+              )
+            end) as $certificate_id_value |
             ($expected_host_id |
               if . == "" then
                 null
@@ -179,7 +187,7 @@ jobs:
               forward_host: $forward_host,
               edge_endpoint_key: $edge_endpoint_key,
               forward_port: $forward_port,
-              certificate_id: $certificate_id,
+              certificate_id: $certificate_id_value,
               enabled: true,
               ssl_forced: true,
               http2_support: true,
