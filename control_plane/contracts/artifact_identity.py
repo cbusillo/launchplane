@@ -122,6 +122,7 @@ class ArtifactIdentityManifest(BaseModel):
     enterprise_base_digest: str
     addon_sources: tuple[ArtifactAddonSource, ...] = ()
     addon_selectors: tuple[ArtifactAddonSelector, ...] = ()
+    odoo_install_modules: tuple[str, ...] = ()
     openupgrade_inputs: ArtifactOpenUpgradeInputs = Field(default_factory=ArtifactOpenUpgradeInputs)
     build_flags: ArtifactBuildFlags = Field(default_factory=ArtifactBuildFlags)
     build_provenance: ArtifactBuildProvenance = Field(default_factory=ArtifactBuildProvenance)

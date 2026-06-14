@@ -881,6 +881,9 @@ context only, and `context_instance` has both context and instance.
 - Confirm the target context has DB-backed artifact manifests, `testing` and
   `prod` release tuples, Dokploy target records, target-id records, and current
   prod inventory.
+- For Odoo artifacts, the stored artifact manifest carries `odoo_install_modules`.
+  Stable target replacement merges that list into `ODOO_INSTALL_MODULES` with
+  Launchplane's required safety modules before deploying the target.
 - For the first harmless drill, call the Odoo prod rollback driver with no
   explicit artifact id. The driver selects the current `testing` release tuple
   for that context and fails closed if the tuple or artifact manifest is missing.

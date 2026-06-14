@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -633,14 +633,23 @@ def _record_with_target_replacement_canonical(
     )
 
 
-def _merge_required_odoo_install_modules(raw_modules: str) -> str:
+def _merge_odoo_install_modules(*module_groups: str | Iterable[str]) -> str:
     merged_modules: list[str] = []
-    for module_name in (*LAUNCHPLANE_REQUIRED_ODOO_MODULES, *raw_modules.split(",")):
-        normalized_module_name = module_name.strip()
-        if not normalized_module_name or normalized_module_name in merged_modules:
-            continue
-        merged_modules.append(normalized_module_name)
+    for module_group in module_groups:
+        if isinstance(module_group, str):
+            raw_module_names: Iterable[str] = module_group.split(",")
+        else:
+            raw_module_names = module_group
+        for module_name in raw_module_names:
+            normalized_module_name = str(module_name).strip()
+            if not normalized_module_name or normalized_module_name in merged_modules:
+                continue
+            merged_modules.append(normalized_module_name)
     return ",".join(merged_modules)
+
+
+def _merge_required_odoo_install_modules(raw_modules: str) -> str:
+    return _merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1290,12 +1299,18 @@ def execute_odoo_stable_target_replacement_apply(
         desired_env_map = dict(current_env_map)
         for key in control_plane_dokploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
             desired_env_map.pop(key, None)
+        desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
-        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = _merge_required_odoo_install_modules(
-            desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
+        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = _merge_odoo_install_modules(
+            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+            artifact_manifest.odoo_install_modules,
+            desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
         )
         runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
+        runtime_source["artifact_odoo_install_modules"] = ",".join(
+            artifact_manifest.odoo_install_modules
+        )
         runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(
