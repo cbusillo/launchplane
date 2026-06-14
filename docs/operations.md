@@ -844,6 +844,12 @@ context only, and `context_instance` has both context and instance.
   persisted to the Dokploy compose target environment before the web container
   is redeployed, and the same payload is passed to the Odoo data-workflow
   runner for post-deploy maintenance.
+- Odoo stable target replacement also merges the required Launchplane-managed
+  operational modules into `ODOO_INSTALL_MODULES` before redeploying the web
+  container. Artifact inputs or base images make addon files available, but the
+  target env install list is what activates modules such as
+  `launchplane_settings` and `disable_odoo_online` in already-initialized
+  databases.
 - When a deploy-phase payload is expected, Launchplane also persists generic
   runtime assertion flags that tell the Odoo runtime to fail closed if managed
   instance overrides or website bootstrap data are missing. Launchplane re-reads
