@@ -879,6 +879,19 @@ but the service fails before records are written, recover by re-running the
 workflow with `operation=adopt` and the created provider target id, not by
 creating a second target for the same lane.
 
+Dokploy target inspect uses `GET /v1/dokploy-targets/inspect`. The route is a
+read-only proof surface for provider identity before an adoption, creation, or
+repair: callers may pass either `context` and `instance` to inspect the current
+tracked target, or `target_type` and `target_id` to inspect an explicit provider
+target. It requires `dokploy_target.inspect` authz for product/context
+`launchplane`, reads Dokploy through Launchplane-managed secrets, and returns a
+redacted identity summary only: target ids, names, project/environment/server
+identity, domain summaries, source metadata, and environment key names/counts.
+It must not return raw provider payloads or environment values. The manual
+`Dokploy Target Inspect` workflow is the supported shared and production caller
+when operators need provider evidence without mutating Dokploy or Launchplane
+records.
+
 The manual `Product Environment Evidence` workflow is the supported read-only
 Phase Two caller for product environment read-model evidence. It uses GitHub
 OIDC and `product_environment.read` to call `GET

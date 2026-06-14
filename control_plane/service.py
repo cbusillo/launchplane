@@ -24,6 +24,10 @@ from jwt import InvalidTokenError
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy_target_inspect import (
+    DokployTargetInspectRequest,
+    inspect_dokploy_target,
+)
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
@@ -546,6 +550,7 @@ _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-la
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
+_DOKPLOY_TARGET_INSPECT_ROUTE = "/v1/dokploy-targets/inspect"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
@@ -4426,6 +4431,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "edge_endpoint.read", {"edge_endpoint_list": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "edge-endpoints", "records"]:
         return "edge_endpoint.read", {"edge_endpoint_key": segments[3]}
+    if len(segments) == 3 and segments == ["v1", "dokploy-targets", "inspect"]:
+        return "dokploy_target.inspect", {}
     if len(segments) == 4 and segments == ["v1", "ingress", "canary-routes", "records"]:
         return "ingress_canary_route.read", {"ingress_canary_route_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "canary-routes", "records"]:
@@ -10171,6 +10178,87 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in endpoint_records
                             ],
+                        },
+                    )
+                if action == "dokploy_target.inspect":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot inspect Launchplane Dokploy targets.",
+                                },
+                            },
+                        )
+                    if not isinstance(record_store, PostgresRecordStore):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=503,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "database_required",
+                                    "message": "Dokploy target inspect requires Launchplane database storage.",
+                                },
+                            },
+                        )
+                    try:
+                        inspect_request = DokployTargetInspectRequest.model_validate(
+                            {
+                                "schema_version": 1,
+                                "product": "launchplane",
+                                "context": _query_string_value(query, "context"),
+                                "instance": _query_string_value(query, "instance"),
+                                "target_type": _query_string_value(query, "target_type"),
+                                "target_id": _query_string_value(query, "target_id"),
+                            }
+                        )
+                        host, token = control_plane_dokploy.read_dokploy_config(
+                            control_plane_root=resolved_root,
+                            database_url=database_url,
+                        )
+                        inspect_result = inspect_dokploy_target(
+                            record_store=record_store,
+                            host=host,
+                            token=token,
+                            request=inspect_request,
+                        )
+                    except ValueError as error:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "invalid_dokploy_target_inspect",
+                                    "message": str(error),
+                                },
+                            },
+                        )
+                    except FileNotFoundError:
+                        return _not_found_response(
+                            start_response=start_response,
+                            trace_id=request_trace_id,
+                            path=path,
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "inspect": inspect_result,
                         },
                     )
                 if action == "ingress_canary_route.read":

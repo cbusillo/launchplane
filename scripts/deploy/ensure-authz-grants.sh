@@ -540,6 +540,14 @@ post_grant \
 	provider-target-operations-backfill
 post_grant \
 	"$GITHUB_REPOSITORY" \
+	dokploy-target-inspect.yml \
+	launchplane \
+	launchplane \
+	dokploy_target.inspect \
+	deploy:dokploy-target-inspect-grant \
+	dokploy-target-inspect
+post_grant \
+	"$GITHUB_REPOSITORY" \
 	dokploy-target-setup.yml \
 	launchplane \
 	launchplane \
