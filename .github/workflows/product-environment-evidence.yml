@@ -119,6 +119,8 @@ jobs:
             environment="$(jq -r '.environment' <<< "$route")"
             response_file="${raw_response_dir}/${product}-${environment}.json"
             summary_file="product-environment-evidence-results/${product}-${environment}-summary.json"
+            config_status_file="${raw_response_dir}/${product}-${environment}-config-status.json"
+            config_summary_file="product-environment-evidence-results/${product}-${environment}-config-status-summary.json"
             status_code="$(curl -sS \
               -o "$response_file" \
               -w '%{http_code}' \
@@ -174,6 +176,48 @@ jobs:
                 "$product" "$environment" >&2
               exit 1
             fi
+            config_status_code="$(curl -sS \
+              -o "$config_status_file" \
+              -w '%{http_code}' \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Accept: application/json' \
+              "${SERVICE_ORIGIN%/}/v1/products/${product}/environments/${environment}/config-status")"
+            if [ "$config_status_code" != "200" ]; then
+              printf 'Product environment config-status read failed for %s/%s.\n' \
+                "$product" "$environment" >&2
+              echo "HTTP status: ${config_status_code}." >&2
+              exit 1
+            fi
+            jq \
+              --arg product "$product" \
+              --arg environment "$environment" \
+              '{
+                product: $product,
+                environment: $environment,
+                context,
+                trust_state,
+                runtime_settings: [
+                  .runtime_settings[] | {
+                    key,
+                    status,
+                    trust_state,
+                    source_label,
+                    updated_at
+                  }
+                ],
+                managed_secrets: [
+                  .managed_secrets[] | {
+                    binding_key,
+                    status,
+                    integration,
+                    trust_state,
+                    updated_at
+                  }
+                ],
+                warnings
+              }' \
+              "$config_status_file" > "$config_summary_file"
+            jq . "$config_summary_file"
           done
 
       - name: Upload product environment evidence

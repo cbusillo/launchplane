@@ -3,6 +3,18 @@ from unittest import TestCase
 
 
 class DocsContractsTests(TestCase):
+    def test_product_environment_evidence_includes_config_status(self) -> None:
+        workflow_text = Path(".github/workflows/product-environment-evidence.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "/v1/products/${product}/environments/${environment}/config-status",
+            workflow_text,
+        )
+        self.assertIn("config-status-summary.json", workflow_text)
+        self.assertIn("product-environment-evidence-results/*-summary.json", workflow_text)
+
     def test_odoo_base_image_promotion_owner_is_documented(self) -> None:
         records_doc = Path("docs/records.md").read_text(encoding="utf-8")
 
