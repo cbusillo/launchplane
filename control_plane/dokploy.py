@@ -2148,7 +2148,7 @@ def deployment_key(deployment: JsonObject | None) -> str:
 def deployment_log_id(deployment: JsonObject | None) -> str:
     if deployment is None:
         return ""
-    for key_name in ("deploymentId", "deployment_id"):
+    for key_name in ("deploymentId", "deployment_id", "id", "uuid"):
         value = deployment.get(key_name)
         if value:
             return str(value)

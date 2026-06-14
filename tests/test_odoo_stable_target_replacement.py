@@ -1198,6 +1198,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                         "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                         "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        "ODOO_INSTALL_MODULES=cm_website,legacy_theme",
                     )
                 ),
             }
@@ -1283,7 +1284,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
         self.assertEqual(
             persisted_env_map["ODOO_INSTALL_MODULES"],
-            "launchplane_settings,disable_odoo_online",
+            "launchplane_settings,disable_odoo_online,cm_website,legacy_theme",
         )
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.source_git_ref, "feed123")
