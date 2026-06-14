@@ -86,6 +86,12 @@ deploy secret. The token authenticates create, comment, and close delivery
 through the managed automation identity; notification delivery fails closed when
 the token is absent and never falls back to active local `gh` authentication.
 
+Every Code Discord notification routing is DB-backed. The service reads
+`EveryCodeNotificationPolicyRecord` records and resolves Discord webhook values
+through managed secret records scoped to Launchplane/Every Code. Do not add a
+service-host env var or checked-in file containing the webhook URL, channel, or
+real destination authority.
+
 | Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields plus bounded dependency, subissue, and PR check signals. Deploy automation forwards these values only when the GitHub Project token secret is present. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
 | Work graph and merge-train GitHub token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and merge-train GitHub API calls. The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |
 

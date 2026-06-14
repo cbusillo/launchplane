@@ -75,10 +75,12 @@ VeriReel product paths:
   - `GET /v1/previews/readiness`
   - `GET /v1/every-code/work-requests`
   - `GET /v1/every-code/work-requests/{request_id}`
+  - `GET /v1/every-code/notification-attempts`
   - `POST /v1/every-code/work-requests/create`
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
+  - `POST /v1/every-code/notification-policies/apply`
   - `GET /v1/every-code/pr-feedback`
   - `POST /v1/every-code/pr-feedback`
   - `POST /v1/every-code/pr-feedback/status`
@@ -732,6 +734,20 @@ an idempotency key when a caller wants retry-safe service semantics. Local
 operator calls must include a non-empty reason. Policies store routing intent and
 managed secret record ids only; Discord webhook URLs, SMTP credentials, and
 operator destination values must not be encoded in text-file defaults or source.
+
+Every Code notification policy writes use
+`POST /v1/every-code/notification-policies/apply`. The request carries
+`mode: "dry-run"` or `mode: "apply"` and a complete
+`EveryCodeNotificationPolicyRecord`. Apply requires
+`every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
+idempotency key when a caller wants retry-safe service semantics. Local operator
+calls must include a non-empty reason. Policies store repository-scoped routing
+intent and managed secret record ids only; Discord webhook URLs and operator
+destination values must stay in managed secrets, not source or text-file
+defaults. When a worker status update transitions a work request to `blocked`,
+Launchplane persists the blocked request first, then attempts configured Every
+Code notifications and records delivered or failed attempts under
+`GET /v1/every-code/notification-attempts`.
 
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret

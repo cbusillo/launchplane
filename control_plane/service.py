@@ -66,9 +66,18 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     build_every_code_work_request_id,
+    build_every_code_work_request_lifecycle_id,
     close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
+)
+from control_plane.contracts.every_code_notifications import (
+    EveryCodeNotificationAttemptRecord,
+    EveryCodeNotificationDeliveryStatus,
+    EveryCodeNotificationDestination,
+    EveryCodeNotificationEvent,
+    EveryCodeNotificationPolicyRecord,
+    build_every_code_notification_attempt_id,
 )
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
@@ -199,6 +208,7 @@ from control_plane.drivers.registry import (
     list_driver_descriptors,
     read_driver_descriptor,
 )
+from control_plane.notifications import post_discord_webhook, public_discord_url_error
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
     _DescriptorDriverDispatchRoute as _DescriptorDriverDispatchRoute,
@@ -1004,6 +1014,20 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
             raise ValueError(
                 "public ingress notification policy apply requires product 'launchplane'"
             )
+        return self
+
+
+class EveryCodeNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: EveryCodeNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "EveryCodeNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
         return self
 
 
@@ -4532,6 +4556,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_pr_feedback.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "preview-gates"]:
         return "every_code_preview_gate.read", {}
+    if len(segments) == 3 and segments == ["v1", "every-code", "notification-attempts"]:
+        return "every_code_notification_attempt.read", {}
     if len(segments) == 3 and segments == ["v1", "agent", "context"]:
         return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
@@ -4651,6 +4677,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "apply",
     ]:
         return "public_ingress_notification_policy.apply", {}
+    if len(segments) == 4 and segments == [
+        "v1",
+        "every-code",
+        "notification-policies",
+        "apply",
+    ]:
+        return "every_code_notification_policy.apply", {}
     if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
         return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
@@ -4798,6 +4831,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/work-graph/rank",
         "/v1/products/public-ingress-monitor/run-once",
         "/v1/public-ingress/notification-policies/apply",
+        "/v1/every-code/notification-policies/apply",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/runner-host-hygiene/audits",
@@ -4986,6 +5020,33 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
+class _EveryCodeNotificationStore(Protocol):
+    def write_every_code_notification_policy_record(
+        self, record: EveryCodeNotificationPolicyRecord
+    ) -> object: ...
+
+    def list_every_code_notification_policy_records(
+        self,
+        *,
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]: ...
+
+    def write_every_code_notification_attempt_record(
+        self, record: EveryCodeNotificationAttemptRecord
+    ) -> object: ...
+
+    def list_every_code_notification_attempt_records(
+        self,
+        *,
+        request_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
+
+
 class _AgentWriteIntentRecordStore(Protocol):
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
 
@@ -5017,6 +5078,18 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
+
+
+def _every_code_notification_store(record_store: object) -> _EveryCodeNotificationStore | None:
+    required_methods = (
+        "write_every_code_notification_policy_record",
+        "list_every_code_notification_policy_records",
+        "write_every_code_notification_attempt_record",
+        "list_every_code_notification_attempt_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_EveryCodeNotificationStore, record_store)
+    return None
 
 
 def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentRecordStore:
@@ -6846,6 +6919,7 @@ def _accepted_payload(
         "runner_lane_registration_audit_record_key",
         "generic_web_rollback_plan_id",
         "public_ingress_notification_policy_id",
+        "every_code_notification_policy_id",
         "ingress_route_audit_record_id",
         "edge_endpoint_key",
         "ingress_canary_route_key",
@@ -7587,6 +7661,21 @@ def _public_ingress_notification_policy_summary(
     }
 
 
+def _every_code_notification_policy_summary(
+    policy: EveryCodeNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "repository": policy.repository,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
+
+
 def _public_ingress_managed_secret_resolver(
     *,
     record_store: control_plane_secrets.SecretReadStore,
@@ -7616,6 +7705,37 @@ def _public_ingress_managed_secret_resolver(
     return resolve
 
 
+def _launchplane_managed_secret_resolver(
+    *,
+    record_store: control_plane_secrets.SecretReadStore,
+    context_name: str,
+    instance_name: str,
+) -> Callable[[str], str]:
+    def resolve(secret_id: str) -> str:
+        normalized_secret_id = secret_id.strip()
+        if not normalized_secret_id:
+            return ""
+        try:
+            record = record_store.read_secret_record(normalized_secret_id)
+        except Exception:  # noqa: BLE001 - notification attempts capture missing secrets.
+            return ""
+        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
+            return ""
+        if not control_plane_secrets._scope_matches_record(
+            record,
+            context_name=context_name,
+            instance_name=instance_name,
+        ):
+            return ""
+        try:
+            version = record_store.read_secret_version(record.current_version_id)
+            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
+        except Exception:  # noqa: BLE001 - notification attempts capture unreadable secrets.
+            return ""
+
+    return resolve
+
+
 def _public_ingress_notification_drivers(
     *,
     record_store: object,
@@ -7626,6 +7746,247 @@ def _public_ingress_notification_drivers(
     return PublicIngressNotificationDriverSet(
         incident_secret_resolver=_public_ingress_managed_secret_resolver(record_store=secret_store)
     )
+
+
+def _deliver_every_code_blocked_notifications(
+    *,
+    record_store: object,
+    request: EveryCodeWorkRequestRecord,
+    attempted_at: str,
+    discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
+    notification_store = _every_code_notification_store(record_store)
+    secret_store = _secret_capable_store(record_store)
+    if notification_store is None or secret_store is None:
+        return ()
+    policies = tuple(
+        policy
+        for policy in notification_store.list_every_code_notification_policy_records(
+            repository=request.repository,
+            status="enabled",
+            limit=None,
+        )
+        if policy.matches(request)
+    )
+    if not policies:
+        return ()
+    secret_resolver = _launchplane_managed_secret_resolver(
+        record_store=secret_store,
+        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+        instance_name="every-code",
+    )
+    attempts: list[EveryCodeNotificationAttemptRecord] = []
+    for policy in policies:
+        for destination in policy.destinations:
+            if destination.status != "enabled":
+                attempt = _write_every_code_notification_attempt(
+                    notification_store=notification_store,
+                    request=request,
+                    event="work_request_blocked",
+                    policy=policy,
+                    destination=destination,
+                    attempted_at=attempted_at,
+                    delivery_status="skipped",
+                    action="destination_disabled",
+                )
+                attempts.append(attempt)
+                continue
+            if destination.kind == "discord":
+                attempt = _deliver_every_code_discord_notification(
+                    notification_store=notification_store,
+                    secret_resolver=secret_resolver,
+                    discord_sender=discord_sender,
+                    request=request,
+                    policy=policy,
+                    destination=destination,
+                    attempted_at=attempted_at,
+                )
+                attempts.append(attempt)
+    return tuple(attempts)
+
+
+def _deliver_every_code_discord_notification(
+    *,
+    notification_store: _EveryCodeNotificationStore,
+    secret_resolver: Callable[[str], str],
+    discord_sender: Callable[[str, dict[str, object]], object],
+    request: EveryCodeWorkRequestRecord,
+    policy: EveryCodeNotificationPolicyRecord,
+    destination: EveryCodeNotificationDestination,
+    attempted_at: str,
+) -> EveryCodeNotificationAttemptRecord:
+    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
+    if not webhook_url:
+        return _write_every_code_notification_attempt(
+            notification_store=notification_store,
+            request=request,
+            event="work_request_blocked",
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="missing_discord_webhook",
+            error_message="Discord webhook secret could not be resolved.",
+        )
+    public_url_error = public_discord_url_error(webhook_url)
+    if public_url_error:
+        return _write_every_code_notification_attempt(
+            notification_store=notification_store,
+            request=request,
+            event="work_request_blocked",
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="invalid_discord_webhook",
+            error_message=f"Discord webhook URL is not public: {public_url_error}",
+        )
+    existing_attempt = _existing_every_code_notification_attempt(
+        notification_store=notification_store,
+        request=request,
+        event="work_request_blocked",
+        policy=policy,
+        destination=destination,
+    )
+    if existing_attempt is not None and existing_attempt.delivery_status in {
+        "pending",
+        "delivered",
+    }:
+        return existing_attempt
+    pending_attempt = _write_every_code_notification_attempt(
+        notification_store=notification_store,
+        request=request,
+        event="work_request_blocked",
+        policy=policy,
+        destination=destination,
+        attempted_at=attempted_at,
+        delivery_status="pending",
+        action="dispatching_discord",
+    )
+    try:
+        discord_sender(webhook_url, _every_code_blocked_discord_payload(request))
+    except Exception as error:  # noqa: BLE001 - delivery attempt records preserve failure detail.
+        return _write_every_code_notification_attempt(
+            notification_store=notification_store,
+            request=request,
+            event="work_request_blocked",
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="discord_webhook_failed",
+            error_message=str(error) or error.__class__.__name__,
+        )
+    try:
+        return _write_every_code_notification_attempt(
+            notification_store=notification_store,
+            request=request,
+            event="work_request_blocked",
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="delivered",
+            action="posted_discord",
+        )
+    except Exception:  # noqa: BLE001 - the pending attempt preserves dispatch evidence.
+        return pending_attempt
+
+
+def _existing_every_code_notification_attempt(
+    *,
+    notification_store: _EveryCodeNotificationStore,
+    request: EveryCodeWorkRequestRecord,
+    event: EveryCodeNotificationEvent,
+    policy: EveryCodeNotificationPolicyRecord,
+    destination: EveryCodeNotificationDestination,
+) -> EveryCodeNotificationAttemptRecord | None:
+    attempt_id = build_every_code_notification_attempt_id(
+        request_id=request.request_id,
+        event=event,
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+        lifecycle_key=_every_code_notification_lifecycle_key(request),
+    )
+    return next(
+        (
+            attempt
+            for attempt in notification_store.list_every_code_notification_attempt_records(
+                request_id=request.request_id,
+                event=event,
+                limit=None,
+            )
+            if attempt.attempt_id == attempt_id
+        ),
+        None,
+    )
+
+
+def _write_every_code_notification_attempt(
+    *,
+    notification_store: _EveryCodeNotificationStore,
+    request: EveryCodeWorkRequestRecord,
+    event: EveryCodeNotificationEvent,
+    policy: EveryCodeNotificationPolicyRecord,
+    destination: EveryCodeNotificationDestination,
+    attempted_at: str,
+    delivery_status: EveryCodeNotificationDeliveryStatus,
+    action: str,
+    error_message: str = "",
+) -> EveryCodeNotificationAttemptRecord:
+    attempt = EveryCodeNotificationAttemptRecord(
+        attempt_id=build_every_code_notification_attempt_id(
+            request_id=request.request_id,
+            event=event,
+            policy_id=policy.policy_id,
+            destination_id=destination.destination_id,
+            lifecycle_key=_every_code_notification_lifecycle_key(request),
+        ),
+        request_id=request.request_id,
+        event=event,
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+        destination_kind=destination.kind,
+        delivery_status=delivery_status,
+        attempted_at=attempted_at,
+        action=action,
+        error_message=_bounded_text(error_message, max_length=500),
+    )
+    notification_store.write_every_code_notification_attempt_record(attempt)
+    return attempt
+
+
+def _every_code_notification_lifecycle_key(request: EveryCodeWorkRequestRecord) -> str:
+    return request.lifecycle_id
+
+
+def _every_code_blocked_discord_payload(
+    request: EveryCodeWorkRequestRecord,
+) -> dict[str, object]:
+    fields = [
+        {"name": "Repository", "value": request.repository, "inline": True},
+        {"name": "Issue", "value": str(request.issue_number), "inline": True},
+        {"name": "Host", "value": request.claimed_by_host, "inline": True},
+        {"name": "Request", "value": request.request_id, "inline": False},
+    ]
+    if request.issue_url:
+        fields.append({"name": "Issue URL", "value": request.issue_url, "inline": False})
+    return {
+        "embeds": [
+            {
+                "title": "Every Code work request blocked",
+                "description": _bounded_text(request.error_message, max_length=1500),
+                "color": 0xC62828,
+                "fields": fields,
+            }
+        ]
+    }
+
+
+def _bounded_text(value: str, *, max_length: int) -> str:
+    normalized_value = " ".join(value.strip().split())
+    if len(normalized_value) <= max_length:
+        return normalized_value
+    return f"{normalized_value[: max_length - 3]}..."
 
 
 def _check_idempotent_request(
@@ -8063,6 +8424,8 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         return True
     if method == "GET" and path.startswith("/v1/every-code/work-requests/"):
         return True
+    if method == "GET" and path == "/v1/every-code/notification-attempts":
+        return True
     return method == "POST" and path in {
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
@@ -8187,6 +8550,28 @@ def _every_code_read_payload(
             "status_filter": status_filter,
             "gates": [record.model_dump(mode="json") for record in gate_records],
         }
+    if path == "/v1/every-code/notification-attempts":
+        notification_store = _every_code_notification_store(record_store)
+        if notification_store is None:
+            raise ValueError("record store does not support Every Code notifications")
+        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
+        event_filter = str((query.get("event") or [""])[0] or "").strip()
+        destination_kind_filter = str(
+            (query.get("destination_kind") or [""])[0] or ""
+        ).strip()
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        attempts = notification_store.list_every_code_notification_attempt_records(
+            request_id=request_id_filter,
+            event=event_filter,
+            destination_kind=destination_kind_filter,
+            limit=limit,
+        )
+        return {
+            "request_id": request_id_filter,
+            "event_filter": event_filter,
+            "destination_kind_filter": destination_kind_filter,
+            "attempts": [record.model_dump(mode="json") for record in attempts],
+        }
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         record = every_code_store.read_every_code_work_request_record(segments[3])
         return {"request": record.model_dump(mode="json")}
@@ -8234,6 +8619,7 @@ def _handle_every_code_worker_write(
     path: str,
     payload: dict[str, object],
     idempotency_key: str = "",
+    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
     if path == "/v1/every-code/preview-gates":
@@ -8431,6 +8817,14 @@ def _handle_every_code_worker_write(
         ),
     )
     every_code_store.write_every_code_work_request_record(updated_work_request_record)
+    notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
+    if updated_work_request_record.state == "blocked":
+        notification_attempts = _deliver_every_code_blocked_notifications(
+            record_store=record_store,
+            request=updated_work_request_record,
+            attempted_at=_utc_now_timestamp(),
+            discord_sender=every_code_discord_sender,
+        )
     return _json_response(
         start_response=start_response,
         status_code=202,
@@ -8440,7 +8834,13 @@ def _handle_every_code_worker_write(
                 "request_id": updated_work_request_record.request_id,
                 "state": updated_work_request_record.state,
             },
-            driver_result={"request": updated_work_request_record.model_dump(mode="json")},
+            driver_result={
+                "request": updated_work_request_record.model_dump(mode="json"),
+                "notifications": [
+                    notification_attempt.model_dump(mode="json")
+                    for notification_attempt in notification_attempts
+                ],
+            },
         ),
     )
 
@@ -8954,11 +9354,16 @@ def _record_slug(value: str) -> str:
 def _build_every_code_work_request_record(
     request: EveryCodeWorkRequestCreateEnvelope, *, queued_at: str
 ) -> EveryCodeWorkRequestRecord:
+    request_id = build_every_code_work_request_id(
+        repository=request.repository,
+        issue_number=request.issue_number,
+        trigger_label=request.trigger_label,
+    )
     return EveryCodeWorkRequestRecord(
-        request_id=build_every_code_work_request_id(
-            repository=request.repository,
-            issue_number=request.issue_number,
-            trigger_label=request.trigger_label,
+        request_id=request_id,
+        lifecycle_id=build_every_code_work_request_lifecycle_id(
+            request_id=request_id,
+            queued_at=queued_at,
         ),
         source=request.source,
         state="queued",
@@ -9533,6 +9938,7 @@ def create_launchplane_service_app(
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     ingress_provider_factory: _IngressProviderFactory | None = None,
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
+    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -9873,6 +10279,7 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=_idempotency_key(environ),
+                    every_code_discord_sender=every_code_discord_sender,
                 )
             except ValueError as error:
                 return _json_response(
@@ -10882,6 +11289,34 @@ def create_launchplane_service_app(
                                 "error": {
                                     "code": "authorization_denied",
                                     "message": "Workflow cannot read Every Code preview readiness.",
+                                },
+                            },
+                        )
+                    return _handle_every_code_work_request_read(
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
+                    )
+                if action == "every_code_notification_attempt.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": (
+                                        "Workflow cannot read Every Code notification attempts."
+                                    ),
                                 },
                             },
                         )
@@ -13025,6 +13460,91 @@ def create_launchplane_service_app(
                     "changed": policy_request.mode == "apply",
                     "policy": summary,
                 }
+            elif path == "/v1/every-code/notification-policies/apply":
+                every_code_policy_request = EveryCodeNotificationPolicyApplyEnvelope.model_validate(
+                    payload
+                )
+                if (
+                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
+                    and not every_code_policy_request.reason
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "reason_required",
+                                "message": (
+                                    "Local operator Every Code notification policy apply"
+                                    " requires a reason."
+                                ),
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="every_code_notification_policy.apply",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot apply Every Code notification policy."
+                                ),
+                            },
+                        },
+                    )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": (
+                                    "Every Code notification policy apply requires"
+                                    " DB-backed Launchplane storage."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                if every_code_policy_request.mode == "apply":
+                    record_store.write_every_code_notification_policy_record(
+                        every_code_policy_request.policy
+                    )
+                summary = _every_code_notification_policy_summary(
+                    every_code_policy_request.policy
+                )
+                result = {
+                    "every_code_notification_policy_id": every_code_policy_request.policy.policy_id,
+                }
+                driver_result = {
+                    "mode": every_code_policy_request.mode,
+                    "changed": every_code_policy_request.mode == "apply",
+                    "policy": summary,
+                }
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(
                     identity=identity,
@@ -13062,6 +13582,7 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=request_idempotency_key,
+                    every_code_discord_sender=every_code_discord_sender,
                 )
             elif path == "/v1/every-code/work-requests/rerun":
                 if not authz_policy.allows(
@@ -13100,6 +13621,7 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=request_idempotency_key,
+                    every_code_discord_sender=every_code_discord_sender,
                 )
             elif path == "/v1/every-code/work-requests/status":
                 if not authz_policy.allows(
@@ -13138,6 +13660,7 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=request_idempotency_key,
+                    every_code_discord_sender=every_code_discord_sender,
                 )
             elif path == "/v1/work-graph/rank":
                 work_graph_rank_result = rank_work_graph_snapshot(
