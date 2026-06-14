@@ -12,6 +12,7 @@ class DocsContractsTests(TestCase):
             "/v1/products/${product}/environments/${environment}/config-status",
             workflow_text,
         )
+        self.assertIn("(.config_status // .environment // .) as $config_status", workflow_text)
         self.assertIn("config-status-summary.json", workflow_text)
         self.assertIn("product-environment-evidence-results/*-summary.json", workflow_text)
 
