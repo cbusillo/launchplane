@@ -33,6 +33,10 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_notifications import (
+    EveryCodeNotificationAttemptRecord,
+    EveryCodeNotificationPolicyRecord,
+)
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
@@ -674,6 +678,49 @@ class LaunchplanePublicIngressNotificationAttemptRow(Base):
 
     attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
     incident_id: Mapped[str] = mapped_column(String, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    destination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    attempted_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeNotificationPolicyRow(Base):
+    __tablename__ = "launchplane_every_code_notification_policies"
+    __table_args__ = (
+        Index(
+            "launchplane_every_code_notify_policies_scope_idx",
+            "repository",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    policy_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeNotificationAttemptRow(Base):
+    __tablename__ = "launchplane_every_code_notification_attempts"
+    __table_args__ = (
+        Index(
+            "launchplane_every_code_notify_attempts_request_idx",
+            "request_id",
+            "event",
+            desc("attempted_at"),
+        ),
+        Index(
+            "launchplane_every_code_notify_attempts_destination_idx",
+            "destination_kind",
+            desc("attempted_at"),
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
     event: Mapped[str] = mapped_column(String, nullable=False)
     destination_kind: Mapped[str] = mapped_column(String, nullable=False)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False)
@@ -2269,6 +2316,86 @@ class PostgresRecordStore(HumanSessionStore):
                 status=record.status,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_every_code_notification_policy_record(
+        self, record: EveryCodeNotificationPolicyRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneEveryCodeNotificationPolicyRow(
+                policy_id=record.policy_id,
+                repository=record.repository,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_every_code_notification_policy_records(
+        self,
+        *,
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneEveryCodeNotificationPolicyRow.repository.in_(("", repository)))
+        if status:
+            filters.append(LaunchplaneEveryCodeNotificationPolicyRow.status == status)
+        return self._list_models(
+            model_type=EveryCodeNotificationPolicyRecord,
+            orm_model=LaunchplaneEveryCodeNotificationPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeNotificationPolicyRow.updated_at.desc(),
+                LaunchplaneEveryCodeNotificationPolicyRow.policy_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_every_code_notification_attempt_record(
+        self, record: EveryCodeNotificationAttemptRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneEveryCodeNotificationAttemptRow(
+                attempt_id=record.attempt_id,
+                request_id=record.request_id,
+                event=record.event,
+                destination_kind=record.destination_kind,
+                delivery_status=record.delivery_status,
+                attempted_at=record.attempted_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_every_code_notification_attempt_records(
+        self,
+        *,
+        request_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
+        filters: list[object] = []
+        if request_id:
+            filters.append(LaunchplaneEveryCodeNotificationAttemptRow.request_id == request_id)
+        if event:
+            filters.append(LaunchplaneEveryCodeNotificationAttemptRow.event == event)
+        if destination_kind:
+            filters.append(
+                LaunchplaneEveryCodeNotificationAttemptRow.destination_kind
+                == destination_kind
+            )
+        return self._list_models(
+            model_type=EveryCodeNotificationAttemptRecord,
+            orm_model=LaunchplaneEveryCodeNotificationAttemptRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeNotificationAttemptRow.attempted_at.desc(),
+                LaunchplaneEveryCodeNotificationAttemptRow.attempt_id.desc(),
+            ),
+            limit=limit,
         )
 
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:

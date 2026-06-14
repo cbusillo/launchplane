@@ -8,7 +8,6 @@ from typing import IO, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener, urlopen
-import ipaddress
 import json
 import os
 import smtplib
@@ -44,6 +43,11 @@ from control_plane.contracts.runtime_identity import (
     health_payload_runtime_identity_status,
 )
 from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.notifications import (
+    post_discord_webhook,
+    public_discord_url_error,
+    public_url_error,
+)
 from control_plane.workflows.odoo_verification import (
     default_odoo_health_url,
     is_legacy_derived_odoo_health_url,
@@ -756,22 +760,10 @@ def _record_summary(
 
 
 def _public_url_error(url: str) -> PublicIngressFailureCode | None:
-    parsed = urlsplit(url.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    error = public_url_error(url)
+    if error == "invalid_url":
         return "invalid_url"
-    hostname = (parsed.hostname or "").lower()
-    if hostname in {"localhost", "127.0.0.1", "::1"}:
-        return "private_url"
-    try:
-        if ipaddress.ip_address(hostname).is_private:
-            return "private_url"
-    except ValueError:
-        pass
-    if (
-        hostname.endswith(".local")
-        or hostname.endswith(".internal")
-        or hostname.endswith(".invalid")
-    ):
+    if error == "private_url":
         return "private_url"
     return None
 
@@ -1035,8 +1027,8 @@ def _deliver_discord_notification(
             action="missing_discord_webhook",
             error_message="Discord webhook secret could not be resolved.",
         )
-    public_url_error = _public_url_error(webhook_url)
-    if public_url_error is not None:
+    public_url_error = public_discord_url_error(webhook_url)
+    if public_url_error:
         return PublicIngressNotificationDelivery(
             delivery_status="failed",
             action="invalid_discord_webhook",
@@ -1246,15 +1238,7 @@ def _send_email_message(
 
 
 def _post_discord_webhook(webhook_url: str, payload: dict[str, object]) -> None:
-    request = Request(
-        webhook_url,
-        method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
-        data=json.dumps(payload).encode("utf-8"),
-    )
-    with urlopen(request, timeout=15) as response:  # noqa: S310 - operator-configured webhook URL with SSRF guard.
-        if not 200 <= response.status < 300:
-            raise RuntimeError(f"Discord webhook returned HTTP {response.status}")
+    post_discord_webhook(webhook_url, payload)
 
 
 def public_ingress_alert_body(

@@ -16,6 +16,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_notifications import (
+    EveryCodeNotificationAttemptRecord,
+    EveryCodeNotificationPolicyRecord,
+)
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
@@ -541,6 +545,64 @@ class FilesystemRecordStore:
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
+
+    def write_every_code_notification_policy_record(
+        self, record: EveryCodeNotificationPolicyRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_every_code_notification_policies", record.policy_id, record
+        )
+
+    def list_every_code_notification_policy_records(
+        self,
+        *,
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodeNotificationPolicyRecord,
+                "launchplane_every_code_notification_policies",
+            )
+            if (not repository or record.repository in {"", repository})
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.policy_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_every_code_notification_attempt_record(
+        self, record: EveryCodeNotificationAttemptRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_every_code_notification_attempts", record.attempt_id, record
+        )
+
+    def list_every_code_notification_attempt_records(
+        self,
+        *,
+        request_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodeNotificationAttemptRecord,
+                "launchplane_every_code_notification_attempts",
+            )
+            if (not request_id or record.request_id == request_id)
+            and (not event or record.event == event)
+            and (not destination_kind or record.destination_kind == destination_kind)
+        ]
+        records.sort(key=lambda record: (record.attempted_at, record.attempt_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> Path:
         return self._write_model("launchplane_every_code_preview_gates", record.gate_id, record)
