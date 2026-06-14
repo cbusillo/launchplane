@@ -15,6 +15,8 @@ from control_plane.every_code_reconciliation import (
 )
 from control_plane.contracts.every_code_work_request import build_every_code_work_request_id
 from control_plane.every_code_worker import (
+    EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+    EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
     EveryCodeWorkerApiError,
     EveryCodeWorkerApiStore,
     EveryCodeWorkerStore,
@@ -168,6 +170,18 @@ def _gh_current_user_login() -> str:
     help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
+@click.option(
+    "--github-token-env",
+    default=EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the GitHub token used for claim comments.",
+)
+@click.option(
+    "--github-actor-env",
+    default=EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the expected claim-comment GitHub actor.",
+)
 def every_code_run_once(
     database_url: str,
     service_url: str,
@@ -180,6 +194,8 @@ def every_code_run_once(
     repository: str,
     command_template: str,
     tmux_binary: str,
+    github_token_env: str,
+    github_actor_env: str,
 ) -> None:
     resolved_host = host.strip() or os.uname().nodename
     record_store = _every_code_worker_store(
@@ -227,6 +243,8 @@ def every_code_run_once(
             database_url=database_url,
             service_url=service_url,
             worker_token_env=worker_token_env,
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
             tmux_binary=tmux_binary,
         )
     finally:
@@ -288,6 +306,18 @@ def every_code_run_once(
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
 @click.option(
+    "--github-token-env",
+    default=EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the GitHub token used for claim comments.",
+)
+@click.option(
+    "--github-actor-env",
+    default=EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the expected claim-comment GitHub actor.",
+)
+@click.option(
     "--interval-seconds",
     type=click.FloatRange(min=0),
     default=60.0,
@@ -313,6 +343,8 @@ def every_code_run(
     repository: str,
     command_template: str,
     tmux_binary: str,
+    github_token_env: str,
+    github_actor_env: str,
     interval_seconds: float,
     max_iterations: int,
 ) -> None:
@@ -336,6 +368,8 @@ def every_code_run(
             database_url=database_url,
             service_url=service_url,
             worker_token_env=worker_token_env,
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
             tmux_binary=tmux_binary,
             interval_seconds=interval_seconds,
             max_iterations=max_iterations,
@@ -401,6 +435,18 @@ def every_code_run(
 )
 @click.option("--tmux-binary", default="tmux", show_default=True)
 @click.option(
+    "--github-token-env",
+    default=EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the GitHub token used for claim comments.",
+)
+@click.option(
+    "--github-actor-env",
+    default=EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the expected claim-comment GitHub actor.",
+)
+@click.option(
     "--interval-seconds",
     type=click.FloatRange(min=0),
     default=60.0,
@@ -419,6 +465,8 @@ def every_code_start(
     repository: str,
     command_template: str,
     tmux_binary: str,
+    github_token_env: str,
+    github_actor_env: str,
     interval_seconds: float,
 ) -> None:
     if service_url.strip():
@@ -437,6 +485,8 @@ def every_code_start(
         repository=repository,
         command_template=command_template,
         tmux_binary=tmux_binary,
+        github_token_env=github_token_env,
+        github_actor_env=github_actor_env,
         interval_seconds=interval_seconds,
     )
     result = start_every_code_worker_daemon(spec=spec, cwd=Path.cwd())
