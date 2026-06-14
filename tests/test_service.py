@@ -14454,6 +14454,214 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(target_records, ())
 
+    def test_dokploy_target_inspect_endpoint_reads_redacted_provider_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+                store.write_dokploy_target_record(
+                    DokployTargetRecord(
+                        context="cm_website",
+                        instance="prod",
+                        target_type="compose",
+                        target_name="cm-prod",
+                        project_name="odoo",
+                        updated_at="2026-06-14T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context="cm_website",
+                        instance="prod",
+                        target_id="compose-cm-prod",
+                        updated_at="2026-06-14T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_provider_target_record(
+                    ProviderTargetRecord(
+                        context="cm_website",
+                        instance="prod",
+                        provider_id="dokploy",
+                        target_category="compose",
+                        target_id="compose-cm-prod",
+                        display_name="cm-prod",
+                        provider_target_type="compose",
+                        provider_evidence={"project_name": "odoo"},
+                        updated_at="2026-06-14T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-inspect.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.inspect"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-inspect.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ) as read_dokploy_config,
+                patch(
+                    "control_plane.dokploy_target_inspect.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "id": "compose-cm-prod",
+                        "name": "cm-prod",
+                        "serverId": "server-123",
+                        "environment": {
+                            "id": "env-prod",
+                            "name": "prod",
+                            "project": {"id": "project-odoo", "name": "odoo"},
+                        },
+                        "env": "ODOO_DB_PASSWORD=secret\nDISABLE_ODOO_ONLINE=true\n",
+                    },
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/dokploy-targets/inspect",
+                    query_string="context=cm_website&instance=prod",
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["inspect"]["target_id"], "compose-cm-prod")
+        self.assertEqual(payload["inspect"]["tracked_target"]["target_name"], "cm-prod")
+        self.assertEqual(payload["inspect"]["provider"]["environment"]["id"], "env-prod")
+        self.assertEqual(
+            payload["inspect"]["provider"]["env"]["keys"],
+            ["DISABLE_ODOO_ONLINE", "ODOO_DB_PASSWORD"],
+        )
+        self.assertTrue(payload["inspect"]["provider_payload_redacted"])
+        self.assertNotIn("secret", str(payload))
+        self.assertNotIn("provider_evidence", str(payload))
+        read_dokploy_config.assert_called_once_with(
+            control_plane_root=root,
+            database_url=database_url,
+        )
+
+    def test_dokploy_target_inspect_endpoint_rejects_without_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-inspect.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/dokploy-targets/inspect",
+                query_string="target_type=compose&target_id=compose-123",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_dokploy_target_inspect_endpoint_returns_not_found_for_unknown_route(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-inspect.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.inspect"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-inspect.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            with patch(
+                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/dokploy-targets/inspect",
+                    query_string="context=missing&instance=prod",
+                )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_dokploy_target_setup_endpoint_applies_compose_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
