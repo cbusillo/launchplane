@@ -48,12 +48,15 @@ function describeError(error) {
   return String(error);
 }
 
-async function fetchWithRetry(url, init, options) {
+async function fetchWithRetry(url, initOrFactory, options) {
   const attempts = parsePositiveInteger(options.retryAttempts, "retry-attempts");
   const delayMs = parseNonNegativeInteger(options.retryDelayMs, "retry-delay-ms");
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      const init = typeof initOrFactory === "function"
+        ? await initOrFactory()
+        : initOrFactory;
       return await fetch(url, init);
     } catch (error) {
       lastError = error;
@@ -352,7 +355,7 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
 
   while (true) {
     attempt += 1;
-    const response = await fetchWithRetry(requestUrl, await requestInit(), {
+    const response = await fetchWithRetry(requestUrl, requestInit, {
       ...options,
       label: "Launchplane request",
     });

@@ -53,6 +53,13 @@ global.fetch = async (url, init) => {{
     return new Response(JSON.stringify({{value: `oidc-token-${{oidcTokenCount}}`}}), {{status: 200}});
   }}
   launchplaneRequestCount += 1;
+  const failureAttempts = String(process.env.TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS || '')
+    .split(',')
+    .filter(Boolean)
+    .map((value) => Number(value));
+  if (failureAttempts.includes(launchplaneRequestCount)) {{
+    throw new TypeError('simulated Launchplane network failure');
+  }}
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
   const refreshStatus = configuredStatuses[launchplaneRequestCount - 1] || process.env.TEST_REFRESH_STATUS || 'pass';
   return new Response(JSON.stringify({{
@@ -108,11 +115,41 @@ process.on('beforeExit', () => {{
             )
             self.assertEqual(calls[1]["headers"]["Authorization"], "Bearer oidc-token-1")
             self.assertEqual(
+                [call for call in calls if call["url"].startswith("https://oidc.example/token")],
+                [calls[0]],
+            )
+            self.assertEqual(
                 calls[1]["headers"]["Idempotency-Key"],
                 "generic-web-preview-refresh:sellyouroutboard:42:sha",
             )
             self.assertEqual(json.loads(calls[1]["body"])["product"], "sellyouroutboard")
             self.assertIn("application_id<<", output_path.read_text(encoding="utf-8"))
+
+    def test_retries_launchplane_request_with_fresh_oidc_token(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/odoo/prod-promotion-run",
+                "payload": '{"schema_version":1,"product":"odoo-tenant-cm-website","run":{"schema_version":1,"context":"cm_website","request_id":"27489057866-1"}}',
+                "retry-attempts": "2",
+                "retry-delay-ms": "1",
+            },
+            environment={"TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = json.loads(result.stderr.strip().splitlines()[-1])
+        launchplane_calls = [
+            call
+            for call in calls
+            if call["url"]
+            == "https://launchplane.example/v1/drivers/odoo/prod-promotion-run"
+        ]
+        self.assertEqual(len(launchplane_calls), 2)
+        self.assertEqual(
+            [call["headers"]["Authorization"] for call in launchplane_calls],
+            ["Bearer oidc-token-1", "Bearer oidc-token-2"],
+        )
 
     def test_writes_mapped_response_value_to_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:
