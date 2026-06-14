@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from fnmatch import fnmatchcase
 from typing import Protocol
 
 from control_plane.contracts.runtime_key_safety_policy import (
@@ -11,6 +12,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
+    RuntimeSecretSafetyTargetScope,
 )
 from control_plane.contracts.secret_record import SecretBinding
 
@@ -250,7 +252,9 @@ def _evaluate_binding_rule(
                 ),
             )
         )
-    if rule.allowed_contexts and target.context not in rule.allowed_contexts:
+    target_allowed = _target_allowed(target=target, rule=rule)
+    context_allowed = _context_allowed(target=target, rule=rule)
+    if not target_allowed and not context_allowed:
         findings.append(
             RuntimeKeySafetyFinding(
                 code="context_not_allowed",
@@ -264,7 +268,9 @@ def _evaluate_binding_rule(
                 ),
             )
         )
-    if rule.allowed_instances and target.instance not in rule.allowed_instances:
+    if not target_allowed and not _instance_allowed_for_diagnostics(
+        target=target, rule=rule
+    ):
         findings.append(
             RuntimeKeySafetyFinding(
                 code="instance_not_allowed",
@@ -279,3 +285,109 @@ def _evaluate_binding_rule(
             )
         )
     return tuple(findings)
+
+
+def _target_allowed(*, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule) -> bool:
+    legacy_restricted = bool(
+        rule.allowed_contexts or rule.allowed_instances or rule.allowed_instance_patterns
+    )
+    paired_restricted = bool(rule.allowed_targets)
+    if not legacy_restricted and not paired_restricted:
+        return True
+    if legacy_restricted and _legacy_scope_allowed(target=target, rule=rule):
+        return True
+    return any(
+        _target_scope_allowed(target=target, scope=scope)
+        for scope in rule.allowed_targets
+    )
+
+
+def _context_allowed(*, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule) -> bool:
+    legacy_restricted = bool(
+        rule.allowed_contexts or rule.allowed_instances or rule.allowed_instance_patterns
+    )
+    if legacy_restricted and (
+        not rule.allowed_contexts or target.context in rule.allowed_contexts
+    ):
+        return True
+    return any(scope.context == target.context for scope in rule.allowed_targets)
+
+
+def _instance_allowed_for_diagnostics(
+    *, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule
+) -> bool:
+    matching_target_scopes = tuple(
+        scope for scope in rule.allowed_targets if scope.context == target.context
+    )
+    if matching_target_scopes:
+        return any(
+            not scope.instances
+            and not scope.instance_patterns
+            or _instance_allowed(
+                instance=target.instance,
+                instances=scope.instances,
+                instance_patterns=scope.instance_patterns,
+            )
+            for scope in matching_target_scopes
+        )
+    if rule.allowed_instances or rule.allowed_instance_patterns:
+        return _legacy_instance_allowed(target=target, rule=rule)
+    return True
+
+
+def _legacy_scope_allowed(
+    *, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule
+) -> bool:
+    return _legacy_context_allowed(target=target, rule=rule) and _legacy_instance_allowed(
+        target=target, rule=rule
+    )
+
+
+def _legacy_context_allowed(
+    *, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule
+) -> bool:
+    return not rule.allowed_contexts or target.context in rule.allowed_contexts
+
+
+def _legacy_instance_allowed(
+    *, target: RuntimeKeySafetyTarget, rule: RuntimeSecretSafetyRule
+) -> bool:
+    if not rule.allowed_instances and not rule.allowed_instance_patterns:
+        return True
+    return _instance_allowed(
+        instance=target.instance,
+        instances=rule.allowed_instances,
+        instance_patterns=rule.allowed_instance_patterns,
+    )
+
+
+def _target_scope_allowed(
+    *,
+    target: RuntimeKeySafetyTarget,
+    scope: RuntimeSecretSafetyTargetScope,
+) -> bool:
+    if scope.context != target.context:
+        return False
+    if not scope.instances and not scope.instance_patterns:
+        return True
+    return _instance_allowed(
+        instance=target.instance,
+        instances=scope.instances,
+        instance_patterns=scope.instance_patterns,
+    )
+
+
+def _instance_allowed(
+    *,
+    instance: str,
+    instances: tuple[str, ...],
+    instance_patterns: tuple[str, ...],
+) -> bool:
+    if instance in instances:
+        return True
+    if any(character in instance for character in ("/", "\\")):
+        return False
+    return any(
+        fnmatchcase(instance, pattern)
+        for pattern in instance_patterns
+    )
