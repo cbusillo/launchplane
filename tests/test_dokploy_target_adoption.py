@@ -10,7 +10,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.dokploy import JsonObject
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
@@ -178,6 +178,128 @@ class DokployTargetAdoptionTests(unittest.TestCase):
             self.assertEqual(store.list_dokploy_target_records(), ())
             self.assertEqual(store.list_dokploy_target_id_records(), ())
             store.close()
+
+    def test_adopt_target_replaces_provider_target_when_current_authority_matches_expectation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            stale_provider_target = ProviderTargetRecord(
+                context="cm_website",
+                instance="prod",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id="compose-cm-prod",
+                display_name="cm-prod",
+                provider_target_type="compose",
+                provider_evidence={"project_name": "odoo"},
+                updated_at="2026-06-14T03:53:56Z",
+                source_label="test:stale-provider-target",
+            )
+            store.write_provider_target_record(stale_provider_target)
+
+            result = adopt_dokploy_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="cm_website",
+                instance="prod",
+                target_type="compose",
+                target_id="compose-cm-website-prod",
+                project_name="odoo",
+                target_name="odoo-tenant-cm-website-prod",
+                healthcheck_path="/web/health",
+                domains=("cm-website-prod.shinycomputers.com",),
+                updated_at="2026-06-14T12:05:00Z",
+                expected_current_provider_target=(
+                    stale_provider_target.to_deployed_target_reference()
+                ),
+                apply=True,
+                fetch_target_payload=lambda *_args: {
+                    "name": "odoo-tenant-cm-website-prod",
+                    "environment": {"project": {"name": "odoo"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            provider_target_record = store.read_provider_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(target_record.target_name, "odoo-tenant-cm-website-prod")
+        self.assertEqual(target_id_record.target_id, "compose-cm-website-prod")
+        self.assertEqual(provider_target_record.target_id, "compose-cm-website-prod")
+        self.assertEqual(provider_target_record.display_name, "odoo-tenant-cm-website-prod")
+
+    def test_adopt_target_rejects_provider_target_replacement_when_expectation_mismatches(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_provider_target_record(
+                ProviderTargetRecord(
+                    context="cm_website",
+                    instance="prod",
+                    provider_id="dokploy",
+                    target_category="compose",
+                    target_id="compose-cm-prod",
+                    display_name="cm-prod",
+                    provider_target_type="compose",
+                    provider_evidence={"project_name": "odoo"},
+                    updated_at="2026-06-14T03:53:56Z",
+                    source_label="test:stale-provider-target",
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "expectation did not match"):
+                adopt_dokploy_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="cm_website",
+                    instance="prod",
+                    target_type="compose",
+                    target_id="compose-cm-website-prod",
+                    project_name="odoo",
+                    target_name="odoo-tenant-cm-website-prod",
+                    healthcheck_path="/web/health",
+                    domains=("cm-website-prod.shinycomputers.com",),
+                    updated_at="2026-06-14T12:05:00Z",
+                    expected_current_provider_target=DeployedTargetReference(
+                        provider_id="dokploy",
+                        target_category="compose",
+                        target_id="some-other-compose",
+                        display_name="cm-prod",
+                        provider_target_type="compose",
+                        provider_evidence={"project_name": "odoo"},
+                    ),
+                    apply=True,
+                    fetch_target_payload=lambda *_args: {
+                        "name": "odoo-tenant-cm-website-prod",
+                        "environment": {"project": {"name": "odoo"}},
+                    },
+                )
+
+            self.assertEqual(store.list_dokploy_target_records(), ())
+            self.assertEqual(store.list_dokploy_target_id_records(), ())
+            provider_target_record = store.read_provider_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(provider_target_record.target_id, "compose-cm-prod")
 
     def test_adopt_target_preserves_live_healthcheck_settings(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -862,6 +984,121 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(requests, [])
         self.assertEqual(target_records, ())
         self.assertEqual(target_id_records, ())
+
+    def test_create_compose_target_replaces_provider_target_when_current_authority_matches_expectation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            stale_provider_target = ProviderTargetRecord(
+                context="cm_website",
+                instance="prod",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id="compose-cm-prod",
+                display_name="cm-prod",
+                provider_target_type="compose",
+                provider_evidence={"project_name": "odoo"},
+                updated_at="2026-06-14T03:53:56Z",
+                source_label="test:stale-provider-target",
+            )
+            store.write_provider_target_record(stale_provider_target)
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                if path == "/api/compose.create":
+                    return {"composeId": "compose-cm-website-prod"}
+                raise AssertionError(path)
+
+            result = create_dokploy_compose_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="cm_website",
+                instance="prod",
+                target_name="odoo-tenant-cm-website-prod",
+                environment_id="env-prod",
+                server_id="server-prod",
+                app_name="odoo-tenant-cm-website-prod",
+                domains=("cm-website-prod.shinycomputers.com",),
+                deploy_timeout_seconds=900,
+                expected_current_provider_target=(
+                    stale_provider_target.to_deployed_target_reference()
+                ),
+                apply=True,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {
+                    "name": "odoo-tenant-cm-website-prod",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "environment": {"project": {"name": "odoo"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            provider_target_record = store.read_provider_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual([path for path, _payload in requests], ["/api/compose.create"])
+        self.assertEqual(target_record.target_name, "odoo-tenant-cm-website-prod")
+        self.assertEqual(target_id_record.target_id, "compose-cm-website-prod")
+        self.assertEqual(provider_target_record.target_id, "compose-cm-website-prod")
+        self.assertEqual(provider_target_record.display_name, "odoo-tenant-cm-website-prod")
+
+    def test_create_compose_target_with_replacement_expectation_requires_existing_provider_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                return {"composeId": "compose-cm-website-prod"}
+
+            with self.assertRaisesRegex(ValueError, "expected an existing provider target"):
+                create_dokploy_compose_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="cm_website",
+                    instance="prod",
+                    target_name="odoo-tenant-cm-website-prod",
+                    environment_id="env-prod",
+                    server_id="server-prod",
+                    expected_current_provider_target=DeployedTargetReference(
+                        provider_id="dokploy",
+                        target_category="compose",
+                        target_id="compose-cm-prod",
+                        display_name="cm-prod",
+                        provider_target_type="compose",
+                        provider_evidence={"project_name": "odoo"},
+                    ),
+                    apply=True,
+                    mutate_provider=mutate_provider,
+                    fetch_target_payload=lambda *_args: {"name": "odoo-tenant-cm-website-prod"},
+                )
+            store.close()
+
+        self.assertEqual(requests, [])
 
     def test_create_application_target_rejects_healthcheck_path_before_provider_mutation(
         self,

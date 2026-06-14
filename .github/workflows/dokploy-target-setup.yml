@@ -113,6 +113,13 @@ name: Dokploy Target Setup
         description: Optional deploy timeout to store.
         required: false
         type: string
+      expected_current_provider_target_json:
+        description: >-
+          Optional JSON deployed target authority that must match the existing
+          provider-target row before replacing it.
+        required: false
+        default: ""
+        type: string
       confirmation:
         description: Type APPLY DOKPLOY TARGET SETUP when mode=apply.
         required: false
@@ -160,6 +167,8 @@ jobs:
       RUNTIME_PORT: ${{ inputs.runtime_port }}
       HEALTHCHECK_PATH: ${{ inputs.healthcheck_path }}
       DEPLOY_TIMEOUT_SECONDS: ${{ inputs.deploy_timeout_seconds }}
+      EXPECTED_CURRENT_PROVIDER_TARGET_JSON: >-
+        ${{ inputs.expected_current_provider_target_json }}
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
     steps:
@@ -308,6 +317,19 @@ jobs:
             payload="$(
               jq --argjson timeout "$DEPLOY_TIMEOUT_SECONDS" \
                 '.deploy_timeout_seconds = $timeout' <<< "$payload"
+            )"
+          fi
+          expected_current_provider_target_text="$(
+            printf '%s' "$EXPECTED_CURRENT_PROVIDER_TARGET_JSON" \
+              | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+          )"
+          if [ -n "$expected_current_provider_target_text" ]; then
+            payload="$(
+              jq \
+                --argjson expected_current_provider_target \
+                  "$expected_current_provider_target_text" \
+                '.expected_current_provider_target = $expected_current_provider_target' \
+                <<< "$payload"
             )"
           fi
           idempotency_key="dokploy-target-setup:${OPERATION}:"
