@@ -352,7 +352,7 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
 
   while (true) {
     attempt += 1;
-    const response = await fetchWithRetry(requestUrl, requestInit, {
+    const response = await fetchWithRetry(requestUrl, await requestInit(), {
       ...options,
       label: "Launchplane request",
     });
@@ -384,22 +384,25 @@ async function main() {
   const idempotencyKey = getInput("idempotency-key");
   const payload = applyPayloadJsonFiles(applyPayloadFields(readPayload()));
   const options = getActionOptions();
-  const token = await requestGitHubOidcToken(audience, options);
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-  };
-  const requestInit = {
-    method,
-    headers,
-    signal: buildAbortSignal(getInput("timeout-ms", { defaultValue: "0" })),
-  };
-  if (idempotencyKey) {
-    headers["Idempotency-Key"] = idempotencyKey;
-  }
-  if (payload !== null) {
-    headers["Content-Type"] = "application/json";
-    requestInit.body = JSON.stringify(payload);
+  async function requestInit() {
+    const token = await requestGitHubOidcToken(audience, options);
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    };
+    const init = {
+      method,
+      headers,
+      signal: buildAbortSignal(getInput("timeout-ms", { defaultValue: "0" })),
+    };
+    if (idempotencyKey) {
+      headers["Idempotency-Key"] = idempotencyKey;
+    }
+    if (payload !== null) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(payload);
+    }
+    return init;
   }
 
   const { response, responseBody, responseText } = await requestLaunchplaneUntilComplete(

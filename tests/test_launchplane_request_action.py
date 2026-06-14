@@ -45,10 +45,12 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
         script = f"""
 const calls = [];
 let launchplaneRequestCount = 0;
+let oidcTokenCount = 0;
 global.fetch = async (url, init) => {{
   calls.push({{url, init}});
   if (url.startsWith('https://oidc.example/token')) {{
-    return new Response(JSON.stringify({{value: 'oidc-token'}}), {{status: 200}});
+    oidcTokenCount += 1;
+    return new Response(JSON.stringify({{value: `oidc-token-${{oidcTokenCount}}`}}), {{status: 200}});
   }}
   launchplaneRequestCount += 1;
   const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
@@ -104,7 +106,7 @@ process.on('beforeExit', () => {{
                 calls[1]["url"],
                 "https://launchplane.example/v1/drivers/generic-web/preview-refresh",
             )
-            self.assertEqual(calls[1]["headers"]["Authorization"], "Bearer oidc-token")
+            self.assertEqual(calls[1]["headers"]["Authorization"], "Bearer oidc-token-1")
             self.assertEqual(
                 calls[1]["headers"]["Idempotency-Key"],
                 "generic-web-preview-refresh:sellyouroutboard:42:sha",
@@ -257,6 +259,10 @@ process.on('beforeExit', () => {{
                 == "https://launchplane.example/v1/drivers/generic-web/preview-refresh"
             ]
             self.assertEqual(len(launchplane_calls), 3)
+            self.assertEqual(
+                [call["headers"]["Authorization"] for call in launchplane_calls],
+                ["Bearer oidc-token-1", "Bearer oidc-token-2", "Bearer oidc-token-3"],
+            )
             self.assertIn("refresh_status<<", output_path.read_text(encoding="utf-8"))
 
     def test_fails_when_polling_times_out(self) -> None:
