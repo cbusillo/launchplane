@@ -336,11 +336,13 @@ def _artifact_manifest(
     artifact_id: str = "artifact-cm-testing",
     source_commit: str = "abc1234",
     digest: str = "sha256:artifact",
+    odoo_install_modules: tuple[str, ...] = (),
 ) -> ArtifactIdentityManifest:
     return ArtifactIdentityManifest(
         artifact_id=artifact_id,
         source_commit=source_commit,
         enterprise_base_digest="sha256:enterprise",
+        odoo_install_modules=odoo_install_modules,
         image=ArtifactImageReference(
             repository="ghcr.io/cbusillo/odoo-tenant-cm",
             digest=digest,
@@ -744,6 +746,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
+            artifact_manifest=_artifact_manifest(odoo_install_modules=("cm_website",)),
             odoo_instance_override_record=OdooInstanceOverrideRecord(
                 context="cm",
                 instance="testing",
@@ -787,6 +790,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             "ODOO_DATA_VOLUME=cm_testing_odoo_data",
                             "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
                             "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                            "ODOO_INSTALL_MODULES=stale_module,disable_odoo_online",
                             f"{ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}={stale_payload_b64}",
                             f"{LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY}=true",
                         )
@@ -1033,7 +1037,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
         self.assertEqual(
             persisted_env_map["ODOO_INSTALL_MODULES"],
-            "launchplane_settings,disable_odoo_online",
+            "launchplane_settings,disable_odoo_online,cm_website",
         )
         self.assertEqual(persisted_env_map[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY], "true")
         self.assertNotIn(
@@ -1144,8 +1148,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "launchplane_settings,disable_odoo_online",
         )
         self.assertEqual(
+            final_deployment.runtime_source["artifact_odoo_install_modules"],
+            "cm_website",
+        )
+        self.assertEqual(
             final_deployment.runtime_source["odoo_install_modules"],
-            "launchplane_settings,disable_odoo_online",
+            "launchplane_settings,disable_odoo_online,cm_website",
         )
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None
@@ -1272,6 +1280,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "ghcr.io/cbusillo/odoo-tenant-cm@sha256:fresh",
         )
         self.assertIn("LAUNCHPLANE_ARTIFACT_ID=artifact-cm-fresh", persisted_env)
+        persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
+        self.assertEqual(
+            persisted_env_map["ODOO_INSTALL_MODULES"],
+            "launchplane_settings,disable_odoo_online",
+        )
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.source_git_ref, "feed123")
         assert final_deployment.runtime_identity is not None
