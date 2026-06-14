@@ -737,6 +737,11 @@ state/
   fails closed when no active policy record exists or when a required binding is
   missing, disabled, ambiguous, unclassified, or outside the allowed
   context/instance.
+- Rules may restrict stable scope with exact `allowed_contexts` and
+  `allowed_instances` values. Dynamic preview lanes should use paired
+  `allowed_targets` entries with an exact context and explicit
+  `instance_patterns` such as `pr-*`, so a preview pattern never broadens a rule
+  to a different product or stable context.
 
 ## Launchplane Preview Record
 

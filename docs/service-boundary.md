@@ -841,7 +841,10 @@ Common failure classes are stable enough for helper summaries:
 - `secret_configuration_required`: trusted Launchplane runtime cannot write
   managed secrets.
 - `runtime_key_safety_unavailable` or `runtime_key_safety_failed`: the active
-  runtime key-safety policy is missing or rejects the requested binding.
+  runtime key-safety policy is missing or rejects the requested binding. Policy
+  payloads may include paired `allowed_targets` metadata for exact context plus
+  dynamic preview instance patterns; they must not include secret plaintext or
+  checked-in runtime authority.
 - `invalid_request`: malformed payload, secret-shaped runtime key, or nested
   runtime/secret target override.
 
@@ -856,7 +859,9 @@ requires DB-backed storage, and writes metadata-only policy records for managed
 runtime secret binding keys. It merges requested rules into the latest active
 policy by binding key so deploy-time bootstrap can add required classifications
 without dropping existing policy coverage. Request and response payloads must
-not include secret plaintext.
+not include secret plaintext. Rules can carry exact context/instance scope and
+explicit preview instance patterns for dynamic PR lanes; policy apply merges
+those scopes additively without making checked-in files runtime authority.
 
 Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
