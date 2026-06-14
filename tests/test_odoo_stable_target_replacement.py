@@ -51,6 +51,7 @@ from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
+    _merge_required_odoo_install_modules,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
     _target_health_url,
@@ -357,6 +358,12 @@ def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
 
 
 class OdooStableTargetReplacementTests(unittest.TestCase):
+    def test_merge_required_odoo_install_modules_prepends_and_dedupes(self) -> None:
+        self.assertEqual(
+            _merge_required_odoo_install_modules("cm_website, disable_odoo_online, website"),
+            "launchplane_settings,disable_odoo_online,cm_website,website",
+        )
+
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
@@ -1024,6 +1031,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertNotIn("ODOO_WEB_COMMAND=/odoo/odoo-bin", persisted_env)
         self.assertIn("ODOO_WORKERS=2", persisted_env)
         persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
+        self.assertEqual(
+            persisted_env_map["ODOO_INSTALL_MODULES"],
+            "launchplane_settings,disable_odoo_online",
+        )
         self.assertEqual(persisted_env_map[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY], "true")
         self.assertNotIn(
             LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
@@ -1127,6 +1138,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertEqual(
             final_deployment.runtime_source["runtime_override_instance_required"], "false"
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["required_odoo_modules"],
+            "launchplane_settings,disable_odoo_online",
+        )
+        self.assertEqual(
+            final_deployment.runtime_source["odoo_install_modules"],
+            "launchplane_settings,disable_odoo_online",
         )
         self.assertEqual(result.runtime_source, final_deployment.runtime_source)
         assert final_deployment.runtime_identity is not None

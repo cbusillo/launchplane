@@ -82,6 +82,8 @@ class OdooStableTargetReplacementStore(RuntimeKeySafetyPolicyReadStore, Protocol
 DokployRequest = Callable[..., JsonValue]
 DokployConfigReader = Callable[..., tuple[str, str]]
 ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
+ODOO_INSTALL_MODULES_ENV_KEY = "ODOO_INSTALL_MODULES"
+LAUNCHPLANE_REQUIRED_ODOO_MODULES = ("launchplane_settings", "disable_odoo_online")
 
 
 class OdooStableTargetRuntimeSnapshot(BaseModel):
@@ -629,6 +631,16 @@ def _record_with_target_replacement_canonical(
             "source_label": "odoo-stable-target-replacement",
         }
     )
+
+
+def _merge_required_odoo_install_modules(raw_modules: str) -> str:
+    merged_modules: list[str] = []
+    for module_name in (*LAUNCHPLANE_REQUIRED_ODOO_MODULES, *raw_modules.split(",")):
+        normalized_module_name = module_name.strip()
+        if not normalized_module_name or normalized_module_name in merged_modules:
+            continue
+        merged_modules.append(normalized_module_name)
+    return ",".join(merged_modules)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1280,6 +1292,11 @@ def execute_odoo_stable_target_replacement_apply(
             desired_env_map.pop(key, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
+        desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = _merge_required_odoo_install_modules(
+            desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
+        )
+        runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
+        runtime_source["odoo_install_modules"] = desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY]
         if runtime_override_payload is not None:
             missing_override_secret_keys = tuple(
                 key
