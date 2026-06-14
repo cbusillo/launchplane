@@ -10,6 +10,7 @@ from control_plane.contracts.deploy_target import (
     ensure_target_reference_matches,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.structured_health import StructuredHealthEvidence
 
 ReleaseStatus = Literal["pending", "pass", "fail", "skipped"]
 
@@ -31,6 +32,7 @@ class HealthcheckEvidence(BaseModel):
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
     runtime_identity_detail: str = ""
     observed_runtime_identity: RuntimeIdentity | None = None
+    structured_health: StructuredHealthEvidence = Field(default_factory=StructuredHealthEvidence)
 
     @model_validator(mode="after")
     def _validate_verified_healthcheck(self) -> "HealthcheckEvidence":

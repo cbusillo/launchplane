@@ -14,6 +14,8 @@ from control_plane.contracts.generic_web_rollback import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
+from control_plane.contracts.runtime_identity import health_payload_runtime_identity_status
+from control_plane.contracts.structured_health import structured_health_evidence_from_payload
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchResult,
     _DriverRouteExecutionMetadata,
@@ -70,6 +72,7 @@ class _StableVerificationRequest(Protocol):
     verified_at: str
     checked_urls: tuple[str, ...]
     timeout_seconds: int | None
+    health_payload: object | None
 
 
 def _validate_stable_verification_request(
@@ -103,6 +106,7 @@ class GenericWebStableVerificationRequest(BaseModel):
     verified_at: str
     checked_urls: tuple[str, ...] = ()
     timeout_seconds: int | None = Field(default=None, ge=1)
+    health_payload: object | None = None
     failure_summary: str = ""
 
     @field_validator("verification_status", mode="before")
@@ -282,13 +286,36 @@ def _generic_web_post_deploy_executor_for_profile(
 
 
 def _stable_verification_health_evidence(
-    *, request: GenericWebStableVerificationRequest
+    *,
+    request: GenericWebStableVerificationRequest,
+    deployment_record: object,
 ) -> HealthcheckEvidence:
+    status = request.verification_status
+    structured_health = structured_health_evidence_from_payload(request.health_payload)
+    if structured_health.status in {"fail", "malformed"}:
+        status = "fail"
+    runtime_identity_status = "unchecked"
+    runtime_identity_detail = ""
+    observed_runtime_identity = None
+    expected_runtime_identity = getattr(deployment_record, "runtime_identity", None)
+    runtime_identity_status, runtime_identity_detail, observed_runtime_identity = (
+        health_payload_runtime_identity_status(
+            expected=expected_runtime_identity,
+            payload=request.health_payload,
+            json_parse_failed=False,
+        )
+    )
+    if runtime_identity_status in {"malformed", "mismatch", "missing", "unverifiable"}:
+        status = "fail"
     return HealthcheckEvidence(
         verified=bool(request.checked_urls),
         urls=request.checked_urls,
         timeout_seconds=request.timeout_seconds if request.checked_urls else None,
-        status=request.verification_status,
+        status=status,
+        runtime_identity_status=runtime_identity_status,
+        runtime_identity_detail=runtime_identity_detail,
+        observed_runtime_identity=observed_runtime_identity,
+        structured_health=structured_health,
     )
 
 
@@ -310,7 +337,10 @@ def _apply_generic_web_stable_verification_records(
     if deployment_record.instance != request.instance:
         raise click.ClickException(f"{label} instance does not match deployment record instance.")
 
-    health_evidence = _stable_verification_health_evidence(request=request)
+    health_evidence = _stable_verification_health_evidence(
+        request=request,
+        deployment_record=deployment_record,
+    )
     updated_deployment = deployment_record.model_copy(
         update={"destination_health": health_evidence}
     )
@@ -320,7 +350,7 @@ def _apply_generic_web_stable_verification_records(
             deployment_record=updated_deployment,
         )
     )
-    result["deployment_health_status"] = request.verification_status
+    result["deployment_health_status"] = health_evidence.status
 
     promotion_record_id = request.promotion_record_id.strip()
     if promotion_record_id:
@@ -352,7 +382,7 @@ def _apply_generic_web_stable_verification_records(
                 promotion_record=updated_promotion,
             )
         )
-        result["promotion_health_status"] = request.verification_status
+        result["promotion_health_status"] = health_evidence.status
 
     return result
 

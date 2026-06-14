@@ -652,6 +652,19 @@ def _merge_required_odoo_install_modules(raw_modules: str) -> str:
     return _merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
+def _missing_required_odoo_modules_from_artifact(
+    artifact_manifest: ArtifactIdentityManifest,
+) -> tuple[str, ...]:
+    declared_modules = {
+        str(module).strip()
+        for module in artifact_manifest.odoo_install_modules
+        if str(module).strip()
+    }
+    return tuple(
+        module for module in LAUNCHPLANE_REQUIRED_ODOO_MODULES if module not in declared_modules
+    )
+
+
 def _normalize_domain(raw_domain: str) -> str:
     return raw_domain.strip().lower().removeprefix("https://").removeprefix("http://").rstrip("/")
 
@@ -1069,6 +1082,12 @@ def execute_odoo_stable_target_replacement_apply(
         raise click.ClickException(
             "Odoo target replacement apply source ref does not match stored artifact manifest. "
             f"Request={source_git_ref} manifest={artifact_manifest.source_commit}."
+        )
+    missing_required_modules = _missing_required_odoo_modules_from_artifact(artifact_manifest)
+    if missing_required_modules:
+        raise click.ClickException(
+            "Odoo target replacement apply requires artifact odoo_install_modules to declare required module(s): "
+            + ", ".join(missing_required_modules)
         )
     image_reference = _artifact_image_reference(artifact_manifest)
     target_name = (

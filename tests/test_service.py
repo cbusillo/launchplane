@@ -104,6 +104,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
@@ -27740,6 +27741,530 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ("https://cm-testing.example.com/web/health",),
             )
             self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+
+    def test_generic_web_stable_verification_records_runtime_identity_payload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            runtime_identity = RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                deployment_record_id="deployment-20260420T153000Z-syo-testing",
+                artifact_id="ghcr.io/every/sellyouroutboard@sha256:abc123",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                image_reference="ghcr.io/every/sellyouroutboard@sha256:abc123",
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=runtime_identity.deployment_record_id,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=runtime_identity.artifact_id
+                    ),
+                    context=runtime_identity.context,
+                    instance=runtime_identity.instance,
+                    source_git_ref=runtime_identity.source_git_ref,
+                    deploy=DeploymentEvidence(
+                        target_name="sellyouroutboard-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-image",
+                        deployment_id="delegated-application-deploy",
+                        status="pass",
+                    ),
+                    runtime_identity=runtime_identity,
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": runtime_identity.context,
+                        "instance": runtime_identity.instance,
+                        "deployment_record_id": runtime_identity.deployment_record_id,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://testing.example.com/health"],
+                        "timeout_seconds": 45,
+                        "health_payload": {
+                            "status": "ok",
+                            "version": runtime_identity.artifact_id,
+                            "runtime_identity": runtime_identity.model_dump(mode="json"),
+                        },
+                    },
+                },
+                headers={"Idempotency-Key": "generic-stable-verification:syo:testing:identity"},
+            )
+
+            deployment = store.read_deployment_record(runtime_identity.deployment_record_id)
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "pass")
+        self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertEqual(
+            deployment.destination_health.structured_health.version,
+            runtime_identity.artifact_id,
+        )
+        self.assertEqual(deployment.destination_health.runtime_identity_status, "match")
+        self.assertEqual(deployment.destination_health.observed_runtime_identity, runtime_identity)
+
+    def test_generic_web_stable_verification_fails_runtime_identity_mismatch(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            expected_identity = RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                deployment_record_id="deployment-20260420T153000Z-syo-testing",
+                artifact_id="ghcr.io/every/sellyouroutboard@sha256:abc123",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                image_reference="ghcr.io/every/sellyouroutboard@sha256:abc123",
+            )
+            observed_identity = expected_identity.model_copy(
+                update={"artifact_id": "ghcr.io/every/sellyouroutboard@sha256:stale"}
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=expected_identity.deployment_record_id,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=expected_identity.artifact_id
+                    ),
+                    context=expected_identity.context,
+                    instance=expected_identity.instance,
+                    source_git_ref=expected_identity.source_git_ref,
+                    deploy=DeploymentEvidence(
+                        target_name="sellyouroutboard-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-image",
+                        deployment_id="delegated-application-deploy",
+                        status="pass",
+                    ),
+                    runtime_identity=expected_identity,
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": expected_identity.context,
+                        "instance": expected_identity.instance,
+                        "deployment_record_id": expected_identity.deployment_record_id,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://testing.example.com/health"],
+                        "timeout_seconds": 45,
+                        "health_payload": {
+                            "status": "ok",
+                            "version": observed_identity.artifact_id,
+                            "runtime_identity": observed_identity.model_dump(mode="json"),
+                        },
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:syo:testing:identity-mismatch"
+                },
+            )
+
+            deployment = store.read_deployment_record(expected_identity.deployment_record_id)
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "fail")
+        self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertEqual(
+            deployment.destination_health.structured_health.version,
+            observed_identity.artifact_id,
+        )
+        self.assertEqual(deployment.destination_health.runtime_identity_status, "mismatch")
+        self.assertIn("artifact_id", deployment.destination_health.runtime_identity_detail)
+        self.assertEqual(
+            deployment.destination_health.observed_runtime_identity,
+            observed_identity,
+        )
+
+    def test_generic_web_stable_verification_fails_when_identity_payload_missing(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            expected_identity = RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                deployment_record_id="deployment-20260420T153000Z-syo-testing",
+                artifact_id="ghcr.io/every/sellyouroutboard@sha256:abc123",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                image_reference="ghcr.io/every/sellyouroutboard@sha256:abc123",
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=expected_identity.deployment_record_id,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=expected_identity.artifact_id
+                    ),
+                    context=expected_identity.context,
+                    instance=expected_identity.instance,
+                    source_git_ref=expected_identity.source_git_ref,
+                    deploy=DeploymentEvidence(
+                        target_name="sellyouroutboard-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-image",
+                        deployment_id="delegated-application-deploy",
+                        status="pass",
+                    ),
+                    runtime_identity=expected_identity,
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": expected_identity.context,
+                        "instance": expected_identity.instance,
+                        "deployment_record_id": expected_identity.deployment_record_id,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://testing.example.com/health"],
+                        "timeout_seconds": 45,
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:syo:testing:identity-missing-payload"
+                },
+            )
+
+            deployment = store.read_deployment_record(expected_identity.deployment_record_id)
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "fail")
+        self.assertEqual(deployment.destination_health.runtime_identity_status, "missing")
+
+    def test_generic_web_stable_verification_fails_when_payload_omits_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            expected_identity = RuntimeIdentity(
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                instance="testing",
+                deployment_record_id="deployment-20260420T153000Z-syo-testing",
+                artifact_id="ghcr.io/every/sellyouroutboard@sha256:abc123",
+                source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                image_reference="ghcr.io/every/sellyouroutboard@sha256:abc123",
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=expected_identity.deployment_record_id,
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=expected_identity.artifact_id
+                    ),
+                    context=expected_identity.context,
+                    instance=expected_identity.instance,
+                    source_git_ref=expected_identity.source_git_ref,
+                    deploy=DeploymentEvidence(
+                        target_name="sellyouroutboard-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-image",
+                        deployment_id="delegated-application-deploy",
+                        status="pass",
+                    ),
+                    runtime_identity=expected_identity,
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": expected_identity.context,
+                        "instance": expected_identity.instance,
+                        "deployment_record_id": expected_identity.deployment_record_id,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://testing.example.com/health"],
+                        "timeout_seconds": 45,
+                        "health_payload": {"status": "ok"},
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:syo:testing:identity-missing"
+                },
+            )
+
+            deployment = store.read_deployment_record(expected_identity.deployment_record_id)
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "fail")
+        self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertEqual(deployment.destination_health.runtime_identity_status, "missing")
+
+    def test_generic_web_stable_verification_fails_structured_health_failure(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-syo-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123"
+                    ),
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="sellyouroutboard-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-image",
+                        deployment_id="delegated-application-deploy",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "sellyouroutboard-testing",
+                        "instance": "testing",
+                        "deployment_record_id": "deployment-20260420T153000Z-syo-testing",
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "checked_urls": ["https://testing.example.com/health"],
+                        "timeout_seconds": 45,
+                        "health_payload": {
+                            "status": "not_ready",
+                            "version": "2026.04.20",
+                            "summary": "last sync is stale",
+                        },
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:syo:testing:structured-fail"
+                },
+            )
+
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-syo-testing")
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "fail")
+        self.assertEqual(deployment.destination_health.structured_health.status, "fail")
+        self.assertEqual(deployment.destination_health.structured_health.version, "2026.04.20")
+        self.assertEqual(
+            deployment.destination_health.structured_health.detail,
+            "last sync is stale",
+        )
 
     def test_generic_web_stable_verification_requires_timeout_for_checked_urls(
         self,
