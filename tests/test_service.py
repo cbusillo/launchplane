@@ -25103,6 +25103,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
                                 "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": "info@shinycomputers.com",
                                 "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "webhook-secret",
+                                "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "github-app-token",
+                                "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "shiny-code-bot",
                                 "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token",
                                 "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
                                 "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
@@ -25150,6 +25152,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET=webhook-secret",
             updated_env_text,
         )
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN=github-app-token", updated_env_text)
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR=shiny-code-bot", updated_env_text)
         self.assertIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=worker-token", updated_env_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN=terminal-read-token", updated_env_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT=local-owner-agent", updated_env_text)
