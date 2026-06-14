@@ -20,6 +20,7 @@ name: Dokploy Target Setup
           - adopt
           - create-application
           - create-compose
+          - prune-compose-domain
           - reconcile-compose-domain
       context:
         description: Launchplane target context.
@@ -95,7 +96,7 @@ name: Dokploy Target Setup
         required: false
         type: string
       domain:
-        description: Optional comma-separated domain hosts to store/reconcile.
+        description: Optional comma-separated domain hosts to store/reconcile/prune.
         required: false
         default: ""
         type: string
@@ -208,14 +209,19 @@ jobs:
           fi
 
       - name: Validate reconcile compose domain inputs
-        if: env.OPERATION == 'reconcile-compose-domain'
+        if: >-
+          env.OPERATION == 'reconcile-compose-domain'
+          || env.OPERATION == 'prune-compose-domain'
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "$(printf '%s' "$DOMAIN" | xargs)" ]; then
-            echo "domain is required when operation=reconcile-compose-domain." \
+            echo "domain is required for compose domain reconcile/prune." \
               >&2
             exit 1
+          fi
+          if [ "$OPERATION" = "prune-compose-domain" ]; then
+            exit 0
           fi
           runtime_port="$(printf '%s' "$RUNTIME_PORT" | xargs)"
           if [ -z "$runtime_port" ]; then

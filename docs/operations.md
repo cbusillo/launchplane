@@ -1017,6 +1017,13 @@ target, and applies each requested domain to Dokploy's `web` service on the
 requested runtime port. Dry-run mode reads the tracked records and reports the
 planned domain/port tuple without calling Dokploy.
 
+Use `operation=prune-compose-domain` only to remove stale provider domain routes
+from an already-tracked Dokploy compose target. The service reads the tracked
+target/id records, requires a compose target, looks up matching Dokploy domain
+records by compose id, reports matched domain ids in dry-run mode, and deletes
+only the explicitly requested matching domain ids in apply mode. Apply also
+removes those hosts from the tracked target record when present.
+
 When a plan is `ready`, the trusted `Odoo Target Replacement Apply` workflow can
 call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 `recreate-in-place` path. The service creates a durable operation record and

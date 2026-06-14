@@ -1453,6 +1453,7 @@ def _seed_tracked_target_records(
     target_id: str,
     target_type: Literal["compose", "application"],
     target_name: str,
+    domains: tuple[str, ...] = (),
 ) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -1463,6 +1464,7 @@ def _seed_tracked_target_records(
                 instance=instance,
                 target_type=target_type,
                 target_name=target_name,
+                domains=domains,
                 updated_at="2026-05-01T00:00:00Z",
                 source_label="test",
             )
@@ -15142,6 +15144,351 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["dry run only; Dokploy compose domain routes were not reconciled"],
         )
         ensure_domain.assert_not_called()
+
+    def test_dokploy_target_setup_prune_compose_domain_dry_run_reports_matches(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm",
+                instance="prod",
+                target_id="compose-cm-prod",
+                target_type="compose",
+                target_name="cm-prod",
+                domains=(
+                    "cm-prod.shinycomputers.com",
+                    "cm-website-prod.shinycomputers.com",
+                ),
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    return_value=(
+                        {
+                            "host": "cm-prod.shinycomputers.com",
+                            "domainId": "domain-cm-prod",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "web",
+                            "path": "/",
+                            "internalPath": "/",
+                        },
+                        {
+                            "host": "cm-website-prod.shinycomputers.com",
+                            "domainId": "domain-cm-website-prod-on-cm",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "web",
+                            "path": "/",
+                            "internalPath": "/",
+                        },
+                    ),
+                ),
+                patch(
+                    "control_plane.service._delete_dokploy_domain_for_target_setup"
+                ) as delete_domain,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "prune-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm",
+                        "instance": "prod",
+                        "domains": ["cm-website-prod.shinycomputers.com"],
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertFalse(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["route_domain_ids"], [])
+        self.assertEqual(
+            payload["result"]["setup"]["matched_domain_ids"],
+            ["domain-cm-website-prod-on-cm"],
+        )
+        self.assertEqual(payload["result"]["setup"]["deleted_domain_ids"], [])
+        self.assertEqual(payload["result"]["setup"]["missing_domains"], [])
+        self.assertIn(
+            "dry run only; Dokploy compose domain routes were not pruned",
+            payload["result"]["setup"]["warnings"],
+        )
+        delete_domain.assert_not_called()
+
+    def test_dokploy_target_setup_prune_compose_domain_deletes_matching_domains(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm",
+                instance="prod",
+                target_id="compose-cm-prod",
+                target_type="compose",
+                target_name="cm-prod",
+                domains=(
+                    "cm-prod.shinycomputers.com",
+                    "cm-website-prod.shinycomputers.com",
+                ),
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            deleted_domains: list[str] = []
+
+            def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
+                del host, token
+                deleted_domains.append(domain_id)
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    return_value=(
+                        {
+                            "host": "cm-prod.shinycomputers.com",
+                            "domainId": "domain-cm-prod",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "web",
+                            "path": "/",
+                            "internalPath": "/",
+                        },
+                        {
+                            "host": "cm-website-prod.shinycomputers.com",
+                            "domainId": "domain-cm-website-prod-on-cm",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "web",
+                            "path": "/",
+                            "internalPath": "/",
+                        },
+                    ),
+                ),
+                patch(
+                    "control_plane.service._delete_dokploy_domain_for_target_setup",
+                    side_effect=_delete_domain,
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "prune-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm",
+                        "instance": "prod",
+                        "domains": ["cm-website-prod.shinycomputers.com"],
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Remove stale cm website domain from full CM prod target.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-prune-cm-prod-website-domain"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_record = store.read_dokploy_target_record(
+                    context_name="cm", instance_name="prod"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(payload["result"]["operation"], "prune-compose-domain")
+        self.assertEqual(
+            payload["result"]["setup"]["matched_domain_ids"],
+            ["domain-cm-website-prod-on-cm"],
+        )
+        self.assertEqual(
+            payload["result"]["setup"]["deleted_domain_ids"],
+            ["domain-cm-website-prod-on-cm"],
+        )
+        self.assertEqual(deleted_domains, ["domain-cm-website-prod-on-cm"])
+        self.assertEqual(target_record.domains, ("cm-prod.shinycomputers.com",))
+        self.assertEqual(
+            target_record.source_label,
+            "service:dokploy-targets:setup:prune-compose-domain",
+        )
+
+    def test_dokploy_target_setup_prune_compose_domain_skips_unrelated_routes(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm",
+                instance="prod",
+                target_id="compose-cm-prod",
+                target_type="compose",
+                target_name="cm-prod",
+                domains=("cm-website-prod.shinycomputers.com",),
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    return_value=(
+                        {
+                            "host": "cm-website-prod.shinycomputers.com",
+                            "domainId": "domain-other-service",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "longpolling",
+                            "path": "/",
+                            "internalPath": "/",
+                        },
+                        {
+                            "host": "cm-website-prod.shinycomputers.com",
+                            "domainId": "domain-other-path",
+                            "composeId": "compose-cm-prod",
+                            "domainType": "compose",
+                            "serviceName": "web",
+                            "path": "/shop",
+                            "internalPath": "/",
+                        },
+                    ),
+                ),
+                patch(
+                    "control_plane.service._delete_dokploy_domain_for_target_setup"
+                ) as delete_domain,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "prune-compose-domain",
+                        "product": "launchplane",
+                        "context": "cm",
+                        "instance": "prod",
+                        "domains": ["cm-website-prod.shinycomputers.com"],
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["setup"]["matched_domain_ids"], [])
+        self.assertEqual(
+            payload["result"]["setup"]["missing_domains"],
+            ["cm-website-prod.shinycomputers.com"],
+        )
+        delete_domain.assert_not_called()
 
     def test_dokploy_target_setup_reconcile_compose_domain_rejects_missing_records(
         self,

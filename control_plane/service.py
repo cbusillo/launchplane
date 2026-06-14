@@ -2244,6 +2244,7 @@ class DokployTargetSetupEnvelope(BaseModel):
         "adopt",
         "create-application",
         "create-compose",
+        "prune-compose-domain",
         "reconcile-compose-domain",
     ]
     product: str = "launchplane"
@@ -2321,6 +2322,8 @@ class DokployTargetSetupEnvelope(BaseModel):
                 raise ValueError("Dokploy compose domain reconciliation requires domains.")
             if self.runtime_port is None:
                 raise ValueError("Dokploy compose domain reconciliation requires runtime_port.")
+        if self.operation == "prune-compose-domain" and not self.domains:
+            raise ValueError("Dokploy compose domain prune requires domains.")
         if self.healthcheck_path and not self.healthcheck_path.startswith("/"):
             raise ValueError("Dokploy target setup healthcheck_path must start with /.")
         return self
@@ -2335,6 +2338,19 @@ class DokployComposeDomainReconcileResult(BaseModel):
     domains: tuple[str, ...]
     runtime_port: int
     route_domain_ids: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+class DokployComposeDomainPruneResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    applied: bool
+    target_record: DokployTargetRecord
+    target_id_record: DokployTargetIdRecord
+    domains: tuple[str, ...]
+    matched_domain_ids: tuple[str, ...] = ()
+    deleted_domain_ids: tuple[str, ...] = ()
+    missing_domains: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
 
@@ -2619,6 +2635,64 @@ def _mutate_dokploy_payload_for_target_setup(
     return response_object
 
 
+def _fetch_dokploy_compose_domains_for_target_setup(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+) -> tuple[dict[str, control_plane_dokploy.JsonValue], ...]:
+    response = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": compose_id},
+    )
+    if not isinstance(response, list):
+        raise click.ClickException(
+            f"Dokploy domain lookup for compose {compose_id} returned an invalid response."
+        )
+    domains: list[dict[str, control_plane_dokploy.JsonValue]] = []
+    for raw_domain in response:
+        domain = control_plane_dokploy.as_json_object(raw_domain)
+        if domain is not None:
+            domains.append(domain)
+    return tuple(domains)
+
+
+def _delete_dokploy_domain_for_target_setup(*, host: str, token: str, domain_id: str) -> None:
+    control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.delete",
+        method="POST",
+        payload={"domainId": domain_id},
+    )
+
+
+def _dokploy_domain_matches_tracked_compose_web_route(
+    *,
+    provider_domain: dict[str, control_plane_dokploy.JsonValue],
+    compose_id: str,
+    domain_host: str,
+) -> bool:
+    if str(provider_domain.get("host") or "").strip() != domain_host:
+        return False
+    provider_compose_id = str(provider_domain.get("composeId") or "").strip()
+    if provider_compose_id and provider_compose_id != compose_id:
+        return False
+    domain_type = str(provider_domain.get("domainType") or "").strip()
+    if domain_type and domain_type != "compose":
+        return False
+    service_name = str(provider_domain.get("serviceName") or "").strip()
+    if service_name and service_name != "web":
+        return False
+    route_path = str(provider_domain.get("path") or "/").strip() or "/"
+    if route_path != "/":
+        return False
+    internal_path = str(provider_domain.get("internalPath") or "/").strip() or "/"
+    return internal_path == "/"
+
+
 def _fetch_dokploy_target_payload_for_setup(
     host: str,
     token: str,
@@ -2663,6 +2737,7 @@ def _execute_dokploy_target_setup(
         | DokployTargetCreateResult
         | DokployComposeTargetCreateResult
         | DokployComposeDomainReconcileResult
+        | DokployComposeDomainPruneResult
     )
     if request.operation == "adopt":
         result = adopt_dokploy_target(
@@ -2686,6 +2761,14 @@ def _execute_dokploy_target_setup(
         )
     elif request.operation == "reconcile-compose-domain":
         result = _execute_dokploy_compose_domain_reconcile(
+            record_store=record_store,
+            request=request,
+            host=host,
+            token=token,
+            apply_changes=apply_changes,
+        )
+    elif request.operation == "prune-compose-domain":
+        result = _execute_dokploy_compose_domain_prune(
             record_store=record_store,
             request=request,
             host=host,
@@ -2834,6 +2917,99 @@ def _execute_dokploy_compose_domain_reconcile(
         warnings=()
         if apply_changes
         else ("dry run only; Dokploy compose domain routes were not reconciled",),
+    )
+
+
+def _execute_dokploy_compose_domain_prune(
+    *,
+    record_store: PostgresRecordStore,
+    request: DokployTargetSetupEnvelope,
+    host: str,
+    token: str,
+    apply_changes: bool,
+) -> DokployComposeDomainPruneResult:
+    try:
+        target_record = record_store.read_dokploy_target_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+        target_id_record = record_store.read_dokploy_target_id_record(
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except FileNotFoundError as error:
+        raise ValueError("Dokploy compose domain prune requires tracked target records.") from error
+    if target_record.target_type != "compose":
+        raise ValueError("Dokploy compose domain prune requires a compose target.")
+
+    requested_domains = tuple(dict.fromkeys(request.domains))
+    provider_domains = _fetch_dokploy_compose_domains_for_target_setup(
+        host=host,
+        token=token,
+        compose_id=target_id_record.target_id,
+    )
+    domains_by_host: dict[str, list[str]] = {domain: [] for domain in requested_domains}
+    for provider_domain in provider_domains:
+        matching_host = next(
+            (
+                domain
+                for domain in requested_domains
+                if _dokploy_domain_matches_tracked_compose_web_route(
+                    provider_domain=provider_domain,
+                    compose_id=target_id_record.target_id,
+                    domain_host=domain,
+                )
+            ),
+            "",
+        )
+        if not matching_host:
+            continue
+        domain_id = str(provider_domain.get("domainId") or "").strip()
+        if not domain_id:
+            raise ValueError(f"Dokploy domain {matching_host} is missing domainId.")
+        domains_by_host[matching_host].append(domain_id)
+
+    matched_domain_ids = tuple(
+        domain_id for domain in requested_domains for domain_id in domains_by_host.get(domain, ())
+    )
+    missing_domains = tuple(
+        domain for domain in requested_domains if not domains_by_host.get(domain)
+    )
+    deleted_domain_ids: list[str] = []
+    if apply_changes:
+        for domain_id in matched_domain_ids:
+            _delete_dokploy_domain_for_target_setup(host=host, token=token, domain_id=domain_id)
+            deleted_domain_ids.append(domain_id)
+        remaining_domains = tuple(
+            domain for domain in target_record.domains if domain not in requested_domains
+        )
+        if remaining_domains != target_record.domains:
+            target_record = target_record.model_copy(
+                update={
+                    "domains": remaining_domains,
+                    "updated_at": _utc_now_timestamp(),
+                    "source_label": "service:dokploy-targets:setup:prune-compose-domain",
+                }
+            )
+            record_store.write_dokploy_target_record(target_record)
+
+    warnings: list[str] = []
+    if not apply_changes:
+        warnings.append("dry run only; Dokploy compose domain routes were not pruned")
+    if missing_domains:
+        warnings.append(
+            "requested domains were not present on the tracked compose target: "
+            + ", ".join(missing_domains)
+        )
+    return DokployComposeDomainPruneResult(
+        applied=apply_changes,
+        target_record=target_record,
+        target_id_record=target_id_record,
+        domains=requested_domains,
+        matched_domain_ids=matched_domain_ids,
+        deleted_domain_ids=tuple(deleted_domain_ids),
+        missing_domains=missing_domains,
+        warnings=tuple(warnings),
     )
 
 
@@ -9675,7 +9851,7 @@ def create_launchplane_service_app(
                         path=path,
                         query=query,
                     )
-                except ValueError as error:
+                except (ValueError, click.ClickException) as error:
                     return _json_response(
                         start_response=start_response,
                         status_code=400,

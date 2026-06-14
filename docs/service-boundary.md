@@ -874,10 +874,13 @@ and requires exact confirmation, an operator reason, and an idempotency key for
 apply. The manual `Dokploy Target Setup` workflow is the supported shared and
 production caller; product repos must not store live target IDs or provider
 fixtures as setup authority. Runtime port is accepted only for `create-compose`
-domain reconciliation with at least one domain. If a provider create succeeds
-but the service fails before records are written, recover by re-running the
-workflow with `operation=adopt` and the created provider target id, not by
-creating a second target for the same lane.
+domain reconciliation with at least one domain. Domain pruning is restricted to
+tracked compose targets and explicit domain hosts; dry-run reports matched
+provider domain ids, while apply deletes only those matching ids and updates the
+tracked target domain list. If a provider create succeeds but the service fails
+before records are written, recover by re-running the workflow with
+`operation=adopt` and the created provider target id, not by creating a second
+target for the same lane.
 
 Dokploy target inspect uses `GET /v1/dokploy-targets/inspect`. The route is a
 read-only proof surface for provider identity before an adoption, creation, or
