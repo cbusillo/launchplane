@@ -41,6 +41,7 @@ class OdooProdPromotionRunRequest(BaseModel):
     context: str
     from_instance: str = "testing"
     to_instance: str = "prod"
+    product: str = ""
     request_id: str
     backup_timeout_seconds: int | None = Field(default=None, ge=1)
     promotion_timeout_seconds: int | None = Field(default=None, ge=1)
@@ -54,6 +55,7 @@ class OdooProdPromotionRunRequest(BaseModel):
         self.context = self.context.strip().lower()
         self.from_instance = self.from_instance.strip().lower()
         self.to_instance = self.to_instance.strip().lower()
+        self.product = self.product.strip()
         self.request_id = self.request_id.strip()
         if not self.context:
             raise ValueError("Odoo prod promotion run requires context.")
@@ -144,6 +146,7 @@ def execute_odoo_prod_promotion_run(
             context=request.context,
             from_instance=request.from_instance,
             to_instance=request.to_instance,
+            product=request.product,
             artifact_id=inputs_result.artifact_id,
             backup_record_id=inputs_result.backup_record_id,
             source_git_ref=inputs_result.source_git_ref,

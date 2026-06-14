@@ -54,6 +54,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
                 record_store=record_store,
                 request=OdooProdPromotionRunRequest(
                     context="CM",
+                    product="odoo-tenant-cm-website",
                     request_id="run-123-attempt-1",
                     backup_timeout_seconds=300,
                     promotion_timeout_seconds=600,
@@ -76,6 +77,7 @@ class OdooProdPromotionRunTests(unittest.TestCase):
         self.assertEqual(backup_mock.call_args.kwargs["request"].timeout_seconds, 300)
         promotion_mock.assert_called_once()
         promotion_request = promotion_mock.call_args.kwargs["request"]
+        self.assertEqual(promotion_request.product, "odoo-tenant-cm-website")
         self.assertEqual(promotion_request.artifact_id, "artifact-cm-new")
         self.assertEqual(promotion_request.timeout_seconds, 600)
         self.assertEqual(promotion_request.health_timeout_seconds, 180)

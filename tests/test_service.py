@@ -34011,6 +34011,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(run_call["state_dir"], root / "state")
             self.assertIsNone(run_call["database_url"])
             self.assertEqual(run_call["request"].context, "cm")
+            self.assertEqual(run_call["request"].product, "odoo")
             self.assertEqual(run_call["request"].request_id, "run-123-attempt-1")
 
     def test_odoo_prod_promotion_run_allows_reusable_launchplane_workflow(self) -> None:
