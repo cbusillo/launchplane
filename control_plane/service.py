@@ -2891,6 +2891,7 @@ def _dispatch_odoo_prod_promotion_run(
     start_response: _StartResponse,
     trace_id: str,
 ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
+    run_request = request.run.model_copy(update={"product": request.product})
     del (
         resolved_context,
         identity,
@@ -2905,7 +2906,7 @@ def _dispatch_odoo_prod_promotion_run(
         state_dir=state_dir,
         database_url=database_url,
         record_store=cast(OdooProdPromotionRunStore, record_store),
-        request=request.run,
+        request=run_request,
     )
     return driver_result.model_dump(mode="json"), driver_result
 
