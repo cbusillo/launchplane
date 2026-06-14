@@ -1296,16 +1296,23 @@ def execute_odoo_stable_target_replacement_apply(
         current_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         )
+        legacy_odoo_install_modules = current_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
         desired_env_map = dict(current_env_map)
         for key in control_plane_dokploy.ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
             desired_env_map.pop(key, None)
         desired_env_map.pop(ODOO_INSTALL_MODULES_ENV_KEY, None)
         desired_env_map.update(runtime_environment_values)
         desired_env_map.update(runtime_override_environment)
+        explicit_odoo_install_modules = desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, "")
+        manifest_odoo_install_modules = artifact_manifest.odoo_install_modules
+        fallback_odoo_install_modules = (
+            "" if manifest_odoo_install_modules else legacy_odoo_install_modules
+        )
         desired_env_map[ODOO_INSTALL_MODULES_ENV_KEY] = _merge_odoo_install_modules(
             LAUNCHPLANE_REQUIRED_ODOO_MODULES,
-            artifact_manifest.odoo_install_modules,
-            desired_env_map.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
+            manifest_odoo_install_modules,
+            fallback_odoo_install_modules,
+            explicit_odoo_install_modules,
         )
         runtime_source["required_odoo_modules"] = ",".join(LAUNCHPLANE_REQUIRED_ODOO_MODULES)
         runtime_source["artifact_odoo_install_modules"] = ",".join(

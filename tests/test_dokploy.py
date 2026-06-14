@@ -2704,7 +2704,7 @@ domains = ["cm-testing.shinycomputers.com"]
                 "control_plane.dokploy.latest_deployment_for_schedule",
                 side_effect=(
                     {"deploymentId": "schedule-before"},
-                    {"deploymentId": "schedule-after", "status": "done"},
+                    {"id": "schedule-after", "status": "done"},
                 ),
             ),
             patch(
@@ -2899,8 +2899,8 @@ domains = ["cm-testing.shinycomputers.com"]
             patch(
                 "control_plane.dokploy.latest_deployment_for_schedule",
                 side_effect=(
-                    {"id": "schedule-before", "status": "done"},
-                    {"id": "schedule-row-after", "status": "done"},
+                    {"status": "done"},
+                    {"status": "done"},
                 ),
             ),
             patch(
