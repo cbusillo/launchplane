@@ -191,13 +191,14 @@ jobs:
             jq \
               --arg product "$product" \
               --arg environment "$environment" \
-              '{
+              '(.config_status // .environment // .) as $config_status
+              | {
                 product: $product,
                 environment: $environment,
-                context,
-                trust_state,
+                context: $config_status.context,
+                trust_state: $config_status.trust_state,
                 runtime_settings: [
-                  .runtime_settings[] | {
+                  $config_status.runtime_settings[] | {
                     key,
                     status,
                     trust_state,
@@ -206,7 +207,7 @@ jobs:
                   }
                 ],
                 managed_secrets: [
-                  .managed_secrets[] | {
+                  $config_status.managed_secrets[] | {
                     binding_key,
                     status,
                     integration,
@@ -214,7 +215,7 @@ jobs:
                     updated_at
                   }
                 ],
-                warnings
+                warnings: $config_status.warnings
               }' \
               "$config_status_file" > "$config_summary_file"
             jq . "$config_summary_file"
