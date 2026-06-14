@@ -588,6 +588,11 @@ state/
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
   inspect the original selector intent, but `addon_sources` remains the exact
   SHA-backed release truth used for tuple minting and deploy execution.
+- Odoo stable target replacement also treats artifact `odoo_install_modules` as
+  required-module availability evidence. Managed Odoo artifacts must declare
+  Launchplane-required modules such as `launchplane_settings` and
+  `disable_odoo_online`; deployment fails closed before provider mutation when
+  that evidence is absent.
 - Artifact manifests may carry `build_provenance` metadata for Odoo runtime and
   devtools base images plus build tools such as `odoo-devkit`. That provenance
   is artifact evidence, not addon ownership: `odoo-docker`, `odoo-devkit`,

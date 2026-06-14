@@ -20,7 +20,11 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    health_payload_runtime_identity_status,
+    runtime_identity_env,
+)
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
@@ -898,7 +902,13 @@ def _enforce_preview_copied_runtime_key_safety(
     )
 
 
-def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seconds: int) -> None:
+def _wait_for_preview_health(
+    *,
+    preview_url: str,
+    health_path: str,
+    timeout_seconds: int,
+    expected_runtime_identity: RuntimeIdentity | None = None,
+) -> None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
     deadline = timeout_seconds
@@ -909,19 +919,41 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
             "Cache-Control": "no-store",
         },
     )
+    last_detail = "timeout"
     while deadline > 0:
         try:
             with urlopen(request, timeout=min(15, deadline)) as response:
                 body = response.read().decode("utf-8")
             if 200 <= response.status < 400:
                 if not body.strip():
-                    return
-                try:
-                    payload = json.loads(body)
-                except json.JSONDecodeError:
-                    return
-                if payload.get("ok") is not False:
-                    return
+                    if expected_runtime_identity is None:
+                        return
+                    last_detail = "health endpoint returned an empty response"
+                else:
+                    try:
+                        payload = json.loads(body)
+                    except json.JSONDecodeError:
+                        if expected_runtime_identity is None:
+                            return
+                        last_detail = "health endpoint did not return parseable JSON"
+                    else:
+                        if not isinstance(payload, dict):
+                            if expected_runtime_identity is None:
+                                return
+                            last_detail = "health endpoint returned non-object JSON"
+                        elif payload.get("ok") is False:
+                            last_detail = "health endpoint reported ok=false"
+                        elif expected_runtime_identity is None:
+                            return
+                        else:
+                            status, detail, _observed = health_payload_runtime_identity_status(
+                                expected=expected_runtime_identity,
+                                payload=payload,
+                                json_parse_failed=False,
+                            )
+                            if status == "match":
+                                return
+                            last_detail = detail
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if "dokploy dead host" in body.lower():
@@ -934,7 +966,9 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
         sleep_seconds = min(5, deadline)
         time.sleep(sleep_seconds)
         deadline -= sleep_seconds
-    raise click.ClickException(f"Timed out waiting for {health_url} to report healthy.")
+    raise click.ClickException(
+        f"Timed out waiting for {health_url} to report healthy: {last_detail}."
+    )
 
 
 def evaluate_generic_web_preview_readiness(
@@ -1251,6 +1285,7 @@ def execute_generic_web_preview_refresh(
             preview_url=preview_url,
             health_path=resolved_profile.health_path,
             timeout_seconds=request.timeout_seconds,
+            expected_runtime_identity=preview_runtime_identity,
         )
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)

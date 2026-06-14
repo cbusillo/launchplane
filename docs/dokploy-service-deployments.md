@@ -138,6 +138,22 @@ Launchplane-owned deploys. The standard keys are
 `LAUNCHPLANE_ARTIFACT_ID`, and `LAUNCHPLANE_SOURCE_GIT_REF`. Product health
 endpoints should expose that identity when adopted so Launchplane can compare
 expected inventory against observed runtime state.
+The preferred JSON health payload is bounded and non-secret:
+
+```json
+{
+  "status": "ok",
+  "version": "ghcr.io/example/product@sha256:...",
+  "source_git_ref": "<commit-sha>",
+  "image_reference": "ghcr.io/example/product@sha256:...",
+  "runtime_identity": { "schema_version": 1 }
+}
+```
+
+`runtime_identity` should be the parsed value from
+`LAUNCHPLANE_RUNTIME_IDENTITY_JSON`. Worker-like products can still use this
+contract; their endpoint should report product-owned freshness in `status` and
+`summary` rather than only process liveness.
 
 ## Config, Secrets, And Volumes
 
@@ -183,6 +199,9 @@ for that lane. Skipping health is acceptable only for an initial migration slice
 with other evidence, such as a successful Dokploy deployment plus product-owned
 log or smoke evidence. The preferred Discord Blue target is a reachable health
 URL on port `8787` so promotion can fail closed on a bad rollout.
+For sync or worker products, the same endpoint should report whether the worker
+is actually fresh. For example, RepairShopr Sync should mark health unhealthy
+when the last successful sync is stale even if the process is running.
 
 Do not expose service ports publicly just to satisfy Launchplane. Keep public,
 private, and internal-only routing as Dokploy/provider configuration and record
