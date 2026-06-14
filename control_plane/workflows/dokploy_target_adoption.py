@@ -3,7 +3,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
 from control_plane.dokploy import JsonObject
@@ -99,6 +99,7 @@ def adopt_dokploy_target(
     healthcheck_path: str = "",
     domains: tuple[str, ...] = (),
     deploy_timeout_seconds: int | None = None,
+    expected_current_provider_target: DeployedTargetReference | None = None,
     source_label: str = "cli:dokploy-targets:adopt",
     updated_at: str = "",
     apply: bool = False,
@@ -175,6 +176,7 @@ def adopt_dokploy_target(
             record_store=record_store,
             target_record=target_record,
             target_id_record=target_id_record,
+            expected_current_provider_target=expected_current_provider_target,
         )
         record_store.write_dokploy_target_record(target_record)
         record_store.write_dokploy_target_id_record(target_id_record)
@@ -211,6 +213,7 @@ def create_dokploy_application_target(
     healthcheck_path: str = "",
     domains: tuple[str, ...] = (),
     deploy_timeout_seconds: int | None = None,
+    expected_current_provider_target: DeployedTargetReference | None = None,
     source_label: str = "cli:dokploy-targets:create-application",
     updated_at: str = "",
     apply: bool = False,
@@ -305,6 +308,7 @@ def create_dokploy_application_target(
         record_store=record_store,
         context=normalized_context,
         instance=normalized_instance,
+        expected_current_provider_target=expected_current_provider_target,
     )
 
     created_project_id = normalized_project_id
@@ -359,6 +363,7 @@ def create_dokploy_application_target(
         healthcheck_path=normalized_healthcheck_path,
         domains=domains,
         deploy_timeout_seconds=deploy_timeout_seconds,
+        expected_current_provider_target=expected_current_provider_target,
         source_label=source_label,
         updated_at=updated_at,
         apply=True,
@@ -401,6 +406,7 @@ def create_dokploy_compose_target(
     healthcheck_path: str = "",
     domains: tuple[str, ...] = (),
     deploy_timeout_seconds: int | None = None,
+    expected_current_provider_target: DeployedTargetReference | None = None,
     source_label: str = "cli:dokploy-targets:create-compose",
     updated_at: str = "",
     apply: bool = False,
@@ -505,6 +511,7 @@ def create_dokploy_compose_target(
         record_store=record_store,
         context=normalized_context,
         instance=normalized_instance,
+        expected_current_provider_target=expected_current_provider_target,
     )
 
     created_project_id = normalized_project_id
@@ -556,6 +563,7 @@ def create_dokploy_compose_target(
         healthcheck_path=normalized_healthcheck_path,
         domains=domains,
         deploy_timeout_seconds=deploy_timeout_seconds,
+        expected_current_provider_target=expected_current_provider_target,
         source_label=source_label,
         updated_at=updated_at,
         apply=True,
@@ -601,14 +609,32 @@ def _require_non_empty(value: str, field_name: str) -> str:
 
 
 def _ensure_create_route_has_no_provider_target(
-    *, record_store: DokployTargetAdoptionRecordStore, context: str, instance: str
+    *,
+    record_store: DokployTargetAdoptionRecordStore,
+    context: str,
+    instance: str,
+    expected_current_provider_target: DeployedTargetReference | None = None,
 ) -> None:
+    found_current_provider_target = False
     for record in record_store.list_physical_provider_target_records():
-        if record.context == context and record.instance == instance:
+        if record.context != context or record.instance != instance:
+            continue
+        found_current_provider_target = True
+        if expected_current_provider_target is None:
             raise ValueError(
                 "Provider target dual-write conflict for "
                 f"{context}/{instance}; create would replace an explicit provider target."
             )
+        if record.to_deployed_target_reference() != expected_current_provider_target:
+            raise ValueError(
+                "Provider target replacement expectation did not match current authority for "
+                f"{context}/{instance}."
+            )
+    if expected_current_provider_target is not None and not found_current_provider_target:
+        raise ValueError(
+            "Provider target replacement expected an existing provider target for "
+            f"{context}/{instance}."
+        )
 
 
 def _normalize_route_part(value: str, field_name: str) -> str:

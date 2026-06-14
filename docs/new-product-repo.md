@@ -105,6 +105,12 @@ one domain. If a provider create succeeds but the follow-up Launchplane record
 write fails, note the created Dokploy compose/application id from the workflow
 logs and re-run the workflow with `operation=adopt` for the same
 context/instance instead of creating another target.
+When repairing an accidental target-authority collision, pass
+`expected_current_provider_target_json` from provider-target audit evidence so
+Launchplane replaces the existing provider-target row only if the live DB-backed
+authority still matches the reviewed old target. Without that expectation,
+target setup continues to fail closed instead of replacing explicit provider
+authority.
 
 When the Dokploy application does not exist yet, let Launchplane plan and apply
 the provider mutation so the app id is captured in records immediately:

@@ -646,6 +646,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("Validate reconcile compose domain inputs", workflow_text)
         self.assertIn("domain is required when operation=reconcile-compose-domain", workflow_text)
         self.assertIn("runtime_port is required for reconcile-compose-domain", workflow_text)
+        self.assertIn("expected_current_provider_target_json:", workflow_text)
+        self.assertIn("EXPECTED_CURRENT_PROVIDER_TARGET_JSON", workflow_text)
+        self.assertIn("expected_current_provider_target", workflow_text)
         self.assertIn("APPLY DOKPLOY TARGET SETUP", workflow_text)
 
     def test_reusable_odoo_workflows_accept_configured_service_identity(self) -> None:

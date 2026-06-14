@@ -14603,6 +14603,123 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(target_id_record.target_id, "compose-123")
         self.assertEqual(provider_target.target_id, "compose-123")
 
+    def test_dokploy_target_setup_endpoint_replaces_provider_target_with_expected_authority(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            stale_provider_target = ProviderTargetRecord(
+                context="cm_website",
+                instance="prod",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id="compose-cm-prod",
+                display_name="cm-prod",
+                provider_target_type="compose",
+                provider_evidence={"project_name": "Odoo"},
+                updated_at="2026-06-14T03:53:56Z",
+                source_label="test:stale-provider-target",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+                store.write_provider_target_record(stale_provider_target)
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    return_value={
+                        "name": "odoo-tenant-cm-website-prod",
+                        "sourceType": "raw",
+                        "composePath": "docker-compose.yml",
+                        "environment": {"project": {"name": "Odoo"}},
+                    },
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "operation": "adopt",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "prod",
+                        "target_type": "compose",
+                        "target_id": "compose-cm-website-prod",
+                        "target_name": "odoo-tenant-cm-website-prod",
+                        "project_name": "Odoo",
+                        "domains": ["cm-website-prod.shinycomputers.com"],
+                        "healthcheck_path": "/web/health",
+                        "expected_current_provider_target": (
+                            stale_provider_target.to_deployed_target_reference().model_dump(
+                                mode="json"
+                            )
+                        ),
+                        "confirmation": "APPLY DOKPLOY TARGET SETUP",
+                        "reason": "Repair cm website prod target authority.",
+                    },
+                    headers={"Idempotency-Key": "dokploy-target-setup-cm-website-prod"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                target_record = store.read_dokploy_target_record(
+                    context_name="cm_website", instance_name="prod"
+                )
+                target_id_record = store.read_dokploy_target_id_record(
+                    context_name="cm_website", instance_name="prod"
+                )
+                provider_target = store.read_provider_target_record(
+                    context_name="cm_website", instance_name="prod"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["applied"])
+        self.assertEqual(target_record.target_name, "odoo-tenant-cm-website-prod")
+        self.assertEqual(target_id_record.target_id, "compose-cm-website-prod")
+        self.assertEqual(provider_target.target_id, "compose-cm-website-prod")
+
     def test_dokploy_target_setup_reconciles_existing_compose_domain_route(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -53,6 +53,7 @@ from control_plane.contracts.agent_write_intent import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
@@ -2262,6 +2263,7 @@ class DokployTargetSetupEnvelope(BaseModel):
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    expected_current_provider_target: DeployedTargetReference | None = None
     confirmation: str = ""
     reason: str = ""
 
@@ -2672,6 +2674,7 @@ def _execute_dokploy_target_setup(
             healthcheck_path=request.healthcheck_path,
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
+            expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:adopt",
             apply=apply_changes,
             fetch_target_payload=_fetch_dokploy_target_payload_for_setup,
@@ -2705,6 +2708,7 @@ def _execute_dokploy_target_setup(
             healthcheck_path=request.healthcheck_path,
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
+            expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:create-application",
             apply=apply_changes,
             mutate_provider=_mutate_dokploy_payload_for_target_setup,
@@ -2733,6 +2737,7 @@ def _execute_dokploy_target_setup(
             healthcheck_path=request.healthcheck_path,
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
+            expected_current_provider_target=request.expected_current_provider_target,
             source_label="service:dokploy-targets:setup:create-compose",
             apply=apply_changes,
             mutate_provider=_mutate_dokploy_payload_for_target_setup,
