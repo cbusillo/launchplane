@@ -702,8 +702,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("'.result.preview_pr_feedback // \"\"'", workflow_text)
         self.assertIn("authorized", workflow_text)
         self.assertIn("accepted a non-dry-run feedback probe", workflow_text)
-        self.assertIn("--data-urlencode \"audience=${service_audience}\"", workflow_text)
-        self.assertIn("Artifact publish inputs did not include the product repository", workflow_text)
+        self.assertIn('--data-urlencode "audience=${service_audience}"', workflow_text)
+        self.assertIn(
+            "Artifact publish inputs did not include the product repository", workflow_text
+        )
         self.assertIn("PRODUCT_REPOSITORY", workflow_text)
         self.assertIn("source_repository=result.repository", workflow_text)
         self.assertIn('"operation": "destroy"', workflow_text)
@@ -775,6 +777,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("PRODUCT: ${{ inputs.product }}", workflow_text)
         self.assertIn("CONTEXT: ${{ inputs.context }}", workflow_text)
         self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
+        self.assertIn("Existing provider certificate id, or new", workflow_text)
+        self.assertIn('--arg certificate_id "$CERTIFICATE_ID"', workflow_text)
+        self.assertIn('if $certificate_id_text == "new" then', workflow_text)
+        self.assertIn('"certificate_id must be an integer or new"', workflow_text)
+        self.assertIn("certificate_id: $certificate_id_value", workflow_text)
         self.assertIn('echo "- Product: $PRODUCT"', workflow_text)
         self.assertIn('echo "- Context: $CONTEXT"', workflow_text)
         self.assertIn('echo "- Domain: $DOMAIN"', workflow_text)
@@ -1084,9 +1091,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("workflow_run", script_text)
 
     def test_product_onboarding_workflow_calls_service_route_with_apply_guard(self) -> None:
-        workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(
-            encoding="utf-8"
-        )
+        workflow_text = Path(".github/workflows/product-onboarding.yml").read_text(encoding="utf-8")
 
         self.assertIn("/v1/product-onboarding/apply", workflow_text)
         self.assertIn("APPLY PRODUCT ONBOARDING", workflow_text)
@@ -1095,9 +1100,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("product-onboarding-result", workflow_text)
 
     def test_deploy_authz_grants_include_product_onboarding_apply(self) -> None:
-        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(
-            encoding="utf-8"
-        )
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
 
         self.assertIn("product-onboarding.yml", script_text)
         self.assertIn("product_onboarding.apply", script_text)

@@ -224,7 +224,8 @@ but mixing it with a conflicting identity/access provider fails closed.
 
 Operators can also use the `Ingress Route Dry Run` GitHub workflow for a
 service-mediated canary plan through GitHub OIDC. The workflow accepts the
-product, context, domain, upstream target, existing certificate id, expected
+product, context, domain, upstream target, existing certificate id or `new` for
+provider-managed issuance, expected
 provider host id, typed identity/access provider, and route toggles as manual
 inputs, then calls the same route with `mode: dry-run`. Its authz grant is
 plan-only; an apply still requires the separate `ingress_route.apply` permission

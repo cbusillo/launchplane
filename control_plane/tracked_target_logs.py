@@ -54,9 +54,6 @@ def build_tracked_target_logs_payload(
     normalized_line_count = control_plane_dokploy.normalize_dokploy_log_line_count(line_count)
     normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
     normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
-    fetch_line_count = normalized_line_count
-    if normalized_search:
-        fetch_line_count = control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
@@ -71,9 +68,9 @@ def build_tracked_target_logs_payload(
             host=host,
             token=token,
             application_id=target_id_record.target_id,
-            line_count=fetch_line_count,
+            line_count=normalized_line_count,
             since=normalized_since,
-            search="",
+            search=normalized_search,
         )
     else:
         logs = control_plane_dokploy.fetch_dokploy_compose_logs(
@@ -82,13 +79,10 @@ def build_tracked_target_logs_payload(
             compose_id=target_id_record.target_id,
             app_name=app_name,
             server_id=server_id,
-            line_count=fetch_line_count,
+            line_count=normalized_line_count,
             since=normalized_since,
-            search="",
+            search=normalized_search,
         )
-    if normalized_search:
-        search_text = normalized_search.lower()
-        logs = tuple(line for line in logs if search_text in line.lower())
     logs = tuple(logs[-normalized_line_count:])
     return {
         "context": normalized_context,

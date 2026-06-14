@@ -1851,13 +1851,14 @@ def run_compose_post_deploy_update(
         token=token,
         schedule_id=schedule_id,
     )
-    completed_schedule_deployment_log_id = deployment_log_id(completed_schedule_deployment)
+    if deployment_key(completed_schedule_deployment) != completed_schedule_deployment_key:
+        completed_schedule_deployment = None
     return _read_odoo_post_deploy_log_markers(
         host=host,
         token=token,
         schedule_id=schedule_id,
         schedule_deployment_key=completed_schedule_deployment_key,
-        deployment_id=completed_schedule_deployment_log_id,
+        deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
 

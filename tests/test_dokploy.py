@@ -2815,6 +2815,80 @@ domains = ["cm-testing.shinycomputers.com"]
             },
         )
 
+    def test_run_compose_post_deploy_update_uses_waited_deployment_for_logs(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=opw_prod\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "opw-prod-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch("control_plane.dokploy.update_dokploy_target_env"),
+            patch("control_plane.dokploy.find_matching_dokploy_schedule", return_value=None),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                return_value={"scheduleId": "schedule-123"},
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                side_effect=(
+                    {"deploymentId": "schedule-before"},
+                    {
+                        "deploymentId": "schedule-after-newer",
+                        "status": "running",
+                        "logs": "website_bootstrap_website_id=99\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                return_value="deployment=schedule-after-waited status=done",
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                return_value=(
+                    "website_bootstrap_domain_matches_canonical=true",
+                    "website_bootstrap_website_id=7",
+                ),
+            ) as fetch_logs_mock,
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **_kwargs: {"ok": True},
+            ),
+        ):
+            markers = control_plane_dokploy.run_compose_post_deploy_update(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-after-waited",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
+        self.assertEqual(
+            markers,
+            {
+                "schedule_id": "schedule-123",
+                "schedule_deployment_key": "schedule-after-waited",
+                "schedule_deployment_id": "schedule-after-waited",
+                "log_available": "true",
+                "website_bootstrap_domain_matches_canonical": "true",
+                "website_bootstrap_website_id": "7",
+            },
+        )
+
     def test_run_compose_post_deploy_update_does_not_fail_when_schedule_logs_are_unavailable(
         self,
     ) -> None:
@@ -2874,7 +2948,7 @@ domains = ["cm-testing.shinycomputers.com"]
             },
         )
 
-    def test_run_compose_post_deploy_update_does_not_read_logs_without_deployment_id(
+    def test_run_compose_post_deploy_update_uses_waited_id_when_refetch_has_none(
         self,
     ) -> None:
         target_definition = control_plane_dokploy.DokployTargetDefinition(
@@ -2907,7 +2981,10 @@ domains = ["cm-testing.shinycomputers.com"]
                 "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
                 return_value="deployment=schedule-row-after status=done",
             ),
-            patch("control_plane.dokploy.fetch_dokploy_deployment_logs") as fetch_logs_mock,
+            patch(
+                "control_plane.dokploy.fetch_dokploy_deployment_logs",
+                side_effect=click.ClickException("not found"),
+            ) as fetch_logs_mock,
             patch(
                 "control_plane.dokploy.dokploy_request",
                 side_effect=lambda **_kwargs: {"ok": True},
@@ -2920,12 +2997,18 @@ domains = ["cm-testing.shinycomputers.com"]
                 env_file=None,
             )
 
-        fetch_logs_mock.assert_not_called()
+        fetch_logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            deployment_id="schedule-row-after",
+            line_count=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+        )
         self.assertEqual(
             markers,
             {
                 "schedule_id": "schedule-123",
                 "schedule_deployment_key": "schedule-row-after",
+                "schedule_deployment_id": "schedule-row-after",
                 "log_available": "false",
             },
         )
