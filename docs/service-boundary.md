@@ -187,6 +187,14 @@ host while still allowing visible local Code/tmux work sessions to claim, rerun
 terminal requests, reconcile preview state, route failed checks, and report
 progress.
 
+The local worker uses a separate GitHub token for public claim comments. Provide
+`LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN` on the worker host, and set
+`LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the operator expects a specific
+automation account. Before creating the `<!-- every-code-claim -->` issue
+comment, the worker resolves `gh api user --jq .login` with that token and
+blocks the work request if the actor does not match. Claim comments never fall
+back to the host's ambient `gh` login.
+
 Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not
 `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure

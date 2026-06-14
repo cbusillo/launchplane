@@ -105,7 +105,11 @@ class EveryCodeWorkerStore(Protocol):
     ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
 
-Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+Runner = Callable[
+    [Sequence[str], Mapping[str, str] | None], subprocess.CompletedProcess[str]
+]
+EVERY_CODE_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN"
+EVERY_CODE_GITHUB_ACTOR_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR"
 
 
 class DaemonProcess(Protocol):
@@ -719,10 +723,40 @@ def _post_every_code_claim_comment(
     host: str,
     session_name: str,
     runner: Runner,
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
 ) -> str:
     repository = record.repository.strip()
     if not repository or record.issue_number <= 0:
         return ""
+    token_env_key = github_token_env.strip()
+    if not token_env_key:
+        raise RuntimeError("Every Code claim comments require --github-token-env")
+    github_token = os.environ.get(token_env_key, "").strip()
+    if not github_token:
+        raise RuntimeError(f"{token_env_key} is required for Every Code claim comments")
+    github_env = {"GH_TOKEN": github_token, "GITHUB_TOKEN": github_token}
+    expected_actor_env_key = github_actor_env.strip()
+    expected_actor = (
+        os.environ.get(expected_actor_env_key, "").strip()
+        if expected_actor_env_key
+        else ""
+    )
+    try:
+        actor_result = runner(("gh", "api", "user", "--jq", ".login"), github_env)
+    except OSError as exc:
+        raise RuntimeError(f"Could not verify GitHub claim-comment actor: {exc}") from exc
+    if actor_result.returncode != 0:
+        detail = actor_result.stderr.strip() or actor_result.stdout.strip() or "gh api user failed"
+        raise RuntimeError(f"Could not verify GitHub claim-comment actor: {detail}")
+    actual_actor = actor_result.stdout.strip()
+    if not actual_actor:
+        raise RuntimeError("Could not verify GitHub claim-comment actor: empty login")
+    if expected_actor and actual_actor.casefold() != expected_actor.casefold():
+        raise RuntimeError(
+            "Every Code claim-comment GitHub actor mismatch: "
+            f"expected {expected_actor!r}, got {actual_actor!r}"
+        )
     body = every_code_claim_comment_body(
         record,
         host=host,
@@ -739,7 +773,8 @@ def _post_every_code_claim_comment(
                 repository,
                 "--body",
                 body,
-            )
+            ),
+            github_env,
         )
     except OSError as exc:
         return f"Could not post GitHub working comment: {exc}"
@@ -990,6 +1025,8 @@ def run_every_code_worker_once(
     database_url: str = "",
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
     tmux_binary: str = "tmux",
     runner: Runner | None = None,
 ) -> EveryCodeWorkerHandoffResult:
@@ -1023,6 +1060,42 @@ def run_every_code_worker_once(
 
     session_name = every_code_tmux_session_name(claimed_record.request_id)
     run = runner or _run_subprocess
+    claim_comment_warning = ""
+    try:
+        claim_comment_warning = _post_every_code_claim_comment(
+            record=claimed_record,
+            host=normalized_host,
+            session_name=session_name,
+            runner=run,
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
+        )
+    except RuntimeError as exc:
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=str(exc),
+            session_name=session_name,
+            checkout_root=resolve_every_code_checkout_root(
+                claimed_record,
+                workspace_root=workspace_root,
+                checkout_root=checkout_root,
+            ),
+        )
+    if claim_comment_warning:
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=claim_comment_warning,
+            session_name=session_name,
+            checkout_root=resolve_every_code_checkout_root(
+                claimed_record,
+                workspace_root=workspace_root,
+                checkout_root=checkout_root,
+            ),
+        )
     resolved_worktree_state_dir = (
         worktree_state_dir if worktree_state_dir is not None else state_dir
     )
@@ -1105,7 +1178,8 @@ def run_every_code_worker_once(
                     "-c",
                     str(resolved_checkout_root),
                     command,
-                )
+                ),
+                None,
             )
         except OSError as exc:
             return _block_every_code_request(
@@ -1135,13 +1209,6 @@ def run_every_code_worker_once(
             worktree_branch=prepared_checkout.worktree_branch,
             host=normalized_host,
         )
-
-    claim_comment_warning = _post_every_code_claim_comment(
-        record=claimed_record,
-        host=normalized_host,
-        session_name=session_name,
-        runner=run,
-    )
     running_record = apply_every_code_work_request_status(
         record_store.read_every_code_work_request_record(claimed_record.request_id),
         EveryCodeWorkRequestStatusUpdate(
@@ -1234,6 +1301,8 @@ def run_every_code_worker_loop(
     database_url: str = "",
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
     tmux_binary: str = "tmux",
     interval_seconds: float = 60.0,
     max_iterations: int = 0,
@@ -1322,6 +1391,8 @@ def run_every_code_worker_loop(
             database_url=database_url,
             service_url=service_url,
             worker_token_env=worker_token_env,
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
             tmux_binary=tmux_binary,
             runner=runner,
         )
@@ -1830,7 +1901,8 @@ def _git_worktree_registered(
                 "worktree",
                 "list",
                 "--porcelain",
-            )
+            ),
+            None,
         )
     except OSError:
         return None
@@ -1863,7 +1935,8 @@ def _git_every_code_branches(
                 "for-each-ref",
                 "--format=%(refname:short)",
                 "refs/heads/every-code/",
-            )
+            ),
+            None,
         )
     except OSError:
         return None
@@ -1916,7 +1989,7 @@ def _terminate_every_code_tmux_session(
         except OSError:
             pass
     try:
-        result = runner((tmux_binary, "kill-session", "-t", session_name))
+        result = runner((tmux_binary, "kill-session", "-t", session_name), None)
     except OSError:
         return closed
     return closed or result.returncode in {0, 1}
@@ -1934,7 +2007,7 @@ def _terminate_every_code_worktree_processes(
     if not launch_root.is_dir():
         return 0
     try:
-        result = runner(("lsof", "-t", "+D", str(launch_root)))
+        result = runner(("lsof", "-t", "+D", str(launch_root)), None)
     except OSError:
         return 0
     if result.returncode not in {0, 1}:
@@ -2045,7 +2118,7 @@ def _cleanup_every_code_worktree(
 
 def _git_worktree_dirty(path: Path, *, runner: Runner) -> bool:
     try:
-        result = runner(("git", "-C", str(path), "status", "--porcelain"))
+        result = runner(("git", "-C", str(path), "status", "--porcelain"), None)
     except OSError:
         return True
     return result.returncode != 0 or bool(result.stdout.strip())
@@ -2189,7 +2262,8 @@ def _apply_every_code_pr_feedback_record(
                 "-c",
                 str(launch_root),
                 command,
-            )
+            ),
+            None,
         )
     except OSError:
         _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="confused", runner=runner)
@@ -2245,7 +2319,8 @@ def _acknowledge_every_code_pr_feedback(
                 "Accept: application/vnd.github+json",
                 "-f",
                 f"content={reaction}",
-            )
+            ),
+            None,
         )
     except OSError:
         return
@@ -2257,6 +2332,8 @@ def build_every_code_worker_daemon_spec(
     database_url: str = "",
     service_url: str = "",
     worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
     host: str = "",
     workspace_root: Path = Path.home() / "Developer",
     checkout_root: Path | None = None,
@@ -2280,6 +2357,10 @@ def build_every_code_worker_daemon_spec(
         str(workspace_root.expanduser().resolve()),
         "--tmux-binary",
         tmux_binary,
+        "--github-token-env",
+        github_token_env.strip() or EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+        "--github-actor-env",
+        github_actor_env.strip() or EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
         "--interval-seconds",
         str(interval_seconds),
     ]
@@ -2904,7 +2985,7 @@ def _run_gh_api(
     args: Sequence[str],
 ) -> subprocess.CompletedProcess[str] | None:
     try:
-        result = runner(args)
+        result = runner(args, None)
     except OSError:
         return None
     if result.returncode != 0:
@@ -3438,7 +3519,7 @@ def _rerun_failed_every_code_infra_checks(
     }
     for run_id in sorted(rerun_run_ids):
         try:
-            runner(("gh", "run", "rerun", run_id, "--repo", repository, "--failed"))
+            runner(("gh", "run", "rerun", run_id, "--repo", repository, "--failed"), None)
         except OSError:
             continue
 
@@ -3477,7 +3558,8 @@ def _every_code_preview_pr_url_for_record(
                 "url",
                 "--limit",
                 "1",
-            )
+            ),
+            None,
         )
     except OSError:
         return ""
@@ -3516,7 +3598,8 @@ def _github_pr_view_payload(
                 f"{owner}/{repo}",
                 "--json",
                 "state,labels,headRefOid,statusCheckRollup",
-            )
+            ),
+            None,
         )
     except OSError:
         return None
@@ -3569,7 +3652,8 @@ def request_every_code_pr_preview_label(
                 repo,
                 "--add-label",
                 preview_label,
-            )
+            ),
+            None,
         )
     except OSError as exc:
         return f"Could not request Launchplane preview: {exc}"
@@ -3610,17 +3694,23 @@ def _send_every_code_pr_feedback_to_session(
 ) -> bool:
     prompt = every_code_pr_feedback_prompt(feedback)
     try:
-        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt))
+        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt), None)
         if result.returncode != 0:
             return False
-        result = runner((tmux_binary, "send-keys", "-t", session_name, "C-m"))
+        result = runner((tmux_binary, "send-keys", "-t", session_name, "C-m"), None)
     except OSError:
         return False
     return result.returncode == 0
 
 
-def _run_subprocess(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, check=False, text=True)
+def _run_subprocess(
+    args: Sequence[str], env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    resolved_env = None
+    if env is not None:
+        resolved_env = os.environ.copy()
+        resolved_env.update(env)
+    return subprocess.run(args, capture_output=True, check=False, text=True, env=resolved_env)
 
 
 def _ensure_every_code_worktree(
@@ -3721,7 +3811,8 @@ def _git_branch_exists(source_checkout_root: Path, *, branch: str, runner: Runne
                 "--verify",
                 "--quiet",
                 f"refs/heads/{branch}",
-            )
+            ),
+            None,
         )
     except OSError as exc:
         raise RuntimeError(f"Could not inspect Every Code worktree branch: {exc}") from exc
@@ -3742,7 +3833,7 @@ def _git_checked(
     args: Sequence[str], *, runner: Runner, detail: str
 ) -> subprocess.CompletedProcess[str]:
     try:
-        result = runner(args)
+        result = runner(args, None)
     except OSError as exc:
         raise RuntimeError(f"Could not {detail}: {exc}") from exc
     if result.returncode != 0:
@@ -3864,7 +3955,7 @@ def _process_matches_expected_command(pid: int, expected_command: Sequence[str])
 
 def _tmux_session_exists(*, tmux_binary: str, session_name: str, runner: Runner) -> bool | None:
     try:
-        result = runner((tmux_binary, "has-session", "-t", session_name))
+        result = runner((tmux_binary, "has-session", "-t", session_name), None)
     except OSError:
         return None
     if result.returncode == 0:
@@ -3884,7 +3975,8 @@ def _tmux_pane_pid(*, tmux_binary: str, session_name: str, runner: Runner) -> in
                 "-t",
                 session_name,
                 "#{pane_pid}",
-            )
+            ),
+            None,
         )
     except OSError:
         return None
