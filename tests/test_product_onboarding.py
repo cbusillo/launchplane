@@ -644,7 +644,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("DOMAIN: ${{ inputs.domain }}", workflow_text)
         self.assertIn("RUNTIME_PORT: ${{ inputs.runtime_port }}", workflow_text)
         self.assertIn("Validate reconcile compose domain inputs", workflow_text)
-        self.assertIn("domain is required when operation=reconcile-compose-domain", workflow_text)
+        self.assertIn("domain is required for compose domain reconcile/prune", workflow_text)
         self.assertIn("runtime_port is required for reconcile-compose-domain", workflow_text)
         self.assertIn("expected_current_provider_target_json:", workflow_text)
         self.assertIn("EXPECTED_CURRENT_PROVIDER_TARGET_JSON", workflow_text)
