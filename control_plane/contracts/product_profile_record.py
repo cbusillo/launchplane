@@ -161,6 +161,7 @@ class ProductLaneHealthCheck(BaseModel):
     kind: ProductLaneHealthCheckKind = "public_http"
     enabled: bool = True
     url: str = ""
+    private_endpoint_key: str = ""
     require_runtime_identity: bool = False
     alert_issue_url: str = ""
     provider: str = ""
@@ -175,6 +176,9 @@ class ProductLaneHealthCheck(BaseModel):
         self.provider_check = self.provider_check.strip()
         if not self.name:
             raise ValueError("product lane health check requires name")
+        self.private_endpoint_key = self.private_endpoint_key.strip()
+        if self.kind == "private_http" and self.url:
+            raise ValueError("private HTTP health checks must use private_endpoint_key")
         if not health_check_record_token(self.name):
             raise ValueError(
                 "product lane health check name must contain at least one alphanumeric character"
@@ -184,9 +188,13 @@ class ProductLaneHealthCheck(BaseModel):
         if self.kind in {"public_http", "private_http"}:
             if self.provider or self.provider_check:
                 raise ValueError("HTTP health checks cannot set provider fields")
+            if self.kind != "private_http" and self.private_endpoint_key:
+                raise ValueError("only private HTTP health checks can set private_endpoint_key")
         elif self.kind == "provider":
             if self.url:
                 raise ValueError("provider health checks cannot set url")
+            if self.private_endpoint_key:
+                raise ValueError("provider health checks cannot set private_endpoint_key")
             if not self.provider:
                 raise ValueError("provider health check requires provider")
             if not self.provider_check:
@@ -474,10 +482,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
                     continue
                 if check.kind == "provider":
                     continue
+                if check.kind == "private_http":
+                    if check.private_endpoint_key:
+                        continue
+                    raise ValueError("private HTTP health check requires private_endpoint_key")
                 if check.url:
                     continue
-                if check.kind == "private_http":
-                    raise ValueError("private HTTP health check requires url")
                 if lane.health_url.strip():
                     continue
                 if not lane.base_url.strip():

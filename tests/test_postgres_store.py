@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 from unittest.mock import Mock, patch
 
 from alembic import command as alembic_command
@@ -50,6 +51,7 @@ from control_plane.contracts.ingress_route_audit_record import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -464,6 +466,26 @@ def _edge_endpoint_record(
         status=status,
         updated_at="2026-06-07T00:00:00Z",
         source_label="test:edge-endpoint",
+    )
+
+
+def _private_health_endpoint_record(
+    *,
+    endpoint_key: str = "repairshopr-sync-prod-runtime",
+    product: str = "repairshopr-sync",
+    context: str = "repairshopr-sync",
+    instance: str = "prod",
+    status: Literal["active", "disabled"] = "active",
+) -> PrivateHealthEndpointRecord:
+    return PrivateHealthEndpointRecord(
+        endpoint_key=endpoint_key,
+        product=product,
+        context=context,
+        instance=instance,
+        url="http://10.0.0.5:8000/health",
+        status=status,
+        updated_at="2026-06-15T00:00:00Z",
+        source_label="test:private-health-endpoint",
     )
 
 
@@ -1016,6 +1038,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_provider_target_record(provider_target)
             edge_endpoint = _edge_endpoint_record()
             store.write_edge_endpoint_record(edge_endpoint)
+            private_health_endpoint = _private_health_endpoint_record()
+            store.write_private_health_endpoint_record(private_health_endpoint)
             ingress_canary_route = _ingress_canary_route_record()
             store.write_ingress_canary_route_record(ingress_canary_route)
             inspect_engine = create_engine(database_url)
@@ -1027,6 +1051,10 @@ class PostgresRecordStoreTests(unittest.TestCase):
             ingress_canary_route_columns = {
                 column["name"]
                 for column in inspector.get_columns("launchplane_ingress_canary_routes")
+            }
+            private_health_endpoint_columns = {
+                column["name"]
+                for column in inspector.get_columns("launchplane_private_health_endpoints")
             }
             provider_target_columns = {
                 column["name"] for column in inspector.get_columns("launchplane_provider_targets")
@@ -1040,6 +1068,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 instance_name="prod",
             )
             loaded_edge_endpoint = store.read_edge_endpoint_record(edge_endpoint.endpoint_key)
+            loaded_private_health_endpoint = store.read_private_health_endpoint_record(
+                private_health_endpoint.endpoint_key
+            )
             loaded_ingress_canary_route = store.read_ingress_canary_route_record(
                 ingress_canary_route.canary_key
             )
@@ -1053,8 +1084,13 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded.image.digest, "sha256:image123")
         self.assertEqual(loaded_provider_target.target_id, provider_target.target_id)
         self.assertEqual(loaded_edge_endpoint.upstream_host, edge_endpoint.upstream_host)
+        self.assertEqual(
+            loaded_private_health_endpoint.url,
+            "http://10.0.0.5:8000/health",
+        )
         self.assertEqual(loaded_ingress_canary_route.domain_name, "ingress-canary.example.test")
         self.assertIn("launchplane_edge_endpoints", table_names)
+        self.assertIn("launchplane_private_health_endpoints", table_names)
         self.assertIn("launchplane_ingress_canary_routes", table_names)
         self.assertGreaterEqual(
             edge_endpoint_columns,
@@ -1065,6 +1101,19 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 "upstream_host",
                 "upstream_scheme",
                 "upstream_port",
+                "status",
+                "updated_at",
+                "payload",
+            },
+        )
+        self.assertGreaterEqual(
+            private_health_endpoint_columns,
+            {
+                "endpoint_key",
+                "product",
+                "context",
+                "instance",
+                "url",
                 "status",
                 "updated_at",
                 "payload",
@@ -2999,6 +3048,41 @@ env_var = "GH_TOKEN"
         self.assertEqual(loaded_record.upstream_scheme, "https")
         self.assertEqual(loaded_record.upstream_port, 443)
         self.assertEqual([record.endpoint_key for record in active_records], ["cm-prod-dokploy"])
+
+    def test_write_read_and_list_private_health_endpoint_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_private_health_endpoint_record(_private_health_endpoint_record())
+            store.write_private_health_endpoint_record(
+                _private_health_endpoint_record(
+                    endpoint_key="disabled-runtime",
+                    status="disabled",
+                )
+            )
+            loaded_record = store.read_private_health_endpoint_record(
+                "repairshopr-sync-prod-runtime"
+            )
+            active_records = store.list_private_health_endpoint_records(
+                product="repairshopr-sync",
+                context_name="repairshopr-sync",
+                instance_name="prod",
+                status="active",
+            )
+            store.close()
+
+        self.assertEqual(loaded_record.product, "repairshopr-sync")
+        self.assertEqual(loaded_record.context, "repairshopr-sync")
+        self.assertEqual(loaded_record.instance, "prod")
+        self.assertEqual(loaded_record.url, "http://10.0.0.5:8000/health")
+        self.assertEqual(
+            [record.endpoint_key for record in active_records],
+            ["repairshopr-sync-prod-runtime"],
+        )
 
     def test_edge_endpoint_record_rejects_hostname_upstream(self) -> None:
         with self.assertRaises(ValueError):

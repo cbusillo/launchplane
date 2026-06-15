@@ -26,6 +26,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheckKind,
     ProductLaneProfile,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
@@ -124,6 +125,10 @@ class PublicIngressMonitorStore(Protocol):
         self, record: PublicIngressNotificationAttemptRecord
     ) -> object: ...
 
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord: ...
+
 
 @dataclass(frozen=True)
 class PublicIngressMonitorTarget:
@@ -141,6 +146,9 @@ class PublicIngressMonitorTarget:
     alert_issue_url: str
     provider: str = ""
     provider_check: str = ""
+    private_endpoint_key: str = ""
+    resolution_failure_code: PublicIngressFailureCode | None = None
+    resolution_failure_summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -220,11 +228,11 @@ def discover_public_ingress_monitor_targets(
 ) -> tuple[PublicIngressMonitorTarget, ...]:
     targets: list[PublicIngressMonitorTarget] = []
     for profile in record_store.list_product_profile_records():
-        if not _profile_uses_generic_web(profile):
-            continue
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
                 if not check.enabled:
+                    continue
+                if check.kind == "public_http" and not _profile_uses_generic_web(profile):
                     continue
                 target = _health_check_monitor_target(
                     profile=profile,
@@ -247,6 +255,8 @@ def _health_check_monitor_target(
 ) -> PublicIngressMonitorTarget | None:
     base_url = ""
     health_url = ""
+    resolution_failure_code: PublicIngressFailureCode | None = None
+    resolution_failure_summary = ""
     if check.kind == "public_http":
         base_url = lane.base_url.strip().rstrip("/")
         health_url = check.url.strip() or _monitor_health_url(
@@ -255,8 +265,17 @@ def _health_check_monitor_target(
         if not (base_url or health_url):
             return None
     elif check.kind == "private_http":
-        health_url = check.url.strip()
-        if not health_url:
+        if check.private_endpoint_key:
+            resolution = _resolved_private_health_url(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                endpoint_key=check.private_endpoint_key,
+            )
+            health_url = resolution.url
+            resolution_failure_code = resolution.failure_code
+            resolution_failure_summary = resolution.summary
+        if not health_url and not resolution_failure_code:
             return None
     else:
         if not (check.provider.strip() and check.provider_check.strip()):
@@ -279,7 +298,57 @@ def _health_check_monitor_target(
         alert_issue_url=check.alert_issue_url,
         provider=check.provider,
         provider_check=check.provider_check,
+        private_endpoint_key=check.private_endpoint_key,
+        resolution_failure_code=resolution_failure_code,
+        resolution_failure_summary=resolution_failure_summary,
     )
+
+
+@dataclass(frozen=True)
+class PrivateHealthEndpointResolution:
+    url: str = ""
+    failure_code: PublicIngressFailureCode | None = None
+    summary: str = ""
+
+
+def _resolved_private_health_url(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    endpoint_key: str,
+) -> PrivateHealthEndpointResolution:
+    read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
+    if not callable(read_endpoint):
+        return PrivateHealthEndpointResolution(
+            failure_code="private_endpoint_not_found",
+            summary="Private health endpoint storage is not available.",
+        )
+    try:
+        endpoint = read_endpoint(endpoint_key)
+    except (FileNotFoundError, KeyError, LookupError):
+        return PrivateHealthEndpointResolution(
+            failure_code="private_endpoint_not_found",
+            summary=f"Private health endpoint {endpoint_key!r} was not found.",
+        )
+    if not isinstance(endpoint, PrivateHealthEndpointRecord):
+        endpoint = PrivateHealthEndpointRecord.model_validate(endpoint)
+    if endpoint.status != "active":
+        return PrivateHealthEndpointResolution(
+            failure_code="private_endpoint_disabled",
+            summary=f"Private health endpoint {endpoint_key!r} is {endpoint.status}.",
+        )
+    if endpoint.product != profile.product:
+        return PrivateHealthEndpointResolution(
+            failure_code="private_endpoint_mismatch",
+            summary=f"Private health endpoint {endpoint_key!r} belongs to another product.",
+        )
+    if endpoint.context != lane.context or endpoint.instance != lane.instance:
+        return PrivateHealthEndpointResolution(
+            failure_code="private_endpoint_mismatch",
+            summary=f"Private health endpoint {endpoint_key!r} belongs to another lane.",
+        )
+    return PrivateHealthEndpointResolution(url=endpoint.url)
 
 
 def run_public_ingress_monitor_once(
@@ -600,6 +669,15 @@ def _check_url(
 ) -> PublicIngressTargetObservation:
     if target.check_kind == "provider":
         return _provider_check_unavailable(target=target)
+    if target.resolution_failure_code is not None:
+        return PublicIngressTargetObservation(
+            target=target_kind,
+            url=url,
+            status="fail",
+            failure_code=target.resolution_failure_code,
+            summary=target.resolution_failure_summary
+            or "Private health endpoint could not be resolved.",
+        )
     public_url_error = None
     if target.check_kind != "private_http":
         public_url_error = _public_url_error(url)
@@ -819,6 +897,8 @@ def _target_urls(
     if target.check_kind == "private_http":
         if target.health_url:
             urls.append(("private_health_url", target.health_url))
+        elif target.resolution_failure_code is not None:
+            urls.append(("private_health_url", f"private-endpoint://{target.private_endpoint_key}"))
         return tuple(urls)
     if target.base_url:
         urls.append(("base_url", target.base_url))
