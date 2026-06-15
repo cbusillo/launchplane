@@ -2582,6 +2582,61 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
         self.assertEqual(lanes[1]["health_monitoring"], {"checks": []})
 
+    def test_health_monitoring_migration_downgrades_first_public_check(self) -> None:
+        migration = _load_health_monitoring_migration()
+        payload = {
+            "product": "example-site",
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                    "health_monitoring": {
+                        "checks": [
+                            {
+                                "name": "private-runtime",
+                                "kind": "private_http",
+                                "enabled": True,
+                                "url": "http://app:3000/healthz",
+                            },
+                            {
+                                "name": "public-ingress",
+                                "kind": "public_http",
+                                "enabled": True,
+                                "require_runtime_identity": True,
+                                "alert_issue_url": "https://github.example.test/org/repo/issues/1",
+                            },
+                        ]
+                    },
+                },
+                {
+                    "instance": "worker",
+                    "context": "example-site",
+                    "health_monitoring": {"checks": []},
+                },
+            ],
+        }
+
+        downgrade_payload = cast(
+            Callable[[object], object],
+            getattr(migration, "downgrade_product_profile_health_monitoring_payload"),
+        )
+        downgraded = cast(dict[str, object], downgrade_payload(payload))
+
+        lanes = cast(list[dict[str, object]], downgraded["lanes"])
+        self.assertEqual(
+            lanes[0]["public_ingress_monitoring"],
+            {
+                "enabled": True,
+                "require_runtime_identity": True,
+                "alert_issue_url": "https://github.example.test/org/repo/issues/1",
+            },
+        )
+        self.assertEqual(lanes[1]["public_ingress_monitoring"], {"enabled": False})
+        self.assertNotIn("health_monitoring", lanes[0])
+        self.assertNotIn("health_monitoring", lanes[1])
+
     def test_product_profile_rejects_colliding_health_check_names(self) -> None:
         payload = {
             "product": "example-site",
