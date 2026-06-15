@@ -2118,10 +2118,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ],
         }
 
-        with self.assertRaisesRegex(ValueError, "requires disabled HTTP surfaces"):
+        with self.assertRaisesRegex(ValueError, "requires empty base_url"):
             ProductOnboardingManifest.model_validate(payload)
 
-    def test_product_onboarding_manifest_rejects_image_less_health_url_surface(
+    def test_product_onboarding_manifest_accepts_image_less_explicit_health_url_surface(
         self,
     ) -> None:
         payload: dict[str, object] = {
@@ -2152,7 +2152,187 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ],
         }
 
-        with self.assertRaisesRegex(ValueError, "requires disabled HTTP surfaces"):
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(payload)
+            result = apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-06-12T20:00:00Z",
+            )
+            profile = store.read_product_profile_record("repairshopr-sync")
+            targets = store.list_dokploy_target_records()
+            store.close()
+
+        self.assertEqual(result.product, "repairshopr-sync")
+        self.assertEqual(profile.image.repository, "")
+        self.assertEqual(profile.runtime_port, 0)
+        self.assertEqual(profile.health_path, "")
+        self.assertEqual(
+            profile.lanes[0].health_url,
+            "https://repairshopr-sync.example.test/health",
+        )
+        self.assertFalse(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].target_type, "compose")
+        self.assertFalse(targets[0].healthcheck_enabled)
+
+    def test_product_onboarding_manifest_accepts_image_less_health_monitoring(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "repairshopr-sync",
+            "display_name": "RepairShopr Sync",
+            "repository": "cbusillo/repairshopr_api",
+            "driver_id": "generic-web",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "repairshopr-sync",
+                    "health_url": "https://repairshopr-sync.example.test/health",
+                    "public_ingress_monitoring": {
+                        "enabled": True,
+                        "alert_issue_url": "https://github.com/example/ops/issues/123",
+                    },
+                }
+            ],
+            "provider_targets": [
+                {
+                    "context": "repairshopr-sync",
+                    "instance": "prod",
+                    "target_id": "compose-123",
+                    "target_type": "compose",
+                    "source_type": "git",
+                    "custom_git_url": "git@github.com:cbusillo/repairshopr_api.git",
+                    "custom_git_branch": "main",
+                    "compose_path": "docker/coolify/compose.yml",
+                    "healthcheck_enabled": False,
+                }
+            ],
+        }
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            manifest = ProductOnboardingManifest.model_validate(payload)
+            apply_product_onboarding_manifest(
+                record_store=store,
+                manifest=manifest,
+                updated_at="2026-06-12T20:00:00Z",
+            )
+            profile = store.read_product_profile_record("repairshopr-sync")
+            store.close()
+
+        self.assertEqual(
+            profile.lanes[0].health_url,
+            "https://repairshopr-sync.example.test/health",
+        )
+        self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertEqual(
+            profile.lanes[0].public_ingress_monitoring.alert_issue_url,
+            "https://github.com/example/ops/issues/123",
+        )
+
+    def test_product_onboarding_manifest_rejects_image_less_health_monitoring_without_url(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "repairshopr-sync",
+            "display_name": "RepairShopr Sync",
+            "repository": "cbusillo/repairshopr_api",
+            "driver_id": "generic-web",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "repairshopr-sync",
+                    "public_ingress_monitoring": {"enabled": True},
+                }
+            ],
+            "provider_targets": [
+                {
+                    "context": "repairshopr-sync",
+                    "instance": "prod",
+                    "target_id": "compose-123",
+                    "target_type": "compose",
+                    "source_type": "git",
+                    "custom_git_url": "git@github.com:cbusillo/repairshopr_api.git",
+                    "custom_git_branch": "main",
+                    "compose_path": "docker/coolify/compose.yml",
+                    "healthcheck_enabled": False,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "requires base_url or explicit health_url"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_rejects_image_less_health_url_without_source_route(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "repairshopr-sync",
+            "display_name": "RepairShopr Sync",
+            "repository": "cbusillo/repairshopr_api",
+            "driver_id": "generic-web",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "repairshopr-sync",
+                    "health_url": "https://repairshopr-sync.example.test/health",
+                    "public_ingress_monitoring": {"enabled": False},
+                }
+            ],
+            "provider_targets": [
+                {
+                    "context": "repairshopr-sync",
+                    "instance": "staging",
+                    "target_id": "compose-123",
+                    "target_type": "compose",
+                    "source_type": "git",
+                    "custom_git_url": "git@github.com:cbusillo/repairshopr_api.git",
+                    "custom_git_branch": "main",
+                    "compose_path": "docker/coolify/compose.yml",
+                    "healthcheck_enabled": False,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "target must match a stable lane"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_rejects_image_less_health_url_without_source_backed_target(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "repairshopr-sync",
+            "display_name": "RepairShopr Sync",
+            "repository": "cbusillo/repairshopr_api",
+            "driver_id": "generic-web",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "repairshopr-sync",
+                    "health_url": "https://repairshopr-sync.example.test/health",
+                    "public_ingress_monitoring": {"enabled": False},
+                }
+            ],
+            "provider_targets": [
+                {
+                    "context": "repairshopr-sync",
+                    "instance": "prod",
+                    "target_id": "compose-123",
+                    "target_type": "compose",
+                    "healthcheck_enabled": False,
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "health surfaces require source-backed compose"):
             ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_manifest_rejects_image_less_product_health_surface(

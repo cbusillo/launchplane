@@ -102,6 +102,15 @@ class ProductOnboardingTargetManifest(BaseModel):
             raise ValueError("product onboarding target healthcheck_path must start with /")
         return self
 
+    def is_source_backed_compose(self) -> bool:
+        return (
+            self.target_type == "compose"
+            and self.source_type.strip().lower() == "git"
+            and bool(self.custom_git_url.strip())
+            and bool(self.custom_git_branch.strip())
+            and bool(self.compose_path.strip())
+        )
+
 
 class ProductOnboardingRuntimeEnvironmentManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -255,14 +264,27 @@ class ProductOnboardingManifest(BaseModel):
                 raise ValueError(
                     "image-less product onboarding requires source-backed compose provider target"
                 )
+            source_backed_compose_routes = {
+                (target.context.strip(), target.instance.strip())
+                for target in self.provider_targets
+                if target.is_source_backed_compose()
+            }
             for lane in self.lanes:
-                if (
-                    lane.base_url.strip()
-                    or lane.health_url.strip()
-                    or lane.public_ingress_monitoring.enabled
-                ):
+                if lane.base_url.strip():
                     raise ValueError(
-                        "image-less product onboarding requires disabled HTTP surfaces"
+                        "image-less product onboarding requires empty base_url; "
+                        "use explicit health_url for source-backed worker health checks"
+                    )
+                has_health_surface = bool(
+                    lane.health_url.strip() or lane.public_ingress_monitoring.enabled
+                )
+                if not has_health_surface:
+                    continue
+                route = (lane.context.strip(), lane.instance.strip())
+                if route not in source_backed_compose_routes:
+                    raise ValueError(
+                        "image-less product onboarding health surfaces require "
+                        "source-backed compose provider target"
                     )
             for target in self.provider_targets:
                 if target.target_type != "compose":
