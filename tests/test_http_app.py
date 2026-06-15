@@ -1,11 +1,13 @@
 import json
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from collections.abc import MutableMapping
+from typing import Any
 from unittest.mock import patch
 
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient, Response
 from jwt import InvalidTokenError
 
 from control_plane import secrets as control_plane_secrets
@@ -187,10 +189,7 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
             record_store_factory=lambda: _MissingProductReadStore(),
         )
 
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ) as client:
-            response = await client.get("/openapi.json")
+        response = await _asgi_get(app, "/openapi.json")
 
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
@@ -220,21 +219,86 @@ def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     )
 
 
+@dataclass(frozen=True)
+class _AsgiResponse:
+    status_code: int
+    headers: "_CaseInsensitiveHeaders"
+    body: bytes
+
+    def json(self) -> Any:
+        return json.loads(self.body.decode("utf-8"))
+
+
 async def _get_config_status(
     app: FastAPI,
     *,
     product: str = "example-site",
     environment: str = "prod",
     authorization: str = "Bearer valid-token",
-) -> Response:
+) -> _AsgiResponse:
     headers = {"Authorization": authorization} if authorization else {}
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://testserver"
-    ) as client:
-        return await client.get(
-            f"/v1/products/{product}/environments/{environment}/config-status",
-            headers=headers,
-        )
+    return await _asgi_get(
+        app,
+        f"/v1/products/{product}/environments/{environment}/config-status",
+        headers=headers,
+    )
+
+
+async def _asgi_get(
+    app: FastAPI, path: str, *, headers: dict[str, str] | None = None
+) -> _AsgiResponse:
+    request_headers = [
+        (key.lower().encode("ascii"), value.encode("latin-1"))
+        for key, value in (headers or {}).items()
+    ]
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": request_headers,
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+    messages = [
+        {"type": "http.request", "body": b"", "more_body": False},
+    ]
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        if messages:
+            return messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    response_headers = _CaseInsensitiveHeaders(
+        {key.decode("latin-1"): value.decode("latin-1") for key, value in start.get("headers", [])}
+    )
+    return _AsgiResponse(
+        status_code=start["status"],
+        headers=response_headers,
+        body=body,
+    )
+
+
+class _CaseInsensitiveHeaders(dict[str, str]):
+    def __init__(self, headers: dict[str, str]) -> None:
+        super().__init__((key.lower(), value) for key, value in headers.items())
+
+    def __getitem__(self, key: str) -> str:
+        return super().__getitem__(key.lower())
 
 
 class _MissingProductReadStore:
