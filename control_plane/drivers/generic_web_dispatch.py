@@ -14,6 +14,11 @@ from control_plane.contracts.generic_web_rollback import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityStatus,
+    health_payload_runtime_identity_status,
+)
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchResult,
     _DriverRouteExecutionMetadata,
@@ -104,6 +109,7 @@ class GenericWebStableVerificationRequest(BaseModel):
     checked_urls: tuple[str, ...] = ()
     timeout_seconds: int | None = Field(default=None, ge=1)
     failure_summary: str = ""
+    health_payload: dict[str, object] | None = Field(default=None)
 
     @field_validator("verification_status", mode="before")
     @classmethod
@@ -282,13 +288,20 @@ def _generic_web_post_deploy_executor_for_profile(
 
 
 def _stable_verification_health_evidence(
-    *, request: GenericWebStableVerificationRequest
+    *,
+    request: GenericWebStableVerificationRequest,
+    runtime_identity_status: RuntimeIdentityStatus = "unchecked",
+    runtime_identity_detail: str = "",
+    observed_runtime_identity: RuntimeIdentity | None = None,
 ) -> HealthcheckEvidence:
     return HealthcheckEvidence(
         verified=bool(request.checked_urls),
         urls=request.checked_urls,
         timeout_seconds=request.timeout_seconds if request.checked_urls else None,
         status=request.verification_status,
+        runtime_identity_status=runtime_identity_status,
+        runtime_identity_detail=runtime_identity_detail,
+        observed_runtime_identity=observed_runtime_identity,
     )
 
 
@@ -310,7 +323,34 @@ def _apply_generic_web_stable_verification_records(
     if deployment_record.instance != request.instance:
         raise click.ClickException(f"{label} instance does not match deployment record instance.")
 
-    health_evidence = _stable_verification_health_evidence(request=request)
+    runtime_identity_status: RuntimeIdentityStatus = "unchecked"
+    runtime_identity_detail = ""
+    observed_runtime_identity: RuntimeIdentity | None = None
+    if request.health_payload is not None:
+        if deployment_record.runtime_identity is None:
+            raise click.ClickException(
+                "Generic web stable verification health payload cannot be verified because "
+                "the deployment record does not include an expected runtime identity."
+            )
+        runtime_identity_status, runtime_identity_detail, observed_runtime_identity = (
+            health_payload_runtime_identity_status(
+                expected=deployment_record.runtime_identity,
+                payload=request.health_payload,
+                json_parse_failed=False,
+            )
+        )
+        if runtime_identity_status != "match":
+            raise click.ClickException(
+                "Generic web stable verification health payload did not match the expected "
+                f"runtime identity: {runtime_identity_detail}"
+            )
+
+    health_evidence = _stable_verification_health_evidence(
+        request=request,
+        runtime_identity_status=runtime_identity_status,
+        runtime_identity_detail=runtime_identity_detail,
+        observed_runtime_identity=observed_runtime_identity,
+    )
     updated_deployment = deployment_record.model_copy(
         update={"destination_health": health_evidence}
     )

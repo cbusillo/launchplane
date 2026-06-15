@@ -1,9 +1,10 @@
+import json
 import unittest
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
 import click
@@ -112,6 +113,15 @@ class _GenericWebPreviewStore:
             if (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
         )
+
+
+def _urlopen_response(body: bytes, *, status: int = 200) -> MagicMock:
+    response = MagicMock()
+    response.status = status
+    response.read.return_value = body
+    context_manager = MagicMock()
+    context_manager.__enter__.return_value = response
+    return context_manager
 
 
 def _profile(
@@ -885,7 +895,122 @@ class GenericWebPreviewTests(unittest.TestCase):
                     preview_url="https://preview-42.example.test",
                     health_path="/api/health",
                     timeout_seconds=30,
+                    expected_runtime_identity=None,
                 )
+
+    def test_wait_for_preview_health_evaluates_runtime_identity(self) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        expected = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="preview",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-pr-42",
+            artifact_id="test",
+            source_git_ref="test",
+            image_reference="test",
+        )
+        response = _urlopen_response(
+            json.dumps(
+                {
+                    "ok": True,
+                    "launchplaneRuntimeIdentity": {
+                        "product": "sellyouroutboard",
+                        "context": "preview",
+                        "instance": "pr-42",
+                        "environment_kind": "preview",
+                        "deployment_record_id": "deployment-pr-42",
+                        "artifact_id": "test",
+                        "source_git_ref": "test",
+                        "image_reference": "test",
+                    },
+                }
+            ).encode("utf-8")
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.urlopen",
+            return_value=response,
+        ):
+            _wait_for_preview_health(
+                preview_url="https://preview-42.example.test",
+                health_path="/api/health",
+                timeout_seconds=1,
+                expected_runtime_identity=expected,
+            )
+
+    def test_wait_for_preview_health_keeps_polling_on_empty_identity_body(self) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        expected = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="preview",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-pr-42",
+            artifact_id="test",
+            source_git_ref="test",
+            image_reference="test",
+        )
+        healthy_response = _urlopen_response(
+            json.dumps(
+                {
+                    "ok": True,
+                    "launchplaneRuntimeIdentity": expected.model_dump(mode="json"),
+                }
+            ).encode("utf-8")
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.urlopen",
+            side_effect=[_urlopen_response(b""), healthy_response],
+        ) as urlopen_mock:
+            with patch("control_plane.workflows.generic_web_preview.time.sleep"):
+                _wait_for_preview_health(
+                    preview_url="https://preview-42.example.test",
+                    health_path="/api/health",
+                    timeout_seconds=6,
+                    expected_runtime_identity=expected,
+                )
+
+        self.assertEqual(urlopen_mock.call_count, 2)
+
+    def test_wait_for_preview_health_keeps_polling_on_non_json_identity_body(self) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        expected = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="preview",
+            instance="pr-42",
+            environment_kind="preview",
+            deployment_record_id="deployment-pr-42",
+            artifact_id="test",
+            source_git_ref="test",
+            image_reference="test",
+        )
+        healthy_response = _urlopen_response(
+            json.dumps(
+                {
+                    "ok": True,
+                    "launchplaneRuntimeIdentity": expected.model_dump(mode="json"),
+                }
+            ).encode("utf-8")
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.urlopen",
+            side_effect=[_urlopen_response(b"healthy"), healthy_response],
+        ) as urlopen_mock:
+            with patch("control_plane.workflows.generic_web_preview.time.sleep"):
+                _wait_for_preview_health(
+                    preview_url="https://preview-42.example.test",
+                    health_path="/api/health",
+                    timeout_seconds=6,
+                    expected_runtime_identity=expected,
+                )
+
+        self.assertEqual(urlopen_mock.call_count, 2)
 
     def test_execute_generic_web_preview_refresh_creates_application_from_template(self) -> None:
         store = _GenericWebPreviewStore(_profile())

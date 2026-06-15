@@ -1411,11 +1411,13 @@ evidence ingestion only; it does not mutate provider state.
 For stable smoke follow-ups,
 `POST /v1/drivers/generic-web/stable-verification` accepts the product, context,
 instance, deployment record, optional promotion record, checked URLs,
-`verification_status`, `verified_at`, and optional failure summary. Launchplane
-updates deployment health evidence and, when a promotion record is supplied,
-promotion/inventory evidence. The former Odoo-shaped stable verification alias
-is retired. The route is safe-write evidence ingestion only; it does not mutate
-provider state.
+`verification_status`, `verified_at`, optional failure summary, and optional
+health payload. When a health payload is supplied, Launchplane verifies its
+runtime identity against the deployment record before accepting the health
+evidence. Launchplane updates deployment health evidence and, when a promotion
+record is supplied, promotion/inventory evidence. The former Odoo-shaped stable
+verification alias is retired. The route is safe-write evidence ingestion only;
+it does not mutate provider state.
 
 `POST /v1/evidence/previews/generations`
 

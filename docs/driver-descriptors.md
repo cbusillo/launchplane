@@ -198,10 +198,13 @@ The `stable_verification` action routes to
 `POST /v1/drivers/generic-web/stable-verification`. Product workflows submit the
 deployment record, optional promotion record, checked URLs, and pass/fail status;
 Launchplane updates deployment, promotion, and inventory evidence without
-mutating provider state. Odoo stable smoke follow-ups use this generic-web route;
-the former Odoo-shaped stable verification alias is retired. This route is
-registered through descriptor-backed dispatch, so descriptor/handler drift fails
-closed before the service starts.
+mutating provider state. Workflows may include the health endpoint payload;
+when present, Launchplane verifies the payload's runtime identity against the
+deployment record before accepting the health evidence. Odoo stable smoke
+follow-ups use this generic-web route; the former Odoo-shaped stable
+verification alias is retired. This route is registered through
+descriptor-backed dispatch, so descriptor/handler drift fails closed before the
+service starts.
 
 The `preview_desired_state` action routes to
 `POST /v1/drivers/generic-web/preview-desired-state`. Product workflows provide

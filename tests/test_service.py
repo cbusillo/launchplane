@@ -27335,6 +27335,325 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(inventory.promotion_record_id, promotion.record_id)
         self.assertEqual(inventory.promoted_from_instance, "prod")
 
+    def test_generic_web_stable_verification_evaluates_health_payload_runtime_identity(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-cm-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="cm",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="cm-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                    runtime_identity=RuntimeIdentity(
+                        product="odoo-tenant-cm",
+                        context="cm",
+                        instance="testing",
+                        environment_kind="stable",
+                        deployment_record_id="deployment-20260420T153000Z-cm-testing",
+                        artifact_id="artifact-20260420-a1b2c3d4",
+                        source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        image_reference="artifact-20260420-a1b2c3d4",
+                    )
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "instance": "testing",
+                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "health_payload": {
+                            "launchplaneRuntimeIdentity": {
+                                "product": "odoo-tenant-cm",
+                                "context": "cm",
+                                "instance": "testing",
+                                "environment_kind": "stable",
+                                "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                                "artifact_id": "artifact-20260420-a1b2c3d4",
+                                "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                                "image_reference": "artifact-20260420-a1b2c3d4"
+                            }
+                        }
+                    },
+                },
+                headers={"Idempotency-Key": "generic-stable-verification:cm:testing:health-payload"},
+            )
+
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
+        self.assertEqual(deployment.destination_health.status, "pass")
+        self.assertEqual(deployment.destination_health.runtime_identity_status, "match")
+
+    def test_generic_web_stable_verification_rejects_mismatched_runtime_identity(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-cm-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="cm",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="cm-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                    runtime_identity=RuntimeIdentity(
+                        product="odoo-tenant-cm",
+                        context="cm",
+                        instance="testing",
+                        environment_kind="stable",
+                        deployment_record_id="deployment-20260420T153000Z-cm-testing",
+                        artifact_id="artifact-20260420-a1b2c3d4",
+                        source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        image_reference="artifact-20260420-a1b2c3d4",
+                    ),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "instance": "testing",
+                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "health_payload": {
+                            "launchplaneRuntimeIdentity": {
+                                "product": "odoo-tenant-cm",
+                                "context": "cm",
+                                "instance": "testing",
+                                "environment_kind": "stable",
+                                "deployment_record_id": "deployment-other",
+                                "artifact_id": "artifact-20260420-a1b2c3d4",
+                                "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                                "image_reference": "artifact-20260420-a1b2c3d4",
+                            }
+                        },
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:cm:testing:identity-mismatch"
+                },
+            )
+
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")
+
+        self.assertEqual(status_code, 400, msg=json.dumps(payload, indent=2))
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(deployment.destination_health.status, "pending")
+
+    def test_generic_web_stable_verification_rejects_payload_without_expected_runtime_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-cm-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="cm",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="cm-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                    ),
+                    destination_health=HealthcheckEvidence(status="pending"),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/stable-smoke.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/stable-verification",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "verification": {
+                        "schema_version": 1,
+                        "context": "cm",
+                        "instance": "testing",
+                        "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-20T15:35:00Z",
+                        "health_payload": {
+                            "launchplaneRuntimeIdentity": {
+                                "product": "odoo-tenant-cm",
+                                "context": "cm",
+                                "instance": "testing",
+                                "environment_kind": "stable",
+                                "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
+                                "artifact_id": "artifact-20260420-a1b2c3d4",
+                                "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                                "image_reference": "artifact-20260420-a1b2c3d4",
+                            }
+                        },
+                    },
+                },
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:cm:testing:no-expected-identity"
+                },
+            )
+
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")
+
+        self.assertEqual(status_code, 400, msg=json.dumps(payload, indent=2))
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(deployment.destination_health.status, "pending")
+
     def test_deployment_endpoint_replays_idempotent_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
