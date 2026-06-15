@@ -1153,6 +1153,20 @@ preview publish/provision/verify outcomes are known, then replace it with ready
 or failed feedback after the actual result. Product repos remain thin adapters
 for labels, artifact build facts, and product-specific health/config hints.
 
+Preview PR feedback delivery failures are operator-visible when a preview PR
+feedback notification policy is configured. Missing context-scoped runtime
+GitHub credentials record `delivery_status="skipped"` on the feedback record and
+emit a `delivery_skipped` notification attempt; GitHub API failures record
+`delivery_status="failed"` and emit `delivery_failed`. Discord destinations
+resolve webhook URLs from managed secrets scoped to `launchplane` /
+`preview-feedback`, and attempt records live under
+`launchplane_preview_pr_feedback_notification_attempts` for DB-backed stores or
+`state/launchplane_preview_pr_feedback_notification_attempts/` for filesystem
+stores. Repair missing credentials by configuring the canonical product preview
+context's managed-secret-backed `GITHUB_TOKEN` in Launchplane runtime records;
+do not add repo-local defaults or service-host env fallbacks for product GitHub
+tokens.
+
 ### VeriReel Preview Evidence Handoff
 
 VeriReel already computes the route, PR slug, image tags, and workflow run URL

@@ -170,6 +170,15 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationDeliveryStatus,
+    PreviewPrFeedbackNotificationDestination,
+    PreviewPrFeedbackNotificationEvent,
+    PreviewPrFeedbackNotificationPolicyRecord,
+    build_preview_pr_feedback_notification_attempt_id,
+    preview_pr_feedback_notification_event,
+)
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
@@ -1049,6 +1058,20 @@ class EveryCodeNotificationPolicyApplyEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "EveryCodeNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
+        return self
+
+
+class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: PreviewPrFeedbackNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewPrFeedbackNotificationPolicyApplyEnvelope":
         self.reason = self.reason.strip()
         return self
 
@@ -4603,6 +4626,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_preview_gate.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "notification-attempts"]:
         return "every_code_notification_attempt.read", {}
+    if len(segments) == 4 and segments == [
+        "v1",
+        "previews",
+        "pr-feedback",
+        "notification-attempts",
+    ]:
+        return "preview_pr_feedback_notification_attempt.read", {}
     if len(segments) == 3 and segments == ["v1", "agent", "context"]:
         return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
@@ -4733,6 +4763,14 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "apply",
     ]:
         return "every_code_notification_policy.apply", {}
+    if len(segments) == 5 and segments == [
+        "v1",
+        "previews",
+        "pr-feedback",
+        "notification-policies",
+        "apply",
+    ]:
+        return "preview_pr_feedback_notification_policy.apply", {}
     if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
         return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
@@ -4881,6 +4919,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/products/public-ingress-monitor/run-once",
         "/v1/public-ingress/notification-policies/apply",
         "/v1/every-code/notification-policies/apply",
+        "/v1/previews/pr-feedback/notification-policies/apply",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/runner-host-hygiene/audits",
@@ -5097,6 +5136,35 @@ class _EveryCodeNotificationStore(Protocol):
     ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
 
 
+class _PreviewPrFeedbackNotificationStore(Protocol):
+    def write_preview_pr_feedback_notification_policy_record(
+        self, record: PreviewPrFeedbackNotificationPolicyRecord
+    ) -> object: ...
+
+    def list_preview_pr_feedback_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationPolicyRecord, ...]: ...
+
+    def write_preview_pr_feedback_notification_attempt_record(
+        self, record: PreviewPrFeedbackNotificationAttemptRecord
+    ) -> object: ...
+
+    def list_preview_pr_feedback_notification_attempt_records(
+        self,
+        *,
+        feedback_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
+
+
 class _AgentWriteIntentRecordStore(Protocol):
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
 
@@ -5139,6 +5207,20 @@ def _every_code_notification_store(record_store: object) -> _EveryCodeNotificati
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeNotificationStore, record_store)
+    return None
+
+
+def _preview_pr_feedback_notification_store(
+    record_store: object,
+) -> _PreviewPrFeedbackNotificationStore | None:
+    required_methods = (
+        "write_preview_pr_feedback_notification_policy_record",
+        "list_preview_pr_feedback_notification_policy_records",
+        "write_preview_pr_feedback_notification_attempt_record",
+        "list_preview_pr_feedback_notification_attempt_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_PreviewPrFeedbackNotificationStore, record_store)
     return None
 
 
@@ -6970,6 +7052,7 @@ def _accepted_payload(
         "generic_web_rollback_plan_id",
         "public_ingress_notification_policy_id",
         "every_code_notification_policy_id",
+        "preview_pr_feedback_notification_policy_id",
         "ingress_route_audit_record_id",
         "edge_endpoint_key",
         "ingress_canary_route_key",
@@ -7738,6 +7821,269 @@ def _every_code_notification_policy_summary(
         "created_at": policy.created_at,
         "updated_at": policy.updated_at,
         "source": policy.source,
+    }
+
+
+def _preview_pr_feedback_notification_policy_summary(
+    policy: PreviewPrFeedbackNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "product": policy.product,
+        "context": policy.context,
+        "repository": policy.repository,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
+
+
+def _deliver_preview_pr_feedback_notifications(
+    *,
+    record_store: object,
+    feedback: PreviewPrFeedbackRecord,
+    attempted_at: str,
+    discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]:
+    if feedback.delivery_status not in {"skipped", "failed"}:
+        return ()
+    notification_store = _preview_pr_feedback_notification_store(record_store)
+    secret_store = _secret_capable_store(record_store)
+    if notification_store is None or secret_store is None:
+        return ()
+    policies = tuple(
+        policy
+        for policy in notification_store.list_preview_pr_feedback_notification_policy_records(
+            product=feedback.product,
+            context_name=feedback.context,
+            repository=feedback.repository,
+            status="enabled",
+            limit=None,
+        )
+        if policy.matches(feedback)
+    )
+    if not policies:
+        return ()
+    event = preview_pr_feedback_notification_event(feedback)
+    secret_resolver = _launchplane_managed_secret_resolver(
+        record_store=secret_store,
+        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+        instance_name="preview-feedback",
+    )
+    attempts: list[PreviewPrFeedbackNotificationAttemptRecord] = []
+    for policy in policies:
+        for destination in policy.destinations:
+            existing_attempt = _existing_preview_pr_feedback_notification_attempt(
+                notification_store=notification_store,
+                feedback=feedback,
+                event=event,
+                policy=policy,
+                destination=destination,
+            )
+            if existing_attempt is not None and existing_attempt.delivery_status in {
+                "pending",
+                "delivered",
+                "skipped",
+            }:
+                attempts.append(existing_attempt)
+                continue
+            if destination.status != "enabled":
+                attempt = _write_preview_pr_feedback_notification_attempt(
+                    notification_store=notification_store,
+                    feedback=feedback,
+                    event=event,
+                    policy=policy,
+                    destination=destination,
+                    attempted_at=attempted_at,
+                    delivery_status="skipped",
+                    action="destination_disabled",
+                )
+                attempts.append(attempt)
+                continue
+            if destination.kind == "discord":
+                attempt = _deliver_preview_pr_feedback_discord_notification(
+                    notification_store=notification_store,
+                    secret_resolver=secret_resolver,
+                    discord_sender=discord_sender,
+                    feedback=feedback,
+                    event=event,
+                    policy=policy,
+                    destination=destination,
+                    attempted_at=attempted_at,
+                )
+                attempts.append(attempt)
+    return tuple(attempts)
+
+
+def _deliver_preview_pr_feedback_discord_notification(
+    *,
+    notification_store: _PreviewPrFeedbackNotificationStore,
+    secret_resolver: Callable[[str], str],
+    discord_sender: Callable[[str, dict[str, object]], object],
+    feedback: PreviewPrFeedbackRecord,
+    event: PreviewPrFeedbackNotificationEvent,
+    policy: PreviewPrFeedbackNotificationPolicyRecord,
+    destination: PreviewPrFeedbackNotificationDestination,
+    attempted_at: str,
+) -> PreviewPrFeedbackNotificationAttemptRecord:
+    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
+    if not webhook_url:
+        return _write_preview_pr_feedback_notification_attempt(
+            notification_store=notification_store,
+            feedback=feedback,
+            event=event,
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="missing_discord_webhook",
+            error_message="Discord webhook secret could not be resolved.",
+        )
+    public_url_error = public_discord_url_error(webhook_url)
+    if public_url_error:
+        return _write_preview_pr_feedback_notification_attempt(
+            notification_store=notification_store,
+            feedback=feedback,
+            event=event,
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="invalid_discord_webhook",
+            error_message=f"Discord webhook URL is not public: {public_url_error}",
+        )
+    pending_attempt = _write_preview_pr_feedback_notification_attempt(
+        notification_store=notification_store,
+        feedback=feedback,
+        event=event,
+        policy=policy,
+        destination=destination,
+        attempted_at=attempted_at,
+        delivery_status="pending",
+        action="dispatching_discord",
+    )
+    try:
+        discord_sender(webhook_url, _preview_pr_feedback_discord_payload(feedback, event=event))
+    except Exception as error:  # noqa: BLE001 - delivery attempts preserve provider failures.
+        return _write_preview_pr_feedback_notification_attempt(
+            notification_store=notification_store,
+            feedback=feedback,
+            event=event,
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="failed",
+            action="discord_webhook_failed",
+            error_message=str(error) or error.__class__.__name__,
+        )
+    try:
+        return _write_preview_pr_feedback_notification_attempt(
+            notification_store=notification_store,
+            feedback=feedback,
+            event=event,
+            policy=policy,
+            destination=destination,
+            attempted_at=attempted_at,
+            delivery_status="delivered",
+            action="posted_discord",
+        )
+    except Exception:  # noqa: BLE001 - the pending attempt preserves dispatch evidence.
+        return pending_attempt
+
+
+def _existing_preview_pr_feedback_notification_attempt(
+    *,
+    notification_store: _PreviewPrFeedbackNotificationStore,
+    feedback: PreviewPrFeedbackRecord,
+    event: PreviewPrFeedbackNotificationEvent,
+    policy: PreviewPrFeedbackNotificationPolicyRecord,
+    destination: PreviewPrFeedbackNotificationDestination,
+) -> PreviewPrFeedbackNotificationAttemptRecord | None:
+    attempt_id = build_preview_pr_feedback_notification_attempt_id(
+        feedback_id=feedback.feedback_id,
+        event=event,
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+    )
+    return next(
+        (
+            attempt
+            for attempt in notification_store.list_preview_pr_feedback_notification_attempt_records(
+                feedback_id=feedback.feedback_id,
+                event=event,
+                limit=None,
+            )
+            if attempt.attempt_id == attempt_id
+        ),
+        None,
+    )
+
+
+def _write_preview_pr_feedback_notification_attempt(
+    *,
+    notification_store: _PreviewPrFeedbackNotificationStore,
+    feedback: PreviewPrFeedbackRecord,
+    event: PreviewPrFeedbackNotificationEvent,
+    policy: PreviewPrFeedbackNotificationPolicyRecord,
+    destination: PreviewPrFeedbackNotificationDestination,
+    attempted_at: str,
+    delivery_status: PreviewPrFeedbackNotificationDeliveryStatus,
+    action: str,
+    error_message: str = "",
+) -> PreviewPrFeedbackNotificationAttemptRecord:
+    attempt = PreviewPrFeedbackNotificationAttemptRecord(
+        attempt_id=build_preview_pr_feedback_notification_attempt_id(
+            feedback_id=feedback.feedback_id,
+            event=event,
+            policy_id=policy.policy_id,
+            destination_id=destination.destination_id,
+        ),
+        feedback_id=feedback.feedback_id,
+        event=event,
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+        destination_kind=destination.kind,
+        delivery_status=delivery_status,
+        attempted_at=attempted_at,
+        action=action,
+        error_message=_bounded_text(error_message, max_length=500),
+    )
+    notification_store.write_preview_pr_feedback_notification_attempt_record(attempt)
+    return attempt
+
+
+def _preview_pr_feedback_discord_payload(
+    feedback: PreviewPrFeedbackRecord,
+    *,
+    event: PreviewPrFeedbackNotificationEvent,
+) -> dict[str, object]:
+    fields = [
+        {"name": "Product", "value": feedback.product, "inline": True},
+        {"name": "Context", "value": feedback.context, "inline": True},
+        {"name": "Repository", "value": feedback.repository, "inline": True},
+        {"name": "PR", "value": str(feedback.anchor_pr_number), "inline": True},
+        {"name": "Delivery", "value": feedback.delivery_status, "inline": True},
+        {"name": "Status", "value": feedback.status, "inline": True},
+        {"name": "Feedback", "value": feedback.feedback_id, "inline": False},
+    ]
+    if feedback.anchor_pr_url:
+        fields.append({"name": "Pull request", "value": feedback.anchor_pr_url, "inline": False})
+    if feedback.run_url:
+        fields.append({"name": "Workflow", "value": feedback.run_url, "inline": False})
+    description = feedback.error_message or "Preview PR feedback could not be delivered."
+    return {
+        "embeds": [
+            {
+                "title": "Launchplane preview PR feedback delivery failed",
+                "description": description,
+                "color": 0xC62828,
+                "fields": fields,
+                "footer": {"text": event},
+            }
+        ]
     }
 
 
@@ -8659,9 +9005,7 @@ def _every_code_read_payload(
             raise ValueError("record store does not support Every Code notifications")
         request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
         event_filter = str((query.get("event") or [""])[0] or "").strip()
-        destination_kind_filter = str(
-            (query.get("destination_kind") or [""])[0] or ""
-        ).strip()
+        destination_kind_filter = str((query.get("destination_kind") or [""])[0] or "").strip()
         limit = _every_code_pagination_value(query, key="limit", default=50)
         attempts = notification_store.list_every_code_notification_attempt_records(
             request_id=request_id_filter,
@@ -8674,6 +9018,28 @@ def _every_code_read_payload(
             "event_filter": event_filter,
             "destination_kind_filter": destination_kind_filter,
             "attempts": [record.model_dump(mode="json") for record in attempts],
+        }
+    if path == "/v1/previews/pr-feedback/notification-attempts":
+        preview_notification_store = _preview_pr_feedback_notification_store(record_store)
+        if preview_notification_store is None:
+            raise ValueError("record store does not support preview PR feedback notifications")
+        feedback_id_filter = str((query.get("feedback_id") or [""])[0] or "").strip()
+        event_filter = str((query.get("event") or [""])[0] or "").strip()
+        destination_kind_filter = str((query.get("destination_kind") or [""])[0] or "").strip()
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        preview_attempts = (
+            preview_notification_store.list_preview_pr_feedback_notification_attempt_records(
+                feedback_id=feedback_id_filter,
+                event=event_filter,
+                destination_kind=destination_kind_filter,
+                limit=limit,
+            )
+        )
+        return {
+            "feedback_id": feedback_id_filter,
+            "event_filter": event_filter,
+            "destination_kind_filter": destination_kind_filter,
+            "attempts": [record.model_dump(mode="json") for record in preview_attempts],
         }
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         record = every_code_store.read_every_code_work_request_record(segments[3])
@@ -10042,6 +10408,9 @@ def create_launchplane_service_app(
     ingress_provider_factory: _IngressProviderFactory | None = None,
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+    preview_pr_feedback_discord_sender: Callable[
+        [str, dict[str, object]], object
+    ] = post_discord_webhook,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -10867,9 +11236,7 @@ def create_launchplane_service_app(
                         },
                     )
                 if action == "private_health_endpoint.read":
-                    private_endpoint_store = _private_health_endpoint_record_store(
-                        record_store
-                    )
+                    private_endpoint_store = _private_health_endpoint_record_store(record_store)
                     product = _query_string_value(query, "product")
                     context_name = _query_string_value(query, "context")
                     instance_name = _query_string_value(query, "instance")
@@ -10926,10 +11293,7 @@ def create_launchplane_service_app(
                         if (
                             private_endpoint_record.product != product
                             or private_endpoint_record.context != context_name
-                            or (
-                                instance_name
-                                and private_endpoint_record.instance != instance_name
-                            )
+                            or (instance_name and private_endpoint_record.instance != instance_name)
                         ):
                             return _not_found_response(
                                 start_response=start_response,
@@ -11525,6 +11889,35 @@ def create_launchplane_service_app(
                                     "code": "authorization_denied",
                                     "message": (
                                         "Workflow cannot read Every Code notification attempts."
+                                    ),
+                                },
+                            },
+                        )
+                    return _handle_every_code_work_request_read(
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
+                    )
+                if action == "preview_pr_feedback_notification_attempt.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": (
+                                        "Workflow cannot read preview PR feedback"
+                                        " notification attempts."
                                     ),
                                 },
                             },
@@ -13743,15 +14136,119 @@ def create_launchplane_service_app(
                     record_store.write_every_code_notification_policy_record(
                         every_code_policy_request.policy
                     )
-                summary = _every_code_notification_policy_summary(
-                    every_code_policy_request.policy
-                )
+                summary = _every_code_notification_policy_summary(every_code_policy_request.policy)
                 result = {
                     "every_code_notification_policy_id": every_code_policy_request.policy.policy_id,
                 }
                 driver_result = {
                     "mode": every_code_policy_request.mode,
                     "changed": every_code_policy_request.mode == "apply",
+                    "policy": summary,
+                }
+            elif path == "/v1/previews/pr-feedback/notification-policies/apply":
+                notification_policy_request = (
+                    PreviewPrFeedbackNotificationPolicyApplyEnvelope.model_validate(payload)
+                )
+                if (
+                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
+                    and not notification_policy_request.reason
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "reason_required",
+                                "message": (
+                                    "Local operator preview PR feedback notification policy"
+                                    " apply requires a reason."
+                                ),
+                            },
+                        },
+                    )
+                if (
+                    not notification_policy_request.policy.product
+                    or not notification_policy_request.policy.context
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_policy_scope",
+                                "message": (
+                                    "Preview PR feedback notification policy apply requires"
+                                    " explicit product and context."
+                                ),
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_pr_feedback_notification_policy.apply",
+                    product=notification_policy_request.policy.product,
+                    context=notification_policy_request.policy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot apply preview PR feedback notification policy."
+                                ),
+                            },
+                        },
+                    )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": (
+                                    "Preview PR feedback notification policy apply requires"
+                                    " DB-backed Launchplane storage."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                if notification_policy_request.mode == "apply":
+                    record_store.write_preview_pr_feedback_notification_policy_record(
+                        notification_policy_request.policy
+                    )
+                summary = _preview_pr_feedback_notification_policy_summary(
+                    notification_policy_request.policy
+                )
+                result = {
+                    "preview_pr_feedback_notification_policy_id": (
+                        notification_policy_request.policy.policy_id
+                    ),
+                }
+                driver_result = {
+                    "mode": notification_policy_request.mode,
+                    "changed": notification_policy_request.mode == "apply",
                     "policy": summary,
                 }
             elif path == "/v1/every-code/work-requests/claim":
@@ -15335,7 +15832,9 @@ def create_launchplane_service_app(
                     request=edge_endpoint_request,
                 )
             elif path == _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE:
-                private_endpoint_request = PrivateHealthEndpointApplyEnvelope.model_validate(payload)
+                private_endpoint_request = PrivateHealthEndpointApplyEnvelope.model_validate(
+                    payload
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="private_health_endpoint.apply",
@@ -16113,7 +16612,24 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     record=driver_result,
                 )
+                notification_attempts = _deliver_preview_pr_feedback_notifications(
+                    record_store=record_store,
+                    feedback=driver_result,
+                    attempted_at=driver_result.requested_at,
+                    discord_sender=preview_pr_feedback_discord_sender,
+                )
                 result = {"preview_pr_feedback_id": preview_pr_feedback_id}
+                if notification_attempts:
+                    result["preview_pr_feedback_notification_attempt_count"] = len(
+                        notification_attempts
+                    )
+                    feedback_payload = driver_result.model_dump(mode="json")
+                    feedback_payload["notifications"] = [
+                        attempt.model_dump(mode="json") for attempt in notification_attempts
+                    ]
+                    driver_result = {
+                        **feedback_payload,
+                    }
             elif path == "/v1/previews/lifecycle-cleanup":
                 preview_lifecycle_cleanup_request = PreviewLifecycleCleanupEnvelope.model_validate(
                     payload

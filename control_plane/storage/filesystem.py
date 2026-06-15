@@ -52,6 +52,10 @@ from control_plane.contracts.preview_generation_record import PreviewGenerationR
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationPolicyRecord,
+)
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
@@ -1614,6 +1618,72 @@ class FilesystemRecordStore:
             if not context_name or record.context == context_name
         ]
         records.sort(key=lambda record: (record.requested_at, record.feedback_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_pr_feedback_notification_policy_record(
+        self, record: PreviewPrFeedbackNotificationPolicyRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_preview_pr_feedback_notification_policies",
+            record.policy_id,
+            record,
+        )
+
+    def list_preview_pr_feedback_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewPrFeedbackNotificationPolicyRecord,
+                "launchplane_preview_pr_feedback_notification_policies",
+            )
+            if (not product or record.product in {"", product})
+            and (not context_name or record.context in {"", context_name})
+            and (not repository or record.repository in {"", repository})
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.policy_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_pr_feedback_notification_attempt_record(
+        self, record: PreviewPrFeedbackNotificationAttemptRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_preview_pr_feedback_notification_attempts",
+            record.attempt_id,
+            record,
+        )
+
+    def list_preview_pr_feedback_notification_attempt_records(
+        self,
+        *,
+        feedback_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewPrFeedbackNotificationAttemptRecord,
+                "launchplane_preview_pr_feedback_notification_attempts",
+            )
+            if (not feedback_id or record.feedback_id == feedback_id)
+            and (not event or record.event == event)
+            and (not destination_kind or record.destination_kind == destination_kind)
+        ]
+        records.sort(key=lambda record: (record.attempted_at, record.attempt_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
