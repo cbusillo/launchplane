@@ -874,11 +874,12 @@ preflights.
   the service status route.
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. Each pass applies
-  trusted PR feedback, reconciles preview gates and ready preview labels, routes
-  failed checks back to the owning session, then claims at most one queued
-  request. Request handoff opens or reuses deterministic visible tmux sessions
-  for local checkouts, records `running` or immediate `blocked` status, and
-  wraps the visible command so terminal success or failure calls
+  trusted PR feedback, reconciles preview gates and ready preview labels, removes
+  stale source-issue queue labels for closed requests that can no longer reach
+  preview readiness, routes failed checks back to the owning session, then claims
+  at most one queued request. Request handoff opens or reuses deterministic
+  visible tmux sessions for local checkouts, records `running` or immediate
+  `blocked` status, and wraps the visible command so terminal success or failure calls
   `uv run launchplane every-code finish`.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with

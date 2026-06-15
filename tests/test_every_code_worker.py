@@ -270,6 +270,10 @@ class _Runner:
             if self.fail_issue_comment:
                 return subprocess.CompletedProcess(args, 1, "", "rate limited")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ("gh", "issue", "edit"):
+            if env is None or env.get("GH_TOKEN") != "bot-token":
+                return subprocess.CompletedProcess(args, 1, "", "missing bot token")
+            return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ("gh", "api", "user"):
             if env is None or env.get("GH_TOKEN") != "bot-token":
                 return subprocess.CompletedProcess(args, 1, "", "missing bot token")
@@ -1241,26 +1245,77 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 ).model_copy(update={"result_summary": "Source issue closed by Mbanks89."})
             )
             store.write_every_code_preview_gate_record(_preview_gate_record())
-            runner = _Runner(
-                pr_view_payload={
-                    "state": "OPEN",
-                    "headRefOid": "abcdef1234567890",
-                    "labels": [],
-                    "statusCheckRollup": [
-                        {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
-                    ],
-                }
-            )
+            runner = _Runner()
 
-            result = request_ready_every_code_pr_preview_labels(
-                record_store=store,
-                runner=runner,
-            )
-            gate_records = store.list_every_code_preview_gate_records(status="cancelled")
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "bot-token",
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "shiny-code-bot",
+                },
+            ):
+                result = request_ready_every_code_pr_preview_labels(
+                    record_store=store,
+                    runner=runner,
+                )
+                gate_records = store.list_every_code_preview_gate_records(status="cancelled")
 
         self.assertEqual(result.cancelled, 1)
         self.assertEqual(len(gate_records), 1)
         self.assertIn("Source issue closed", gate_records[0].blocked_reason)
+        self.assertEqual(
+            runner.calls,
+            [
+                ("gh", "api", "user", "--jq", ".login"),
+                (
+                    "gh",
+                    "issue",
+                    "edit",
+                    "123",
+                    "--repo",
+                    "cbusillo/sellyouroutboard",
+                    "--remove-label",
+                    "every-code",
+                ),
+                (
+                    "gh",
+                    "issue",
+                    "edit",
+                    "123",
+                    "--repo",
+                    "cbusillo/sellyouroutboard",
+                    "--remove-label",
+                    "preview-ready",
+                ),
+            ],
+        )
+
+    def test_preview_gate_cancels_when_source_issue_closed_even_without_label_token(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                ).model_copy(update={"result_summary": "Source issue closed by Mbanks89."})
+            )
+            store.write_every_code_preview_gate_record(_preview_gate_record())
+            runner = _Runner()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": ""}):
+                result = request_ready_every_code_pr_preview_labels(
+                    record_store=store,
+                    runner=runner,
+                )
+                gate_records = store.list_every_code_preview_gate_records(status="cancelled")
+
+        self.assertEqual(result.cancelled, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("Source issue closed", gate_records[0].blocked_reason)
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN", gate_records[0].blocked_reason)
         self.assertFalse(runner.calls)
 
     def test_preview_gate_skips_pull_request_with_preview_label(self) -> None:

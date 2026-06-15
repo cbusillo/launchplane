@@ -729,34 +729,14 @@ def _post_every_code_claim_comment(
     repository = record.repository.strip()
     if not repository or record.issue_number <= 0:
         return ""
-    token_env_key = github_token_env.strip()
-    if not token_env_key:
-        raise RuntimeError("Every Code claim comments require --github-token-env")
-    github_token = os.environ.get(token_env_key, "").strip()
-    if not github_token:
-        raise RuntimeError(f"{token_env_key} is required for Every Code claim comments")
-    github_env = {"GH_TOKEN": github_token, "GITHUB_TOKEN": github_token}
-    expected_actor_env_key = github_actor_env.strip()
-    expected_actor = (
-        os.environ.get(expected_actor_env_key, "").strip()
-        if expected_actor_env_key
-        else ""
-    )
     try:
-        actor_result = runner(("gh", "api", "user", "--jq", ".login"), github_env)
-    except OSError as exc:
-        raise RuntimeError(f"Could not verify GitHub claim-comment actor: {exc}") from exc
-    if actor_result.returncode != 0:
-        detail = actor_result.stderr.strip() or actor_result.stdout.strip() or "gh api user failed"
-        raise RuntimeError(f"Could not verify GitHub claim-comment actor: {detail}")
-    actual_actor = actor_result.stdout.strip()
-    if not actual_actor:
-        raise RuntimeError("Could not verify GitHub claim-comment actor: empty login")
-    if expected_actor and actual_actor.casefold() != expected_actor.casefold():
-        raise RuntimeError(
-            "Every Code claim-comment GitHub actor mismatch: "
-            f"expected {expected_actor!r}, got {actual_actor!r}"
+        github_env = _every_code_github_env(
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
+            runner=runner,
         )
+    except RuntimeError as exc:
+        raise RuntimeError(f"Could not verify GitHub claim-comment actor: {exc}") from exc
     body = every_code_claim_comment_body(
         record,
         host=host,
@@ -781,6 +761,90 @@ def _post_every_code_claim_comment(
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "gh issue comment failed"
         return f"Could not post GitHub working comment: {detail}"
+    return ""
+
+
+def _every_code_github_env(
+    *,
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+    runner: Runner,
+) -> dict[str, str]:
+    token_env_key = github_token_env.strip()
+    if not token_env_key:
+        raise RuntimeError("Every Code GitHub operations require a token env key")
+    github_token = os.environ.get(token_env_key, "").strip()
+    if not github_token:
+        raise RuntimeError(f"{token_env_key} is required for Every Code GitHub operations")
+    github_env = {"GH_TOKEN": github_token, "GITHUB_TOKEN": github_token}
+    expected_actor_env_key = github_actor_env.strip()
+    expected_actor = (
+        os.environ.get(expected_actor_env_key, "").strip()
+        if expected_actor_env_key
+        else ""
+    )
+    try:
+        actor_result = runner(("gh", "api", "user", "--jq", ".login"), github_env)
+    except OSError as exc:
+        raise RuntimeError(f"Could not verify GitHub actor: {exc}") from exc
+    if actor_result.returncode != 0:
+        detail = actor_result.stderr.strip() or actor_result.stdout.strip() or "gh api user failed"
+        raise RuntimeError(f"Could not verify GitHub actor: {detail}")
+    actual_actor = actor_result.stdout.strip()
+    if not actual_actor:
+        raise RuntimeError("Could not verify GitHub actor: empty login")
+    if expected_actor and actual_actor.casefold() != expected_actor.casefold():
+        raise RuntimeError(
+            "Every Code GitHub actor mismatch: "
+            f"expected {expected_actor!r}, got {actual_actor!r}"
+        )
+    return github_env
+
+
+def _remove_every_code_source_issue_labels(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    runner: Runner,
+    github_token_env: str = EVERY_CODE_GITHUB_TOKEN_ENV_KEY,
+    github_actor_env: str = EVERY_CODE_GITHUB_ACTOR_ENV_KEY,
+) -> str:
+    repository = record.repository.strip()
+    if not repository or record.issue_number <= 0:
+        return ""
+    try:
+        github_env = _every_code_github_env(
+            github_token_env=github_token_env,
+            github_actor_env=github_actor_env,
+            runner=runner,
+        )
+    except RuntimeError as exc:
+        return str(exc)
+    errors: list[str] = []
+    for label in (record.trigger_label.strip(), "preview-ready"):
+        if not label:
+            continue
+        try:
+            result = runner(
+                (
+                    "gh",
+                    "issue",
+                    "edit",
+                    str(record.issue_number),
+                    "--repo",
+                    repository,
+                    "--remove-label",
+                    label,
+                ),
+                github_env,
+            )
+        except OSError as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "gh issue edit failed"
+            errors.append(f"{label}: {detail}")
+    if errors:
+        return "Could not remove Every Code source issue labels: " + "; ".join(errors)
     return ""
 
 
@@ -2596,10 +2660,17 @@ def request_ready_every_code_pr_preview_labels(
     reviewer_backfilled = 0
     for record in records:
         if _every_code_work_request_closed_before_preview(record):
+            label_cleanup_error = _remove_every_code_source_issue_labels(
+                record=record,
+                runner=run,
+            )
+            reason = "Source issue closed before preview was ready."
+            if label_cleanup_error:
+                reason = f"{reason} {label_cleanup_error}"
             cancelled += _cancel_every_code_preview_gates_for_record(
                 record_store=record_store,
                 record=record,
-                reason="Source issue closed before preview was ready.",
+                reason=reason,
             )
             continue
         result_pr_url = _every_code_preview_pr_url_for_record(record, runner=run)
