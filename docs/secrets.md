@@ -100,6 +100,10 @@ title: Secrets
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
+- Policy rules can allow dynamic preview instances with paired `allowed_targets`
+  entries that combine an exact preview context with `instance_patterns`, for
+  example `pr-*`. Use paired patterns for reusable preview lanes instead of
+  adding one-off PR instance names to policy records or broadening stable scope.
 - Product-specific preview drivers that derive runtime secrets from a template,
   such as VeriReel's preview database bootstrap, must run the same metadata-only
   gate before creating databases, rendering preview env, or starting preview

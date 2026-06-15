@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,6 +16,7 @@ class EveryCodeWorkRequestRecord(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     request_id: str
+    lifecycle_id: str = ""
     source: EveryCodeWorkRequestSource
     state: EveryCodeWorkRequestState
     repository: str
@@ -38,6 +40,10 @@ class EveryCodeWorkRequestRecord(BaseModel):
     def _validate_record(self) -> "EveryCodeWorkRequestRecord":
         if not self.request_id.strip():
             raise ValueError("Every Code work request requires request_id")
+        if not self.lifecycle_id.strip():
+            self.lifecycle_id = build_every_code_work_request_lifecycle_id(
+                request_id=self.request_id, queued_at=self.queued_at
+            )
         if not self.repository.strip() or "/" not in self.repository.strip():
             raise ValueError("Every Code work request requires owner/repo repository")
         if not self.issue_url.strip():
@@ -100,6 +106,27 @@ def build_every_code_work_request_id(
         f"{normalized_repository}#{issue_number}:{normalized_label}".encode("utf-8")
     ).hexdigest()[:16]
     return f"every-code-{normalized_repository.replace('/', '-')}-{issue_number}-{digest}"
+
+
+def build_every_code_work_request_lifecycle_id(
+    *, request_id: str, queued_at: str, previous_lifecycle_id: str = ""
+) -> str:
+    normalized_request_id = request_id.strip().lower()
+    normalized_queued_at = queued_at.strip()
+    if not normalized_request_id or not normalized_queued_at:
+        raise ValueError("Every Code work request lifecycle id requires request_id and queued_at")
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "request_id": normalized_request_id,
+                "queued_at": normalized_queued_at,
+                "previous_lifecycle_id": previous_lifecycle_id.strip(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"every-code-lifecycle-{digest}"
 
 
 def claim_every_code_work_request(
@@ -189,6 +216,11 @@ def requeue_every_code_work_request(
     return record.model_copy(
         update={
             "state": "queued",
+            "lifecycle_id": build_every_code_work_request_lifecycle_id(
+                request_id=record.request_id,
+                queued_at=queued_at,
+                previous_lifecycle_id=record.lifecycle_id,
+            ),
             "trigger_actor": trigger_actor.strip() or record.trigger_actor,
             "queued_at": queued_at,
             "updated_at": queued_at,

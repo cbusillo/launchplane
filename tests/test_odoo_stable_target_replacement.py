@@ -336,7 +336,10 @@ def _artifact_manifest(
     artifact_id: str = "artifact-cm-testing",
     source_commit: str = "abc1234",
     digest: str = "sha256:artifact",
-    odoo_install_modules: tuple[str, ...] = (),
+    odoo_install_modules: tuple[str, ...] = (
+        "launchplane_settings",
+        "disable_odoo_online",
+    ),
 ) -> ArtifactIdentityManifest:
     return ArtifactIdentityManifest(
         artifact_id=artifact_id,
@@ -746,7 +749,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             target_record=_target_record(),
             target_id_record=_target_id_record(),
             inventory=_inventory(),
-            artifact_manifest=_artifact_manifest(odoo_install_modules=("cm_website",)),
+            artifact_manifest=_artifact_manifest(
+                odoo_install_modules=(
+                    "launchplane_settings",
+                    "disable_odoo_online",
+                    "cm_website",
+                )
+            ),
             odoo_instance_override_record=OdooInstanceOverrideRecord(
                 context="cm",
                 instance="testing",
@@ -1149,7 +1158,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertEqual(
             final_deployment.runtime_source["artifact_odoo_install_modules"],
-            "cm_website",
+            "launchplane_settings,disable_odoo_online,cm_website",
         )
         self.assertEqual(
             final_deployment.runtime_source["odoo_install_modules"],
@@ -1177,6 +1186,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             artifact_id="artifact-cm-fresh",
             source_commit="feed123",
             digest="sha256:fresh",
+            odoo_install_modules=(
+                "launchplane_settings",
+                "disable_odoo_online",
+                "cm_website",
+            ),
         )
         store = _Store(
             target_record=_target_record(),
@@ -1284,7 +1298,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(persisted_env)
         self.assertEqual(
             persisted_env_map["ODOO_INSTALL_MODULES"],
-            "launchplane_settings,disable_odoo_online,cm_website,legacy_theme",
+            "launchplane_settings,disable_odoo_online,cm_website",
         )
         final_deployment = store.deployment_records[-1]
         self.assertEqual(final_deployment.source_git_ref, "feed123")
@@ -1439,6 +1453,70 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ],
             "false",
         )
+
+    def test_apply_fails_before_provider_mutation_when_required_artifact_modules_missing(
+        self,
+    ) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            artifact_manifest=_artifact_manifest(odoo_install_modules=("cm_website",)),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ) as read_config,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                    "appName": "cm-testing",
+                    "serverId": "server-123",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env"
+            ) as update_env,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ) as trigger_deploy,
+        ):
+            with self.assertRaises(click.ClickException) as error_context:
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm", instance="testing"
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                )
+
+        self.assertIn(
+            "artifact odoo_install_modules to declare required module(s)",
+            str(error_context.exception),
+        )
+        self.assertIn("launchplane_settings", str(error_context.exception))
+        self.assertIn("disable_odoo_online", str(error_context.exception))
+        read_config.assert_called_once()
+        update_env.assert_not_called()
+        trigger_deploy.assert_not_called()
 
     def test_apply_fails_before_deploy_when_override_secret_env_is_missing(self) -> None:
         store = _Store(

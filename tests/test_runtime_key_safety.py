@@ -4,6 +4,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
+    RuntimeSecretSafetyTargetScope,
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretStatus
@@ -60,6 +61,8 @@ def _binding(
     binding_key: str,
     binding_id: str = "binding-shopify-token",
     secret_id: str = "secret-shopify-token",
+    context: str = "opw",
+    instance: str = "testing",
     status: SecretStatus = "configured",
 ) -> SecretBinding:
     return SecretBinding(
@@ -67,8 +70,8 @@ def _binding(
         secret_id=secret_id,
         integration="runtime_environment",
         binding_key=binding_key,
-        context="opw",
-        instance="testing",
+        context=context,
+        instance=instance,
         status=status,
         created_at="2026-05-05T20:00:00Z",
         updated_at="2026-05-05T20:00:00Z",
@@ -122,6 +125,280 @@ class RuntimeKeySafetyTests(unittest.TestCase):
         self.assertEqual(evaluation.status, "pass")
         self.assertEqual(evaluation.findings, ())
         self.assertEqual(evaluation.checked_binding_keys, ("SHOPIFY_ACCESS_TOKEN",))
+
+    def test_preview_instance_pattern_accepts_matching_preview_instance(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel-testing",
+                instance="pr-217",
+                environment_class="preview",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel-testing",
+                    instance="pr-217",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel-testing",),
+                    allowed_instance_patterns=("pr-*",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+
+    def test_paired_target_scope_accepts_matching_preview_instance(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel-testing",
+                instance="pr-217",
+                environment_class="preview",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel-testing",
+                    instance="pr-217",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel",),
+                    allowed_instances=("testing",),
+                    allowed_targets=(
+                        RuntimeSecretSafetyTargetScope(
+                            context="verireel-testing",
+                            instance_patterns=("pr-*",),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(evaluation.findings, ())
+
+    def test_paired_target_scope_rejects_cross_product_preview_instance(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel",
+                instance="pr-217",
+                environment_class="preview",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel",
+                    instance="pr-217",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel",),
+                    allowed_instances=("testing",),
+                    allowed_targets=(
+                        RuntimeSecretSafetyTargetScope(
+                            context="verireel-testing",
+                            instance_patterns=("pr-*",),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(
+            [finding.code for finding in evaluation.findings],
+            ["instance_not_allowed"],
+        )
+
+    def test_paired_target_scope_rejects_cross_product_stable_instance(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel-testing",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel-testing",
+                    instance="testing",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel",),
+                    allowed_instances=("testing",),
+                    allowed_targets=(
+                        RuntimeSecretSafetyTargetScope(
+                            context="verireel-testing",
+                            instance_patterns=("pr-*",),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(
+            [finding.code for finding in evaluation.findings],
+            ["instance_not_allowed"],
+        )
+
+    def test_preview_instance_pattern_still_rejects_wrong_context(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="opw-testing",
+                instance="pr-217",
+                environment_class="preview",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="opw-testing",
+                    instance="pr-217",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel-testing",),
+                    allowed_instance_patterns=("pr-*",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(
+            [finding.code for finding in evaluation.findings],
+            ["context_not_allowed"],
+        )
+
+    def test_preview_instance_pattern_still_rejects_non_matching_instance(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel-testing",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel-testing",
+                    instance="testing",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel-testing",),
+                    allowed_instance_patterns=("pr-*",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(
+            [finding.code for finding in evaluation.findings],
+            ["instance_not_allowed"],
+        )
+
+    def test_preview_instance_pattern_does_not_match_separator_bearing_target(self) -> None:
+        evaluation = evaluate_runtime_key_safety(
+            target=RuntimeKeySafetyTarget(
+                context="verireel-testing",
+                instance="pr-217/other",
+                environment_class="preview",
+            ),
+            required_binding_keys=("POSTGRES_PASSWORD",),
+            secret_bindings=(
+                _binding(
+                    binding_key="POSTGRES_PASSWORD",
+                    binding_id="binding-postgres-password",
+                    secret_id="secret-postgres-password",
+                    context="verireel-testing",
+                    instance="pr-217/other",
+                ),
+            ),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="POSTGRES_PASSWORD",
+                    secret_class="shared_safe",
+                    allowed_contexts=("verireel-testing",),
+                    allowed_instance_patterns=("pr-*",),
+                ),
+            ),
+        )
+
+        self.assertEqual(evaluation.status, "fail")
+        self.assertEqual(
+            [finding.code for finding in evaluation.findings],
+            ["instance_not_allowed"],
+        )
+
+    def test_preview_instance_pattern_rejects_path_separator(self) -> None:
+        with self.assertRaisesRegex(ValueError, "path separators"):
+            RuntimeSecretSafetyRule(
+                binding_key="POSTGRES_PASSWORD",
+                secret_class="shared_safe",
+                allowed_instance_patterns=("pr-*/*",),
+            )
+
+    def test_preview_instance_pattern_rejects_universal_pattern(self) -> None:
+        with self.assertRaisesRegex(ValueError, "literal character"):
+            RuntimeSecretSafetyRule(
+                binding_key="POSTGRES_PASSWORD",
+                secret_class="shared_safe",
+                allowed_instance_patterns=("*",),
+            )
+
+    def test_preview_instance_pattern_rejects_whitespace(self) -> None:
+        with self.assertRaisesRegex(ValueError, "whitespace"):
+            RuntimeSecretSafetyRule(
+                binding_key="POSTGRES_PASSWORD",
+                secret_class="shared_safe",
+                allowed_instance_patterns=("pr-* preview",),
+            )
+
+    def test_paired_target_scope_rejects_universal_pattern(self) -> None:
+        with self.assertRaisesRegex(ValueError, "literal character"):
+            RuntimeSecretSafetyTargetScope(
+                context="verireel-testing",
+                instance_patterns=("*",),
+            )
 
     def test_unclassified_secret_fails_closed(self) -> None:
         evaluation = evaluate_runtime_key_safety(

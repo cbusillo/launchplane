@@ -1,6 +1,7 @@
+import os
 import subprocess
 import unittest
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -235,7 +236,9 @@ class _Runner:
         self.pr_list_payload = pr_list_payload
         self.gh_api_payloads = gh_api_payloads or {}
 
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
         if args[0] == "git" and args[3:6] == (
             "symbolic-ref",
@@ -262,9 +265,15 @@ class _Runner:
         if args[0] == "git":
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ("gh", "issue", "comment"):
+            if env is None or env.get("GH_TOKEN") != "bot-token":
+                return subprocess.CompletedProcess(args, 1, "", "missing bot token")
             if self.fail_issue_comment:
                 return subprocess.CompletedProcess(args, 1, "", "rate limited")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ("gh", "api", "user"):
+            if env is None or env.get("GH_TOKEN") != "bot-token":
+                return subprocess.CompletedProcess(args, 1, "", "missing bot token")
+            return subprocess.CompletedProcess(args, 0, "shiny-code-bot\n", "")
         if args[:3] == ("gh", "pr", "view") and self.pr_view_payload is not None:
             return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_view_payload), "")
         if args[:3] == ("gh", "pr", "list") and self.pr_list_payload is not None:
@@ -287,7 +296,10 @@ class _Runner:
 
 
 class _ExistingSessionRunner(_Runner):
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        del env
         self.calls.append(tuple(args))
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 0, "", "")
@@ -297,7 +309,10 @@ class _ExistingSessionRunner(_Runner):
 
 
 class _FailingFeedbackSendRunner(_ExistingSessionRunner):
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        del env
         self.calls.append(tuple(args))
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 0, "", "")
@@ -309,13 +324,15 @@ class _FailingFeedbackSendRunner(_ExistingSessionRunner):
 
 
 class _GoneSessionRunner(_Runner):
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 1, "", "no session")
         if args[0] == "tmux" and args[1] == "new-session":
             return subprocess.CompletedProcess(args, 0, "", "")
-        return super().__call__(args)
+        return super().__call__(args, env)
 
 
 class _CleanupReconciliationRunner(_ExistingSessionRunner):
@@ -338,7 +355,10 @@ class _CleanupReconciliationRunner(_ExistingSessionRunner):
         self.tmux_inspection_fails = tmux_inspection_fails
         self.registered = registered
 
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        del env
         self.calls.append(tuple(args))
         if args[1:3] == ("has-session", "-t"):
             if self.tmux_inspection_fails:
@@ -360,7 +380,7 @@ class _CleanupReconciliationRunner(_ExistingSessionRunner):
                 "",
             )
         self.calls.pop()
-        return _Runner.__call__(self, args)
+        return _Runner.__call__(self, args, None)
 
 
 class _CleanupStoreMissingRequest(FilesystemRecordStore):
@@ -369,13 +389,15 @@ class _CleanupStoreMissingRequest(FilesystemRecordStore):
 
 
 class _GoneSessionWithWorktreeProcessRunner(_GoneSessionRunner):
-    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, args: Sequence[str], env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
         if args[0] == "lsof":
             return subprocess.CompletedProcess(args, 0, "9001\n9002\n", "")
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 1, "", "no session")
-        return super().__call__(args)
+        return super().__call__(args, env)
 
 
 class _Process:
@@ -629,6 +651,19 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
 
 
 class EveryCodeWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._github_env_patch = patch.dict(
+            os.environ,
+            {
+                "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "bot-token",
+                "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "shiny-code-bot",
+            },
+        )
+        self._github_env_patch.start()
+
+    def tearDown(self) -> None:
+        self._github_env_patch.stop()
+
     def test_api_store_lists_claims_and_updates_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -1995,11 +2030,13 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
     def test_terminal_request_preserves_dirty_worktree(self) -> None:
         class _DirtyWorktreeRunner(_ExistingSessionRunner):
-            def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            def __call__(
+                self, args: Sequence[str], env: Mapping[str, str] | None = None
+            ) -> subprocess.CompletedProcess[str]:
                 if args[0] == "git" and args[3:5] == ("status", "--porcelain"):
                     self.calls.append(tuple(args))
                     return subprocess.CompletedProcess(args, 0, " M README.md\n", "")
-                return super().__call__(args)
+                return super().__call__(args, env)
 
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -2409,15 +2446,17 @@ class EveryCodeWorkerTests(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__(existing_branch=True)
 
-            def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            def __call__(
+                self, args: Sequence[str], env: Mapping[str, str] | None = None
+            ) -> subprocess.CompletedProcess[str]:
                 self.calls.append(tuple(args))
                 if args[0] == "git" and args[3:5] == ("branch", "-d"):
                     return subprocess.CompletedProcess(args, 1, "", "not merged")
                 if args[0] == "git":
                     self.calls.pop()
-                    return _Runner.__call__(self, args)
+                    return _Runner.__call__(self, args, env)
                 self.calls.pop()
-                return super().__call__(args)
+                return super().__call__(args, env)
 
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -2592,7 +2631,10 @@ class EveryCodeWorkerTests(unittest.TestCase):
             )
 
             class _MissingPanePidRunner(_ExistingSessionRunner):
-                def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                def __call__(
+                    self, args: Sequence[str], env: Mapping[str, str] | None = None
+                ) -> subprocess.CompletedProcess[str]:
+                    del env
                     self.calls.append(tuple(args))
                     if args[0] == "lsof":
                         return subprocess.CompletedProcess(args, 1, "", "")
@@ -2657,7 +2699,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(closed, 0)
         killpg.assert_not_called()
 
-    def test_run_once_still_launches_tmux_when_claim_comment_fails(self) -> None:
+    def test_run_once_blocks_before_launch_when_claim_comment_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
@@ -2676,12 +2718,94 @@ class EveryCodeWorkerTests(unittest.TestCase):
             )
             record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
 
-        self.assertEqual(result.status, "running")
-        self.assertEqual(record.state, "running")
-        self.assertIn("Visible tmux session", record.result_summary)
-        self.assertIn("Could not post GitHub working comment", record.result_summary)
-        self.assertTrue(any(call[1] == "new-session" for call in runner.calls))
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(record.state, "blocked")
+        self.assertIn("Could not post GitHub working comment", record.error_message)
+        self.assertFalse(any(call[1] == "new-session" for call in runner.calls))
         self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
+    def test_run_once_blocks_before_launch_without_claim_comment_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            state_dir = temporary_root / "state"
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": ""}):
+                result = run_every_code_worker_once(
+                    record_store=store,
+                    host="Chris-Studio",
+                    workspace_root=temporary_root / "Developer",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+            worktree_exists = every_code_worktree_root(_queued_record(), state_dir=state_dir).exists()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(record.state, "blocked")
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN", record.error_message)
+        self.assertFalse(any(call[1] == "new-session" for call in runner.calls))
+        self.assertFalse(worktree_exists)
+
+    def test_run_once_uses_configured_claim_comment_token_env(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "",
+                    "CUSTOM_EVERY_CODE_GITHUB_TOKEN": "bot-token",
+                },
+            ):
+                result = run_every_code_worker_once(
+                    record_store=store,
+                    host="Chris-Studio",
+                    workspace_root=temporary_root / "Developer",
+                    state_dir=temporary_root / "state",
+                    github_token_env="CUSTOM_EVERY_CODE_GITHUB_TOKEN",
+                    runner=runner,
+                )
+
+        self.assertEqual(result.status, "running")
+        self.assertTrue(any(call[:3] == ("gh", "api", "user") for call in runner.calls))
+        self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
+    def test_run_once_blocks_before_launch_on_claim_comment_actor_mismatch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "cbusillo"}):
+                result = run_every_code_worker_once(
+                    record_store=store,
+                    host="Chris-Studio",
+                    workspace_root=temporary_root / "Developer",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(record.state, "blocked")
+        self.assertIn("GitHub actor mismatch", record.error_message)
+        self.assertFalse(any(call[1] == "new-session" for call in runner.calls))
 
     def test_finish_marks_running_request_done(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3145,6 +3269,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 workspace_root=temporary_root / "Developer",
                 worktree_state_dir=temporary_root / "worktrees",
                 repository="cbusillo/code",
+                github_token_env="CUSTOM_EVERY_CODE_GITHUB_TOKEN",
+                github_actor_env="CUSTOM_EVERY_CODE_GITHUB_ACTOR",
                 interval_seconds=15,
             )
 
@@ -3155,6 +3281,10 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("postgres://example", spec.command)
         self.assertIn("--service-url", spec.command)
         self.assertIn("https://launchplane.example", spec.command)
+        self.assertIn("--github-token-env", spec.command)
+        self.assertIn("CUSTOM_EVERY_CODE_GITHUB_TOKEN", spec.command)
+        self.assertIn("--github-actor-env", spec.command)
+        self.assertIn("CUSTOM_EVERY_CODE_GITHUB_ACTOR", spec.command)
         self.assertIn("--worktree-state-dir", spec.command)
         self.assertIn(str((temporary_root / "worktrees").resolve()), spec.command)
         self.assertIn("cbusillo/code", spec.command)

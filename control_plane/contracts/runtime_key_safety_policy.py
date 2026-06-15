@@ -1,5 +1,6 @@
 import hashlib
 import json
+import string
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -39,6 +40,32 @@ class RuntimeKeySafetyTarget(BaseModel):
         return self
 
 
+class RuntimeSecretSafetyTargetScope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: str
+    instances: tuple[str, ...] = ()
+    instance_patterns: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_target_scope(self) -> "RuntimeSecretSafetyTargetScope":
+        context = self.context.strip()
+        if not context:
+            raise ValueError("runtime secret safety target scope requires context")
+        self.context = context
+        self.instances = _normalize_unique_values(
+            self.instances,
+            "runtime secret safety target scope instances values must be non-empty",
+        )
+        self.instance_patterns = _normalize_unique_values(
+            self.instance_patterns,
+            "runtime secret safety target scope instance_patterns values must be non-empty",
+        )
+        for pattern in self.instance_patterns:
+            _validate_instance_pattern(pattern, "target scope instance_patterns")
+        return self
+
+
 class RuntimeSecretSafetyRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -46,6 +73,8 @@ class RuntimeSecretSafetyRule(BaseModel):
     secret_class: RuntimeSecretClass
     allowed_contexts: tuple[str, ...] = ()
     allowed_instances: tuple[str, ...] = ()
+    allowed_instance_patterns: tuple[str, ...] = ()
+    allowed_targets: tuple[RuntimeSecretSafetyTargetScope, ...] = ()
     description: str = ""
 
     @model_validator(mode="after")
@@ -62,6 +91,12 @@ class RuntimeSecretSafetyRule(BaseModel):
             self.allowed_instances,
             "runtime secret safety allowed_instances values must be non-empty",
         )
+        self.allowed_instance_patterns = _normalize_unique_values(
+            self.allowed_instance_patterns,
+            "runtime secret safety allowed_instance_patterns values must be non-empty",
+        )
+        for pattern in self.allowed_instance_patterns:
+            _validate_instance_pattern(pattern, "allowed_instance_patterns")
         self.description = self.description.strip()
         return self
 
@@ -160,3 +195,16 @@ def _normalize_unique_values(values: tuple[str, ...], empty_message: str) -> tup
         if value not in normalized:
             normalized.append(value)
     return tuple(normalized)
+
+
+def _validate_instance_pattern(pattern: str, field_name: str) -> None:
+    if any(character in pattern for character in ("/", "\\")):
+        raise ValueError(
+            f"runtime secret safety {field_name} cannot contain path separators"
+        )
+    if not any(character not in "*?[]!" for character in pattern):
+        raise ValueError(
+            f"runtime secret safety {field_name} must contain a literal character"
+        )
+    if any(character in string.whitespace for character in pattern):
+        raise ValueError(f"runtime secret safety {field_name} cannot contain whitespace")

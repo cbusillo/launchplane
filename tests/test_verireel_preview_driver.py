@@ -12,6 +12,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretClass,
     RuntimeSecretSafetyRule,
+    RuntimeSecretSafetyTargetScope,
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.dokploy import DokployTargetDefinition
@@ -88,6 +89,57 @@ def _runtime_policy(
                 binding_key="BETTER_AUTH_SECRET",
                 secret_class=secret_class,
                 allowed_contexts=("verireel-testing",),
+            ),
+        ),
+    )
+
+
+def _verireel_preview_runtime_policy() -> RuntimeKeySafetyPolicyRecord:
+    return RuntimeKeySafetyPolicyRecord(
+        record_id="runtime-key-safety-policy-verireel-preview-test",
+        status="active",
+        source="test",
+        updated_at="2026-05-05T22:15:00Z",
+        rules=(
+            RuntimeSecretSafetyRule(
+                binding_key="POSTGRES_PASSWORD",
+                secret_class="shared_safe",
+                allowed_targets=(
+                    RuntimeSecretSafetyTargetScope(
+                        context="verireel-testing",
+                        instance_patterns=("pr-*",),
+                    ),
+                ),
+            ),
+            RuntimeSecretSafetyRule(
+                binding_key="BETTER_AUTH_SECRET",
+                secret_class="shared_safe",
+                allowed_targets=(
+                    RuntimeSecretSafetyTargetScope(
+                        context="verireel-testing",
+                        instance_patterns=("pr-*",),
+                    ),
+                ),
+            ),
+            RuntimeSecretSafetyRule(
+                binding_key="VERIREEL_SECRETS_MASTER_KEY",
+                secret_class="shared_safe",
+                allowed_targets=(
+                    RuntimeSecretSafetyTargetScope(
+                        context="verireel-testing",
+                        instance_patterns=("pr-*",),
+                    ),
+                ),
+            ),
+            RuntimeSecretSafetyRule(
+                binding_key="VERIREEL_CRON_SECRET",
+                secret_class="shared_safe",
+                allowed_targets=(
+                    RuntimeSecretSafetyTargetScope(
+                        context="verireel-testing",
+                        instance_patterns=("pr-*",),
+                    ),
+                ),
             ),
         ),
     )
@@ -307,6 +359,31 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
                 "BETTER_AUTH_SECRET": "auth-secret",
                 "NEXT_PUBLIC_SITE_URL": "https://testing.example",
+            },
+            request=_refresh_request(),
+        )
+
+    def test_verireel_preview_runtime_key_safety_allows_pr_pattern_for_shared_template_secrets(
+        self,
+    ) -> None:
+        store = _RuntimeKeySafetyStore(
+            policies=(_verireel_preview_runtime_policy(),),
+            bindings=(
+                _runtime_binding("POSTGRES_PASSWORD"),
+                _runtime_binding("BETTER_AUTH_SECRET"),
+                _runtime_binding("VERIREEL_SECRETS_MASTER_KEY"),
+                _runtime_binding("VERIREEL_CRON_SECRET"),
+            ),
+        )
+
+        _enforce_verireel_preview_runtime_key_safety(
+            record_store=store,
+            template_target=_template_target(),
+            template_env_map={
+                "POSTGRES_PASSWORD": "database-password",
+                "BETTER_AUTH_SECRET": "auth-secret",
+                "VERIREEL_SECRETS_MASTER_KEY": "master-key",
+                "VERIREEL_CRON_SECRET": "cron-secret",
             },
             request=_refresh_request(),
         )

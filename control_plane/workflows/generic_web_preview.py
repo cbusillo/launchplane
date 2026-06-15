@@ -907,7 +907,7 @@ def _wait_for_preview_health(
     preview_url: str,
     health_path: str,
     timeout_seconds: int,
-    expected_runtime_identity: RuntimeIdentity | None,
+    expected_runtime_identity: RuntimeIdentity | None = None,
 ) -> None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
@@ -919,6 +919,7 @@ def _wait_for_preview_health(
             "Cache-Control": "no-store",
         },
     )
+    last_detail = "timeout"
     while deadline > 0:
         try:
             with urlopen(request, timeout=min(15, deadline)) as response:
@@ -927,25 +928,32 @@ def _wait_for_preview_health(
                 if not body.strip():
                     if expected_runtime_identity is None:
                         return
+                    last_detail = "health endpoint returned an empty response"
                 else:
                     try:
                         payload = json.loads(body)
                     except json.JSONDecodeError:
                         if expected_runtime_identity is None:
                             return
+                        last_detail = "health endpoint did not return parseable JSON"
                     else:
-                        if payload.get("ok") is not False:
-                            if expected_runtime_identity is not None:
-                                status, _, _ = health_payload_runtime_identity_status(
-                                    expected=expected_runtime_identity,
-                                    payload=payload,
-                                    json_parse_failed=False,
-                                )
-                                if status == "match":
-                                    return
-                                # The app is up, but it has not yet proven the expected identity.
-                            else:
+                        if not isinstance(payload, dict):
+                            if expected_runtime_identity is None:
                                 return
+                            last_detail = "health endpoint returned non-object JSON"
+                        elif payload.get("ok") is False:
+                            last_detail = "health endpoint reported ok=false"
+                        elif expected_runtime_identity is None:
+                            return
+                        else:
+                            status, detail, _observed = health_payload_runtime_identity_status(
+                                expected=expected_runtime_identity,
+                                payload=payload,
+                                json_parse_failed=False,
+                            )
+                            if status == "match":
+                                return
+                            last_detail = detail
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             if "dokploy dead host" in body.lower():
@@ -958,7 +966,9 @@ def _wait_for_preview_health(
         sleep_seconds = min(5, deadline)
         time.sleep(sleep_seconds)
         deadline -= sleep_seconds
-    raise click.ClickException(f"Timed out waiting for {health_url} to report healthy.")
+    raise click.ClickException(
+        f"Timed out waiting for {health_url} to report healthy: {last_detail}."
+    )
 
 
 def evaluate_generic_web_preview_readiness(

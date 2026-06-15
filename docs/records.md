@@ -390,6 +390,26 @@ skipped, or failed status plus provider-safe external ids or URLs. Delivery
 attempts are the idempotency boundary for notifications, while incident records
 remain the source of truth for active public-ingress state.
 
+## Every Code Notification Records
+
+Every Code notification policy records are DB-backed Launchplane records under
+`launchplane_every_code_notification_policies`. They select enabled
+destinations for Every Code operator events, currently `work_request_blocked`,
+optionally scoped by repository. Policies store routing intent and managed
+secret references only; they must not store Discord webhook URLs or real
+operator destination values as source, workflow defaults, or checked-in config.
+
+Every Code notification attempt records are delivery evidence under
+`launchplane_every_code_notification_attempts`. Each attempt is keyed by the
+work-request id, event, policy, and destination. Attempts record pending,
+delivered, skipped, or failed status plus a bounded, provider-safe action or
+error. Launchplane writes a pending attempt before calling an external Discord
+webhook, then updates it after delivery returns, so retries have durable dispatch
+evidence instead of blindly sending duplicate notifications. When a worker
+reports a request as `blocked`, Launchplane writes the terminal work request
+first and then records each notification attempt so bot-auth or Discord delivery
+failures remain inspectable even when no Every Code session starts.
+
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
 an issue-backed approval URL, the destructive confirmation phrase,
@@ -588,6 +608,11 @@ state/
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
   inspect the original selector intent, but `addon_sources` remains the exact
   SHA-backed release truth used for tuple minting and deploy execution.
+- Odoo stable target replacement also treats artifact `odoo_install_modules` as
+  required-module availability evidence. Managed Odoo artifacts must declare
+  Launchplane-required modules such as `launchplane_settings` and
+  `disable_odoo_online`; deployment fails closed before provider mutation when
+  that evidence is absent.
 - Artifact manifests may carry `build_provenance` metadata for Odoo runtime and
   devtools base images plus build tools such as `odoo-devkit`. That provenance
   is artifact evidence, not addon ownership: `odoo-docker`, `odoo-devkit`,
@@ -712,6 +737,11 @@ state/
   fails closed when no active policy record exists or when a required binding is
   missing, disabled, ambiguous, unclassified, or outside the allowed
   context/instance.
+- Rules may restrict stable scope with exact `allowed_contexts` and
+  `allowed_instances` values. Dynamic preview lanes should use paired
+  `allowed_targets` entries with an exact context and explicit
+  `instance_patterns` such as `pr-*`, so a preview pattern never broadens a rule
+  to a different product or stable context.
 
 ## Launchplane Preview Record
 
