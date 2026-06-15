@@ -6,6 +6,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
+from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 
@@ -15,7 +19,8 @@ PublicIngressIncidentEvent = Literal["opened", "updated", "resolved"]
 PublicIngressNotificationDestinationKind = Literal["github_issue", "email", "discord"]
 PublicIngressNotificationStatus = Literal["enabled", "disabled"]
 PublicIngressNotificationDeliveryStatus = Literal["delivered", "skipped", "failed"]
-PublicIngressTargetKind = Literal["base_url", "health_url"]
+PublicIngressHealthCheckKind = Literal["public_http", "private_http", "provider"]
+PublicIngressTargetKind = Literal["base_url", "health_url", "private_health_url", "provider"]
 PublicIngressFailureCode = Literal[
     "connection_timeout",
     "dns_failure",
@@ -23,6 +28,7 @@ PublicIngressFailureCode = Literal[
     "http_error",
     "invalid_url",
     "private_url",
+    "provider_check_unavailable",
     "redirect_loop",
     "self_redirect",
     "tls_failure",
@@ -72,6 +78,8 @@ class PublicIngressObservationRecord(BaseModel):
     driver_id: str = ""
     context: str
     instance: str
+    check_name: str = "public-ingress"
+    check_kind: PublicIngressHealthCheckKind = "public_http"
     observed_at: str
     status: PublicIngressObservationStatus
     failure_code: PublicIngressFailureCode | None = None
@@ -98,6 +106,9 @@ class PublicIngressObservationRecord(BaseModel):
         )
         self.repository = self.repository.strip()
         self.driver_id = self.driver_id.strip()
+        self.check_name = _required_text(
+            self.check_name, "public ingress observation requires check_name"
+        )
         self.base_url = self.base_url.strip()
         self.health_url = self.health_url.strip()
         self.notification_key = self.notification_key.strip()
@@ -129,6 +140,8 @@ class PublicIngressIncidentRecord(BaseModel):
     driver_id: str = ""
     context: str
     instance: str
+    check_name: str = "public-ingress"
+    check_kind: PublicIngressHealthCheckKind = "public_http"
     status: PublicIngressIncidentStatus
     opened_at: str
     opened_observation_id: str
@@ -164,6 +177,9 @@ class PublicIngressIncidentRecord(BaseModel):
         )
         self.repository = self.repository.strip()
         self.driver_id = self.driver_id.strip()
+        self.check_name = _required_text(
+            self.check_name, "public ingress incident requires check_name"
+        )
         self.resolved_at = self.resolved_at.strip()
         self.resolved_observation_id = self.resolved_observation_id.strip()
         self.summary = _required_text(self.summary, "public ingress incident requires summary")
@@ -253,6 +269,8 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
     product: str = ""
     context: str = ""
     instance: str = ""
+    check_name: str = ""
+    check_kind: PublicIngressHealthCheckKind | Literal[""] = ""
     status: PublicIngressNotificationStatus = "enabled"
     destinations: tuple[PublicIngressNotificationDestination, ...] = ()
     created_at: str
@@ -267,6 +285,7 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
         self.product = self.product.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
+        self.check_name = self.check_name.strip()
         self.created_at = _required_text(
             self.created_at, "public ingress notification policy requires created_at"
         )
@@ -283,6 +302,14 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
             raise ValueError(
                 "public ingress notification policy with instance scope requires context"
             )
+        if self.check_name and not self.instance:
+            raise ValueError(
+                "public ingress notification policy with check_name scope requires instance"
+            )
+        if self.check_kind and not (self.context and self.instance):
+            raise ValueError(
+                "public ingress notification policy with check_kind scope requires lane scope"
+            )
         return self
 
     def matches(self, incident: PublicIngressIncidentRecord) -> bool:
@@ -290,6 +317,12 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
             (not self.product or self.product == incident.product)
             and (not self.context or self.context == incident.context)
             and (not self.instance or self.instance == incident.instance)
+            and (
+                not self.check_name
+                or canonical_health_check_record_token(self.check_name)
+                == canonical_health_check_record_token(incident.check_name)
+            )
+            and (not self.check_kind or self.check_kind == incident.check_kind)
         )
 
 
@@ -344,11 +377,12 @@ class PublicIngressNotificationAttemptRecord(BaseModel):
 
 
 def build_public_ingress_observation_id(
-    *, product: str, context: str, instance: str, observed_at: str
+    *, product: str, context: str, instance: str, observed_at: str, check_name: str = ""
 ) -> str:
+    check_token = _check_record_token(check_name)
     return "-".join(
         _record_token(value)
-        for value in ("public-ingress", product, context, instance, observed_at)
+        for value in ("public-ingress", product, context, instance, check_token, observed_at)
         if _record_token(value)
     )
 
@@ -363,10 +397,13 @@ def build_public_ingress_incident_id(
     )
 
 
-def build_public_ingress_lane_incident_id(*, product: str, context: str, instance: str) -> str:
+def build_public_ingress_lane_incident_id(
+    *, product: str, context: str, instance: str, check_name: str = ""
+) -> str:
+    check_token = _check_record_token(check_name)
     return "-".join(
         _record_token(value)
-        for value in ("public-ingress-incident", product, context, instance)
+        for value in ("public-ingress-incident", product, context, instance, check_token)
         if _record_token(value)
     )
 
@@ -402,9 +439,13 @@ def build_public_ingress_notification_attempt_id(
 
 
 def _record_token(value: str) -> str:
-    return "".join(
-        character if character.isalnum() else "-" for character in value.strip().lower()
-    ).strip("-")
+    return health_check_record_token(value)
+
+
+def _check_record_token(check_name: str) -> str:
+    # Preserve legacy public-ingress observation and incident ids for the default
+    # public HTTP check while still separating every explicitly named non-default check.
+    return canonical_health_check_record_token(check_name)
 
 
 def _required_text(value: str, message: str) -> str:

@@ -54,6 +54,12 @@ from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLife
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
+from control_plane.contracts.product_health_monitoring_migration import (
+    migrate_product_profile_health_monitoring_payload,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
@@ -782,6 +788,8 @@ class FilesystemRecordStore:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         records = [
@@ -793,6 +801,12 @@ class FilesystemRecordStore:
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(record.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or record.check_kind == check_kind)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
         if limit is not None:
@@ -808,6 +822,8 @@ class FilesystemRecordStore:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
@@ -820,6 +836,12 @@ class FilesystemRecordStore:
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(record.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or record.check_kind == check_kind)
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.opened_at, record.incident_id), reverse=True)
@@ -890,10 +912,8 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        return LaunchplaneProductProfileRecord.model_validate(
-            self._read_model(
-                LaunchplaneProductProfileRecord, "launchplane_product_profiles", product
-            ).model_dump(mode="json")
+        return self._read_product_profile_record_path(
+            self._record_path("launchplane_product_profiles", product)
         )
 
     def list_product_profile_records(
@@ -901,15 +921,30 @@ class FilesystemRecordStore:
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        records = [
-            record
-            for record in self._list_models(
-                LaunchplaneProductProfileRecord, "launchplane_product_profiles"
-            )
-            if not driver_id or record.driver_id == driver_id
-        ]
+        record_dir = self._record_dir("launchplane_product_profiles")
+        records: list[LaunchplaneProductProfileRecord] = []
+        if record_dir.exists():
+            for record_path in sorted(record_dir.glob("*.json")):
+                record = self._read_product_profile_record_path(record_path)
+                if not driver_id or record.driver_id == driver_id:
+                    records.append(record)
         records.sort(key=lambda record: record.product)
         return tuple(records)
+
+    def _read_product_profile_record_path(
+        self, record_path: Path
+    ) -> LaunchplaneProductProfileRecord:
+        payload = json.loads(record_path.read_text(encoding="utf-8"))
+        migrated_payload = migrate_product_profile_health_monitoring_payload(payload)
+        record = LaunchplaneProductProfileRecord.model_validate(migrated_payload)
+        if migrated_payload != payload:
+            record_path.write_text(
+                json.dumps(
+                    record.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True
+                ),
+                encoding="utf-8",
+            )
+        return record
 
     def list_authz_policy_records(
         self,

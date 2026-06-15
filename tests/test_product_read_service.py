@@ -166,9 +166,11 @@ class _ProductReadStore:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
-        _ = (self, product, context_name, instance_name, limit)
+        _ = (self, product, context_name, instance_name, check_name, check_kind, limit)
         return ()
 
     def list_public_ingress_incident_records(
@@ -177,10 +179,12 @@ class _ProductReadStore:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
-        _ = (self, product, context_name, instance_name, status, limit)
+        _ = (self, product, context_name, instance_name, check_name, check_kind, status, limit)
         return ()
 
     def list_runtime_environment_records(

@@ -276,20 +276,22 @@ topology from records.
 Grant requests return only authz policy record metadata and rule counts; they do
 not echo workflow refs, human logins, or the full policy body.
 
-Public ingress monitoring is a Launchplane-owned synthetic check for every
-public generic-web stable lane, including drivers that inherit generic-web
-behavior. The `Public Ingress Monitor` workflow owns both the recurring schedule
-and manual operator reruns, so its GitHub OIDC identity stays scoped only to
+Lane health monitoring is Launchplane-owned synthetic monitoring for
+generic-web stable lanes, including drivers that inherit generic-web behavior.
+The `Public Ingress Monitor` workflow owns both the recurring schedule and
+manual operator reruns, so its GitHub OIDC identity stays scoped only to
 `public_ingress_monitor.run_once`. Both paths call
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
-authorized in the Launchplane service context. Monitoring is default-on for
-lanes with public `base_url` or `health_url`; disable it per lane only for
-non-public or intentionally unreachable endpoints. Observations are sensor
-evidence; public-ingress incident records are the active operator lifecycle when
-a lane fails and later recovers. Notification routing is a separate
-service-backed policy and delivery concern, not lane-owned text config. The
-initial notification destinations are GitHub issues, email, and Discord; each is
-selected by DB-backed policy and evidenced by delivery-attempt records.
+authorized in the Launchplane service context. Lanes opt in by declaring
+`health_monitoring.checks[]`: `public_http` checks validate public reachability,
+`private_http` checks monitor an explicit internal URL, and `provider` checks
+fail closed until a provider-specific monitor is wired. Observations are sensor
+evidence; incident records are keyed by product, lane, and health-check name so
+public, private, and provider failures do not overwrite each other.
+Notification routing is a separate service-backed policy and delivery concern,
+not lane-owned text config. The initial notification destinations are GitHub
+issues, email, and Discord; each is selected by DB-backed policy and evidenced
+by delivery-attempt records.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped

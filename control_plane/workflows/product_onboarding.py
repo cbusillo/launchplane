@@ -99,7 +99,7 @@ def build_product_profile_record(
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
                 odoo_prelaunch_rebuild=lane.odoo_prelaunch_rebuild,
                 odoo_data_policy=lane.odoo_data_policy,
-                public_ingress_monitoring=lane.public_ingress_monitoring,
+                health_monitoring=lane.health_monitoring,
             )
             for lane in manifest.lanes
         ),
@@ -112,7 +112,9 @@ def build_product_profile_record(
     )
 
 
-def _lane_health_url(*, manifest: ProductOnboardingManifest, lane: ProductOnboardingLaneManifest) -> str:
+def _lane_health_url(
+    *, manifest: ProductOnboardingManifest, lane: ProductOnboardingLaneManifest
+) -> str:
     health_url = lane.health_url.strip()
     if health_url:
         return health_url

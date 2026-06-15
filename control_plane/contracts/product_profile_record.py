@@ -2,6 +2,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
+from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+
 
 PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL = "launchplane-preview"
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
@@ -146,16 +151,62 @@ class ProductOdooLaneDataPolicy(BaseModel):
         return source in self.allowed_rebuild_sources
 
 
-class ProductPublicIngressMonitoringPolicy(BaseModel):
+ProductLaneHealthCheckKind = Literal["public_http", "private_http", "provider"]
+
+
+class ProductLaneHealthCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    name: str
+    kind: ProductLaneHealthCheckKind = "public_http"
     enabled: bool = True
+    url: str = ""
     require_runtime_identity: bool = False
     alert_issue_url: str = ""
+    provider: str = ""
+    provider_check: str = ""
 
     @model_validator(mode="after")
-    def _validate_policy(self) -> "ProductPublicIngressMonitoringPolicy":
+    def _validate_check(self) -> "ProductLaneHealthCheck":
+        self.name = self.name.strip()
+        self.url = self.url.strip()
         self.alert_issue_url = self.alert_issue_url.strip()
+        self.provider = self.provider.strip()
+        self.provider_check = self.provider_check.strip()
+        if not self.name:
+            raise ValueError("product lane health check requires name")
+        if not health_check_record_token(self.name):
+            raise ValueError(
+                "product lane health check name must contain at least one alphanumeric character"
+            )
+        if self.kind != "public_http" and canonical_health_check_record_token(self.name) == "":
+            raise ValueError("non-public health checks cannot use the reserved public-ingress name")
+        if self.kind in {"public_http", "private_http"}:
+            if self.provider or self.provider_check:
+                raise ValueError("HTTP health checks cannot set provider fields")
+        elif self.kind == "provider":
+            if self.url:
+                raise ValueError("provider health checks cannot set url")
+            if not self.provider:
+                raise ValueError("provider health check requires provider")
+            if not self.provider_check:
+                raise ValueError("provider health check requires provider_check")
+        return self
+
+
+class ProductLaneHealthMonitoringPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    checks: tuple[ProductLaneHealthCheck, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ProductLaneHealthMonitoringPolicy":
+        tokens: list[str] = []
+        for check in self.checks:
+            token = canonical_health_check_record_token(check.name)
+            if token in tokens:
+                raise ValueError("product lane health check names must be unique")
+            tokens.append(token)
         return self
 
 
@@ -173,8 +224,8 @@ class ProductLaneProfile(BaseModel):
         default_factory=ProductOdooPrelaunchRebuildPolicy
     )
     odoo_data_policy: ProductOdooLaneDataPolicy = Field(default_factory=ProductOdooLaneDataPolicy)
-    public_ingress_monitoring: ProductPublicIngressMonitoringPolicy = Field(
-        default_factory=ProductPublicIngressMonitoringPolicy
+    health_monitoring: ProductLaneHealthMonitoringPolicy = Field(
+        default_factory=ProductLaneHealthMonitoringPolicy
     )
 
     @model_validator(mode="after")
@@ -418,16 +469,21 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
         for lane in self.lanes:
-            if not lane.public_ingress_monitoring.enabled:
-                continue
-            if lane.health_url.strip():
-                continue
-            if not lane.base_url.strip():
-                raise ValueError(
-                    "public ingress monitoring requires base_url or explicit health_url"
-                )
-            if not self.health_path:
-                raise ValueError(
-                    "public ingress monitoring for lane with base_url requires health_path"
-                )
+            for check in lane.health_monitoring.checks:
+                if not check.enabled:
+                    continue
+                if check.kind == "provider":
+                    continue
+                if check.url:
+                    continue
+                if check.kind == "private_http":
+                    raise ValueError("private HTTP health check requires url")
+                if lane.health_url.strip():
+                    continue
+                if not lane.base_url.strip():
+                    raise ValueError(
+                        "public HTTP health check requires base_url or explicit health_url"
+                    )
+                if not self.health_path:
+                    raise ValueError("public HTTP health check with base_url requires health_path")
         return self

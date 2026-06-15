@@ -17,8 +17,13 @@ import ssl
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheck,
+    ProductLaneHealthCheckKind,
     ProductLaneProfile,
 )
 from control_plane.contracts.public_ingress_monitoring import (
@@ -71,6 +76,8 @@ class PublicIngressMonitorStore(Protocol):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]: ...
 
@@ -84,6 +91,8 @@ class PublicIngressMonitorStore(Protocol):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]: ...
@@ -125,9 +134,13 @@ class PublicIngressMonitorTarget:
     instance: str
     base_url: str
     health_url: str
+    check_name: str
+    check_kind: ProductLaneHealthCheckKind
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
     alert_issue_url: str
+    provider: str = ""
+    provider_check: str = ""
 
 
 @dataclass(frozen=True)
@@ -210,30 +223,63 @@ def discover_public_ingress_monitor_targets(
         if not _profile_uses_generic_web(profile):
             continue
         for lane in profile.lanes:
-            if not lane.public_ingress_monitoring.enabled:
-                continue
-            base_url = lane.base_url.strip().rstrip("/")
-            health_url = _monitor_health_url(profile=profile, lane=lane, base_url=base_url)
-            if not (base_url or health_url):
-                continue
-            targets.append(
-                PublicIngressMonitorTarget(
-                    product=profile.product,
-                    repository=profile.repository,
-                    driver_id=profile.driver_id,
-                    context=lane.context,
-                    instance=lane.instance,
-                    base_url=base_url,
-                    health_url=health_url,
-                    expected_runtime_identity=_expected_runtime_identity(
-                        record_store=record_store,
-                        lane=lane,
-                    ),
-                    require_runtime_identity=lane.public_ingress_monitoring.require_runtime_identity,
-                    alert_issue_url=lane.public_ingress_monitoring.alert_issue_url,
+            for check in lane.health_monitoring.checks:
+                if not check.enabled:
+                    continue
+                target = _health_check_monitor_target(
+                    profile=profile,
+                    lane=lane,
+                    check=check,
+                    record_store=record_store,
                 )
-            )
+                if target is None:
+                    continue
+                targets.append(target)
     return tuple(targets)
+
+
+def _health_check_monitor_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    check: ProductLaneHealthCheck,
+    record_store: object,
+) -> PublicIngressMonitorTarget | None:
+    base_url = ""
+    health_url = ""
+    if check.kind == "public_http":
+        base_url = lane.base_url.strip().rstrip("/")
+        health_url = check.url.strip() or _monitor_health_url(
+            profile=profile, lane=lane, base_url=base_url
+        )
+        if not (base_url or health_url):
+            return None
+    elif check.kind == "private_http":
+        health_url = check.url.strip()
+        if not health_url:
+            return None
+    else:
+        if not (check.provider.strip() and check.provider_check.strip()):
+            return None
+    return PublicIngressMonitorTarget(
+        product=profile.product,
+        repository=profile.repository,
+        driver_id=profile.driver_id,
+        context=lane.context,
+        instance=lane.instance,
+        base_url=base_url,
+        health_url=health_url,
+        check_name=check.name,
+        check_kind=check.kind,
+        expected_runtime_identity=_expected_runtime_identity(
+            record_store=record_store,
+            lane=lane,
+        ),
+        require_runtime_identity=check.require_runtime_identity,
+        alert_issue_url=check.alert_issue_url,
+        provider=check.provider,
+        provider_check=check.provider_check,
+    )
 
 
 def run_public_ingress_monitor_once(
@@ -382,6 +428,7 @@ def reconcile_public_ingress_incident(
             product=record.product,
             context=record.context,
             instance=record.instance,
+            check_name=record.check_name,
         )
         open_incident = next(
             (incident for incident in open_incidents if incident.incident_id == incident_id), None
@@ -403,6 +450,8 @@ def reconcile_public_ingress_incident(
                 driver_id=record.driver_id,
                 context=record.context,
                 instance=record.instance,
+                check_name=record.check_name,
+                check_kind=record.check_kind,
                 status="open",
                 opened_at=record.observed_at,
                 opened_observation_id=record.record_id,
@@ -500,12 +549,15 @@ def check_public_ingress_target(
             context=target.context,
             instance=target.instance,
             observed_at=checked_at,
+            check_name=target.check_name,
         ),
         product=target.product,
         repository=target.repository,
         driver_id=target.driver_id,
         context=target.context,
         instance=target.instance,
+        check_name=target.check_name,
+        check_kind=target.check_kind,
         observed_at=checked_at,
         status=status,
         failure_code=failure_code,
@@ -546,7 +598,11 @@ def _check_url(
     target: PublicIngressMonitorTarget,
     http_get: HttpGet,
 ) -> PublicIngressTargetObservation:
-    public_url_error = _public_url_error(url)
+    if target.check_kind == "provider":
+        return _provider_check_unavailable(target=target)
+    public_url_error = None
+    if target.check_kind != "private_http":
+        public_url_error = _public_url_error(url)
     if public_url_error is not None:
         status: PublicIngressObservationStatus = (
             "skipped" if public_url_error == "private_url" else "fail"
@@ -565,7 +621,11 @@ def _check_url(
             target=target_kind,
             url=url,
             status="fail",
-            failure_code=("health_status_error" if target_kind == "health_url" else "http_error"),
+            failure_code=(
+                "health_status_error"
+                if target_kind in {"health_url", "private_health_url"}
+                else "http_error"
+            ),
             http_status=error.code,
             final_url=error.url or "",
             summary=f"HTTP {error.code}",
@@ -599,7 +659,11 @@ def _check_url(
             target=target_kind,
             url=url,
             status="fail",
-            failure_code=("health_status_error" if target_kind == "health_url" else "http_error"),
+            failure_code=(
+                "health_status_error"
+                if target_kind in {"health_url", "private_health_url"}
+                else "http_error"
+            ),
             http_status=observation.status_code,
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
@@ -608,7 +672,10 @@ def _check_url(
     runtime_status: RuntimeIdentityStatus = "unchecked"
     runtime_detail = ""
     observed_runtime_identity: RuntimeIdentity | None = None
-    if target_kind == "health_url" and target.expected_runtime_identity is not None:
+    if (
+        target_kind in {"health_url", "private_health_url"}
+        and target.expected_runtime_identity is not None
+    ):
         runtime_status, runtime_detail, observed_runtime_identity = (
             health_payload_runtime_identity_status(
                 expected=target.expected_runtime_identity,
@@ -643,7 +710,23 @@ def _check_url(
         runtime_identity_status=runtime_status,
         runtime_identity_detail=runtime_detail,
         observed_runtime_identity=observed_runtime_identity,
-        summary="Public ingress returned a successful response.",
+        summary=_successful_target_summary(target),
+    )
+
+
+def _provider_check_unavailable(
+    *,
+    target: PublicIngressMonitorTarget,
+) -> PublicIngressTargetObservation:
+    return PublicIngressTargetObservation(
+        target="provider",
+        url=f"provider://{target.provider}/{target.provider_check}",
+        status="fail",
+        failure_code="provider_check_unavailable",
+        summary=(
+            f"Provider health check {target.provider}/{target.provider_check} "
+            "is not wired to a monitor driver."
+        ),
     )
 
 
@@ -685,6 +768,8 @@ def _latest_observation(
         product=target.product,
         context_name=target.context,
         instance_name=target.instance,
+        check_name=target.check_name,
+        check_kind=target.check_kind,
         limit=1,
     )
     return next(iter(records), None)
@@ -697,6 +782,8 @@ def _open_incidents(
         product=record.product,
         context_name=record.context,
         instance_name=record.instance,
+        check_name=record.check_name,
+        check_kind=record.check_kind,
         status="open",
     )
     return tuple(
@@ -705,6 +792,9 @@ def _open_incidents(
         if incident.product == record.product
         and incident.context == record.context
         and incident.instance == record.instance
+        and canonical_health_check_record_token(incident.check_name)
+        == canonical_health_check_record_token(record.check_name)
+        and incident.check_kind == record.check_kind
     )
 
 
@@ -723,6 +813,13 @@ def _target_urls(
     target: PublicIngressMonitorTarget,
 ) -> tuple[tuple[PublicIngressTargetKind, str], ...]:
     urls: list[tuple[PublicIngressTargetKind, str]] = []
+    if target.check_kind == "provider":
+        urls.append(("provider", f"provider://{target.provider}/{target.provider_check}"))
+        return tuple(urls)
+    if target.check_kind == "private_http":
+        if target.health_url:
+            urls.append(("private_health_url", target.health_url))
+        return tuple(urls)
     if target.base_url:
         urls.append(("base_url", target.base_url))
     if target.health_url and target.health_url != target.base_url:
@@ -750,13 +847,27 @@ def _record_summary(
     observations: list[PublicIngressTargetObservation],
 ) -> str:
     if status == "pass":
-        return f"Public ingress is reachable for {target.product}/{target.instance}."
+        return f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
     failing = next(
         (observation for observation in observations if observation.status == "fail"), None
     )
     if failing is not None:
-        return f"Public ingress failed for {target.product}/{target.instance}: {failing.summary}"
-    return f"Public ingress monitoring skipped {target.product}/{target.instance}."
+        return f"{_check_label(target)} failed for {target.product}/{target.instance}: {failing.summary}"
+    return f"{_check_label(target)} monitoring skipped {target.product}/{target.instance}."
+
+
+def _check_label(target: PublicIngressMonitorTarget) -> str:
+    if target.check_kind == "private_http":
+        return "Private health check"
+    if target.check_kind == "provider":
+        return "Provider health check"
+    return "Public ingress"
+
+
+def _successful_target_summary(target: PublicIngressMonitorTarget) -> str:
+    if target.check_kind == "private_http":
+        return "Private health check returned a successful response."
+    return "Public ingress returned a successful response."
 
 
 def _public_url_error(url: str) -> PublicIngressFailureCode | None:
@@ -844,6 +955,20 @@ def _normalized_url(url: str) -> str:
 
 def _notification_key(target: PublicIngressMonitorTarget) -> str:
     return target.alert_issue_url or ""
+
+
+def public_http_health_check(
+    *,
+    name: str = "public-ingress",
+    require_runtime_identity: bool = False,
+    alert_issue_url: str = "",
+) -> ProductLaneHealthCheck:
+    return ProductLaneHealthCheck(
+        name=name,
+        kind="public_http",
+        require_runtime_identity=require_runtime_identity,
+        alert_issue_url=alert_issue_url,
+    )
 
 
 class PublicIngressNotificationDriverSet:

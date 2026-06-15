@@ -122,6 +122,8 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]: ...
 
@@ -131,6 +133,8 @@ class ProductEnvironmentReadModelStore(ProductReadModelStore, Protocol):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]: ...
