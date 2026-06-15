@@ -1304,6 +1304,22 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("deploy:local-operator-edge-endpoint-apply-grant", script_text)
         self.assertIn("deploy:local-operator-edge-endpoint-read-grant", script_text)
 
+    def test_deploy_authz_grants_include_private_health_endpoint_authority(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("private_health_endpoint.apply", script_text)
+        self.assertIn("private_health_endpoint.read", script_text)
+        self.assertIn(
+            "deploy:local-operator-private-health-endpoint-apply-grant",
+            script_text,
+        )
+        self.assertIn(
+            "deploy:local-operator-private-health-endpoint-read-grant",
+            script_text,
+        )
+
     def test_deploy_authz_grants_include_ingress_canary_route_authority(
         self,
     ) -> None:
@@ -1399,13 +1415,29 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             and "subjects" in grant
             and "token_labels" in grant
         ]
+        private_health_endpoint_grants = [
+            grant
+            for grant in grants
+            if grant["actions"][0].startswith("private_health_endpoint.")
+            and "subjects" in grant
+            and "token_labels" in grant
+        ]
         self.assertEqual(product_config_grants, [])
+        self.assertEqual(private_health_endpoint_grants, [])
         self.assertIn(
             "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator product_config.plan grant reconciliation.",
             result.stdout,
         )
         self.assertIn(
             "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator product_config.apply grant reconciliation.",
+            result.stdout,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator private_health_endpoint.read grant reconciliation.",
+            result.stdout,
+        )
+        self.assertIn(
+            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator private_health_endpoint.apply grant reconciliation.",
             result.stdout,
         )
 
@@ -1472,6 +1504,137 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("parse error", result.stderr)
 
+    def test_deploy_authz_grants_fail_on_malformed_private_health_endpoint_scopes(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                **OWNER_AUTHZ_ENV,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": "not-json",
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("parse error", result.stderr)
+
+    def test_deploy_authz_grants_reject_private_health_endpoint_wildcard_scopes(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *github.invalid/oidc*) printf \'{"value":"oidc-token"}\' ;;\n'
+                "  *)\n"
+                "    output_file=''\n"
+                '    while [ "$#" -gt 0 ]; do\n'
+                '      case "$1" in\n'
+                '        -o) shift; output_file="$1" ;;\n'
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                '    if [ -n "$output_file" ]; then\n'
+                '      printf \'{"status":"ok"}\' > "$output_file"\n'
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                **OWNER_AUTHZ_ENV,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": json.dumps(
+                    [{"product": "*", "context": "*"}]
+                ),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must use explicit product/context values",
+            result.stderr,
+        )
+
     def test_deploy_authz_grants_scope_configured_local_operator_product_config(
         self,
     ) -> None:
@@ -1533,6 +1696,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
                 "LAUNCHPLANE_INGRESS_CANARY_ROUTE_SCOPES_JSON": configured_scopes,
                 "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON": configured_scopes,
+                "LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON": configured_scopes,
                 "CAPTURED_GRANTS": str(captured_grants),
                 "CAPTURED_RESPONSE_FILE": str(captured_response_file),
                 "CAPTURED_BIN_DIR": str(captured_bin_directory),
@@ -1561,9 +1725,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             and "subjects" in grant
             and "token_labels" in grant
         ]
+        private_health_endpoint_grants = [
+            grant
+            for grant in grants
+            if grant["actions"][0].startswith("private_health_endpoint.")
+            and "subjects" in grant
+            and "token_labels" in grant
+        ]
         scoped_grants = {
             (grant["products"][0], grant["contexts"][0], grant["actions"][0])
-            for grant in product_config_grants
+            for grant in product_config_grants + private_health_endpoint_grants
         }
         canary_workflow_grants = [
             grant
@@ -1586,7 +1757,12 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             {
                 (product, context, action)
                 for product, context in expected_scopes
-                for action in ("product_config.plan", "product_config.apply")
+                for action in (
+                    "product_config.plan",
+                    "product_config.apply",
+                    "private_health_endpoint.read",
+                    "private_health_endpoint.apply",
+                )
             },
         )
         self.assertEqual(canary_scoped_grants, expected_scopes)
@@ -1595,6 +1771,14 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             self.assertNotEqual(grant["contexts"], ["*"])
             self.assertTrue(
                 grant["source_label"].startswith("deploy:local-operator-product-config-")
+            )
+        for grant in private_health_endpoint_grants:
+            self.assertNotEqual(grant["products"], ["*"])
+            self.assertNotEqual(grant["contexts"], ["*"])
+            self.assertTrue(
+                grant["source_label"].startswith(
+                    "deploy:local-operator-private-health-endpoint-"
+                )
             )
         for grant in canary_workflow_grants:
             self.assertNotEqual(grant["products"], ["*"])

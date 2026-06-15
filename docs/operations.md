@@ -265,6 +265,13 @@ operator-reviewed routine write access; use local-admin grants for rare broader
 repair authority instead of widening routine local-operator access. Checked-in
 catalogs are not deploy-time authority for these operator scopes.
 
+Private health endpoint grants follow the same scoped local-operator pattern.
+Set `LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON` to an array of
+product/context objects when the local operator should manage DB-backed private
+health endpoint records for those scopes. Scopes must use explicit product and
+context values; wildcard/glob scopes fail closed. Leave it unset to skip
+reconciliation, and do not place endpoint URLs in repo files.
+
 The `Ingress Route Canary Apply` workflow grant is also scoped by operator input,
 not a checked-in product catalog. By default the deploy reconciliation grants the
 workflow `ingress_route.apply` only for `launchplane`/`launchplane`. Set

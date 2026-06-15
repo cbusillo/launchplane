@@ -229,16 +229,33 @@ local_operator_product_config_scopes_json() {
 	printf '[]\n'
 }
 
-post_local_operator_product_config_grants() {
+local_operator_private_health_endpoint_scopes_json() {
+	if [ -n "${LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON:-}" ]; then
+		jq -c \
+			'if type != "array" then error("LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must be a JSON array") else . end
+       | map({product: (.product // ""), context: (.context // "")})
+       | map(select((.product | length) > 0 and (.context | length) > 0))
+       | if any(.[]; (.product | test("[\\*\\?\\[]")) or (.context | test("[\\*\\?\\[]"))) then error("LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON must use explicit product/context values") else . end
+       | unique_by(.product, .context)' \
+			<<<"${LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON}" ||
+			return 1
+		return 0
+	fi
+
+	printf '[]\n'
+}
+
+post_scoped_local_operator_grants() {
 	local action_name="$1"
 	local source_label_prefix="$2"
 	local idempotency_prefix="$3"
-	local scopes_json scope_count product_name context_name scope_suffix
+	local scopes_json="$4"
+	local missing_message="$5"
+	local scope_count product_name context_name scope_suffix
 
-	scopes_json="$(local_operator_product_config_scopes_json)"
 	scope_count="$(jq 'length' <<<"$scopes_json")"
 	if [ "$scope_count" = "0" ]; then
-		echo "LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
+		echo "$missing_message"
 		return 0
 	fi
 
@@ -254,6 +271,36 @@ post_local_operator_product_config_grants() {
 			"${source_label_prefix}-${scope_suffix}" \
 			"${idempotency_prefix}-${scope_suffix}"
 	done
+}
+
+post_local_operator_product_config_grants() {
+	local action_name="$1"
+	local source_label_prefix="$2"
+	local idempotency_prefix="$3"
+	local scopes_json
+
+	scopes_json="$(local_operator_product_config_scopes_json)"
+	post_scoped_local_operator_grants \
+		"$action_name" \
+		"$source_label_prefix" \
+		"$idempotency_prefix" \
+		"$scopes_json" \
+		"LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
+}
+
+post_local_operator_private_health_endpoint_grants() {
+	local action_name="$1"
+	local source_label_prefix="$2"
+	local idempotency_prefix="$3"
+	local scopes_json
+
+	scopes_json="$(local_operator_private_health_endpoint_scopes_json)"
+	post_scoped_local_operator_grants \
+		"$action_name" \
+		"$source_label_prefix" \
+		"$idempotency_prefix" \
+		"$scopes_json" \
+		"LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON is unset or empty; skipping local-operator ${action_name} grant reconciliation."
 }
 
 ingress_canary_route_scopes_json() {
@@ -645,6 +692,14 @@ post_local_owner_grant \
 	edge_endpoint.read \
 	deploy:local-operator-edge-endpoint-read-grant \
 	local-operator-edge-endpoint-read
+post_local_operator_private_health_endpoint_grants \
+	private_health_endpoint.read \
+	deploy:local-operator-private-health-endpoint-read-grant \
+	local-operator-private-health-endpoint-read
+post_local_operator_private_health_endpoint_grants \
+	private_health_endpoint.apply \
+	deploy:local-operator-private-health-endpoint-apply-grant \
+	local-operator-private-health-endpoint-apply
 post_local_owner_grant \
 	local-operator \
 	launchplane \
