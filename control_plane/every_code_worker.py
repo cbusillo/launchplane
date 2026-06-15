@@ -953,6 +953,11 @@ def build_every_code_session_command(
         "EVERY_CODE_REPOSITORY": record.repository,
         "EVERY_CODE_ISSUE_NUMBER": str(record.issue_number),
         "EVERY_CODE_ISSUE_URL": record.issue_url,
+        "AGENT_SESSION_ORIGIN": "every_code",
+        "AGENT_SESSION_REQUEST_ID": record.request_id,
+        "AGENT_SESSION_REPOSITORY": record.repository,
+        "AGENT_SESSION_ISSUE_NUMBER": str(record.issue_number),
+        "AGENT_SESSION_ISSUE_URL": record.issue_url,
     }
     env_shell = " ".join(
         f"{key}={shlex.quote(value)}" for key, value in session_env.items() if value

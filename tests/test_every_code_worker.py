@@ -935,6 +935,13 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("EVERY_CODE_REPOSITORY=cbusillo/code", command)
         self.assertIn("EVERY_CODE_ISSUE_NUMBER=123", command)
         self.assertIn("EVERY_CODE_ISSUE_URL=https://github.com/cbusillo/code/issues/123", command)
+        self.assertIn("AGENT_SESSION_ORIGIN=every_code", command)
+        self.assertIn("AGENT_SESSION_REQUEST_ID=every-code-cbusillo-code-123-test", command)
+        self.assertIn("AGENT_SESSION_REPOSITORY=cbusillo/code", command)
+        self.assertIn("AGENT_SESSION_ISSUE_NUMBER=123", command)
+        self.assertIn(
+            "AGENT_SESSION_ISSUE_URL=https://github.com/cbusillo/code/issues/123", command
+        )
 
     def test_preview_label_request_labels_eligible_pull_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
