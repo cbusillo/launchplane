@@ -73,6 +73,10 @@ from control_plane.contracts.preview_generation_record import PreviewGenerationR
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationPolicyRecord,
+)
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
@@ -409,6 +413,53 @@ class LaunchplanePreviewPrFeedbackRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewPrFeedbackNotificationPolicyRow(Base):
+    __tablename__ = "launchplane_preview_pr_feedback_notification_policies"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_pr_feedback_notify_policies_scope_idx",
+            "product",
+            "context",
+            "repository",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    policy_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewPrFeedbackNotificationAttemptRow(Base):
+    __tablename__ = "launchplane_preview_pr_feedback_notification_attempts"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_pr_feedback_notify_attempts_feedback_idx",
+            "feedback_id",
+            "event",
+            desc("attempted_at"),
+        ),
+        Index(
+            "launchplane_preview_pr_feedback_notify_attempts_destination_idx",
+            "destination_kind",
+            desc("attempted_at"),
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    feedback_id: Mapped[str] = mapped_column(String, nullable=False)
+    event: Mapped[str] = mapped_column(String, nullable=False)
+    destination_kind: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False)
+    attempted_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2898,6 +2949,102 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplanePreviewPrFeedbackRow.requested_at.desc(),
                 LaunchplanePreviewPrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_preview_pr_feedback_notification_policy_record(
+        self, record: PreviewPrFeedbackNotificationPolicyRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePreviewPrFeedbackNotificationPolicyRow(
+                policy_id=record.policy_id,
+                product=record.product,
+                context=record.context,
+                repository=record.repository,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_pr_feedback_notification_policy_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        repository: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationPolicyRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(
+                LaunchplanePreviewPrFeedbackNotificationPolicyRow.product.in_(("", product))
+            )
+        if context_name:
+            filters.append(
+                LaunchplanePreviewPrFeedbackNotificationPolicyRow.context.in_(("", context_name))
+            )
+        if repository:
+            filters.append(
+                LaunchplanePreviewPrFeedbackNotificationPolicyRow.repository.in_(("", repository))
+            )
+        if status:
+            filters.append(LaunchplanePreviewPrFeedbackNotificationPolicyRow.status == status)
+        return self._list_models(
+            model_type=PreviewPrFeedbackNotificationPolicyRecord,
+            orm_model=LaunchplanePreviewPrFeedbackNotificationPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewPrFeedbackNotificationPolicyRow.updated_at.desc(),
+                LaunchplanePreviewPrFeedbackNotificationPolicyRow.policy_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_preview_pr_feedback_notification_attempt_record(
+        self, record: PreviewPrFeedbackNotificationAttemptRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePreviewPrFeedbackNotificationAttemptRow(
+                attempt_id=record.attempt_id,
+                feedback_id=record.feedback_id,
+                event=record.event,
+                destination_kind=record.destination_kind,
+                delivery_status=record.delivery_status,
+                attempted_at=record.attempted_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_pr_feedback_notification_attempt_records(
+        self,
+        *,
+        feedback_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]:
+        filters: list[object] = []
+        if feedback_id:
+            filters.append(
+                LaunchplanePreviewPrFeedbackNotificationAttemptRow.feedback_id == feedback_id
+            )
+        if event:
+            filters.append(LaunchplanePreviewPrFeedbackNotificationAttemptRow.event == event)
+        if destination_kind:
+            filters.append(
+                LaunchplanePreviewPrFeedbackNotificationAttemptRow.destination_kind
+                == destination_kind
+            )
+        return self._list_models(
+            model_type=PreviewPrFeedbackNotificationAttemptRecord,
+            orm_model=LaunchplanePreviewPrFeedbackNotificationAttemptRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewPrFeedbackNotificationAttemptRow.attempted_at.desc(),
+                LaunchplanePreviewPrFeedbackNotificationAttemptRow.attempt_id.desc(),
             ),
             limit=limit,
         )

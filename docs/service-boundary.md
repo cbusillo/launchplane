@@ -749,6 +749,20 @@ Launchplane persists the blocked request first, then attempts configured Every
 Code notifications and records delivered or failed attempts under
 `GET /v1/every-code/notification-attempts`.
 
+Preview PR feedback notification policy writes use
+`POST /v1/previews/pr-feedback/notification-policies/apply`. The request
+carries `mode: "dry-run"` or `mode: "apply"` and a complete
+`PreviewPrFeedbackNotificationPolicyRecord`. Apply requires
+`preview_pr_feedback_notification_policy.apply`, DB-backed Launchplane storage,
+and an idempotency key when a caller wants retry-safe service semantics. Local
+operator calls must include a non-empty reason. Policies store product/context/
+repository-scoped routing intent and managed secret record ids only; Discord
+webhook URLs and operator destination values must stay in managed secrets, not
+source or checked-in workflow defaults. When `/v1/previews/pr-feedback` records
+skipped or failed PR comment delivery, Launchplane attempts configured preview
+PR feedback notifications and records delivered or failed attempts under
+`launchplane_preview_pr_feedback_notification_attempts`.
+
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the

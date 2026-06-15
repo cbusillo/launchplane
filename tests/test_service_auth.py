@@ -274,6 +274,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "product_config.apply": "mutation",
             "product_config.apply.secret": "secret_backed",
             "public_ingress_notification_policy.apply": "mutation",
+            "preview_pr_feedback_notification_policy.apply": "mutation",
             "generic_web_prod_promotion.execute": "prod",
             "preview_destroy.execute": "destructive",
             "secret_binding.apply": "secret_backed",
@@ -1149,9 +1150,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
     def test_actions_policy_matches_product_and_context_patterns(self) -> None:
         rule = GitHubActionsPolicyRule(
             repository="cbusillo/verireel",
-            workflow_refs=(
-                "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml@refs/heads/main",
-            ),
+            workflow_refs=("cbusillo/verireel/.github/workflows/cleanup-ghcr.yml@refs/heads/main",),
             event_names=("schedule",),
             products=("verireel",),
             contexts=("*",),
@@ -1162,8 +1161,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             rule.allows(
                 identity=_actions_identity(
                     workflow_ref=(
-                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml"
-                        "@refs/heads/main"
+                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml@refs/heads/main"
                     ),
                     event_name="schedule",
                     ref="refs/heads/main",
@@ -1178,8 +1176,7 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
             rule.allows(
                 identity=_actions_identity(
                     workflow_ref=(
-                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml"
-                        "@refs/heads/main"
+                        "cbusillo/verireel/.github/workflows/cleanup-ghcr.yml@refs/heads/main"
                     ),
                     event_name="schedule",
                     ref="refs/heads/main",

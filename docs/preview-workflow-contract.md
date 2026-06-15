@@ -149,7 +149,12 @@ or `manual_destroy_requested`.
 
 Preview feedback routes receive the status and primitive display facts.
 Launchplane derives the marker, rendered markdown, delivery behavior, and record
-id.
+id. If the feedback comment cannot be delivered, Launchplane records the skipped
+or failed feedback result and, when a preview PR feedback notification policy is
+configured, emits operator notification attempts from the control plane. Product
+workflows should not render fallback PR comments themselves; missing runtime
+GitHub credentials and GitHub API failures are Launchplane-owned operator
+signals.
 
 Use `cbusillo/launchplane/.github/actions/launchplane-request@main` for the OIDC
 transport whenever a product workflow only needs to send JSON to Launchplane.

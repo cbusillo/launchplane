@@ -42,6 +42,11 @@ from control_plane.contracts.merge_train_batch import (
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackRecord,
 )
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationDestination,
+    PreviewPrFeedbackNotificationPolicyRecord,
+)
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseEntry,
     MergeTrainStackCollapseMutation,
@@ -1067,6 +1072,58 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             )
             attempts = store.list_public_ingress_notification_attempt_records(
                 incident_id="incident-1",
+                destination_kind="discord",
+            )
+
+            self.assertTrue(policy_path.exists())
+            self.assertTrue(attempt_path.exists())
+            self.assertEqual([record.policy_id for record in policies], [policy.policy_id])
+            self.assertEqual([record.attempt_id for record in attempts], [attempt.attempt_id])
+
+    def test_write_and_list_preview_pr_feedback_notification_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            policy = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-policy-verireel",
+                product="verireel",
+                context="verireel-testing",
+                repository="every/verireel",
+                status="enabled",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord-ops",
+                        kind="discord",
+                        discord_webhook_secret="discord-webhook",
+                    ),
+                ),
+                created_at="2026-06-15T16:40:00Z",
+                updated_at="2026-06-15T16:40:00Z",
+                source="test",
+            )
+            attempt = PreviewPrFeedbackNotificationAttemptRecord(
+                attempt_id="preview-pr-feedback-notification-attempt-1",
+                feedback_id="preview-pr-feedback-verireel-testing-pr-42-20260615T164000Z",
+                event="delivery_skipped",
+                policy_id=policy.policy_id,
+                destination_id="discord-ops",
+                destination_kind="discord",
+                delivery_status="delivered",
+                attempted_at="2026-06-15T16:40:01Z",
+                action="posted_discord",
+            )
+
+            policy_path = store.write_preview_pr_feedback_notification_policy_record(policy)
+            attempt_path = store.write_preview_pr_feedback_notification_attempt_record(attempt)
+            policies = store.list_preview_pr_feedback_notification_policy_records(
+                product="verireel",
+                context_name="verireel-testing",
+                repository="every/verireel",
+                status="enabled",
+            )
+            attempts = store.list_preview_pr_feedback_notification_attempt_records(
+                feedback_id=attempt.feedback_id,
+                event="delivery_skipped",
                 destination_kind="discord",
             )
 

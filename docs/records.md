@@ -416,6 +416,26 @@ reports a request as `blocked`, Launchplane writes the terminal work request
 first and then records each notification attempt so bot-auth or Discord delivery
 failures remain inspectable even when no Every Code session starts.
 
+## Preview PR Feedback Notification Records
+
+Preview PR feedback notification policy records are DB-backed Launchplane
+records under `launchplane_preview_pr_feedback_notification_policies`. They
+select enabled destinations for skipped or failed `/v1/previews/pr-feedback`
+delivery by product, context, and repository. Policies store routing intent and
+managed secret record ids only; Discord webhook URLs and operator destination
+values must stay in managed secrets, not checked-in workflow defaults, examples,
+or service-host env.
+
+Preview PR feedback notification attempt records are delivery evidence under
+`launchplane_preview_pr_feedback_notification_attempts`. Each attempt is keyed
+by the preview feedback record, event, policy, and destination. Missing runtime
+GitHub credentials produce `delivery_skipped`; GitHub API failures produce
+`delivery_failed`. Attempts record pending, delivered, skipped, or failed status
+plus bounded provider-safe action/error text. Launchplane writes a pending
+attempt before calling Discord and updates it after the provider returns, so
+idempotent retries have durable dispatch evidence instead of silently re-sending
+or silently dropping operator feedback.
+
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
 an issue-backed approval URL, the destructive confirmation phrase,
