@@ -642,6 +642,8 @@ jobs:
           LAUNCHPLANE_SERVICE_URL: ${{ steps.service.outputs.service_url }}
           LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON: >-
             ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_PRODUCT_CONFIG_SCOPES_JSON }}
+          LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON: >-
+            ${{ vars.LAUNCHPLANE_PRIVATE_HEALTH_ENDPOINT_SCOPES_JSON }}
           LAUNCHPLANE_AUTHZ_GRANTS_JSON: >-
             ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
         run: bash scripts/deploy/ensure-authz-grants.sh
