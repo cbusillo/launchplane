@@ -92,6 +92,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
     PreviewPrFeedbackNotificationDestination,
     PreviewPrFeedbackNotificationPolicyRecord,
 )
@@ -2913,10 +2914,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 read_status_code, read_payload = _invoke_app(
                     app,
                     method="GET",
-                    path=(
-                        "/v1/private-health-endpoints/records/"
-                        "repairshopr-sync-prod-runtime"
-                    ),
+                    path=("/v1/private-health-endpoints/records/repairshopr-sync-prod-runtime"),
                     query_string="product=repairshopr-sync&context=repairshopr-sync&instance=prod",
                     authorization="Bearer local-operator-token",
                 )
@@ -4612,6 +4610,283 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["result"]["mode"], "apply")
         self.assertEqual(records, (policy_record,))
+
+    def test_preview_pr_feedback_notification_policy_dry_run_does_not_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-syo-dry-run",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:15:00Z",
+                updated_at="2026-06-15T17:15:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_preview_pr_feedback_notification_policy_records(
+                    product="sellyouroutboard",
+                    context_name="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(records, ())
+
+    def test_preview_pr_feedback_notification_policy_rejects_wildcard_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-global",
+                product="",
+                context="",
+                repository="",
+                status="enabled",
+                created_at="2026-06-15T17:20:00Z",
+                updated_at="2026-06-15T17:20:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notification-global"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_preview_pr_feedback_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_policy_scope")
+        self.assertEqual(records, ())
+
+    def test_preview_pr_feedback_notification_policy_rejects_mismatched_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-syo-denied",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:25:00Z",
+                updated_at="2026-06-15T17:25:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notification-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_pr_feedback_notification_policy_local_operator_requires_reason(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_policy(
+                    actions=("preview_pr_feedback_notification_policy.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-local-operator",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:30:00Z",
+                updated_at="2026-06-15T17:30:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            with patch.dict(os.environ, LOCAL_OPERATOR_AUTH_ENV, clear=True):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/pr-feedback/notification-policies/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "preview-pr-feedback-local-no-reason"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "reason_required")
 
     def test_every_code_blocked_status_posts_discord_notification(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -31834,6 +32109,69 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(len(sent_payloads), 1)
         self.assertEqual(attempts[0].delivery_status, "delivered")
         self.assertEqual(attempts[0].action, "posted_discord")
+
+    def test_preview_pr_feedback_notification_attempts_can_be_read(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(
+                    extra_actions=("preview_pr_feedback_notification_attempt.read",)
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            attempt_record = PreviewPrFeedbackNotificationAttemptRecord(
+                attempt_id="preview-pr-feedback-notification-feedback-1-delivery-skipped",
+                feedback_id="feedback-1",
+                event="delivery_skipped",
+                policy_id="preview-pr-feedback-notification-discord",
+                destination_id="discord",
+                destination_kind="discord",
+                delivery_status="delivered",
+                attempted_at="2026-06-15T17:35:00Z",
+                action="posted_discord",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_preview_pr_feedback_notification_attempt_record(attempt_record)
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/pr-feedback/notification-attempts",
+                query_string="feedback_id=feedback-1&event=delivery_skipped",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["feedback_id"], "feedback-1")
+        self.assertEqual(payload["event_filter"], "delivery_skipped")
+        self.assertEqual(payload["attempts"], [attempt_record.model_dump(mode="json")])
+
+    def test_preview_pr_feedback_notification_attempt_read_requires_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/pr-feedback/notification-attempts",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_preview_pr_feedback_notification_not_duplicated_on_idempotent_retry(
         self,

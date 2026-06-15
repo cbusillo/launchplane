@@ -1,7 +1,7 @@
 """add preview pr feedback notifications
 
 Revision ID: b6d8f0a2c4e6
-Revises: fa2c4e6f8a0b
+Revises: fb3d5e7a9c1b
 Create Date: 2026-06-15 00:00:00.000000+00:00
 """
 
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "b6d8f0a2c4e6"
-down_revision: str | None = "fa2c4e6f8a0b"
+down_revision: str | None = "fb3d5e7a9c1b"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

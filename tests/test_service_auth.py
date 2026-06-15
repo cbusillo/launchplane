@@ -269,6 +269,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         cases = {
             "product_environment.read": "read",
             "work_graph.rank": "read",
+            "preview_pr_feedback_notification_attempt.read": "read",
             "preview_pr_feedback.write": "safe_write",
             "every_code_work_request.rerun": "safe_write",
             "product_config.apply": "mutation",

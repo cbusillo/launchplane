@@ -4626,6 +4626,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_preview_gate.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "notification-attempts"]:
         return "every_code_notification_attempt.read", {}
+    if len(segments) == 4 and segments == [
+        "v1",
+        "previews",
+        "pr-feedback",
+        "notification-attempts",
+    ]:
+        return "preview_pr_feedback_notification_attempt.read", {}
     if len(segments) == 3 and segments == ["v1", "agent", "context"]:
         return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
@@ -9012,6 +9019,28 @@ def _every_code_read_payload(
             "destination_kind_filter": destination_kind_filter,
             "attempts": [record.model_dump(mode="json") for record in attempts],
         }
+    if path == "/v1/previews/pr-feedback/notification-attempts":
+        preview_notification_store = _preview_pr_feedback_notification_store(record_store)
+        if preview_notification_store is None:
+            raise ValueError("record store does not support preview PR feedback notifications")
+        feedback_id_filter = str((query.get("feedback_id") or [""])[0] or "").strip()
+        event_filter = str((query.get("event") or [""])[0] or "").strip()
+        destination_kind_filter = str((query.get("destination_kind") or [""])[0] or "").strip()
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        preview_attempts = (
+            preview_notification_store.list_preview_pr_feedback_notification_attempt_records(
+                feedback_id=feedback_id_filter,
+                event=event_filter,
+                destination_kind=destination_kind_filter,
+                limit=limit,
+            )
+        )
+        return {
+            "feedback_id": feedback_id_filter,
+            "event_filter": event_filter,
+            "destination_kind_filter": destination_kind_filter,
+            "attempts": [record.model_dump(mode="json") for record in preview_attempts],
+        }
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         record = every_code_store.read_every_code_work_request_record(segments[3])
         return {"request": record.model_dump(mode="json")}
@@ -11207,9 +11236,7 @@ def create_launchplane_service_app(
                         },
                     )
                 if action == "private_health_endpoint.read":
-                    private_endpoint_store = _private_health_endpoint_record_store(
-                        record_store
-                    )
+                    private_endpoint_store = _private_health_endpoint_record_store(record_store)
                     product = _query_string_value(query, "product")
                     context_name = _query_string_value(query, "context")
                     instance_name = _query_string_value(query, "instance")
@@ -11266,10 +11293,7 @@ def create_launchplane_service_app(
                         if (
                             private_endpoint_record.product != product
                             or private_endpoint_record.context != context_name
-                            or (
-                                instance_name
-                                and private_endpoint_record.instance != instance_name
-                            )
+                            or (instance_name and private_endpoint_record.instance != instance_name)
                         ):
                             return _not_found_response(
                                 start_response=start_response,
@@ -11865,6 +11889,35 @@ def create_launchplane_service_app(
                                     "code": "authorization_denied",
                                     "message": (
                                         "Workflow cannot read Every Code notification attempts."
+                                    ),
+                                },
+                            },
+                        )
+                    return _handle_every_code_work_request_read(
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
+                    )
+                if action == "preview_pr_feedback_notification_attempt.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": (
+                                        "Workflow cannot read preview PR feedback"
+                                        " notification attempts."
                                     ),
                                 },
                             },
@@ -14115,13 +14168,30 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                if (
+                    not notification_policy_request.policy.product
+                    or not notification_policy_request.policy.context
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_policy_scope",
+                                "message": (
+                                    "Preview PR feedback notification policy apply requires"
+                                    " explicit product and context."
+                                ),
+                            },
+                        },
+                    )
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_pr_feedback_notification_policy.apply",
-                    product=notification_policy_request.policy.product or "launchplane",
-                    context=(
-                        notification_policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT
-                    ),
+                    product=notification_policy_request.policy.product,
+                    context=notification_policy_request.policy.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -15762,7 +15832,9 @@ def create_launchplane_service_app(
                     request=edge_endpoint_request,
                 )
             elif path == _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE:
-                private_endpoint_request = PrivateHealthEndpointApplyEnvelope.model_validate(payload)
+                private_endpoint_request = PrivateHealthEndpointApplyEnvelope.model_validate(
+                    payload
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="private_health_endpoint.apply",
