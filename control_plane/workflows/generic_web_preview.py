@@ -953,6 +953,11 @@ def _wait_for_preview_health(
                             )
                             if status == "match":
                                 return
+                            if status == "mismatch":
+                                raise click.ClickException(
+                                    "Preview runtime identity did not match the expected "
+                                    f"deployment identity: {detail}."
+                                )
                             last_detail = detail
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
