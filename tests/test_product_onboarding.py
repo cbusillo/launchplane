@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Callable, cast
 import unittest
 
 from click import Command
@@ -2557,11 +2557,16 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ],
         }
 
-        migrated = migration.migrate_product_profile_health_monitoring_payload(payload)
+        migrate_payload = cast(
+            Callable[[object], object],
+            getattr(migration, "migrate_product_profile_health_monitoring_payload"),
+        )
+        migrated = cast(dict[str, object], migrate_payload(payload))
 
-        lanes = migrated["lanes"]
+        lanes = cast(list[dict[str, object]], migrated["lanes"])
+        first_lane_health_monitoring = cast(dict[str, object], lanes[0]["health_monitoring"])
         self.assertEqual(
-            lanes[0]["health_monitoring"]["checks"],
+            first_lane_health_monitoring["checks"],
             [
                 {
                     "name": "public-ingress",
