@@ -7,11 +7,15 @@ from urllib.request import Request
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
-    ProductPublicIngressMonitoringPolicy,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneHealthCheck,
 )
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
@@ -31,6 +35,20 @@ from control_plane.workflows.public_ingress_monitor import (
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
 )
+
+
+def _public_health_monitoring(
+    *, require_runtime_identity: bool = False, alert_issue_url: str = ""
+) -> ProductLaneHealthMonitoringPolicy:
+    return ProductLaneHealthMonitoringPolicy(
+        checks=(
+            ProductLaneHealthCheck(
+                name="public-ingress",
+                require_runtime_identity=require_runtime_identity,
+                alert_issue_url=alert_issue_url,
+            ),
+        )
+    )
 
 
 class _Store:
@@ -58,6 +76,8 @@ class _Store:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         records = [
@@ -66,6 +86,12 @@ class _Store:
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(record.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or record.check_kind == check_kind)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
         if limit is not None:
@@ -83,6 +109,8 @@ class _Store:
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
@@ -92,6 +120,12 @@ class _Store:
             if (not product or incident.product == product)
             and (not context_name or incident.context == context_name)
             and (not instance_name or incident.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(incident.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or incident.check_kind == check_kind)
             and (not status or incident.status == status)
         ]
         incidents.sort(
@@ -177,7 +211,7 @@ def _profile(
                 instance="prod",
                 context="example-site",
                 base_url="https://example.test",
-                public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(
+                health_monitoring=_public_health_monitoring(
                     alert_issue_url="https://github.com/cbusillo/launchplane/issues/929"
                 ),
             ),
@@ -283,7 +317,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             context="example-site",
             base_url="https://example.test/",
             health_url="HTTPS://EXAMPLE.TEST/cm-website/health/",
-            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=True),
+            health_monitoring=_public_health_monitoring(),
         )
         store = _Store(
             (
@@ -304,7 +338,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             context="example-site",
             base_url="https://example.test",
             health_url="https://internal.example.test/web/health",
-            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=True),
+            health_monitoring=_public_health_monitoring(),
         )
         store = _Store(
             (
@@ -324,7 +358,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             base_url="https://example.test",
-            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+            health_monitoring=ProductLaneHealthMonitoringPolicy(checks=()),
         )
         store = _Store((_profile(lane=lane),))
 
@@ -335,6 +369,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             base_url="https://localhost:3000",
+            health_monitoring=_public_health_monitoring(),
         )
         store = _Store((_profile(lane=lane),))
         requested_urls: list[str] = []
@@ -348,6 +383,103 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(result.skipped_count, 1)
         self.assertEqual(requested_urls, [])
         self.assertEqual(store.records[0].failure_code, "private_url")
+
+    def test_private_http_check_requests_private_health_url(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        url="http://10.0.0.5:8080/health",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        requested_urls: list[str] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:06:00Z",
+            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(requested_urls, ["http://10.0.0.5:8080/health"])
+        self.assertEqual(store.records[0].check_name, "private-runtime")
+        self.assertEqual(store.records[0].check_kind, "private_http")
+        self.assertEqual(store.records[0].targets[0].target, "private_health_url")
+
+    def test_provider_check_fails_closed_until_provider_monitor_is_wired(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="provider-target",
+                        kind="provider",
+                        provider="dokploy",
+                        provider_check="target-health",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        requested_urls: list[str] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:07:00Z",
+            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(requested_urls, [])
+        self.assertEqual(store.records[0].check_name, "provider-target")
+        self.assertEqual(store.records[0].check_kind, "provider")
+        self.assertEqual(store.records[0].failure_code, "provider_check_unavailable")
+        self.assertEqual(store.incidents[0].check_name, "provider-target")
+
+    def test_multiple_lane_checks_write_separate_records_and_incidents(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(name="public-ingress"),
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        url="http://10.0.0.5:8080/health",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:08:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=503,
+                final_url=url,
+                redirect_count=0,
+            ),
+        )
+
+        self.assertEqual(result.fail_count, 2)
+        self.assertEqual(len(store.records), 2)
+        self.assertEqual(len({record.record_id for record in store.records}), 2)
+        self.assertEqual(len(store.incidents), 2)
+        self.assertEqual(
+            {incident.check_name for incident in store.incidents},
+            {"public-ingress", "private-runtime"},
+        )
 
     def test_compares_runtime_identity_when_lane_evidence_exists(self) -> None:
         identity = _identity()
@@ -431,9 +563,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
             instance="prod",
             context="example-site",
             base_url="https://example.test",
-            public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(
-                require_runtime_identity=True
-            ),
+            health_monitoring=_public_health_monitoring(require_runtime_identity=True),
         )
         store = _Store((_profile(lane=lane),))
         store.lane_summaries[("example-site", "prod")] = LaunchplaneLaneSummary(
@@ -761,6 +891,97 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(github_calls[0][0], "create")
         self.assertEqual(email_subjects, ["[Launchplane] Public ingress opened: example-site/prod"])
         self.assertEqual(discord_posts[0][0], "https://discord.com/api/webhooks/test/webhook")
+
+    def test_notification_policies_can_scope_to_health_check_kind(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(name="public-ingress"),
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        url="http://10.0.0.5:8080/health",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        store.notification_policies.extend(
+            (
+                PublicIngressNotificationPolicyRecord(
+                    policy_id="public-health-notifications",
+                    product="example-site",
+                    context="example-site",
+                    instance="prod",
+                    check_kind="public_http",
+                    destinations=(
+                        PublicIngressNotificationDestination(
+                            destination_id="public-discord",
+                            kind="discord",
+                            discord_webhook_secret="public-discord-webhook",
+                        ),
+                    ),
+                    created_at="2026-05-29T12:00:00Z",
+                    updated_at="2026-05-29T12:00:00Z",
+                    source="test",
+                ),
+                PublicIngressNotificationPolicyRecord(
+                    policy_id="private-health-notifications",
+                    product="example-site",
+                    context="example-site",
+                    instance="prod",
+                    check_kind="private_http",
+                    destinations=(
+                        PublicIngressNotificationDestination(
+                            destination_id="private-discord",
+                            kind="discord",
+                            discord_webhook_secret="private-discord-webhook",
+                        ),
+                    ),
+                    created_at="2026-05-29T12:00:00Z",
+                    updated_at="2026-05-29T12:00:00Z",
+                    source="test",
+                ),
+            )
+        )
+        discord_posts: list[tuple[str, dict[str, object]]] = []
+        drivers = PublicIngressNotificationDriverSet(
+            discord_sender=lambda webhook_url, payload: discord_posts.append(
+                (webhook_url, payload)
+            ),
+            secret_resolver=lambda secret_name: {
+                "public-discord-webhook": "https://discord.com/api/webhooks/public/webhook",
+                "private-discord-webhook": "https://discord.com/api/webhooks/private/webhook",
+            }.get(secret_name, ""),
+        )
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:25:00Z",
+            http_get=lambda _url, _timeout: HttpObservation(
+                status_code=503,
+                final_url="https://example.test",
+                redirect_count=0,
+            ),
+            notification_drivers=drivers,
+        )
+
+        self.assertEqual(result.open_incident_count, 2)
+        self.assertEqual(result.delivery_attempt_count, 2)
+        self.assertEqual(
+            {attempt.destination_id for attempt in store.notification_attempts},
+            {"public-discord", "private-discord"},
+        )
+        self.assertEqual(
+            {post[0] for post in discord_posts},
+            {
+                "https://discord.com/api/webhooks/public/webhook",
+                "https://discord.com/api/webhooks/private/webhook",
+            },
+        )
 
     def test_policy_delivery_failures_are_recorded_per_destination(self) -> None:
         store = _Store((_profile(),))

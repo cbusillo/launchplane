@@ -921,9 +921,7 @@ def _merge_train_service_identity() -> GitHubActionsIdentity:
     )
 
 
-def _every_code_worker_policy(
-    *, extra_actions: tuple[str, ...] = ()
-) -> LaunchplaneAuthzPolicy:
+def _every_code_worker_policy(*, extra_actions: tuple[str, ...] = ()) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "github_actions": [
@@ -4743,21 +4741,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
             public_discord_url_error("http://169.254.169.254/latest/meta-data"),
             "private_url",
         )
-        self.assertEqual(
-            public_discord_url_error("http://224.0.0.1/hook"), "private_url"
-        )
-        self.assertEqual(
-            public_discord_url_error("http://0.0.0.0/hook"), "private_url"
-        )
+        self.assertEqual(public_discord_url_error("http://224.0.0.1/hook"), "private_url")
+        self.assertEqual(public_discord_url_error("http://0.0.0.0/hook"), "private_url")
         self.assertEqual(public_url_error("https://example.com/health"), "")
         self.assertEqual(public_url_error("https://93.184.216.34/health"), "")
         self.assertEqual(
             public_discord_url_error("https://93.184.216.34/api/webhooks/test/webhook"),
             "invalid_url",
         )
-        self.assertEqual(
-            public_discord_url_error("https://example.com/hook"), "invalid_url"
-        )
+        self.assertEqual(public_discord_url_error("https://example.com/hook"), "invalid_url")
         self.assertEqual(
             public_discord_url_error("https://discord.com/api/webhooks/test/webhook"),
             "",
@@ -14512,7 +14504,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["sellyouroutboard"],
         )
 
-    def test_product_profile_endpoint_rejects_inert_public_ingress_monitoring(
+    def test_product_profile_endpoint_rejects_inert_health_monitoring(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14544,6 +14536,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {
                     "instance": "testing",
                     "context": "sellyouroutboard-testing",
+                    "health_monitoring": {
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                    },
                 },
             )
 
@@ -14559,7 +14554,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertEqual(
             payload["error"]["message"],
-            "public ingress monitoring requires base_url or explicit health_url",
+            "public HTTP health check requires base_url or explicit health_url",
         )
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
@@ -28484,7 +28479,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         artifact_id="artifact-20260420-a1b2c3d4",
                         source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
                         image_reference="artifact-20260420-a1b2c3d4",
-                    )
+                    ),
                 )
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
@@ -28541,12 +28536,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "deployment_record_id": "deployment-20260420T153000Z-cm-testing",
                                 "artifact_id": "artifact-20260420-a1b2c3d4",
                                 "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
-                                "image_reference": "artifact-20260420-a1b2c3d4"
+                                "image_reference": "artifact-20260420-a1b2c3d4",
                             }
-                        }
+                        },
                     },
                 },
-                headers={"Idempotency-Key": "generic-stable-verification:cm:testing:health-payload"},
+                headers={
+                    "Idempotency-Key": "generic-stable-verification:cm:testing:health-payload"
+                },
             )
 
             deployment = store.read_deployment_record("deployment-20260420T153000Z-cm-testing")

@@ -18,6 +18,9 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
     ProductEnvironmentReadModelCapabilityError,
@@ -247,6 +250,8 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         records = [
@@ -255,6 +260,12 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(record.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or record.check_kind == check_kind)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
         if limit is not None:
@@ -267,6 +278,8 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
@@ -276,6 +289,12 @@ class _PublicIngressReadModelStore(_PreviewRecordStore):
             if (not product or incident.product == product)
             and (not context_name or incident.context == context_name)
             and (not instance_name or incident.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(incident.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or incident.check_kind == check_kind)
             and (not status or incident.status == status)
         ]
         incidents.sort(
@@ -301,6 +320,8 @@ class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         records = [
@@ -309,6 +330,12 @@ class _PublicIngressObservationsOnlyStore(_PreviewRecordStore):
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
             and (not instance_name or record.instance == instance_name)
+            and (
+                not check_name
+                or canonical_health_check_record_token(record.check_name)
+                == canonical_health_check_record_token(check_name)
+            )
+            and (not check_kind or record.check_kind == check_kind)
         ]
         records.sort(key=lambda record: (record.observed_at, record.record_id), reverse=True)
         if limit is not None:

@@ -256,15 +256,18 @@ derived from runtime-environment records, managed secret binding records, driver
 support, and trust metadata; expected config requirements do not store runtime
 values, managed secret IDs, secret plaintext, or ciphertext.
 
-Stable lanes inherit public-ingress synthetic monitoring by default when their
-product uses `generic-web` or a driver based on it. A lane with a public
-`base_url` or `health_url` is eligible unless its
-`public_ingress_monitoring.enabled` policy is set false. The monitor records
-HTTP reachability, redirect failures, private/internal URL skips, and runtime
-identity comparison when current lane inventory or deployment evidence provides
-an expected identity. Lane policy may carry an `alert_issue_url`; Launchplane
-uses that issue for fail/recover transition comments, not as runtime
-configuration authority.
+Stable lanes declare synthetic monitoring through `health_monitoring.checks[]`.
+Each check has a stable name and kind. `public_http` checks use an explicit URL
+or the lane `health_url`, or derive one from lane `base_url` plus product
+`health_path`. `private_http` checks require an explicit URL and skip public URL
+validation so internal service endpoints can be monitored without publishing an
+ingress route. `provider` checks record provider-health intent and fail closed
+until a provider-specific monitor implementation is wired. The monitor records
+HTTP reachability, redirect failures, private/internal URL skips for public
+checks, and runtime identity comparison when current lane inventory or
+deployment evidence provides an expected identity. Check policy may carry an
+`alert_issue_url`; Launchplane uses that issue for fail/recover transition
+comments, not as runtime configuration authority.
 
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
