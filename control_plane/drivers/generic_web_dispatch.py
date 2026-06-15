@@ -319,6 +319,34 @@ def _stable_verification_health_evidence(
     )
 
 
+def _validate_stable_verification_health_payload_identity(
+    *, request: GenericWebStableVerificationRequest, deployment_record: object
+) -> None:
+    if request.health_payload is None:
+        return
+    structured_health = structured_health_evidence_from_payload(request.health_payload)
+    if structured_health.status in {"fail", "malformed"}:
+        return
+    expected_runtime_identity = getattr(deployment_record, "runtime_identity", None)
+    if expected_runtime_identity is None:
+        raise click.ClickException(
+            "Generic web stable verification health payload cannot be verified because "
+            "the deployment record does not include an expected runtime identity."
+        )
+    runtime_identity_status, runtime_identity_detail, _observed_runtime_identity = (
+        health_payload_runtime_identity_status(
+            expected=expected_runtime_identity,
+            payload=request.health_payload,
+            json_parse_failed=False,
+        )
+    )
+    if runtime_identity_status != "match":
+        raise click.ClickException(
+            "Generic web stable verification health payload did not match the expected "
+            f"runtime identity: {runtime_identity_detail}"
+        )
+
+
 def _apply_generic_web_stable_verification_records(
     *,
     record_store: object,
@@ -337,6 +365,10 @@ def _apply_generic_web_stable_verification_records(
     if deployment_record.instance != request.instance:
         raise click.ClickException(f"{label} instance does not match deployment record instance.")
 
+    _validate_stable_verification_health_payload_identity(
+        request=request,
+        deployment_record=deployment_record,
+    )
     health_evidence = _stable_verification_health_evidence(
         request=request,
         deployment_record=deployment_record,
