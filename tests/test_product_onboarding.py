@@ -1,9 +1,10 @@
 import json
 import os
+import importlib.util
 from pathlib import Path
 import subprocess
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Callable, cast
 import unittest
 
 from click import Command
@@ -18,6 +19,14 @@ from control_plane.workflows.product_onboarding import apply_product_onboarding_
 
 
 CLI_MAIN = cast(Command, main)
+_HEALTH_MONITORING_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "control_plane"
+    / "storage"
+    / "migrations"
+    / "versions"
+    / "fa2c4e6f8a0b_migrate_lane_health_monitoring.py"
+)
 ODOO_RUNTIME_KEYS = (
     "ODOO_DB_NAME",
     "ODOO_DB_USER",
@@ -47,6 +56,17 @@ OWNER_AUTHZ_ENV = {
 }
 
 
+def _load_health_monitoring_migration() -> object:
+    spec = importlib.util.spec_from_file_location(
+        "launchplane_health_monitoring_migration", _HEALTH_MONITORING_MIGRATION_PATH
+    )
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
@@ -65,8 +85,14 @@ def _manifest_payload() -> dict[str, object]:
                 "instance": "testing",
                 "context": "example-site-testing",
                 "base_url": "https://testing.example.invalid",
-                "public_ingress_monitoring": {
-                    "alert_issue_url": "https://github.com/cbusillo/launchplane/issues/929"
+                "health_monitoring": {
+                    "checks": [
+                        {
+                            "name": "public-ingress",
+                            "kind": "public_http",
+                            "alert_issue_url": "https://github.com/cbusillo/launchplane/issues/929",
+                        }
+                    ]
                 },
                 "odoo_stable_bootstrap": {
                     "enabled": True,
@@ -1609,10 +1635,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(profile.historical_contexts, ())
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertTrue(profile.lanes[0].odoo_stable_bootstrap.enabled)
-        self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
-        self.assertFalse(profile.lanes[0].public_ingress_monitoring.require_runtime_identity)
+        health_check = profile.lanes[0].health_monitoring.checks[0]
+        self.assertTrue(health_check.enabled)
+        self.assertFalse(health_check.require_runtime_identity)
         self.assertEqual(
-            profile.lanes[0].public_ingress_monitoring.alert_issue_url,
+            health_check.alert_issue_url,
             "https://github.com/cbusillo/launchplane/issues/929",
         )
         self.assertEqual(
@@ -1919,7 +1946,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -1958,7 +1985,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(profile.runtime_port, 0)
         self.assertEqual(profile.health_path, "")
         self.assertEqual(profile.lanes[0].health_url, "")
-        self.assertFalse(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertEqual(profile.lanes[0].health_monitoring.checks, ())
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].target_type, "compose")
         self.assertFalse(targets[0].healthcheck_enabled)
@@ -1976,7 +2003,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2005,7 +2032,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2035,7 +2062,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2067,7 +2094,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2100,7 +2127,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "base_url": "https://repairshopr-sync.example.test",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2134,7 +2161,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "health_url": "https://repairshopr-sync.example.test/health",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2175,7 +2202,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             profile.lanes[0].health_url,
             "https://repairshopr-sync.example.test/health",
         )
-        self.assertFalse(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertEqual(profile.lanes[0].health_monitoring.checks, ())
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].target_type, "compose")
         self.assertFalse(targets[0].healthcheck_enabled)
@@ -2193,9 +2220,14 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "health_url": "https://repairshopr-sync.example.test/health",
-                    "public_ingress_monitoring": {
-                        "enabled": True,
-                        "alert_issue_url": "https://github.com/example/ops/issues/123",
+                    "health_monitoring": {
+                        "checks": [
+                            {
+                                "name": "public-ingress",
+                                "kind": "public_http",
+                                "alert_issue_url": "https://github.com/example/ops/issues/123",
+                            }
+                        ]
                     },
                 }
             ],
@@ -2232,9 +2264,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             profile.lanes[0].health_url,
             "https://repairshopr-sync.example.test/health",
         )
-        self.assertTrue(profile.lanes[0].public_ingress_monitoring.enabled)
+        self.assertTrue(profile.lanes[0].health_monitoring.checks[0].enabled)
         self.assertEqual(
-            profile.lanes[0].public_ingress_monitoring.alert_issue_url,
+            profile.lanes[0].health_monitoring.checks[0].alert_issue_url,
             "https://github.com/example/ops/issues/123",
         )
 
@@ -2250,7 +2282,9 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": True},
+                    "health_monitoring": {
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                    },
                 }
             ],
             "provider_targets": [
@@ -2284,7 +2318,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "health_url": "https://repairshopr-sync.example.test/health",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2318,7 +2352,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "health_url": "https://repairshopr-sync.example.test/health",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2349,7 +2383,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2382,7 +2416,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2416,7 +2450,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2445,7 +2479,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2467,7 +2501,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         with self.assertRaisesRegex(ValueError, "requires disabled provider healthcheck"):
             ProductOnboardingManifest.model_validate(payload)
 
-    def test_product_onboarding_manifest_rejects_inert_public_ingress_monitoring(
+    def test_product_onboarding_manifest_rejects_inert_health_monitoring(
         self,
     ) -> None:
         payload: dict[str, object] = {
@@ -2475,24 +2509,151 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "display_name": "RepairShopr Sync",
             "repository": "cbusillo/repairshopr_api",
             "driver_id": "generic-web",
+            "image_repository": "ghcr.io/cbusillo/repairshopr-sync",
+            "runtime_port": 3000,
+            "health_path": "/health",
             "lanes": [
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                }
-            ],
-            "provider_targets": [
-                {
-                    "context": "repairshopr-sync",
-                    "instance": "prod",
-                    "target_id": "compose-123",
-                    "target_type": "compose",
-                    "healthcheck_enabled": False,
+                    "health_monitoring": {
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                    },
                 }
             ],
         }
 
         with self.assertRaisesRegex(ValueError, "requires base_url or explicit health_url"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_rejects_legacy_public_ingress_monitoring(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        lanes = payload["lanes"]
+        assert isinstance(lanes, list)
+        first_lane = lanes[0]
+        assert isinstance(first_lane, dict)
+        first_lane.pop("health_monitoring")
+        first_lane["public_ingress_monitoring"] = {"enabled": True}
+
+        with self.assertRaisesRegex(ValueError, "public_ingress_monitoring"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_health_monitoring_migration_preserves_legacy_default_public_check(
+        self,
+    ) -> None:
+        migration = _load_health_monitoring_migration()
+        payload = {
+            "product": "example-site",
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                },
+                {"instance": "worker", "context": "example-site"},
+            ],
+        }
+
+        migrate_payload = cast(
+            Callable[[object], object],
+            getattr(migration, "migrate_product_profile_health_monitoring_payload"),
+        )
+        migrated = cast(dict[str, object], migrate_payload(payload))
+
+        lanes = cast(list[dict[str, object]], migrated["lanes"])
+        first_lane_health_monitoring = cast(dict[str, object], lanes[0]["health_monitoring"])
+        self.assertEqual(
+            first_lane_health_monitoring["checks"],
+            [
+                {
+                    "name": "public-ingress",
+                    "kind": "public_http",
+                    "enabled": True,
+                    "url": "",
+                    "require_runtime_identity": False,
+                    "alert_issue_url": "",
+                    "provider": "",
+                    "provider_check": "",
+                }
+            ],
+        )
+        self.assertEqual(lanes[1]["health_monitoring"], {"checks": []})
+
+    def test_product_profile_rejects_colliding_health_check_names(self) -> None:
+        payload = {
+            "product": "example-site",
+            "display_name": "Example Site",
+            "driver_id": "generic-web",
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                    "health_monitoring": {
+                        "checks": [
+                            {"name": "api check", "kind": "public_http"},
+                            {
+                                "name": "api-check",
+                                "kind": "private_http",
+                                "url": "http://app:3000/healthz",
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "health check names must be unique"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_profile_rejects_reserved_non_public_health_check_name(self) -> None:
+        payload = {
+            "product": "example-site",
+            "display_name": "Example Site",
+            "driver_id": "generic-web",
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                    "health_monitoring": {
+                        "checks": [
+                            {
+                                "name": "public-ingress",
+                                "kind": "private_http",
+                                "url": "http://app:3000/healthz",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "reserved public-ingress name"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_profile_rejects_degenerate_health_check_name(self) -> None:
+        payload = {
+            "product": "example-site",
+            "display_name": "Example Site",
+            "driver_id": "generic-web",
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                    "health_monitoring": {"checks": [{"name": "---", "kind": "public_http"}]},
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "alphanumeric"):
             ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_manifest_rejects_base_url_without_health_path(
@@ -2503,25 +2664,20 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "display_name": "RepairShopr Sync",
             "repository": "cbusillo/repairshopr_api",
             "driver_id": "generic-web",
+            "image_repository": "ghcr.io/cbusillo/repairshopr-sync",
             "lanes": [
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
                     "base_url": "https://repairshopr-sync.example.test",
-                }
-            ],
-            "provider_targets": [
-                {
-                    "context": "repairshopr-sync",
-                    "instance": "prod",
-                    "target_id": "compose-123",
-                    "target_type": "compose",
-                    "healthcheck_enabled": False,
+                    "health_monitoring": {
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                    },
                 }
             ],
         }
 
-        with self.assertRaisesRegex(ValueError, "base_url requires health_path"):
+        with self.assertRaisesRegex(ValueError, "with base_url requires health_path"):
             ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_manifest_rejects_zero_runtime_port_with_health_path(
@@ -2538,7 +2694,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [
@@ -2568,7 +2724,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 {
                     "instance": "prod",
                     "context": "repairshopr-sync",
-                    "public_ingress_monitoring": {"enabled": False},
+                    "health_monitoring": {"checks": []},
                 }
             ],
             "provider_targets": [

@@ -13,6 +13,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     desc,
+    func,
     inspect,
     text,
     select,
@@ -75,6 +76,9 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationAttemptRecord,
@@ -2340,7 +2344,9 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[EveryCodeNotificationPolicyRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneEveryCodeNotificationPolicyRow.repository.in_(("", repository)))
+            filters.append(
+                LaunchplaneEveryCodeNotificationPolicyRow.repository.in_(("", repository))
+            )
         if status:
             filters.append(LaunchplaneEveryCodeNotificationPolicyRow.status == status)
         return self._list_models(
@@ -2384,8 +2390,7 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneEveryCodeNotificationAttemptRow.event == event)
         if destination_kind:
             filters.append(
-                LaunchplaneEveryCodeNotificationAttemptRow.destination_kind
-                == destination_kind
+                LaunchplaneEveryCodeNotificationAttemptRow.destination_kind == destination_kind
             )
         return self._list_models(
             model_type=EveryCodeNotificationAttemptRecord,
@@ -3279,6 +3284,8 @@ class PostgresRecordStore(HumanSessionStore):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressObservationRecord, ...]:
         filters: list[object] = []
@@ -3288,7 +3295,15 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplanePublicIngressObservationRow.context == context_name)
         if instance_name:
             filters.append(LaunchplanePublicIngressObservationRow.instance == instance_name)
-        return self._list_models(
+        if check_kind:
+            filters.append(
+                func.coalesce(
+                    LaunchplanePublicIngressObservationRow.payload["check_kind"].as_string(),
+                    "public_http",
+                )
+                == check_kind
+            )
+        records = self._list_models(
             model_type=PublicIngressObservationRecord,
             orm_model=LaunchplanePublicIngressObservationRow,
             filters=filters,
@@ -3296,8 +3311,18 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressObservationRow.observed_at.desc(),
                 LaunchplanePublicIngressObservationRow.record_id.desc(),
             ),
-            limit=limit,
+            limit=None if check_name else limit,
         )
+        if check_name:
+            check_token = canonical_health_check_record_token(check_name)
+            records = tuple(
+                record
+                for record in records
+                if canonical_health_check_record_token(record.check_name) == check_token
+            )
+            if limit is not None:
+                records = records[:limit]
+        return records
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> None:
         self._write_row(
@@ -3319,6 +3344,8 @@ class PostgresRecordStore(HumanSessionStore):
         product: str = "",
         context_name: str = "",
         instance_name: str = "",
+        check_name: str = "",
+        check_kind: str = "",
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PublicIngressIncidentRecord, ...]:
@@ -3329,9 +3356,17 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplanePublicIngressIncidentRow.context == context_name)
         if instance_name:
             filters.append(LaunchplanePublicIngressIncidentRow.instance == instance_name)
+        if check_kind:
+            filters.append(
+                func.coalesce(
+                    LaunchplanePublicIngressIncidentRow.payload["check_kind"].as_string(),
+                    "public_http",
+                )
+                == check_kind
+            )
         if status:
             filters.append(LaunchplanePublicIngressIncidentRow.status == status)
-        return self._list_models(
+        records = self._list_models(
             model_type=PublicIngressIncidentRecord,
             orm_model=LaunchplanePublicIngressIncidentRow,
             filters=filters,
@@ -3339,8 +3374,18 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplanePublicIngressIncidentRow.opened_at.desc(),
                 LaunchplanePublicIngressIncidentRow.incident_id.desc(),
             ),
-            limit=limit,
+            limit=None if check_name else limit,
         )
+        if check_name:
+            check_token = canonical_health_check_record_token(check_name)
+            records = tuple(
+                record
+                for record in records
+                if canonical_health_check_record_token(record.check_name) == check_token
+            )
+            if limit is not None:
+                records = records[:limit]
+        return records
 
     def write_public_ingress_notification_policy_record(
         self, record: PublicIngressNotificationPolicyRecord

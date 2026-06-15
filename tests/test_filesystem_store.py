@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -749,6 +750,61 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
         self.assertEqual(
             [listed_record.product for listed_record in listed_records], ["sellyouroutboard"]
+        )
+
+    def test_read_product_profile_record_migrates_legacy_health_monitoring(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            profile_dir = state_dir / "launchplane_product_profiles"
+            profile_dir.mkdir(parents=True)
+            (profile_dir / "example-site.json").write_text(
+                """
+                {
+                  "product": "example-site",
+                  "display_name": "Example Site",
+                  "repository": "example/example-site",
+                  "driver_id": "generic-web",
+                  "image": {"repository": "ghcr.io/example/example-site"},
+                  "runtime_port": 3000,
+                  "health_path": "/healthz",
+                  "updated_at": "2026-06-15T14:00:00Z",
+                  "source": "operator:test",
+                  "lanes": [
+                    {
+                      "instance": "prod",
+                      "context": "example-site",
+                      "base_url": "https://example.test",
+                      "public_ingress_monitoring": {
+                        "enabled": true,
+                        "require_runtime_identity": true,
+                        "alert_issue_url": "https://github.example.test/org/repo/issues/1"
+                      }
+                    }
+                  ]
+                }
+                """.strip(),
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+
+            loaded_record = store.read_product_profile_record("example-site")
+            listed_records = store.list_product_profile_records(driver_id="generic-web")
+            persisted_payload = json.loads(
+                (state_dir / "launchplane_product_profiles" / "example-site.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        check = loaded_record.lanes[0].health_monitoring.checks[0]
+        self.assertEqual(check.name, "public-ingress")
+        self.assertEqual(check.kind, "public_http")
+        self.assertTrue(check.require_runtime_identity)
+        self.assertEqual(check.alert_issue_url, "https://github.example.test/org/repo/issues/1")
+        self.assertEqual([record.product for record in listed_records], ["example-site"])
+        self.assertNotIn("public_ingress_monitoring", persisted_payload["lanes"][0])
+        self.assertEqual(
+            persisted_payload["lanes"][0]["health_monitoring"]["checks"][0]["name"],
+            "public-ingress",
         )
 
     def test_write_and_list_public_ingress_observation_records(self) -> None:

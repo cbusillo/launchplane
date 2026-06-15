@@ -9,8 +9,8 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooPrelaunchRebuildPolicy,
     ProductOdooStableBootstrapPolicy,
     ProductExpectedConfigProfile,
+    ProductLaneHealthMonitoringPolicy,
     ProductPreviewProfile,
-    ProductPublicIngressMonitoringPolicy,
     ProductPromotionWorkflowProfile,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
@@ -31,8 +31,8 @@ class ProductOnboardingLaneManifest(BaseModel):
         default_factory=ProductOdooPrelaunchRebuildPolicy
     )
     odoo_data_policy: ProductOdooLaneDataPolicy = Field(default_factory=ProductOdooLaneDataPolicy)
-    public_ingress_monitoring: ProductPublicIngressMonitoringPolicy = Field(
-        default_factory=ProductPublicIngressMonitoringPolicy
+    health_monitoring: ProductLaneHealthMonitoringPolicy = Field(
+        default_factory=ProductLaneHealthMonitoringPolicy
     )
 
     @model_validator(mode="after")
@@ -228,18 +228,23 @@ class ProductOnboardingManifest(BaseModel):
             raise ValueError("product onboarding lanes must be unique by instance")
         ProductPreviewProfile.model_validate(self.preview.model_dump(mode="json"))
         for lane in self.lanes:
-            if not lane.public_ingress_monitoring.enabled:
-                continue
-            if lane.health_url.strip():
-                continue
-            if not lane.base_url.strip():
-                raise ValueError(
-                    "public ingress monitoring requires base_url or explicit health_url"
-                )
-            if not self.health_path:
-                raise ValueError(
-                    "public ingress monitoring for lane with base_url requires health_path"
-                )
+            for check in lane.health_monitoring.checks:
+                if not check.enabled:
+                    continue
+                if check.kind == "provider":
+                    continue
+                if check.url:
+                    continue
+                if check.kind == "private_http":
+                    raise ValueError("private HTTP health check requires url")
+                if lane.health_url.strip():
+                    continue
+                if not lane.base_url.strip():
+                    raise ValueError(
+                        "public HTTP health check requires base_url or explicit health_url"
+                    )
+                if not self.health_path:
+                    raise ValueError("public HTTP health check with base_url requires health_path")
 
         for target in self.provider_targets:
             route = (target.context.strip(), target.instance.strip())
@@ -276,7 +281,8 @@ class ProductOnboardingManifest(BaseModel):
                         "use explicit health_url for source-backed worker health checks"
                     )
                 has_health_surface = bool(
-                    lane.health_url.strip() or lane.public_ingress_monitoring.enabled
+                    lane.health_url.strip()
+                    or any(check.enabled for check in lane.health_monitoring.checks)
                 )
                 if not has_health_surface:
                     continue

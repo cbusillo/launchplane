@@ -31,7 +31,7 @@ from control_plane.contracts.product_profile_record import (
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
-    ProductPublicIngressMonitoringPolicy,
+    ProductLaneHealthMonitoringPolicy,
     ProductSecretConfigRequirement,
 )
 from control_plane.contracts.promotion_record import (
@@ -183,7 +183,7 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
             ProductLaneProfile(
                 instance="testing",
                 context="cm",
-                public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+                health_monitoring=ProductLaneHealthMonitoringPolicy(checks=()),
             ),
         ),
         preview=ProductPreviewProfile(enabled=True, context="cm"),

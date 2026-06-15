@@ -15,7 +15,8 @@ from control_plane.contracts.product_profile_record import (
     ProductImageProfile,
     ProductLaneProfile,
     ProductPreviewProfile,
-    ProductPublicIngressMonitoringPolicy,
+    ProductLaneHealthMonitoringPolicy,
+    ProductLaneHealthCheck,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
@@ -171,7 +172,7 @@ def _source_ref_worker_profile() -> LaunchplaneProductProfileRecord:
             ProductLaneProfile(
                 instance="prod",
                 context="repairshopr-sync",
-                public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+                health_monitoring=ProductLaneHealthMonitoringPolicy(checks=()),
             ),
         ),
         updated_at="2026-06-12T20:00:00Z",
@@ -183,7 +184,7 @@ def _source_ref_worker_lane() -> ProductLaneProfile:
     return ProductLaneProfile(
         instance="prod",
         context="repairshopr-sync",
-        public_ingress_monitoring=ProductPublicIngressMonitoringPolicy(enabled=False),
+        health_monitoring=ProductLaneHealthMonitoringPolicy(checks=()),
     )
 
 
@@ -296,7 +297,7 @@ class GenericWebDeployTests(unittest.TestCase):
                 artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
             )
 
-    def test_product_profile_write_contract_rejects_inert_public_ingress_monitoring(
+    def test_product_profile_write_contract_rejects_inert_health_monitoring(
         self,
     ) -> None:
         profile = LaunchplaneProductProfileRecord(
@@ -309,6 +310,9 @@ class GenericWebDeployTests(unittest.TestCase):
                 ProductLaneProfile(
                     instance="prod",
                     context="repairshopr-sync",
+                    health_monitoring=ProductLaneHealthMonitoringPolicy(
+                        checks=(ProductLaneHealthCheck(name="public-ingress"),)
+                    ),
                 ),
             ),
             updated_at="2026-06-12T20:00:00Z",
@@ -332,6 +336,9 @@ class GenericWebDeployTests(unittest.TestCase):
                     instance="prod",
                     context="repairshopr-sync",
                     base_url="https://repairshopr-sync.example.test",
+                    health_monitoring=ProductLaneHealthMonitoringPolicy(
+                        checks=(ProductLaneHealthCheck(name="public-ingress"),)
+                    ),
                 ),
             ),
             updated_at="2026-06-12T20:00:00Z",
