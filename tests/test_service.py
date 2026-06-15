@@ -91,6 +91,11 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationDestination,
+    PreviewPrFeedbackNotificationPolicyRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
@@ -2909,10 +2914,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 read_status_code, read_payload = _invoke_app(
                     app,
                     method="GET",
-                    path=(
-                        "/v1/private-health-endpoints/records/"
-                        "repairshopr-sync-prod-runtime"
-                    ),
+                    path=("/v1/private-health-endpoints/records/repairshopr-sync-prod-runtime"),
                     query_string="product=repairshopr-sync&context=repairshopr-sync&instance=prod",
                     authorization="Bearer local-operator-token",
                 )
@@ -4522,6 +4524,369 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["result"]["mode"], "apply")
         self.assertEqual(records, (policy_record,))
+
+    def test_preview_pr_feedback_notification_policy_apply_writes_db_policy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-syo",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:10:00Z",
+                updated_at="2026-06-15T17:10:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notification-policy-test"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_preview_pr_feedback_notification_policy_records(
+                    product="sellyouroutboard",
+                    context_name="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                    status="enabled",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["preview_pr_feedback_notification_policy_id"],
+            policy_record.policy_id,
+        )
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(records, (policy_record,))
+
+    def test_preview_pr_feedback_notification_policy_dry_run_does_not_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-syo-dry-run",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:15:00Z",
+                updated_at="2026-06-15T17:15:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_preview_pr_feedback_notification_policy_records(
+                    product="sellyouroutboard",
+                    context_name="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(records, ())
+
+    def test_preview_pr_feedback_notification_policy_rejects_wildcard_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-global",
+                product="",
+                context="",
+                repository="",
+                status="enabled",
+                created_at="2026-06-15T17:20:00Z",
+                updated_at="2026-06-15T17:20:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notification-global"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_preview_pr_feedback_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_policy_scope")
+        self.assertEqual(records, ())
+
+    def test_preview_pr_feedback_notification_policy_rejects_mismatched_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["preview_pr_feedback_notification_policy.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-syo-denied",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:25:00Z",
+                updated_at="2026-06-15T17:25:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback/notification-policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": policy_record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notification-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_pr_feedback_notification_policy_local_operator_requires_reason(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_policy(
+                    actions=("preview_pr_feedback_notification_policy.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            policy_record = PreviewPrFeedbackNotificationPolicyRecord(
+                policy_id="preview-pr-feedback-notification-local-operator",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+                repository="cbusillo/sellyouroutboard",
+                status="enabled",
+                created_at="2026-06-15T17:30:00Z",
+                updated_at="2026-06-15T17:30:00Z",
+                source="test",
+                destinations=(
+                    PreviewPrFeedbackNotificationDestination(
+                        destination_id="discord",
+                        kind="discord",
+                        discord_webhook_secret="secret-discord-webhook",
+                    ),
+                ),
+            )
+
+            with patch.dict(os.environ, LOCAL_OPERATOR_AUTH_ENV, clear=True):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/pr-feedback/notification-policies/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "preview-pr-feedback-local-no-reason"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "reason_required")
 
     def test_every_code_blocked_status_posts_discord_notification(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -31491,6 +31856,564 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
         self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
         self.assertEqual(feedback_records[0].anchor_pr_number, 42)
+
+    def test_preview_pr_feedback_skipped_delivery_dispatches_discord_notification(
+        self,
+    ) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="preview-pr-feedback-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="preview-feedback",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_preview_pr_feedback_notification_policy_record(
+                    PreviewPrFeedbackNotificationPolicyRecord(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                        status="enabled",
+                        created_at="2026-06-15T16:30:00Z",
+                        updated_at="2026-06-15T16:30:00Z",
+                        source="test",
+                        destinations=(
+                            PreviewPrFeedbackNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret=str(secret_result["secret_id"]),
+                            ),
+                        ),
+                    )
+                )
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source": "preview-control-plane",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 42,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/42",
+                    "status": "ready",
+                    "preview_url": "https://pr-42.preview.example",
+                    "run_url": "https://github.com/every/verireel/actions/runs/123",
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notify-skipped"},
+            )
+            feedback_id = str(payload["records"]["preview_pr_feedback_id"])
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_preview_pr_feedback_notification_attempt_records(
+                    feedback_id=feedback_id,
+                    event="delivery_skipped",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["delivery_status"], "skipped")
+        self.assertEqual(len(payload["result"]["notifications"]), 1)
+        self.assertEqual(payload["result"]["notifications"][0]["delivery_status"], "delivered")
+        self.assertEqual(len(sent_payloads), 1)
+        self.assertEqual(sent_payloads[0][0], "https://discord.com/api/webhooks/test/webhook")
+        self.assertEqual(attempts[0].delivery_status, "delivered")
+        self.assertEqual(attempts[0].action, "posted_discord")
+
+    def test_preview_pr_feedback_failed_delivery_dispatches_discord_notification(
+        self,
+    ) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                side_effect=ClickException("GitHub comments are unavailable."),
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/43/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/43/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="preview-pr-feedback-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="preview-feedback",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_preview_pr_feedback_notification_policy_record(
+                    PreviewPrFeedbackNotificationPolicyRecord(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                        status="enabled",
+                        created_at="2026-06-15T16:30:00Z",
+                        updated_at="2026-06-15T16:30:00Z",
+                        source="test",
+                        destinations=(
+                            PreviewPrFeedbackNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret=str(secret_result["secret_id"]),
+                            ),
+                        ),
+                    )
+                )
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source": "preview-control-plane",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 43,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/43",
+                    "status": "ready",
+                    "preview_url": "https://pr-43.preview.example",
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notify-failed"},
+            )
+            feedback_id = str(payload["records"]["preview_pr_feedback_id"])
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_preview_pr_feedback_notification_attempt_records(
+                    feedback_id=feedback_id,
+                    event="delivery_failed",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["delivery_status"], "failed")
+        self.assertIn("GitHub comments are unavailable", payload["result"]["error_message"])
+        self.assertEqual(len(sent_payloads), 1)
+        self.assertEqual(attempts[0].delivery_status, "delivered")
+        self.assertEqual(attempts[0].action, "posted_discord")
+
+    def test_preview_pr_feedback_notification_attempts_can_be_read(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(
+                    extra_actions=("preview_pr_feedback_notification_attempt.read",)
+                ),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            attempt_record = PreviewPrFeedbackNotificationAttemptRecord(
+                attempt_id="preview-pr-feedback-notification-feedback-1-delivery-skipped",
+                feedback_id="feedback-1",
+                event="delivery_skipped",
+                policy_id="preview-pr-feedback-notification-discord",
+                destination_id="discord",
+                destination_kind="discord",
+                delivery_status="delivered",
+                attempted_at="2026-06-15T17:35:00Z",
+                action="posted_discord",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_preview_pr_feedback_notification_attempt_record(attempt_record)
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/pr-feedback/notification-attempts",
+                query_string="feedback_id=feedback-1&event=delivery_skipped",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["feedback_id"], "feedback-1")
+        self.assertEqual(payload["event_filter"], "delivery_skipped")
+        self.assertEqual(payload["attempts"], [attempt_record.model_dump(mode="json")])
+
+    def test_preview_pr_feedback_notification_attempt_read_requires_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/pr-feedback/notification-attempts",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_pr_feedback_notification_not_duplicated_on_idempotent_retry(
+        self,
+    ) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/44/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/44/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="preview-pr-feedback-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="preview-feedback",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_preview_pr_feedback_notification_policy_record(
+                    PreviewPrFeedbackNotificationPolicyRecord(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                        status="enabled",
+                        created_at="2026-06-15T16:30:00Z",
+                        updated_at="2026-06-15T16:30:00Z",
+                        source="test",
+                        destinations=(
+                            PreviewPrFeedbackNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret=str(secret_result["secret_id"]),
+                            ),
+                        ),
+                    )
+                )
+            finally:
+                store.close()
+
+            request_payload = {
+                "product": "verireel",
+                "context": "verireel-testing",
+                "source": "preview-control-plane",
+                "repository": "every/verireel",
+                "anchor_repo": "verireel",
+                "anchor_pr_number": 44,
+                "anchor_pr_url": "https://github.com/every/verireel/pull/44",
+                "status": "ready",
+                "preview_url": "https://pr-44.preview.example",
+            }
+            headers = {"Idempotency-Key": "preview-pr-feedback-notify-retry"}
+            first_status, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload=request_payload,
+                headers=headers,
+            )
+            second_status, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload=request_payload,
+                headers=headers,
+            )
+            feedback_id = str(first_payload["records"]["preview_pr_feedback_id"])
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_preview_pr_feedback_notification_attempt_records(
+                    feedback_id=feedback_id,
+                    event="delivery_skipped",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(second_status, 202)
+        self.assertEqual(second_payload["replayed"], True)
+        self.assertEqual(len(sent_payloads), 1)
+        self.assertEqual(len(attempts), 1)
+
+    def test_preview_pr_feedback_successful_delivery_does_not_dispatch_discord(
+        self,
+    ) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                return_value={
+                    "id": 123,
+                    "html_url": "https://github.com/every/verireel/pull/45#issuecomment-123",
+                },
+            ),
+        ):
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/45/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/45/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                preview_pr_feedback_discord_sender=send_discord,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_preview_pr_feedback_notification_policy_record(
+                    PreviewPrFeedbackNotificationPolicyRecord(
+                        policy_id="preview-pr-feedback-notification-discord",
+                        product="verireel",
+                        context="verireel-testing",
+                        repository="every/verireel",
+                        status="enabled",
+                        created_at="2026-06-15T16:30:00Z",
+                        updated_at="2026-06-15T16:30:00Z",
+                        source="test",
+                        destinations=(
+                            PreviewPrFeedbackNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret="secret-id",
+                            ),
+                        ),
+                    )
+                )
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source": "preview-control-plane",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 45,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/45",
+                    "status": "pending",
+                },
+                headers={"Idempotency-Key": "preview-pr-feedback-notify-success"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_preview_pr_feedback_notification_attempt_records()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["delivery_status"], "delivered")
+        self.assertEqual(sent_payloads, [])
+        self.assertEqual(attempts, ())
 
     def test_preview_pr_feedback_endpoint_dry_run_authorizes_without_writing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
