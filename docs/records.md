@@ -183,6 +183,16 @@ an ORM column/table or remains only in the evidence payload.
   migration criteria and evidence that existing shared-service payloads have
   been migrated; mixed neutral and legacy target facts fail closed when they
   disagree.
+- Private health endpoint records define Launchplane-owned private monitor URL
+  authority for a lane: `endpoint_key`, `product`, `context`, `instance`,
+  `url`, `status`, `updated_at`, and payload-only provenance such as
+  `source_label`. The service applies them through
+  `POST /v1/private-health-endpoints/apply` with product/context-scoped
+  `private_health_endpoint.apply` authorization, and reads them through
+  `GET /v1/private-health-endpoints/records` with
+  `private_health_endpoint.read`. The stored URL must be private/internal;
+  product profiles reference it by `private_endpoint_key` and do not own the
+  mutable URL value.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
   `updated_at`. Individual key/value settings stay payload-only until GUI
   filtering or editing requires a setting table.
@@ -260,13 +270,18 @@ values, managed secret IDs, secret plaintext, or ciphertext.
 Stable lanes declare synthetic monitoring through `health_monitoring.checks[]`.
 Each check has a stable name and kind. `public_http` checks use an explicit URL
 or the lane `health_url`, or derive one from lane `base_url` plus product
-`health_path`. `private_http` checks require an explicit URL and skip public URL
-validation so internal service endpoints can be monitored without publishing an
-ingress route. `provider` checks record provider-health intent and fail closed
-until a provider-specific monitor implementation is wired. The monitor records
-HTTP reachability, redirect failures, private/internal URL skips for public
-checks, and runtime identity comparison when current lane inventory or
-deployment evidence provides an expected identity. Check policy may carry an
+`health_path`. `private_http` checks monitor internal service endpoints without
+publishing an ingress route by carrying a `private_endpoint_key` that resolves
+through a DB-backed private health endpoint record. Product profiles own what to
+monitor, while
+`launchplane_private_health_endpoints` owns the mutable private endpoint URL for
+a product/context/instance lane. Private endpoint records reject public URLs,
+and endpoint-key-backed checks fail closed when the record is missing, disabled,
+or scoped to another lane. `provider` checks record provider-health intent and
+fail closed until a provider-specific monitor implementation is wired. The
+monitor records HTTP reachability, redirect failures, private/internal URL skips
+for public checks, and runtime identity comparison when current lane inventory
+or deployment evidence provides an expected identity. Check policy may carry an
 `alert_issue_url`; Launchplane uses that issue for fail/recover transition
 comments, not as runtime configuration authority.
 

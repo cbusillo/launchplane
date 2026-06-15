@@ -61,6 +61,7 @@ from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
@@ -569,6 +570,7 @@ _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-la
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
+_PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
 _DOKPLOY_TARGET_INSPECT_ROUTE = "/v1/dokploy-targets/inspect"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
@@ -885,6 +887,26 @@ class _EdgeEndpointRecordStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[EdgeEndpointRecord, ...]: ...
+
+
+class _PrivateHealthEndpointRecordStore(Protocol):
+    def write_private_health_endpoint_record(
+        self, record: PrivateHealthEndpointRecord
+    ) -> object: ...
+
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord: ...
+
+    def list_private_health_endpoint_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
 
 
 class _IngressCanaryRouteRecordStore(Protocol):
@@ -1423,6 +1445,29 @@ class EdgeEndpointApplyEnvelope(BaseModel):
                 raise ValueError("Edge endpoint apply requires a reason")
             if self.confirmation != "APPLY LAUNCHPLANE EDGE ENDPOINT":
                 raise ValueError("Edge endpoint apply requires exact confirmation text")
+        return self
+
+
+class PrivateHealthEndpointApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    endpoint: PrivateHealthEndpointRecord
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "PrivateHealthEndpointApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported private health endpoint apply schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Private health endpoint apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE PRIVATE HEALTH ENDPOINT":
+                raise ValueError("Private health endpoint apply requires exact confirmation text")
         return self
 
 
@@ -4656,6 +4701,10 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "edge_endpoint.read", {"edge_endpoint_list": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "edge-endpoints", "records"]:
         return "edge_endpoint.read", {"edge_endpoint_key": segments[3]}
+    if len(segments) == 3 and segments == ["v1", "private-health-endpoints", "records"]:
+        return "private_health_endpoint.read", {"private_health_endpoint_list": "true"}
+    if len(segments) == 4 and segments[:3] == ["v1", "private-health-endpoints", "records"]:
+        return "private_health_endpoint.read", {"private_health_endpoint_key": segments[3]}
     if len(segments) == 3 and segments == ["v1", "dokploy-targets", "inspect"]:
         return "dokploy_target.inspect", {}
     if len(segments) == 4 and segments == ["v1", "ingress", "canary-routes", "records"]:
@@ -4883,6 +4932,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/dokploy-targets/setup",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
         _EDGE_ENDPOINT_APPLY_ROUTE,
+        _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE,
         _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE,
         _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
         "/v1/product-config/apply",
@@ -7135,6 +7185,21 @@ def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStor
     raise click.ClickException("Edge endpoint operations require Launchplane record storage.")
 
 
+def _private_health_endpoint_record_store(
+    record_store: object,
+) -> _PrivateHealthEndpointRecordStore:
+    required_methods = (
+        "write_private_health_endpoint_record",
+        "read_private_health_endpoint_record",
+        "list_private_health_endpoint_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_PrivateHealthEndpointRecordStore, record_store)
+    raise click.ClickException(
+        "Private health endpoint operations require Launchplane record storage."
+    )
+
+
 def _ingress_canary_route_record_store(
     record_store: object,
 ) -> _IngressCanaryRouteRecordStore:
@@ -8506,6 +8571,44 @@ def _edge_endpoint_apply_result(
     return {
         "edge_endpoint_key": request.endpoint.endpoint_key,
         "edge_endpoint_status": status,
+        "mode": request.mode,
+        "reason": request.reason,
+    }, {
+        "mode": request.mode,
+        "endpoint_key": request.endpoint.endpoint_key,
+        "endpoint_status": status,
+        "record": request.endpoint.model_dump(mode="json"),
+    }
+
+
+def _private_health_endpoint_apply_result(
+    *,
+    record_store: object,
+    request: PrivateHealthEndpointApplyEnvelope,
+) -> tuple[dict[str, object], dict[str, object]]:
+    endpoint_store = _private_health_endpoint_record_store(record_store)
+    try:
+        existing_endpoint = endpoint_store.read_private_health_endpoint_record(
+            request.endpoint.endpoint_key
+        )
+    except FileNotFoundError:
+        existing_endpoint = None
+    if existing_endpoint is not None and (
+        existing_endpoint.product != request.endpoint.product
+        or existing_endpoint.context != request.endpoint.context
+        or existing_endpoint.instance != request.endpoint.instance
+    ):
+        raise ValueError(
+            "Private health endpoint key already belongs to another product/context/instance."
+        )
+    if request.mode == "apply":
+        endpoint_store.write_private_health_endpoint_record(request.endpoint)
+        status = "applied"
+    else:
+        status = "planned"
+    return {
+        "private_health_endpoint_key": request.endpoint.endpoint_key,
+        "private_health_endpoint_status": status,
         "mode": request.mode,
         "reason": request.reason,
     }, {
@@ -11100,6 +11203,112 @@ def create_launchplane_service_app(
                             "count": len(endpoint_records),
                             "records": [
                                 record.model_dump(mode="json") for record in endpoint_records
+                            ],
+                        },
+                    )
+                if action == "private_health_endpoint.read":
+                    private_endpoint_store = _private_health_endpoint_record_store(
+                        record_store
+                    )
+                    product = _query_string_value(query, "product")
+                    context_name = _query_string_value(query, "context")
+                    instance_name = _query_string_value(query, "instance")
+                    if not product or not context_name:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "invalid_query",
+                                    "message": (
+                                        "Private health endpoint reads require product and "
+                                        "context query parameters."
+                                    ),
+                                },
+                            },
+                        )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product=product,
+                        context=context_name,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": (
+                                        "Workflow cannot read private health endpoints "
+                                        "for the requested product/context."
+                                    ),
+                                },
+                            },
+                        )
+                    if "private_health_endpoint_key" in params:
+                        try:
+                            private_endpoint_record = (
+                                private_endpoint_store.read_private_health_endpoint_record(
+                                    params["private_health_endpoint_key"]
+                                )
+                            )
+                        except FileNotFoundError:
+                            return _not_found_response(
+                                start_response=start_response,
+                                trace_id=request_trace_id,
+                                path=path,
+                            )
+                        if (
+                            private_endpoint_record.product != product
+                            or private_endpoint_record.context != context_name
+                            or (
+                                instance_name
+                                and private_endpoint_record.instance != instance_name
+                            )
+                        ):
+                            return _not_found_response(
+                                start_response=start_response,
+                                trace_id=request_trace_id,
+                                path=path,
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "record": private_endpoint_record.model_dump(mode="json"),
+                            },
+                        )
+                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
+                    private_endpoint_records = (
+                        private_endpoint_store.list_private_health_endpoint_records(
+                            product=product,
+                            context_name=context_name,
+                            instance_name=instance_name,
+                            status=_query_string_value(query, "status"),
+                            limit=limit,
+                        )
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "product": product,
+                            "context": context_name,
+                            "instance": instance_name,
+                            "limit": limit,
+                            "count": len(private_endpoint_records),
+                            "records": [
+                                record.model_dump(mode="json")
+                                for record in private_endpoint_records
                             ],
                         },
                     )
@@ -15552,6 +15761,75 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=edge_endpoint_request,
                 )
+            elif path == _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE:
+                private_endpoint_request = PrivateHealthEndpointApplyEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="private_health_endpoint.apply",
+                    product=private_endpoint_request.endpoint.product,
+                    context=private_endpoint_request.endpoint.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot apply private health endpoint records "
+                                    "for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                if private_endpoint_request.mode == "apply":
+                    if not request_idempotency_key:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_required",
+                                    "message": (
+                                        "Private health endpoint apply requests require "
+                                        "an Idempotency-Key header."
+                                    ),
+                                },
+                            },
+                        )
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    result, driver_result = _private_health_endpoint_apply_result(
+                        record_store=record_store,
+                        request=private_endpoint_request,
+                    )
+                except ValueError as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=409,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "conflicting_private_health_endpoint",
+                                "message": str(error),
+                            },
+                        },
+                    )
             elif path == _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE:
                 canary_record_request = IngressCanaryRouteRecordApplyEnvelope.model_validate(
                     payload

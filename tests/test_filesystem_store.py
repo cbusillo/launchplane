@@ -29,6 +29,7 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -407,6 +408,52 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertFalse((state_dir / "cm-prod" / "dokploy.json").exists())
         self.assertEqual(loaded_record.endpoint_key, "../cm-prod/dokploy")
         self.assertEqual([record.endpoint_key for record in active_records], ["../cm-prod/dokploy"])
+
+    def test_write_read_and_list_private_health_endpoint_records_escape_paths(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            endpoint_record = PrivateHealthEndpointRecord(
+                endpoint_key="../repairshopr-sync/prod-runtime",
+                product="repairshopr-sync",
+                context="repairshopr-sync",
+                instance="prod",
+                url="http://10.0.0.5:8000/health",
+                updated_at="2026-06-15T00:00:00Z",
+                source_label="test:private-health-endpoint",
+            )
+            disabled_record = endpoint_record.model_copy(
+                update={
+                    "endpoint_key": "disabled:runtime",
+                    "status": "disabled",
+                }
+            )
+
+            written_path = store.write_private_health_endpoint_record(endpoint_record)
+            store.write_private_health_endpoint_record(disabled_record)
+            loaded_record = store.read_private_health_endpoint_record(
+                "../repairshopr-sync/prod-runtime"
+            )
+            active_records = store.list_private_health_endpoint_records(
+                product="repairshopr-sync",
+                context_name="repairshopr-sync",
+                instance_name="prod",
+                status="active",
+            )
+
+        self.assertEqual(
+            written_path.parent.relative_to(state_dir).as_posix(),
+            "launchplane_private_health_endpoints",
+        )
+        self.assertEqual(written_path.name, "..%2Frepairshopr-sync%2Fprod-runtime.json")
+        self.assertFalse((state_dir / "repairshopr-sync" / "prod-runtime.json").exists())
+        self.assertEqual(loaded_record.endpoint_key, "../repairshopr-sync/prod-runtime")
+        self.assertEqual(
+            [record.endpoint_key for record in active_records],
+            ["../repairshopr-sync/prod-runtime"],
+        )
 
     def test_write_read_and_list_ingress_canary_route_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -2641,7 +2641,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         payload = {
             "product": "example-site",
             "display_name": "Example Site",
+            "repository": "cbusillo/example-site",
             "driver_id": "generic-web",
+            "image_repository": "ghcr.io/cbusillo/example-site",
+            "runtime_port": 3000,
             "health_path": "/healthz",
             "lanes": [
                 {
@@ -2654,7 +2657,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                             {
                                 "name": "api-check",
                                 "kind": "private_http",
-                                "url": "http://app:3000/healthz",
+                                "private_endpoint_key": "example-site-prod-runtime",
                             },
                         ]
                     },
@@ -2664,6 +2667,43 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         with self.assertRaisesRegex(ValueError, "health check names must be unique"):
             ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_accepts_private_endpoint_health_check(
+        self,
+    ) -> None:
+        payload = {
+            "product": "example-site",
+            "display_name": "Example Site",
+            "repository": "cbusillo/example-site",
+            "driver_id": "generic-web",
+            "image_repository": "ghcr.io/cbusillo/example-site",
+            "runtime_port": 3000,
+            "health_path": "/healthz",
+            "lanes": [
+                {
+                    "instance": "prod",
+                    "context": "example-site",
+                    "base_url": "https://example.test",
+                    "health_monitoring": {
+                        "checks": [
+                            {"name": "public-ingress", "kind": "public_http"},
+                            {
+                                "name": "private-runtime",
+                                "kind": "private_http",
+                                "private_endpoint_key": "example-site-prod-runtime",
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+
+        manifest = ProductOnboardingManifest.model_validate(payload)
+
+        self.assertEqual(
+            manifest.lanes[0].health_monitoring.checks[1].private_endpoint_key,
+            "example-site-prod-runtime",
+        )
 
     def test_product_profile_rejects_reserved_non_public_health_check_name(self) -> None:
         payload = {
@@ -2681,7 +2721,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                             {
                                 "name": "public-ingress",
                                 "kind": "private_http",
-                                "url": "http://app:3000/healthz",
+                                "private_endpoint_key": "example-site-prod-runtime",
                             }
                         ]
                     },

@@ -284,10 +284,13 @@ manual operator reruns, so its GitHub OIDC identity stays scoped only to
 `POST /v1/products/public-ingress-monitor/run-once` through GitHub OIDC and are
 authorized in the Launchplane service context. Lanes opt in by declaring
 `health_monitoring.checks[]`: `public_http` checks validate public reachability,
-`private_http` checks monitor an explicit internal URL, and `provider` checks
-fail closed until a provider-specific monitor is wired. Observations are sensor
-evidence; incident records are keyed by product, lane, and health-check name so
-public, private, and provider failures do not overwrite each other.
+`private_http` checks resolve a Launchplane-owned private endpoint record by
+`private_endpoint_key`, and `provider` checks fail closed until a
+provider-specific monitor is wired. The public-ingress route and record
+names are compatibility names for the existing health-monitor observation
+family. Observations are sensor evidence; incident records are keyed by product,
+lane, and health-check name so public, private, and provider failures do not
+overwrite each other.
 Notification routing is a separate service-backed policy and delivery concern,
 not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced

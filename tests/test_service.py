@@ -49,6 +49,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointStatus
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
@@ -1673,6 +1674,30 @@ def _edge_endpoint_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
     }
 
 
+def _private_health_endpoint_record(
+    *, url: str = "http://10.0.0.5:8000/health"
+) -> PrivateHealthEndpointRecord:
+    return PrivateHealthEndpointRecord(
+        endpoint_key="repairshopr-sync-prod-runtime",
+        product="repairshopr-sync",
+        context="repairshopr-sync",
+        instance="prod",
+        url=url,
+        updated_at="2026-06-15T00:00:00Z",
+        source_label="test:private-health-endpoint",
+    )
+
+
+def _private_health_endpoint_apply_payload(*, mode: str = "dry-run") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "endpoint": _private_health_endpoint_record().model_dump(mode="json"),
+        "reason": "test private health endpoint apply",
+        "confirmation": "APPLY LAUNCHPLANE PRIVATE HEALTH ENDPOINT" if mode == "apply" else "",
+    }
+
+
 def _ingress_canary_route_record(*, status: str = "active") -> IngressCanaryRouteRecord:
     return IngressCanaryRouteRecord(
         canary_key="ingress-canary",
@@ -2850,6 +2875,157 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(read_status_code, 404)
         self.assertEqual(read_payload["status"], "rejected")
         self.assertEqual(read_payload["error"]["code"], "not_found")
+
+    def test_private_health_endpoint_apply_and_read_routes_store_db_backed_url(
+        self,
+    ) -> None:
+        policy = _local_operator_policy(
+            actions=("private_health_endpoint.apply", "private_health_endpoint.read"),
+            products=("repairshopr-sync",),
+            contexts=("repairshopr-sync",),
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                apply_status_code, apply_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/private-health-endpoints/apply",
+                    payload=_private_health_endpoint_apply_payload(mode="apply"),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "private-health-endpoint-apply"},
+                )
+                read_status_code, read_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path=(
+                        "/v1/private-health-endpoints/records/"
+                        "repairshopr-sync-prod-runtime"
+                    ),
+                    query_string="product=repairshopr-sync&context=repairshopr-sync&instance=prod",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(apply_status_code, 202)
+        self.assertEqual(
+            apply_payload["result"]["endpoint_key"],
+            "repairshopr-sync-prod-runtime",
+        )
+        self.assertEqual(
+            apply_payload["result"]["endpoint_status"],
+            "applied",
+        )
+        self.assertEqual(read_status_code, 200)
+        self.assertEqual(read_payload["record"]["product"], "repairshopr-sync")
+        self.assertEqual(read_payload["record"]["url"], "http://10.0.0.5:8000/health")
+
+    def test_private_health_endpoint_apply_rejects_public_url(self) -> None:
+        policy = _local_operator_policy(
+            actions=("private_health_endpoint.apply",),
+            products=("repairshopr-sync",),
+            contexts=("repairshopr-sync",),
+        )
+        payload = _private_health_endpoint_apply_payload(mode="apply")
+        endpoint = cast(dict[str, object], payload["endpoint"])
+        endpoint["url"] = "https://repairshopr-sync.example.test/health"
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, response_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/private-health-endpoints/apply",
+                    payload=payload,
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "private-health-endpoint-apply"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(response_payload["status"], "rejected")
+
+    def test_private_health_endpoint_apply_rejects_cross_product_overwrite(
+        self,
+    ) -> None:
+        policy = _local_operator_policy(
+            actions=("private_health_endpoint.apply",),
+            products=("repairshopr-sync",),
+            contexts=("repairshopr-sync",),
+        )
+        existing_record = _private_health_endpoint_record().model_copy(
+            update={
+                "endpoint_key": "shared-runtime",
+                "product": "other-product",
+                "context": "other-product",
+                "instance": "prod",
+            }
+        )
+        payload = _private_health_endpoint_apply_payload(mode="apply")
+        endpoint = cast(dict[str, object], payload["endpoint"])
+        endpoint["endpoint_key"] = "shared-runtime"
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(root / "state")
+            record_store.write_private_health_endpoint_record(existing_record)
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, response_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/private-health-endpoints/apply",
+                    payload=payload,
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "private-health-endpoint-conflict"},
+                )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(response_payload["status"], "rejected")
+        self.assertEqual(
+            response_payload["error"]["code"],
+            "conflicting_private_health_endpoint",
+        )
 
     def test_ingress_canary_route_record_apply_and_read_store_route_authority(
         self,

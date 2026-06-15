@@ -58,6 +58,7 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 )
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -754,6 +755,49 @@ class FilesystemRecordStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.provider, record.endpoint_key))
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_private_health_endpoint_record(
+        self, record: PrivateHealthEndpointRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_private_health_endpoints",
+            _private_health_endpoint_record_id(record.endpoint_key),
+            record,
+        )
+
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord:
+        return self._read_model(
+            PrivateHealthEndpointRecord,
+            "launchplane_private_health_endpoints",
+            _private_health_endpoint_record_id(endpoint_key),
+        )
+
+    def list_private_health_endpoint_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivateHealthEndpointRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PrivateHealthEndpointRecord,
+                "launchplane_private_health_endpoints",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.product, record.context, record.instance))
         if limit is not None:
             records = records[:limit]
         return tuple(records)
@@ -1672,6 +1716,10 @@ def _runner_lane_registration_audit_record_id(audit_record_key: str) -> str:
 
 
 def _edge_endpoint_record_id(endpoint_key: str) -> str:
+    return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
+
+
+def _private_health_endpoint_record_id(endpoint_key: str) -> str:
     return endpoint_key.replace("/", "%2F").replace("\\", "%5C")
 
 

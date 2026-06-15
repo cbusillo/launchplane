@@ -233,10 +233,12 @@ class ProductOnboardingManifest(BaseModel):
                     continue
                 if check.kind == "provider":
                     continue
+                if check.kind == "private_http":
+                    if check.private_endpoint_key:
+                        continue
+                    raise ValueError("private HTTP health check requires private_endpoint_key")
                 if check.url:
                     continue
-                if check.kind == "private_http":
-                    raise ValueError("private HTTP health check requires url")
                 if lane.health_url.strip():
                     continue
                 if not lane.base_url.strip():
