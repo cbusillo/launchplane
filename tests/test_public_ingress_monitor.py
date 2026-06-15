@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from typing import Literal
 from unittest.mock import patch
 from urllib.request import Request
 
@@ -10,6 +11,7 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -59,6 +61,7 @@ class _Store:
         self.notification_policies: list[PublicIngressNotificationPolicyRecord] = []
         self.notification_attempts: list[PublicIngressNotificationAttemptRecord] = []
         self.lane_summaries: dict[tuple[str, str], LaunchplaneLaneSummary] = {}
+        self.private_health_endpoints: dict[str, PrivateHealthEndpointRecord] = {}
 
     def list_product_profile_records(
         self, *, driver_id: str = ""
@@ -193,6 +196,14 @@ class _Store:
         ]
         self.notification_attempts.append(record)
 
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord:
+        try:
+            return self.private_health_endpoints[endpoint_key]
+        except KeyError as error:
+            raise FileNotFoundError(endpoint_key) from error
+
 
 def _profile(
     *, driver_id: str = "generic-web", lane: ProductLaneProfile | None = None
@@ -284,6 +295,27 @@ class _GitHubResponse:
 def _capture_request(requested_urls: list[str], url: str) -> HttpObservation:
     requested_urls.append(url)
     return HttpObservation(status_code=200, final_url=url, redirect_count=0)
+
+
+def _add_private_endpoint(
+    store: _Store,
+    endpoint_key: str = "example-site-prod-runtime",
+    *,
+    product: str = "example-site",
+    context: str = "example-site",
+    instance: str = "prod",
+    status: Literal["active", "disabled"] = "active",
+    url: str = "http://10.0.0.5:8080/health",
+) -> None:
+    store.private_health_endpoints[endpoint_key] = PrivateHealthEndpointRecord(
+        endpoint_key=endpoint_key,
+        product=product,
+        context=context,
+        instance=instance,
+        url=url,
+        status=status,
+        updated_at="2026-05-29T12:00:00Z",
+    )
 
 
 class PublicIngressMonitorTests(unittest.TestCase):
@@ -384,7 +416,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(requested_urls, [])
         self.assertEqual(store.records[0].failure_code, "private_url")
 
-    def test_private_http_check_requests_private_health_url(self) -> None:
+    def test_private_http_check_requests_private_health_endpoint_url(self) -> None:
         lane = ProductLaneProfile(
             instance="prod",
             context="example-site",
@@ -393,12 +425,13 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
-                        url="http://10.0.0.5:8080/health",
+                        private_endpoint_key="example-site-prod-runtime",
                     ),
                 )
             ),
         )
         store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store)
         requested_urls: list[str] = []
 
         result = run_public_ingress_monitor_once(
@@ -412,6 +445,169 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(store.records[0].check_name, "private-runtime")
         self.assertEqual(store.records[0].check_kind, "private_http")
         self.assertEqual(store.records[0].targets[0].target, "private_health_url")
+
+    def test_private_http_check_resolves_private_endpoint_record(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store)
+        requested_urls: list[str] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:06:30Z",
+            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+        )
+
+        self.assertEqual(result.pass_count, 1)
+        self.assertEqual(requested_urls, ["http://10.0.0.5:8080/health"])
+        self.assertEqual(store.records[0].health_url, "http://10.0.0.5:8080/health")
+        self.assertEqual(store.records[0].targets[0].target, "private_health_url")
+
+    def test_private_http_endpoint_reference_fails_closed_when_missing(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="missing-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        requested_urls: list[str] = []
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:06:40Z",
+            http_get=lambda url, _timeout: _capture_request(requested_urls, url),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(requested_urls, [])
+        self.assertEqual(store.records[0].failure_code, "private_endpoint_not_found")
+        self.assertEqual(store.records[0].targets[0].url, "private-endpoint://missing-runtime")
+        self.assertEqual(store.incidents[0].failure_code, "private_endpoint_not_found")
+
+    def test_private_http_endpoint_reference_fails_closed_when_disabled(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="disabled-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store, "disabled-runtime", status="disabled")
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:06:50Z",
+            http_get=lambda url, _timeout: _capture_request([], url),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "private_endpoint_disabled")
+
+    def test_private_http_endpoint_reference_fails_closed_when_lane_mismatched(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="wrong-lane-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store, "wrong-lane-runtime", instance="testing")
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:07:00Z",
+            http_get=lambda url, _timeout: _capture_request([], url),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "private_endpoint_mismatch")
+
+    def test_private_http_endpoint_reference_fails_closed_when_product_mismatched(
+        self,
+    ) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="wrong-product-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store, "wrong-product-runtime", product="other-product")
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:07:05Z",
+            http_get=lambda url, _timeout: _capture_request([], url),
+        )
+
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(store.records[0].failure_code, "private_endpoint_mismatch")
+
+    def test_non_generic_profile_discovers_private_checks_but_not_public_checks(self) -> None:
+        lane = ProductLaneProfile(
+            instance="prod",
+            context="example-site",
+            base_url="https://example.test",
+            health_monitoring=ProductLaneHealthMonitoringPolicy(
+                checks=(
+                    ProductLaneHealthCheck(name="public-ingress"),
+                    ProductLaneHealthCheck(
+                        name="private-runtime",
+                        kind="private_http",
+                        private_endpoint_key="example-site-prod-runtime",
+                    ),
+                )
+            ),
+        )
+        store = _Store((_profile(driver_id="custom-worker", lane=lane),))
+        _add_private_endpoint(store)
+
+        targets = discover_public_ingress_monitor_targets(store)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].check_name, "private-runtime")
+        self.assertEqual(targets[0].check_kind, "private_http")
 
     def test_provider_check_fails_closed_until_provider_monitor_is_wired(self) -> None:
         lane = ProductLaneProfile(
@@ -455,12 +651,13 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
-                        url="http://10.0.0.5:8080/health",
+                        private_endpoint_key="example-site-prod-runtime",
                     ),
                 )
             ),
         )
         store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store)
 
         result = run_public_ingress_monitor_once(
             record_store=store,
@@ -903,12 +1100,13 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     ProductLaneHealthCheck(
                         name="private-runtime",
                         kind="private_http",
-                        url="http://10.0.0.5:8080/health",
+                        private_endpoint_key="example-site-prod-runtime",
                     ),
                 )
             ),
         )
         store = _Store((_profile(lane=lane),))
+        _add_private_endpoint(store)
         store.notification_policies.extend(
             (
                 PublicIngressNotificationPolicyRecord(

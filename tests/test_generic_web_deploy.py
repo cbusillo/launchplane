@@ -348,6 +348,51 @@ class GenericWebDeployTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "base_url requires health_path"):
             profile.validate_write_contract()
 
+    def test_product_profile_write_contract_accepts_private_endpoint_key(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord(
+            product="repairshopr-sync",
+            display_name="RepairShopr Sync",
+            repository="cbusillo/repairshopr_api",
+            driver_id="generic-web",
+            image=ProductImageProfile(),
+            lanes=(
+                ProductLaneProfile(
+                    instance="prod",
+                    context="repairshopr-sync",
+                    health_monitoring=ProductLaneHealthMonitoringPolicy(
+                        checks=(
+                            ProductLaneHealthCheck(
+                                name="private-runtime",
+                                kind="private_http",
+                                private_endpoint_key="repairshopr-sync-prod-runtime",
+                            ),
+                        )
+                    ),
+                ),
+            ),
+            updated_at="2026-06-12T20:00:00Z",
+            source="test",
+        )
+
+        self.assertIs(profile.validate_write_contract(), profile)
+
+    def test_private_http_check_rejects_inline_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must use private_endpoint_key"):
+            ProductLaneHealthCheck(
+                name="private-runtime",
+                kind="private_http",
+                url="http://10.0.0.5:8080/health",
+            )
+
+    def test_public_http_check_rejects_private_endpoint_key(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only private HTTP"):
+            ProductLaneHealthCheck(
+                name="public-ingress",
+                private_endpoint_key="repairshopr-sync-prod-runtime",
+            )
+
     def test_product_profile_rejects_zero_runtime_port_with_health_path(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime_port=0 cannot set health_path"):
             LaunchplaneProductProfileRecord(

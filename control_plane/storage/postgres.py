@@ -76,6 +76,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -585,6 +586,28 @@ class LaunchplaneEdgeEndpointRow(Base):
     upstream_host: Mapped[str] = mapped_column(String, nullable=False)
     upstream_scheme: Mapped[str] = mapped_column(String, nullable=False)
     upstream_port: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePrivateHealthEndpointRow(Base):
+    __tablename__ = "launchplane_private_health_endpoints"
+    __table_args__ = (
+        Index(
+            "launchplane_private_health_endpoints_lookup_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+        ),
+    )
+
+    endpoint_key: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    url: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
@@ -3244,6 +3267,62 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneEdgeEndpointRow.provider.asc(),
                 LaunchplaneEdgeEndpointRow.endpoint_key.asc(),
+            ),
+            limit=limit,
+        )
+
+    def write_private_health_endpoint_record(
+        self, record: PrivateHealthEndpointRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePrivateHealthEndpointRow(
+                endpoint_key=record.endpoint_key,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                url=record.url,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord:
+        return self._read_model(
+            model_type=PrivateHealthEndpointRecord,
+            orm_model=LaunchplanePrivateHealthEndpointRow,
+            filters=(LaunchplanePrivateHealthEndpointRow.endpoint_key == endpoint_key,),
+        )
+
+    def list_private_health_endpoint_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivateHealthEndpointRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplanePrivateHealthEndpointRow.product == product)
+        if context_name:
+            filters.append(LaunchplanePrivateHealthEndpointRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplanePrivateHealthEndpointRow.instance == instance_name)
+        if status:
+            filters.append(LaunchplanePrivateHealthEndpointRow.status == status)
+        return self._list_models(
+            model_type=PrivateHealthEndpointRecord,
+            orm_model=LaunchplanePrivateHealthEndpointRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePrivateHealthEndpointRow.product.asc(),
+                LaunchplanePrivateHealthEndpointRow.context.asc(),
+                LaunchplanePrivateHealthEndpointRow.instance.asc(),
+                LaunchplanePrivateHealthEndpointRow.endpoint_key.asc(),
             ),
             limit=limit,
         )
