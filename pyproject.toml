@@ -18,6 +18,7 @@ dependencies = [
     "sqlalchemy>=2.0.50",
     "uvicorn>=0.38.0",
     "alembic>=1.18.4",
+    "a2wsgi>=1.10.10",
 ]
 
 [project.optional-dependencies]

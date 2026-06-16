@@ -10,17 +10,16 @@ import os
 import re
 import secrets
 import threading
-from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Literal, Protocol, cast
 from urllib.parse import parse_qs
-from wsgiref.simple_server import WSGIServer, make_server
-from wsgiref.types import WSGIApplication
 
 import click
+from a2wsgi import WSGIMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from jwt import InvalidTokenError
+from starlette.types import ASGIApp
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
@@ -32,6 +31,11 @@ from control_plane import product_context_audit as control_plane_product_context
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane.http_app import (
+    LaunchplaneAuthzPolicyRuntime,
+    create_launchplane_fastapi_app,
+    resolve_launchplane_authz_policy,
+)
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -42,8 +46,6 @@ from control_plane.agent_context_service import (
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
-    authz_policy_sha256,
-    build_authz_policy_record_id,
 )
 from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRecord,
@@ -2486,10 +2488,6 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     @property
     def apply_changes(self) -> bool:
         return self.mode == "apply"
-
-
-class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    daemon_threads = True
 
 
 def _redirect_response(
@@ -9863,32 +9861,17 @@ def _resolve_authz_policy(
     record_store: object,
     bootstrap_policy: LaunchplaneAuthzPolicy,
 ) -> tuple[LaunchplaneAuthzPolicy, str, str]:
-    list_records = getattr(record_store, "list_authz_policy_records", None)
-    if callable(list_records):
-        records = list_records(status="active", limit=1)
-        if records:
-            record = records[0]
-            return record.policy, record.policy_sha256, "db"
-
-    policy_sha256 = authz_policy_sha256(bootstrap_policy)
-    write_record = getattr(record_store, "write_authz_policy_record", None)
-    if callable(write_record):
-        updated_at = _now_timestamp()
-        record = LaunchplaneAuthzPolicyRecord(
-            record_id=build_authz_policy_record_id(
-                updated_at=updated_at,
-                policy_sha256=policy_sha256,
-            ),
-            status="active",
-            source=_bootstrap_policy_source_from_env(),
-            updated_at=updated_at,
-            policy_sha256=policy_sha256,
-            policy=bootstrap_policy,
-        )
-        write_record(record)
-        return record.policy, record.policy_sha256, "bootstrap_seeded_store"
-
-    return bootstrap_policy, policy_sha256, "bootstrap"
+    resolved_policy = resolve_launchplane_authz_policy(
+        record_store=record_store,
+        bootstrap_policy=bootstrap_policy,
+        policy_source=_bootstrap_policy_source_from_env(),
+        now_timestamp=_now_timestamp(),
+    )
+    return (
+        resolved_policy.policy,
+        resolved_policy.policy_sha256,
+        resolved_policy.source,
+    )
 
 
 def _launchplane_policy_sha256_from_env() -> str:
@@ -10411,17 +10394,25 @@ def create_launchplane_service_app(
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
+    authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
+    record_store_for_service: _TestLaunchplaneServiceRecordStore | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
     record_store = cast(
         PostgresRecordStore,
-        local_record_store_for_tests or build_shared_record_store(database_url=database_url),
+        record_store_for_service
+        or local_record_store_for_tests
+        or build_shared_record_store(database_url=database_url),
     )
     storage_backend = storage_backend_name(record_store)
     authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source = (
         _resolve_authz_policy(record_store=record_store, bootstrap_policy=authz_policy)
     )
+    resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
+        authz_policy
+    )
+    resolved_authz_policy_runtime.update(authz_policy)
     resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
     oauth_login_states = OAuthLoginStateStore()
     session_manager = (
@@ -14762,6 +14753,7 @@ def create_launchplane_service_app(
                     )
                 if authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -14880,6 +14872,7 @@ def create_launchplane_service_app(
                     )
                 if authz_removal_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -14998,6 +14991,7 @@ def create_launchplane_service_app(
                     )
                 if human_authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -15116,6 +15110,7 @@ def create_launchplane_service_app(
                     )
                 if terminal_authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -15212,6 +15207,7 @@ def create_launchplane_service_app(
                     )
                 if local_operator_grant_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -15308,6 +15304,7 @@ def create_launchplane_service_app(
                     )
                 if local_admin_grant_request.mode == "apply":
                     authz_policy = updated_policy
+                    resolved_authz_policy_runtime.update(updated_policy)
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -17084,10 +17081,20 @@ def serve_launchplane_service(
     audience: str,
     database_url: str | None = None,
 ) -> None:
+    import uvicorn
+
     from control_plane.service_auth import GitHubOidcVerifier
 
-    authz_policy = load_authz_policy(policy_file)
+    bootstrap_authz_policy = load_authz_policy(policy_file)
     verifier = GitHubOidcVerifier(audience=audience)
+    service_record_store = build_shared_record_store(database_url=database_url)
+    resolved_fastapi_policy = resolve_launchplane_authz_policy(
+        record_store=service_record_store,
+        bootstrap_policy=bootstrap_authz_policy,
+        policy_source=_bootstrap_policy_source_from_env(),
+        now_timestamp=_now_timestamp(),
+    )
+    authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(resolved_fastapi_policy.policy)
     work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
     work_graph_planning_facts_provider = (
         (lambda: build_github_project_planning_facts(work_graph_project_config))
@@ -17122,17 +17129,31 @@ def serve_launchplane_service(
     application = create_launchplane_service_app(
         state_dir=state_dir,
         verifier=verifier,
-        authz_policy=authz_policy,
+        authz_policy=bootstrap_authz_policy,
         database_url=database_url,
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
+        authz_policy_runtime=authz_policy_runtime,
+        record_store_for_service=service_record_store,
     )
-    with make_server(
-        host,
-        port,
-        cast(WSGIApplication, application),
-        server_class=ThreadingWSGIServer,
-    ) as server:
-        click.echo(f"Launchplane service listening on http://{host}:{port}")
-        server.serve_forever()
+    fastapi_application = create_launchplane_fastapi_app(
+        verifier=verifier,
+        authz_policy=resolved_fastapi_policy.policy,
+        authz_policy_runtime=authz_policy_runtime,
+        record_store_factory=lambda: service_record_store,
+    )
+    fastapi_application.mount(
+        "/",
+        cast(ASGIApp, WSGIMiddleware(cast(Any, application))),
+    )
+    click.echo(f"Launchplane service listening on http://{host}:{port}")
+    try:
+        uvicorn.run(
+            fastapi_application,
+            host=host,
+            port=port,
+            log_config=None,
+        )
+    finally:
+        service_record_store.close()
