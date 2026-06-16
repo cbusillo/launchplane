@@ -40,8 +40,10 @@ VeriReel product paths:
   the fallback while route ownership is migrated incrementally
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model and included in OpenAPI as the first v2 contract proof
-- protected artifact inventory route:
-  - `GET /v1/artifacts/protected`
+- native FastAPI protected artifact inventory route:
+  - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
+    the requested product and either the requested context or whole-product
+    wildcard context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates`
   - `POST /v1/evidence/deployments`
@@ -1076,7 +1078,9 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/inventory/{context}/{instance}`
 - `GET /v1/promotions/{record_id}`
 - `GET /v1/deployments/{record_id}`
-- `GET /v1/artifacts/protected`
+- `GET /v1/artifacts/protected` (native FastAPI for bearer-token and
+  human-session callers; legacy WSGI fallback retained until caller evidence is
+  complete)
 - `GET /v1/contexts/{context}/secrets`
 - `GET /v1/contexts/{context}/instances/{instance}/secrets`
 - `GET /v1/secrets/{secret_id}`
