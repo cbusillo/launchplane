@@ -289,6 +289,7 @@ def create_launchplane_fastapi_app(
     def read_human_session_identity(
         *,
         cookie_header: str,
+        request: Request,
         response: Response,
     ) -> GitHubHumanIdentity | None:
         session_result = read_human_session(cookie_header=cookie_header)
@@ -296,12 +297,13 @@ def create_launchplane_fastapi_app(
             return None
         session, was_renewed = session_result
         if was_renewed and human_session_manager is not None:
-            response.headers.append(
-                "Set-Cookie", human_session_manager.session_cookie_header(session)
-            )
+            session_cookie_header = human_session_manager.session_cookie_header(session)
+            response.headers.append("Set-Cookie", session_cookie_header)
+            request.state.launchplane_renewed_session_cookie = session_cookie_header
         return session.identity
 
     def read_identity(
+        request: Request,
         response: Response,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
         cookie: Annotated[str, Header(alias="Cookie")] = "",
@@ -309,30 +311,29 @@ def create_launchplane_fastapi_app(
         header = authorization.strip()
         if header:
             scheme, _, token = header.partition(" ")
-            if scheme.lower() != "bearer" or not token.strip():
-                raise _authentication_required_error(
-                    "Authorization header must use Bearer token format."
-                )
-            try:
-                owner_agent_identity = bearer_identity_from_token(
-                    token=token.strip(),
-                    config=bearer_identity_config or BearerIdentityConfig(),
-                )
-            except PermissionError as error:
-                raise _authentication_required_error(str(error)) from error
-            if owner_agent_identity is not None:
-                return owner_agent_identity
-            try:
-                return verifier.verify(token.strip())
-            except (InvalidTokenError, ValueError) as error:
-                raise _authentication_required_error(str(error)) from error
+            bearer_token = token.strip()
+            if scheme.lower() == "bearer" and bearer_token:
+                try:
+                    owner_agent_identity = bearer_identity_from_token(
+                        token=bearer_token,
+                        config=bearer_identity_config or BearerIdentityConfig(),
+                    )
+                except PermissionError as error:
+                    raise _authentication_required_error(str(error)) from error
+                if owner_agent_identity is not None:
+                    return owner_agent_identity
+                try:
+                    return verifier.verify(bearer_token)
+                except (InvalidTokenError, ValueError) as error:
+                    raise _authentication_required_error(str(error)) from error
         human_identity = read_human_session_identity(
             cookie_header=cookie,
+            request=request,
             response=response,
         )
-        if human_identity is None:
-            raise _authentication_required_error("Authorization header is required.")
-        return human_identity
+        if human_identity is not None:
+            return human_identity
+        raise _authentication_required_error("Authorization header is required.")
 
     def read_product_environment_config_status(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -539,6 +540,15 @@ def create_launchplane_fastapi_app(
             storage_backend=storage_backend_name(record_store),
         )
 
+    def preserve_renewed_session_cookie(request: Request, response: JSONResponse) -> None:
+        renewed_session_cookie = getattr(
+            request.state,
+            "launchplane_renewed_session_cookie",
+            "",
+        )
+        if renewed_session_cookie:
+            response.headers.append("Set-Cookie", str(renewed_session_cookie))
+
     app.add_api_route(
         "/v1/health",
         read_health,
@@ -617,7 +627,7 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    def launchplane_http_exception_handler(_request: Request, error: Exception) -> JSONResponse:
+    def launchplane_http_exception_handler(request: Request, error: Exception) -> JSONResponse:
         if not isinstance(error, HTTPException):
             raise error
         http_error = error
@@ -634,14 +644,16 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             error=LaunchplaneErrorDetail(code=code, message=message),
         )
-        return JSONResponse(
+        response = JSONResponse(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json"),
             headers=http_error.headers,
         )
+        preserve_renewed_session_cookie(request, response)
+        return response
 
     def launchplane_request_validation_exception_handler(
-        _request: Request, error: Exception
+        request: Request, error: Exception
     ) -> JSONResponse:
         if not isinstance(error, RequestValidationError):
             raise error
@@ -652,10 +664,12 @@ def create_launchplane_fastapi_app(
                 message="Launchplane request validation failed.",
             ),
         )
-        return JSONResponse(
+        response = JSONResponse(
             status_code=400,
             content=payload.model_dump(mode="json"),
         )
+        preserve_renewed_session_cookie(request, response)
+        return response
 
     app.add_api_route(
         "/v1/products/{product}/environments/{environment}/config-status",
