@@ -628,6 +628,15 @@ state/
   for a concurrent owner id to settle, then give that owner record its own
   bounded settle window before clearing abandoned empty or orphaned reservations
   so an interrupted writer cannot block the lane forever.
+- The v2 target execution model for these Odoo long-running operation records is
+  a dedicated Launchplane worker process backed by DB leases and heartbeats. The
+  HTTP route should create or replay the operation record and return the poll
+  URL; request-process daemon threads are a compatibility path to remove once
+  the worker can claim, heartbeat, recover, and complete these records. Other
+  long-running work should use typed worker operation or lease records that
+  reference business evidence records, rather than making business evidence
+  records themselves the queue lease, unless a future ADR explicitly says
+  otherwise.
 - Odoo prod rollback delegates the rollback deploy to stable target replacement,
   which writes the deployment record and prod release tuple. Rollback then
   refreshes prod inventory with rollback provenance and annotates the current
@@ -920,8 +929,8 @@ preflights.
   preview readiness, routes failed checks back to the owning session, then claims
   at most one queued request. Request handoff opens or reuses deterministic
   visible tmux sessions for local checkouts, records `running` or immediate
-  `blocked` status, and wraps the visible command so terminal success or failure calls
-  `uv run launchplane every-code finish`.
+  `blocked` status, and wraps the visible command so terminal success or failure
+  calls `uv run launchplane every-code finish`.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with
