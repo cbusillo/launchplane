@@ -218,6 +218,25 @@ def require_protected_artifact_store(record_store: object) -> ProtectedArtifactS
     return cast(ProtectedArtifactStore, record_store)
 
 
+def require_deployment_evidence_store(record_store: object) -> EvidenceIngestionStore:
+    required_methods = (
+        "write_deployment_record",
+        "write_environment_inventory",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support deployment evidence writes: "
+            f"{missing_summary}"
+        )
+    return cast(EvidenceIngestionStore, record_store)
+
+
 def require_evidence_ingestion_store(record_store: object) -> EvidenceIngestionStore:
     required_methods = (
         "write_deployment_record",
@@ -726,16 +745,6 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
-        try:
-            evidence_store = require_evidence_ingestion_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-
         idempotency_store = idempotency_capable_store(record_store)
         normalized_idempotency_key = idempotency_key.strip()
         normalized_scope = idempotency_scope(identity)
@@ -762,6 +771,16 @@ def create_launchplane_fastapi_app(
                     trace_id=trace_id,
                     stored_record=stored_record,
                 )
+
+        try:
+            evidence_store = require_deployment_evidence_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
 
         records = {
             str(key): str(value)

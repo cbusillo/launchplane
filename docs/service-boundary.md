@@ -821,6 +821,11 @@ writes, not on every possible operator action.
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 
+`POST /v1/evidence/deployments` only requires the deployment-write record-store
+capability and any available idempotency store. Replay handling runs before the
+deployment-write capability check so a stored response can still be returned if
+the backing store is temporarily write-restricted for deployment evidence.
+
 ### Preview lifecycle endpoints
 
 - `POST /v1/previews/lifecycle-plan`

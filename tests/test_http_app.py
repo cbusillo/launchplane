@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any, cast
 from urllib.parse import urlencode
 from unittest.mock import patch
@@ -83,6 +83,64 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_req_00000000000000000000000000000000", example_text)
         self.assertNotIn("example-site", example_text)
         self.assertNotIn("shinycomputers", example_text)
+
+
+class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deployment_evidence_accepts_store_without_promotion_methods(self) -> None:
+        store = _DeploymentEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_deployment_evidence(app, _deployment_evidence_payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-example-site-prod")
+        self.assertEqual(
+            store.deployment_records["deployment-example-site-prod"]["context"],
+            "example-site",
+        )
+        self.assertEqual(
+            store.environment_inventories[0]["deployment_record_id"],
+            "deployment-example-site-prod",
+        )
+
+    async def test_deployment_evidence_replays_idempotency_before_deployment_gate(self) -> None:
+        store = _IdempotencyOnlyReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _deployment_evidence_payload()
+
+        first_response = await _post_deployment_evidence(
+            app,
+            request_payload,
+            idempotency_key="deployment-example-site-prod",
+        )
+        store.write_deployment_record = None
+        store.write_environment_inventory = None
+        second_response = await _post_deployment_evidence(
+            app,
+            request_payload,
+            idempotency_key="deployment-example-site-prod",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_deployment_calls, 1)
+        self.assertEqual(store.write_environment_inventory_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -2044,6 +2102,59 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _DeploymentEvidenceOnlyStore:
+    def __init__(self) -> None:
+        self.deployment_records: dict[str, dict[str, Any]] = {}
+        self.environment_inventories: list[dict[str, Any]] = []
+
+    def write_deployment_record(self, record: DeploymentRecord) -> None:
+        self.deployment_records[record.record_id] = record.model_dump(mode="json")
+
+    def write_environment_inventory(self, inventory: Any) -> None:
+        self.environment_inventories.append(inventory.model_dump(mode="json"))
+
+
+class _IdempotencyOnlyReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_deployment_calls = 0
+        self.write_environment_inventory_calls = 0
+        self._stored_record: Any | None = None
+        self.write_deployment_record: Callable[[DeploymentRecord], None] | None = (
+            self._write_deployment_record
+        )
+        self.write_environment_inventory: Callable[[Any], None] | None = (
+            self._write_environment_inventory
+        )
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def _write_deployment_record(self, record: DeploymentRecord) -> None:
+        self.write_deployment_calls += 1
+
+    def _write_environment_inventory(self, inventory: Any) -> None:
+        self.write_environment_inventory_calls += 1
 
 
 class _RejectingVerifier:
