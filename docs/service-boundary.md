@@ -748,6 +748,27 @@ returns sanitized binding keys, policy ids, and finding codes only. It never
 returns plaintext secret values, ciphertext, provider env dumps, or token
 prefixes to the agent.
 
+### Managed Secret Boundary
+
+Secret writes, rotation, metadata reads, and plaintext resolution are
+Launchplane service/storage responsibilities. Drivers, workers, and product
+workflows must request managed-secret bundles through service-owned interfaces;
+they must not query secret tables, inspect ciphertext, select encryption keys,
+or fall back to provider env dumps or local files.
+
+Routine reads return metadata only: binding keys, ids, statuses, scopes,
+version ids, encryption key ids, counts, and finding codes. Plaintext resolution
+is allowed only for an authorized service-side operation that immediately uses
+the value, such as rendering a provider payload or preparing a worker runtime
+environment after authz and runtime key-safety checks pass. A future trusted
+operator reveal path must be separate, reasoned, scoped, audited, and denied by
+default.
+
+Every plaintext resolution or reveal attempt writes redacted audit evidence.
+Service responses, logs, workflow artifacts, UI payloads, and agent context must
+not include plaintext, ciphertext, token prefixes, provider env dumps, or secret
+request bodies.
+
 ### OpenFGA Candidate Mapping
 
 The current DB-backed policy records remain the active authorization path.

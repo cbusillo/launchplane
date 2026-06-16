@@ -43,7 +43,8 @@ Use these docs as the source of truth for `launchplane`.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria
   before making Launchplane public.
-- [secrets.md](secrets.md) — Launchplane secret ownership and local contract.
+- [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
+  and local contract.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and

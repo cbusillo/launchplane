@@ -373,6 +373,63 @@ deployment topology, Python SDK compatibility, local/dev bootstrap, failure mode
 when Temporal is unavailable, rollback posture, and how Temporal history maps
 back to Launchplane records without becoming product/runtime authority.
 
+### Managed Secrets And Key Rotation
+
+Managed secrets are accepted Launchplane authority for secret-shaped runtime and
+provider values. The repository owns schemas, validators, redaction rules,
+rotation contracts, and fake tests. Live secret values, bindings, provider
+credentials, operator assignments, product runtime values, and key material must
+stay in Launchplane records, managed secret providers, platform secrets, or
+explicit scoped operator input.
+
+The bootstrap/root-of-trust exception is intentionally narrow: Launchplane may
+receive the minimal decryption root or platform-secret reference required to
+decrypt DB-backed managed-secret versions before the secret store is usable.
+That bootstrap surface must not become a product/runtime secret catalog,
+provider credential fallback, operator assignment list, or checked-in key ring.
+
+#### #1331 Boundary Record
+
+Issue #1331 records the v2 managed-secret and rotation model. Launchplane
+managed secrets remain the accepted implementation boundary; external Vault,
+HSM, KMS, or cloud-secret-manager providers are deferred candidates until a
+future slice proves a named Launchplane need, local/dev bootstrap plan,
+operational owner, failure mode, and rollback posture.
+
+Each encrypted secret version must carry stable non-secret identifiers:
+
+- `secret_id`: the durable Launchplane secret identity.
+- `version_id`: the immutable secret-value version identity.
+- `encryption_key_id`: the non-secret id of the decryption root that encrypted
+  the version.
+
+`current_version_id` points at the active secret-value version. It is not the
+encryption key id and must not be used as master-key rotation state. Key ids are
+opaque labels, not key material, provider tokens, product values, domains,
+operator identities, or topology.
+
+Rotation introduces a new active `encryption_key_id`, keeps older key ids only
+for explicit historical decrypt windows, re-encrypts active secret versions
+through a Launchplane-owned rotation path, verifies readability under the new
+key id, and retires the old key id. Missing, ambiguous, stale, disabled, or
+unreadable secret-version/key metadata fails closed rather than trying service
+env, local files, previous ciphertext, provider env dumps, workflow defaults, or
+ambient operator credentials.
+
+Plaintext exposure is exceptional and service-side. Routine APIs, CLI output,
+workflows, UI, logs, and agent context may show metadata such as binding ids,
+secret ids, version ids, key ids, scopes, counts, reason codes, and findings.
+They must not show plaintext, ciphertext, token prefixes, provider env dumps,
+or request bodies that contain secrets. Any plaintext resolution or reveal
+attempt must write redacted audit evidence before or with the operation it
+supports.
+
+The legacy-removal checkpoint for this slice is clear: production-capable secret
+paths with fixed or ambiguous key ids, unlabeled ciphertext, or no rotation
+metadata are not compliant v2 paths. They must be re-keyed, migrated, or removed
+by the implementation slice that makes managed-secret rotation production
+critical.
+
 ### ORM And Migrations
 
 New shared-service persistence should use SQLAlchemy ORM models and Alembic
