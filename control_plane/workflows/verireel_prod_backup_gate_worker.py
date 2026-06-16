@@ -13,11 +13,11 @@ from urllib.request import Request, urlopen
 
 import click
 
-from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.verireel_prod_backup_gate import (
+from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateWorkerRequest,
     VeriReelProdBackupGateWorkerResult,
 )
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 DEFAULT_HEALTH_TIMEOUT_SECONDS = 10
@@ -286,12 +286,8 @@ def execute_worker(
         )
     snapshot_prefix = _optional_env("VERIREEL_PROD_SNAPSHOT_PREFIX", DEFAULT_SNAPSHOT_PREFIX)
     snapshot_keep = _parse_non_negative_int("VERIREEL_PROD_SNAPSHOT_KEEP", 5)
-    testing_base_url = _optional_env(
-        "VERIREEL_TESTING_BASE_URL", "https://ver-testing.shinycomputers.com"
-    )
-    prod_base_url = _optional_env(
-        "VERIREEL_PROD_OPERATOR_BASE_URL", "https://ver-prod.shinycomputers.com"
-    )
+    testing_base_url = _optional_env("VERIREEL_TESTING_BASE_URL")
+    prod_base_url = _optional_env("VERIREEL_PROD_OPERATOR_BASE_URL")
 
     started_at = utc_now_timestamp()
     snapshot_name = _format_snapshot_name(snapshot_prefix) if "snapshot" in backup_mode else ""

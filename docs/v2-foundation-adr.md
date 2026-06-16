@@ -186,11 +186,12 @@ workflow engine until a named workflow proves the smaller model is not enough.
 The current problem is concrete and narrower than general workflow orchestration.
 Odoo stable bootstrap and Odoo stable target replacement write typed Launchplane
 operation records, expose poll/read boundaries, and are executed by the
-supervised DB-backed worker. VeriReel async backup gate work has similar
-durability pressure because it is guarded by in-memory active sets; moving it to
-this model requires a typed worker operation record that references the backup
-evidence record instead of turning that evidence record into queue state. New
-durable paths should use a dedicated Launchplane worker process that claims
+supervised DB-backed worker. VeriReel async backup gate work uses the same
+model: the HTTP route writes or replays a typed operation record that references
+the backup evidence record, while the supervised worker owns claim, lease,
+heartbeat, execution, and terminal operation state. The backup evidence record
+remains the promotion/replay authority; queue records are execution mechanics.
+New durable paths should use a dedicated Launchplane worker process that claims
 DB-backed work, updates a lease/heartbeat, executes typed handlers, and writes
 terminal records.
 

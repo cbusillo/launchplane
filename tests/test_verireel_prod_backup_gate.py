@@ -14,16 +14,29 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretSafetyRule,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.verireel_prod_backup_gate import (
+    VeriReelProdBackupGateRequest,
+    VeriReelProdBackupGateWorkerRequest,
+    VeriReelProdBackupGateWorkerResult,
+)
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
+    build_verireel_prod_backup_gate_operation_id,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_backup_gate_worker
 from control_plane.workflows.verireel_prod_backup_gate import (
     DEFAULT_TIMEOUT_SECONDS,
-    VeriReelProdBackupGateRequest,
-    VeriReelProdBackupGateWorkerRequest,
-    VeriReelProdBackupGateWorkerResult,
     _run_delegated_worker,
+    enqueue_verireel_prod_backup_gate,
     execute_verireel_prod_backup_gate,
+)
+from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
+    build_verireel_prod_backup_gate_operation_worker_status,
+    reconcile_stale_verireel_prod_backup_gate_operation_records,
+    run_verireel_prod_backup_gate_operation_worker_loop,
+    run_verireel_prod_backup_gate_operation_worker_once,
 )
 
 
@@ -33,6 +46,42 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
 
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
+
+    def _operation_record(
+        self,
+        *,
+        operation_id: str = "verireel-operation-1",
+        backup_record_id: str = "backup-gate-verireel-prod-run-12345-attempt-1",
+        status: str = "pending",
+        phase: str = "created",
+        attempt: int = 0,
+        lease_owner: str = "",
+        lease_expires_at: str = "",
+        error_message: str = "backup failed",
+    ) -> VeriReelProdBackupGateOperationRecord:
+        request = VeriReelProdBackupGateRequest(backup_record_id=backup_record_id)
+        payload: dict[str, object] = {
+            "operation_id": operation_id,
+            "product": "verireel",
+            "context": "verireel",
+            "instance": "prod",
+            "backup_record_id": backup_record_id,
+            "request_fingerprint": request.model_dump_json(),
+            "request": request.model_dump(mode="json"),
+            "status": status,
+            "phase": phase,
+            "created_at": "2026-04-25T00:00:00Z",
+            "updated_at": "2026-04-25T00:00:00Z",
+            "attempt": attempt,
+            "lease_owner": lease_owner,
+            "lease_expires_at": lease_expires_at,
+            "heartbeat_at": "2026-04-25T00:01:00Z" if lease_owner else "",
+        }
+        if status in {"pass", "fail"}:
+            payload["finished_at"] = "2026-04-25T00:02:00Z"
+            if status == "fail":
+                payload["error_message"] = error_message
+        return VeriReelProdBackupGateOperationRecord.model_validate(payload)
 
     def _write_prod_worker_secret_binding(
         self,
@@ -227,27 +276,45 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
 
         self.assertEqual(request.timeout_seconds, 1800)
 
-    def test_execute_verireel_prod_backup_gate_async_records_pending_and_completes(self) -> None:
+    def test_enqueue_verireel_prod_backup_gate_records_pending_operation_and_replays_terminal_evidence(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             record_store = self._record_store(root)
+            request = VeriReelProdBackupGateRequest(
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+            )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_backup_gate._ensure_async_backup_gate_worker"
-            ) as worker_mock:
-                result = execute_verireel_prod_backup_gate(
-                    control_plane_root=root,
-                    record_store=record_store,
-                    request=VeriReelProdBackupGateRequest(
-                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
-                    ),
-                    run_async=True,
-                )
+            result = enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=request,
+                now="2026-04-25T00:00:00Z",
+            )
 
             self.assertEqual(result.backup_status, "pending")
-            worker_mock.assert_called_once()
             record = record_store.read_backup_gate_record(result.backup_record_id)
             self.assertEqual(record.status, "pending")
+            operations = record_store.list_verireel_prod_backup_gate_operation_records(
+                backup_record_id=request.backup_record_id
+            )
+            self.assertEqual(len(operations), 1)
+            self.assertEqual(operations[0].status, "pending")
+
+            replay = enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=request,
+                now="2026-04-25T00:01:00Z",
+            )
+            self.assertEqual(replay.backup_status, "pending")
+            self.assertEqual(
+                len(
+                    record_store.list_verireel_prod_backup_gate_operation_records(
+                        backup_record_id=request.backup_record_id
+                    )
+                ),
+                1,
+            )
 
             record_store.write_backup_gate_record(
                 BackupGateRecord(
@@ -262,21 +329,390 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
                 )
             )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_backup_gate._ensure_async_backup_gate_worker"
-            ) as worker_mock:
-                completed_result = execute_verireel_prod_backup_gate(
-                    control_plane_root=root,
-                    record_store=record_store,
-                    request=VeriReelProdBackupGateRequest(
-                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
-                    ),
-                    run_async=True,
-                )
+            completed_result = enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=request,
+                now="2026-04-25T00:02:00Z",
+            )
 
             self.assertEqual(completed_result.backup_status, "pass")
             self.assertEqual(completed_result.snapshot_name, "ver-predeploy-20260425-001500")
-            worker_mock.assert_not_called()
+
+    def test_enqueue_verireel_prod_backup_gate_rejects_conflicting_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            request = VeriReelProdBackupGateRequest(
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=request,
+                now="2026-04-25T00:00:00Z",
+            )
+
+            with self.assertRaisesRegex(click.ClickException, "conflicts"):
+                enqueue_verireel_prod_backup_gate(
+                    record_store=record_store,
+                    request=VeriReelProdBackupGateRequest(
+                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        timeout_seconds=42,
+                    ),
+                    now="2026-04-25T00:01:00Z",
+                )
+
+    def test_enqueue_verireel_prod_backup_gate_rejects_raced_conflicting_operation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            request = VeriReelProdBackupGateRequest(
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                timeout_seconds=42,
+            )
+            existing_operation = self._operation_record(
+                operation_id=build_verireel_prod_backup_gate_operation_id(
+                    product="verireel",
+                    context="verireel",
+                    instance="prod",
+                    backup_record_id=request.backup_record_id,
+                )
+            )
+
+            def _return_raced_operation(
+                operation: VeriReelProdBackupGateOperationRecord,
+            ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
+                return existing_operation, False
+
+            with patch.object(
+                record_store,
+                "create_verireel_prod_backup_gate_operation_record_if_no_active_record",
+                side_effect=_return_raced_operation,
+            ):
+                with self.assertRaisesRegex(click.ClickException, "conflicts"):
+                    enqueue_verireel_prod_backup_gate(
+                        record_store=record_store,
+                        request=request,
+                        now="2026-04-25T00:01:00Z",
+                    )
+
+    def test_enqueue_verireel_prod_backup_gate_materializes_failed_terminal_operation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            request = VeriReelProdBackupGateRequest(
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            record_store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id=request.backup_record_id,
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-25T00:00:00Z",
+                    source="launchplane-verireel-prod-backup-gate",
+                    required=True,
+                    status="pending",
+                    evidence={},
+                )
+            )
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(
+                    operation_id=build_verireel_prod_backup_gate_operation_id(
+                        product="verireel",
+                        context="verireel",
+                        instance="prod",
+                        backup_record_id=request.backup_record_id,
+                    ),
+                    status="fail",
+                    phase="failed",
+                    error_message="lease expired in backup_gate",
+                )
+            )
+
+            result = enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=request,
+                now="2026-04-25T00:03:00Z",
+            )
+
+            self.assertEqual(result.backup_status, "fail")
+            self.assertEqual(result.error_message, "lease expired in backup_gate")
+            backup_record = record_store.read_backup_gate_record(request.backup_record_id)
+            self.assertEqual(backup_record.status, "fail")
+            self.assertEqual(
+                backup_record.evidence["error_message"], "lease expired in backup_gate"
+            )
+
+    def test_verireel_operation_worker_claims_and_executes_pending_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record()
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
+                return_value=VeriReelProdBackupGateWorkerResult(
+                    status="pass",
+                    snapshot_name="ver-predeploy-20260425-001500",
+                    started_at="2026-04-25T00:15:00Z",
+                    finished_at="2026-04-25T00:16:00Z",
+                    detail="Backup completed.",
+                    evidence={"snapshot_name": "ver-predeploy-20260425-001500"},
+                ),
+            ):
+                result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            self.assertEqual(result.status, "worked")
+            self.assertTrue(result.terminal_write_committed)
+            backup_record = record_store.read_backup_gate_record(
+                "backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(backup_record.status, "pass")
+            operation = record_store.read_verireel_prod_backup_gate_operation_record(
+                "verireel-operation-1"
+            )
+            self.assertEqual(operation.status, "pass")
+            self.assertEqual(operation.phase, "completed")
+            self.assertEqual(operation.attempt, 1)
+
+    def test_verireel_operation_worker_writes_fail_record_on_worker_exception(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record()
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
+                side_effect=click.ClickException("pct snapshot failed"),
+            ):
+                result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            self.assertEqual(result.status, "worked")
+            backup_record = record_store.read_backup_gate_record(
+                "backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(backup_record.status, "fail")
+            self.assertEqual(backup_record.evidence["error_message"], "pct snapshot failed")
+            operation = record_store.read_verireel_prod_backup_gate_operation_record(
+                "verireel-operation-1"
+            )
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.phase, "failed")
+
+    def test_verireel_operation_worker_preserves_structured_fail_detail(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record()
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
+                return_value=VeriReelProdBackupGateWorkerResult(
+                    status="fail",
+                    started_at="2026-04-25T00:15:00Z",
+                    finished_at="2026-04-25T00:16:00Z",
+                    detail="pct snapshot failed",
+                    evidence={"exit_code": "17"},
+                ),
+            ):
+                result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            self.assertEqual(result.status, "worked")
+            backup_record = record_store.read_backup_gate_record(
+                "backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(backup_record.status, "fail")
+            self.assertEqual(backup_record.evidence["error_message"], "pct snapshot failed")
+            self.assertEqual(backup_record.evidence["exit_code"], "17")
+
+            replay = enqueue_verireel_prod_backup_gate(
+                record_store=record_store,
+                request=VeriReelProdBackupGateRequest(
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+                ),
+                now="2026-04-25T00:17:00Z",
+            )
+            self.assertEqual(replay.backup_status, "fail")
+            self.assertEqual(replay.error_message, "pct snapshot failed")
+
+    def test_verireel_operation_worker_recovers_created_and_fails_backup_gate_phase(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(
+                    operation_id="created-operation",
+                    backup_record_id="backup-gate-created",
+                    status="running",
+                    phase="created",
+                    attempt=1,
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                )
+            )
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(
+                    operation_id="backup-gate-operation",
+                    backup_record_id="backup-gate-side-effect",
+                    status="running",
+                    phase="backup_gate",
+                    attempt=1,
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                )
+            )
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(
+                    operation_id="running-operation",
+                    backup_record_id="backup-gate-running-before-side-effect",
+                    status="running",
+                    phase="running",
+                    attempt=1,
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                )
+            )
+
+            result = reconcile_stale_verireel_prod_backup_gate_operation_records(
+                record_store=record_store,
+                now="2026-04-25T00:10:00Z",
+            )
+
+            self.assertEqual(
+                set(result.reconciled_operation_ids),
+                {"created-operation", "backup-gate-operation", "running-operation"},
+            )
+            recovered = record_store.read_verireel_prod_backup_gate_operation_record(
+                "created-operation"
+            )
+            self.assertEqual(recovered.status, "pending")
+            self.assertEqual(recovered.phase, "created")
+            recovered_running = record_store.read_verireel_prod_backup_gate_operation_record(
+                "running-operation"
+            )
+            self.assertEqual(recovered_running.status, "pending")
+            self.assertEqual(recovered_running.phase, "running")
+            failed = record_store.read_verireel_prod_backup_gate_operation_record(
+                "backup-gate-operation"
+            )
+            self.assertEqual(failed.status, "fail")
+            self.assertEqual(failed.phase, "failed")
+            self.assertIn("unsafe to retry", failed.error_message)
+            failed_backup_gate = record_store.read_backup_gate_record(
+                "backup-gate-side-effect"
+            )
+            self.assertEqual(failed_backup_gate.status, "fail")
+            self.assertIn("unsafe to retry", failed_backup_gate.evidence["error_message"])
+
+    def test_verireel_operation_worker_status_and_loop_are_observable(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record(
+                    status="running",
+                    phase="backup_gate",
+                    attempt=1,
+                    lease_owner="old-worker",
+                    lease_expires_at="2000-01-01T00:00:00Z",
+                )
+            )
+
+            status = build_verireel_prod_backup_gate_operation_worker_status(
+                record_store=record_store,
+                now="2026-04-25T00:10:00Z",
+            )
+
+            self.assertEqual(status.status, "stalled")
+            self.assertEqual(status.running_count, 1)
+            self.assertEqual(status.stalled_count, 1)
+            loop_result = run_verireel_prod_backup_gate_operation_worker_loop(
+                record_store=record_store,
+                control_plane_root_path=root,
+                lease_owner="worker-a",
+                poll_seconds=1,
+                max_iterations=1,
+            )
+            self.assertEqual(loop_result.status, "completed")
+            self.assertEqual(loop_result.iterations, 1)
+
+    def test_verireel_operation_worker_does_not_publish_evidence_after_lease_loss(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                self._operation_record()
+            )
+            claimed = record_store.claim_next_verireel_prod_backup_gate_operation_record(
+                lease_owner="worker-a",
+                lease_expires_at="2026-04-25T00:05:00Z",
+                claimed_at="2026-04-25T00:01:00Z",
+            )
+            assert claimed is not None
+            record_store.write_verireel_prod_backup_gate_operation_record(
+                claimed.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "finished_at": "2026-04-25T00:02:00Z",
+                        "lease_owner": "other-worker",
+                        "error_message": "superseded lease",
+                    }
+                )
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate_operation_worker._run_delegated_worker",
+                return_value=VeriReelProdBackupGateWorkerResult(
+                    status="pass",
+                    snapshot_name="ver-predeploy-20260425-001500",
+                    started_at="2026-04-25T00:15:00Z",
+                    finished_at="2026-04-25T00:16:00Z",
+                    detail="Backup completed.",
+                    evidence={"snapshot_name": "ver-predeploy-20260425-001500"},
+                ),
+            ) as delegated_worker:
+                second_result = run_verireel_prod_backup_gate_operation_worker_once(
+                    record_store=record_store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-b",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            self.assertEqual(second_result.status, "idle")
+            delegated_worker.assert_not_called()
+            with self.assertRaises(FileNotFoundError):
+                record_store.read_backup_gate_record(
+                    "backup-gate-verireel-prod-run-12345-attempt-1"
+                )
 
     def test_run_delegated_worker_reports_timeout_as_click_exception(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -455,4 +891,4 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             self.assertEqual(result.error_message, "pct snapshot failed")
             record = record_store.read_backup_gate_record(result.backup_record_id)
             self.assertEqual(record.status, "fail")
-            self.assertEqual(record.evidence, {})
+            self.assertEqual(record.evidence["error_message"], "pct snapshot failed")

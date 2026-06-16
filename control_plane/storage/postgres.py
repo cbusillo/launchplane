@@ -108,6 +108,9 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
+)
 from control_plane.service_auth import GitHubHumanIdentity
 from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -1284,6 +1287,53 @@ class LaunchplaneOdooStableTargetReplacementOperationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneVeriReelProdBackupGateOperationRow(Base):
+    __tablename__ = "launchplane_verireel_prod_backup_gate_operations"
+    __table_args__ = (
+        Index(
+            "launchplane_verireel_backup_gate_operation_lane_status_idx",
+            "product",
+            "context",
+            "instance",
+            "status",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_verireel_backup_gate_operation_record_idx",
+            "backup_record_id",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_verireel_backup_gate_active_record_uidx",
+            "backup_record_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+            sqlite_where=text("status IN ('pending', 'running')"),
+        ),
+        Index(
+            "launchplane_verireel_backup_gate_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    backup_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneHumanSessionRow(Base):
     __tablename__ = "launchplane_human_sessions"
     __table_args__ = (
@@ -2311,6 +2361,429 @@ class PostgresRecordStore(HumanSessionStore):
                         }
                     )
                 self._sync_odoo_stable_target_replacement_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
+
+    def write_verireel_prod_backup_gate_operation_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneVeriReelProdBackupGateOperationRow(
+                operation_id=record.operation_id,
+                product=record.product,
+                context=record.context,
+                instance=record.instance,
+                backup_record_id=record.backup_record_id,
+                status=record.status,
+                phase=record.phase,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                heartbeat_at=record.heartbeat_at,
+                attempt=record.attempt,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def _sync_verireel_prod_backup_gate_operation_row(
+        self,
+        row: LaunchplaneVeriReelProdBackupGateOperationRow,
+        record: VeriReelProdBackupGateOperationRecord,
+    ) -> None:
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.backup_record_id = record.backup_record_id
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
+
+    def create_verireel_prod_backup_gate_operation_record_if_no_active_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
+        try:
+            return self.read_verireel_prod_backup_gate_operation_record(
+                record.operation_id
+            ), False
+        except FileNotFoundError:
+            pass
+        with self._session_factory() as session:
+            session.add(
+                LaunchplaneVeriReelProdBackupGateOperationRow(
+                    operation_id=record.operation_id,
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    backup_record_id=record.backup_record_id,
+                    status=record.status,
+                    phase=record.phase,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    lease_owner=record.lease_owner,
+                    lease_expires_at=record.lease_expires_at,
+                    heartbeat_at=record.heartbeat_at,
+                    attempt=record.attempt,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                active_records = self.list_verireel_prod_backup_gate_operation_records(
+                    backup_record_id=record.backup_record_id,
+                    statuses=("pending", "running"),
+                    limit=1,
+                )
+                if active_records:
+                    return active_records[0], False
+                return self.create_verireel_prod_backup_gate_operation_record_if_no_active_record(
+                    record
+                )
+        return record, True
+
+    def read_verireel_prod_backup_gate_operation_record(
+        self, operation_id: str
+    ) -> VeriReelProdBackupGateOperationRecord:
+        return self._read_model(
+            model_type=VeriReelProdBackupGateOperationRecord,
+            orm_model=LaunchplaneVeriReelProdBackupGateOperationRow,
+            filters=(LaunchplaneVeriReelProdBackupGateOperationRow.operation_id == operation_id,),
+        )
+
+    def list_verireel_prod_backup_gate_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        backup_record_id: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]:
+        filters: list[object] = []
+        if product:
+            filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.instance == instance_name)
+        if backup_record_id:
+            filters.append(
+                LaunchplaneVeriReelProdBackupGateOperationRow.backup_record_id
+                == backup_record_id
+            )
+        if statuses:
+            filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.status.in_(statuses))
+        return self._list_models(
+            model_type=VeriReelProdBackupGateOperationRecord,
+            orm_model=LaunchplaneVeriReelProdBackupGateOperationRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneVeriReelProdBackupGateOperationRow.updated_at.desc(),
+                LaunchplaneVeriReelProdBackupGateOperationRow.operation_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def claim_next_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> VeriReelProdBackupGateOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("VeriReel prod backup gate operation claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError(
+                "VeriReel prod backup gate operation claim requires lease_expires_at."
+            )
+        if not claimed_at.strip():
+            raise ValueError("VeriReel prod backup gate operation claim requires claimed_at.")
+        statement = (
+            select(LaunchplaneVeriReelProdBackupGateOperationRow)
+            .where(LaunchplaneVeriReelProdBackupGateOperationRow.status == "pending")
+            .order_by(
+                LaunchplaneVeriReelProdBackupGateOperationRow.created_at.asc(),
+                LaunchplaneVeriReelProdBackupGateOperationRow.operation_id.asc(),
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            claimed_record = record.model_copy(
+                update={
+                    "status": "running",
+                    "phase": "running",
+                    "started_at": record.started_at or claimed_at,
+                    "updated_at": claimed_at,
+                    "lease_owner": normalized_lease_owner,
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "heartbeat_at": claimed_at.strip(),
+                    "attempt": record.attempt + 1,
+                }
+            )
+            self._sync_verireel_prod_backup_gate_operation_row(row, claimed_record)
+            session.commit()
+            return claimed_record
+
+    def heartbeat_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(LaunchplaneVeriReelProdBackupGateOperationRow.operation_id == operation_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self._sync_verireel_prod_backup_gate_operation_row(row, heartbeat_record)
+            session.commit()
+            return True
+
+    def mark_verireel_prod_backup_gate_operation_phase(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: str,
+        updated_at: str,
+    ) -> VeriReelProdBackupGateOperationRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(LaunchplaneVeriReelProdBackupGateOperationRow.operation_id == operation_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= updated_at.strip()
+            ):
+                return None
+            updated_record = record.model_copy(
+                update={
+                    "phase": phase.strip(),
+                    "updated_at": updated_at.strip(),
+                }
+            )
+            self._sync_verireel_prod_backup_gate_operation_row(row, updated_record)
+            session.commit()
+            return updated_record
+
+    def complete_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        record: VeriReelProdBackupGateOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self._sync_verireel_prod_backup_gate_operation_row(row, record)
+            session.commit()
+            return True
+
+    def complete_verireel_prod_backup_gate_operation_with_backup_gate_record(
+        self,
+        *,
+        operation_record: VeriReelProdBackupGateOperationRecord,
+        backup_gate_record: BackupGateRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == operation_record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_record.operation_id)
+            current_record = self._read_payload(
+                model_type=VeriReelProdBackupGateOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            session.merge(
+                LaunchplaneBackupGateRow(
+                    record_id=backup_gate_record.record_id,
+                    context=backup_gate_record.context,
+                    instance=backup_gate_record.instance,
+                    created_at=backup_gate_record.created_at,
+                    status=backup_gate_record.status,
+                    payload=self._payload_dict(backup_gate_record),
+                )
+            )
+            self._sync_verireel_prod_backup_gate_operation_row(row, operation_record)
+            session.commit()
+            return True
+
+    def recover_expired_verireel_prod_backup_gate_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        filters = (
+            LaunchplaneVeriReelProdBackupGateOperationRow.status == "running",
+            (
+                (LaunchplaneVeriReelProdBackupGateOperationRow.lease_expires_at == "")
+                | (LaunchplaneVeriReelProdBackupGateOperationRow.lease_expires_at < now)
+            ),
+        )
+        statement = select(LaunchplaneVeriReelProdBackupGateOperationRow).where(*filters)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            for row in rows:
+                record = self._read_payload(
+                    model_type=VeriReelProdBackupGateOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                else:
+                    error_message = (
+                        "VeriReel prod backup gate operation lease expired in "
+                        f"phase {record.phase!r}; unsafe to retry automatically."
+                    )
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_message": error_message,
+                        }
+                    )
+                    session.merge(
+                        LaunchplaneBackupGateRow(
+                            record_id=record.backup_record_id,
+                            context=record.context,
+                            instance=record.instance,
+                            created_at=now,
+                            status="fail",
+                            payload=self._payload_dict(
+                                BackupGateRecord(
+                                    record_id=record.backup_record_id,
+                                    context=record.context,
+                                    instance=record.instance,
+                                    created_at=now,
+                                    source="launchplane-verireel-prod-backup-gate",
+                                    required=True,
+                                    status="fail",
+                                    evidence={"error_message": error_message},
+                                )
+                            ),
+                        )
+                    )
+                self._sync_verireel_prod_backup_gate_operation_row(row, recovered_record)
             session.commit()
         return tuple(affected_operation_ids)
 

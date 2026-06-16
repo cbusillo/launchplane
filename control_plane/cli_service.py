@@ -27,6 +27,19 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
+from control_plane.workflows.verireel_prod_backup_gate_operation_worker import (
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS,
+    VeriReelProdBackupGateOperationWorkerStore,
+    build_verireel_prod_backup_gate_operation_worker_status,
+    reconcile_stale_verireel_prod_backup_gate_operation_records,
+    run_verireel_prod_backup_gate_operation_worker_loop,
+    run_verireel_prod_backup_gate_operation_worker_once,
+)
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -508,6 +521,262 @@ def service_odoo_workers_status(
     result = build_odoo_stable_operation_worker_status(
         record_store=cast(
             OdooStableOperationWorkerStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        recent_terminal_limit=recent_terminal_limit,
+    )
+    click.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
+
+
+@service.group("verireel-workers")
+def service_verireel_workers() -> None:
+    """Run Launchplane-owned VeriReel operation workers."""
+
+
+@service_verireel_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used by VeriReel operation workflows.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option(
+    "--lease-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--heartbeat-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    show_default=True,
+)
+def service_verireel_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    max_attempts: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "VeriReel operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    result = run_verireel_prod_backup_gate_operation_worker_once(
+        record_store=cast(
+            VeriReelProdBackupGateOperationWorkerStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        control_plane_root_path=control_plane_root or _control_plane_root(),
+        lease_owner=generated_lease_owner,
+        lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        max_attempts=max_attempts,
+    )
+    click.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
+
+
+@service_verireel_workers.command("reconcile")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    show_default=True,
+)
+def service_verireel_workers_reconcile(
+    state_dir: Path,
+    database_url: str,
+    max_attempts: int,
+) -> None:
+    """Recover expired VeriReel worker leases without claiming new work."""
+    if not database_url.strip():
+        raise click.ClickException(
+            "VeriReel operation worker reconciliation requires --database-url or "
+            "LAUNCHPLANE_DATABASE_URL."
+        )
+    result = reconcile_stale_verireel_prod_backup_gate_operation_records(
+        record_store=cast(
+            VeriReelProdBackupGateOperationWorkerStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        max_attempts=max_attempts,
+    )
+    payload = {
+        "status": "ok",
+        "reconciled_operation_ids": list(result.reconciled_operation_ids),
+        "reconciled_count": len(result.reconciled_operation_ids),
+    }
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service_verireel_workers.command("run")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used by VeriReel operation workflows.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option(
+    "--lease-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_LEASE_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--heartbeat-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_HEARTBEAT_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_ATTEMPTS,
+    show_default=True,
+)
+@click.option(
+    "--poll-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_POLL_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--error-backoff-seconds",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_ERROR_BACKOFF_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--max-consecutive-errors",
+    type=int,
+    default=DEFAULT_VERIREEL_BACKUP_GATE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    show_default=True,
+)
+def service_verireel_workers_run(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    max_attempts: int,
+    poll_seconds: int,
+    error_backoff_seconds: int,
+    max_consecutive_errors: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "VeriReel operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    stop_event = Event()
+
+    def _request_stop(_signum: int, _frame: object) -> None:
+        stop_event.set()
+
+    previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
+    previous_sigint = signal.signal(signal.SIGINT, _request_stop)
+    try:
+        result = run_verireel_prod_backup_gate_operation_worker_loop(
+            record_store=cast(
+                VeriReelProdBackupGateOperationWorkerStore,
+                _store(state_dir=state_dir, database_url=database_url),
+            ),
+            control_plane_root_path=control_plane_root or _control_plane_root(),
+            lease_owner=generated_lease_owner,
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
+            max_attempts=max_attempts,
+            poll_seconds=poll_seconds,
+            error_backoff_seconds=error_backoff_seconds,
+            max_consecutive_errors=max_consecutive_errors,
+            stop_event=stop_event,
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
+    click.echo(json.dumps(asdict(result), indent=2, sort_keys=True))
+
+
+@service_verireel_workers.command("status")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--recent-terminal-limit",
+    type=int,
+    default=10,
+    show_default=True,
+)
+def service_verireel_workers_status(
+    state_dir: Path,
+    database_url: str,
+    recent_terminal_limit: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "VeriReel operation worker status requires --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    result = build_verireel_prod_backup_gate_operation_worker_status(
+        record_store=cast(
+            VeriReelProdBackupGateOperationWorkerStore,
             _store(state_dir=state_dir, database_url=database_url),
         ),
         recent_terminal_limit=recent_terminal_limit,

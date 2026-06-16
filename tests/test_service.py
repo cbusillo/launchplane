@@ -176,7 +176,7 @@ from control_plane.workflows.verireel_preview_driver import (
 )
 
 from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceResult
-from control_plane.workflows.verireel_prod_backup_gate import VeriReelProdBackupGateResult
+from control_plane.contracts.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
@@ -38684,7 +38684,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_verireel_prod_backup_gate",
+                "control_plane.service.enqueue_verireel_prod_backup_gate",
                 return_value=VeriReelProdBackupGateResult(
                     backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
                     backup_status="pass",
@@ -38715,7 +38715,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["result"]["backup_status"], "pass")
             execute_mock.assert_called_once()
-            self.assertTrue(execute_mock.call_args.kwargs["run_async"])
+            self.assertEqual(
+                execute_mock.call_args.kwargs["request"].backup_record_id,
+                "backup-gate-verireel-prod-run-12345-attempt-1",
+            )
 
     def test_verireel_prod_backup_gate_retry_runs_again_after_pending_result(
         self,
@@ -38760,7 +38763,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
 
             with patch(
-                "control_plane.service.execute_verireel_prod_backup_gate",
+                "control_plane.service.enqueue_verireel_prod_backup_gate",
                 return_value=VeriReelProdBackupGateResult(
                     backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
                     backup_status="pending",
@@ -38788,8 +38791,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertNotIn("replayed", first_payload)
             self.assertNotIn("replayed", second_payload)
             self.assertEqual(execute_mock.call_count, 2)
-            for call in execute_mock.call_args_list:
-                self.assertTrue(call.kwargs["run_async"])
 
     def test_verireel_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
