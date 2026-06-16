@@ -17,6 +17,7 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.idempotency_record import (
@@ -60,6 +61,7 @@ _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
 _DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
+_BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -168,6 +170,18 @@ class DeploymentEvidenceRequest(BaseModel):
             raise ValueError("deployment evidence requires product")
 
 
+class BackupGateEvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    backup_gate: BackupGateRecord
+
+    def model_post_init(self, _context: object) -> None:
+        if not self.product.strip():
+            raise ValueError("backup gate evidence requires product")
+
+
 class AcceptedEvidenceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -192,6 +206,10 @@ class _IdempotencyCapableStore(Protocol):
     ) -> LaunchplaneIdempotencyRecord | None: ...
 
     def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
+
+
+class _BackupGateEvidenceStore(Protocol):
+    def write_backup_gate_record(self, record: BackupGateRecord) -> object: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -237,14 +255,8 @@ def require_deployment_evidence_store(record_store: object) -> EvidenceIngestion
     return cast(EvidenceIngestionStore, record_store)
 
 
-def require_evidence_ingestion_store(record_store: object) -> EvidenceIngestionStore:
-    required_methods = (
-        "write_deployment_record",
-        "read_deployment_record",
-        "read_promotion_record",
-        "write_promotion_record",
-        "write_environment_inventory",
-    )
+def require_backup_gate_evidence_store(record_store: object) -> _BackupGateEvidenceStore:
+    required_methods = ("write_backup_gate_record",)
     missing_methods = [
         method_name
         for method_name in required_methods
@@ -253,10 +265,10 @@ def require_evidence_ingestion_store(record_store: object) -> EvidenceIngestionS
     if missing_methods:
         missing_summary = ", ".join(missing_methods)
         raise TypeError(
-            "Launchplane record store does not support evidence ingestion writes: "
+            "Launchplane record store does not support backup gate evidence writes: "
             f"{missing_summary}"
         )
-    return cast(EvidenceIngestionStore, record_store)
+    return cast(_BackupGateEvidenceStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -808,6 +820,89 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def write_backup_gate_evidence(
+        request: Request,
+        backup_gate_request: BackupGateEvidenceRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="backup_gate.write",
+            product=backup_gate_request.product,
+            context=backup_gate_request.backup_gate.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write backup gate evidence for the requested product/context."
+                ),
+            )
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_BACKUP_GATE_EVIDENCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        try:
+            evidence_store = require_backup_gate_evidence_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        evidence_store.write_backup_gate_record(backup_gate_request.backup_gate)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"backup_gate_record_id": backup_gate_request.backup_gate.record_id},
+        )
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_BACKUP_GATE_EVIDENCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -898,6 +993,24 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _BACKUP_GATE_EVIDENCE_ROUTE,
+        write_backup_gate_evidence,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_backup_gate_evidence",
+        summary="Write backup gate evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 
