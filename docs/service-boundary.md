@@ -508,6 +508,40 @@ This avoids copying browser session cookies into terminal processes and keeps
 agent credentials independent from GitHub Actions OIDC and Every Code worker
 automation.
 
+### Identity Types
+
+Launchplane normalizes authenticated callers into compact subject types before
+authorization checks and audit records consume them:
+
+- `github_actions`: GitHub Actions workflow subjects from verified GitHub OIDC
+  claims.
+- `github_human`: browser-session humans from GitHub OAuth and Launchplane
+  session cookies.
+- `terminal_agent`: read-only trusted terminal agents authenticated by the
+  dedicated terminal-agent bearer token.
+- `local_operator`: reason-bearing owner automation authenticated by the
+  dedicated local-operator bearer token.
+- `local_admin`: rare privileged owner automation authenticated by the dedicated
+  local-admin bearer token.
+
+A future Keycloak slice may add OIDC human and service-client subject types.
+Those subjects would be trusted only after issuer, audience, signature, expiry,
+and client expectations validate. Keycloak would provide identity and session or
+token facts only; product, context, lane, provider, authz, and runtime authority
+would still come from Launchplane records, OpenFGA tuples if adopted, managed
+secrets, provider state, or explicit scoped operator input.
+
+For future OpenFGA checks, Launchplane should pass normalized facts rather than
+raw tokens. Caller facts include `subject_type`, stable `subject_id`, `issuer`,
+`audience` or client id, token expiry/freshness, optional audit display claims,
+and normalized group or role ids when present. Request/resource facts include
+the Launchplane action, product, context, optional instance, and resource id.
+GitHub workflow subjects additionally keep workflow identity claims such as
+repository, workflow ref, reusable workflow ref, ref, event name, environment,
+subject, and SHA. Keycloak service-client subjects should use the validated
+client id plus issuer as the stable caller identity, not a checked-in grant or
+ambient process identity.
+
 Launchplane should verify:
 
 - `iss` is GitHub's OIDC issuer
