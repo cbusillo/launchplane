@@ -643,6 +643,10 @@ launchplane service odoo-workers run` is the foreground loop intended for an
 status` reports pending, running, stalled, and recent terminal operation
   counts without exposing request payloads. `status` is read-only observation;
   stale lease mutation remains storage-owned recovery inside the worker pass.
+  The deployed service exposes the same redacted read model at
+  `GET /v1/service/odoo-workers/status` for callers authorized to
+  `launchplane_service.read` on product/context `launchplane`, so operators can
+  prove worker queue state without shelling into provider containers.
   The checked-in Launchplane compose topology starts a separate
   `launchplane-odoo-workers` process with the same image, runtime volume, and
   operator-supplied environment as the HTTP service. That process runs

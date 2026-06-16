@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -504,6 +504,10 @@ from control_plane.workflows.odoo_prod_rollback import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     build_odoo_stable_target_replacement_plan,
+)
+from control_plane.workflows.odoo_stable_operation_worker import (
+    OdooStableOperationWorkerStore,
+    build_odoo_stable_operation_worker_status,
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
@@ -4676,6 +4680,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
+    if len(segments) == 4 and segments == ["v1", "service", "odoo-workers", "status"]:
+        return "launchplane_service.read", {"odoo_worker_status": "true"}
     if len(segments) == 4 and segments == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
@@ -7141,6 +7147,28 @@ def _odoo_stable_target_replacement_operation_store(
         return cast(_OdooStableTargetReplacementOperationStore, record_store)
     raise click.ClickException(
         "Odoo stable target replacement operations require Launchplane operation-record storage."
+    )
+
+
+def _odoo_stable_operation_worker_store(
+    record_store: object,
+) -> OdooStableOperationWorkerStore:
+    required_methods = (
+        "list_odoo_stable_bootstrap_operation_records",
+        "claim_next_odoo_stable_bootstrap_operation_record",
+        "heartbeat_odoo_stable_bootstrap_operation_record",
+        "complete_odoo_stable_bootstrap_operation_record",
+        "recover_expired_odoo_stable_bootstrap_operation_records",
+        "list_odoo_stable_target_replacement_operation_records",
+        "claim_next_odoo_stable_target_replacement_operation_record",
+        "heartbeat_odoo_stable_target_replacement_operation_record",
+        "complete_odoo_stable_target_replacement_operation_record",
+        "recover_expired_odoo_stable_target_replacement_operation_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(OdooStableOperationWorkerStore, record_store)
+    raise click.ClickException(
+        "Odoo stable operation worker status requires Launchplane operation-record storage."
     )
 
 
@@ -11584,6 +11612,55 @@ def create_launchplane_service_app(
                                     "code": "authorization_denied",
                                     "message": "Workflow cannot read Launchplane service runtime state.",
                                 },
+                            },
+                        )
+                    if params.get("odoo_worker_status") == "true":
+                        try:
+                            recent_terminal_limit = _query_int_value(
+                                query,
+                                "recent_terminal_limit",
+                                default=10,
+                                minimum=0,
+                                maximum=100,
+                            )
+                            assert recent_terminal_limit is not None
+                            worker_status = build_odoo_stable_operation_worker_status(
+                                record_store=_odoo_stable_operation_worker_store(record_store),
+                                recent_terminal_limit=recent_terminal_limit,
+                            )
+                        except click.ClickException as error:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=503,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "operation_record_storage_required",
+                                        "message": str(error),
+                                    },
+                                },
+                            )
+                        except ValueError as error:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=400,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "invalid_query",
+                                        "message": str(error),
+                                    },
+                                },
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "worker_status": asdict(worker_status),
                             },
                         )
                     return _json_response(

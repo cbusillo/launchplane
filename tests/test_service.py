@@ -14314,6 +14314,183 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
 
+    def test_service_odoo_workers_status_endpoint_reports_queue_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir)
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        "operation_id": "bootstrap-cm-testing",
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "idempotency_key": "bootstrap-cm-testing",
+                        "request_fingerprint": "fingerprint-123",
+                        "request": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "testing",
+                            "confirmation": "bootstrap cm testing",
+                        },
+                        "status": "pending",
+                        "phase": "created",
+                        "created_at": "2026-05-17T00:00:00Z",
+                        "updated_at": "2026-05-17T00:00:00Z",
+                    }
+                )
+            )
+            policy = _local_operator_policy(
+                actions=("launchplane_service.read",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/odoo-workers/status",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 200)
+        worker_status = payload["worker_status"]
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(worker_status["status"], "ok")
+        self.assertEqual(worker_status["pending_count"], 1)
+        self.assertEqual(worker_status["running_count"], 0)
+        self.assertEqual(worker_status["operations"][0]["operation_id"], "bootstrap-cm-testing")
+        self.assertNotIn("request", worker_status["operations"][0])
+
+    def test_service_odoo_workers_status_endpoint_requires_service_read_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("driver.read",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/odoo-workers/status",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_service_odoo_workers_status_endpoint_validates_recent_terminal_limit(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("launchplane_service.read",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/odoo-workers/status",
+                    query_string="recent_terminal_limit=101",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_query")
+
+    def test_service_odoo_workers_status_endpoint_requires_operation_record_storage(
+        self,
+    ) -> None:
+        class _EmptyStore:
+            backend_name = "test-empty"
+
+            def close(self) -> None:
+                return None
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("launchplane_service.read",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=cast(Any, _EmptyStore()),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/service/odoo-workers/status",
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "operation_record_storage_required")
+
     def test_service_uses_db_backed_authz_policy_when_present(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (
