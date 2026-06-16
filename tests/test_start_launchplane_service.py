@@ -202,6 +202,7 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
                 captured_args = capture_file.read_text(encoding="utf-8").splitlines()
 
             self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertNotIn("stamp", captured_args)
             self.assertIn("--database-url", captured_args)
             self.assertIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
         finally:
