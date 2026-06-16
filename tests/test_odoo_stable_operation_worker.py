@@ -1,9 +1,14 @@
+import json
 import logging
 import unittest
 from pathlib import Path
+from threading import Event
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from click.testing import CliRunner
+
+from control_plane.cli import main
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -16,6 +21,9 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_stable_operation_worker import (
+    OdooStableOperationWorkerLoopResult,
+    build_odoo_stable_operation_worker_status,
+    run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
 
@@ -186,6 +194,38 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(operation.phase, "failed")
             self.assertEqual(operation.error_message, "provider unavailable")
 
+    def test_worker_writes_target_replacement_failure_when_execution_raises(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(_replacement_payload())
+            )
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                    side_effect=RuntimeError("provider unavailable"),
+                ),
+                self.assertLogs(level=logging.ERROR),
+            ):
+                worker_result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-testing"
+            )
+            self.assertEqual(worker_result.status, "worked")
+            self.assertTrue(worker_result.terminal_write_committed)
+            self.assertEqual(operation.status, "fail")
+            self.assertEqual(operation.phase, "failed")
+            self.assertEqual(operation.error_message, "provider unavailable")
+
     def test_worker_recovers_expired_safe_operation_before_claiming(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -249,6 +289,274 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
 
             self.assertEqual(worker_result.status, "idle")
             self.assertEqual(worker_result.operation_kind, "")
+
+    def test_worker_status_reports_pending_running_stalled_and_terminal_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    _bootstrap_payload("bootstrap-pending")
+                )
+            )
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_bootstrap_payload("bootstrap-running"),
+                        "status": "running",
+                        "phase": "running",
+                        "lease_owner": "worker-a",
+                        "lease_expires_at": "2026-05-17T00:10:00Z",
+                        "heartbeat_at": "2026-05-17T00:04:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_replacement_payload("replacement-stalled"),
+                        "status": "running",
+                        "phase": "running",
+                        "lease_owner": "worker-b",
+                        "lease_expires_at": "2026-05-17T00:03:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 2,
+                    }
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_replacement_payload("replacement-blank-lease"),
+                        "status": "running",
+                        "phase": "running",
+                        "lease_owner": "worker-c",
+                        "heartbeat_at": "2026-05-17T00:02:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_replacement_payload("replacement-pass"),
+                        "status": "pass",
+                        "phase": "completed",
+                        "finished_at": "2026-05-17T00:02:00Z",
+                    }
+                )
+            )
+
+            status = build_odoo_stable_operation_worker_status(
+                record_store=store,
+                now="2026-05-17T00:05:00Z",
+            )
+
+            self.assertEqual(status.status, "stalled")
+            self.assertEqual(status.pending_count, 1)
+            self.assertEqual(status.running_count, 3)
+            self.assertEqual(status.stalled_count, 2)
+            self.assertEqual(status.terminal_count, 1)
+            self.assertEqual(status.counts_by_kind_status["odoo_stable_bootstrap:pending"], 1)
+            self.assertEqual(status.counts_by_kind_status["odoo_stable_bootstrap:running"], 1)
+            self.assertEqual(
+                status.counts_by_kind_status["odoo_stable_target_replacement:running"],
+                2,
+            )
+            self.assertEqual(
+                status.counts_by_kind_status["odoo_stable_target_replacement:pass"],
+                1,
+            )
+            stalled_operation = next(
+                operation
+                for operation in status.operations
+                if operation.operation_id == "replacement-stalled"
+            )
+            self.assertTrue(stalled_operation.lease_expired)
+            self.assertEqual(stalled_operation.heartbeat_age_seconds, 240)
+            blank_lease_operation = next(
+                operation
+                for operation in status.operations
+                if operation.operation_id == "replacement-blank-lease"
+            )
+            self.assertTrue(blank_lease_operation.lease_expired)
+
+    def test_worker_loop_processes_until_idle_then_stops(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(_bootstrap_payload())
+            )
+            result = OdooStableBootstrapResult(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="testing",
+                deployment_record_id="deployment-cm-testing",
+                bootstrap_status="pass",
+                bootstrap_run_status="pass",
+                readiness_status="pass",
+                post_deploy_status="pass",
+                health_status="pass",
+                canonical_status="pass",
+                logo_status="pass",
+            )
+            stop_event = Event()
+            iteration_statuses: list[str] = []
+
+            def _record_iteration(worker_result: object) -> None:
+                status = getattr(worker_result, "status")
+                iteration_statuses.append(status)
+                if status == "idle":
+                    stop_event.set()
+
+            with patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_bootstrap",
+                return_value=result,
+            ):
+                loop_result = run_odoo_stable_operation_worker_loop(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                    poll_seconds=1,
+                    stop_event=stop_event,
+                    iteration_callback=_record_iteration,
+                )
+
+            self.assertEqual(loop_result.status, "stopped")
+            self.assertEqual(loop_result.iterations, 2)
+            self.assertEqual(loop_result.worked_count, 1)
+            self.assertEqual(loop_result.idle_count, 1)
+            self.assertEqual(iteration_statuses, ["worked", "idle"])
+
+    def test_worker_loop_raises_after_consecutive_errors(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=RuntimeError("boom"),
+                ),
+                self.assertLogs(level=logging.ERROR),
+                self.assertRaises(RuntimeError),
+            ):
+                run_odoo_stable_operation_worker_loop(
+                    record_store=store,
+                    control_plane_root_path=root,
+                    lease_owner="worker-a",
+                    error_backoff_seconds=1,
+                    max_consecutive_errors=2,
+                    max_iterations=3,
+                )
+
+    def test_cli_status_outputs_worker_status_json(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(_bootstrap_payload())
+            )
+
+            with patch("control_plane.cli_service._store", return_value=store):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "service",
+                        "odoo-workers",
+                        "status",
+                        "--database-url",
+                        "sqlite+pysqlite:///:memory:",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["pending_count"], 1)
+            self.assertEqual(payload["running_count"], 0)
+            self.assertEqual(payload["operations"][0]["operation_id"], "operation-cm-testing")
+            self.assertNotIn("request", payload["operations"][0])
+
+    def test_cli_run_once_outputs_worker_result_json(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+
+            with (
+                patch("control_plane.cli_service._store", return_value=store),
+                patch(
+                    "control_plane.cli_service._control_plane_root",
+                    return_value=root,
+                ),
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "service",
+                        "odoo-workers",
+                        "run-once",
+                        "--database-url",
+                        "sqlite+pysqlite:///:memory:",
+                        "--lease-owner",
+                        "worker-a",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "idle")
+            self.assertEqual(payload["operation_kind"], "")
+
+    def test_cli_run_delegates_to_worker_loop(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            loop_result = OdooStableOperationWorkerLoopResult(
+                status="completed",
+                iterations=1,
+                worked_count=0,
+                idle_count=1,
+                error_count=0,
+            )
+
+            with (
+                patch("control_plane.cli_service._store", return_value=store),
+                patch(
+                    "control_plane.cli_service._control_plane_root",
+                    return_value=root,
+                ),
+                patch(
+                    "control_plane.cli_service.run_odoo_stable_operation_worker_loop",
+                    return_value=loop_result,
+                ) as loop_mock,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "service",
+                        "odoo-workers",
+                        "run",
+                        "--database-url",
+                        "sqlite+pysqlite:///:memory:",
+                        "--lease-owner",
+                        "worker-a",
+                        "--poll-seconds",
+                        "1",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "completed")
+            loop_mock.assert_called_once()
+            self.assertEqual(loop_mock.call_args.kwargs["record_store"], store)
+            self.assertEqual(loop_mock.call_args.kwargs["lease_owner"], "worker-a")
+            self.assertEqual(loop_mock.call_args.kwargs["poll_seconds"], 1)
 
 
 if __name__ == "__main__":
