@@ -226,14 +226,23 @@ an ORM column/table or remains only in the evidence payload.
   cross-driver settings need generic structure.
 - Secret: modeled fields are `secret_id`, `scope`, `integration`, `name`,
   `context`, `instance`, `status`, `current_version_id`, and `updated_at`.
-  Descriptions, validation detail, and encrypted version payloads stay
-  payload-only.
+  `current_version_id` points to the active secret-value version and is separate
+  from the non-secret `encryption_key_id` recorded on encrypted version payloads.
+  Version ids, key ids, descriptions, validation detail, and encrypted version
+  payloads stay payload-only until rotation or operator views need queryable
+  columns.
 - Secret binding: modeled fields are `binding_id`, `secret_id`, `integration`,
   `binding_key`, `context`, `instance`, `status`, and `updated_at`. Binding
   implementation details beyond status and lookup stay payload-only.
 - Secret audit event: modeled fields are `event_id`, `secret_id`, `event_type`,
-  and `recorded_at`. Actor, detail, and metadata stay payload-only until audit
-  filtering needs more columns.
+  and `recorded_at`. Event categories should cover version writes, rotation or
+  re-encryption, disable/retire, bind/unbind, plaintext resolution, reveal
+  denial, and key-safety gate evaluation without overloading one event type for
+  all secret access. Actor, reason, trace or idempotency metadata, binding ids,
+  version ids, encryption key ids, destination class, detail, and finding codes
+  stay payload-only until audit filtering needs more columns. Audit payloads
+  must never contain plaintext, ciphertext, token prefixes, provider env dumps,
+  or request bodies that contain secrets.
 - Runner host hygiene audit: modeled fields are `audit_record_key`,
   `host_name`, `action`, `status`, and `mutate`. The payload carries the typed
   request, plan, pre/post hygiene reports, retained warm-builder evidence, and

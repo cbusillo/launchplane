@@ -47,6 +47,91 @@ title: Secrets
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
 
+## Managed Secret Model
+
+Managed secrets are the durable value boundary for secret-shaped runtime and
+provider inputs. A secret record names the stable Launchplane secret identity;
+secret versions hold encrypted value payloads and rotation metadata; bindings map
+runtime-facing keys to the current allowed secret version for a product context
+or Launchplane-owned integration.
+
+`secret_id`, `version_id`, and `encryption_key_id` are identifiers, not secret
+material. They must be stable, opaque, unique within their record family, and
+safe to show in redacted audit or operator status surfaces. They must not encode
+real plaintext values, provider tokens, operator identities, tenant values,
+domains, or topology. `current_version_id` points to the active secret-value
+version; it is not the encryption-key id and must not be overloaded as rotation
+state for the master encryption root.
+
+New writes create a new version and move the current-version pointer only after
+the encrypted payload, metadata, binding checks, and audit record are durable.
+Old versions remain evidence until an explicit retirement or retention policy
+marks them unusable. Missing, disabled, ambiguous, or unlabeled versions fail
+closed rather than falling back to process env, local files, previous ciphertext,
+or provider-side env dumps.
+
+## Encryption Key IDs And Rotation
+
+Every encrypted managed-secret version should record the non-secret
+`encryption_key_id` that identifies which Launchplane decryption root encrypted
+that version. The active key id is used for new writes. Allowed historical key
+ids may decrypt old versions only during an explicit rotation or recovery window.
+
+The target rotation model is:
+
+1. Introduce a new bootstrap decryption root or platform-secret reference and an
+   active `encryption_key_id`.
+2. Keep the previous decryption root available only as an allowed historical key
+   for versions that still carry its key id.
+3. Re-encrypt managed-secret versions under the new key id through a
+   Launchplane-owned rotation path that writes audit evidence.
+4. Verify that all active versions are readable under the new key id.
+5. Retire the old key id so later reads fail closed if any active secret still
+   depends on it.
+
+Rotation is a service/storage operation, not a product workflow shortcut. It
+must not copy plaintext into GitHub issues, workflow logs, checked-in files,
+operator-local env files, provider env dumps, or docs. Ambiguous key ids,
+missing key ids, missing decryption roots, or mismatched active/historical key
+state block the read or write instead of silently trying another source.
+
+## Secret Provider Boundary
+
+The accepted v2 provider for this slice is Launchplane-managed secrets backed by
+Launchplane storage and a minimal bootstrap decryption root. Future Vault, HSM,
+KMS, or cloud-secret-manager integrations are deferred provider candidates. They
+require a named Launchplane problem, local/dev bootstrap plan, operational owner,
+failure mode, rollback posture, and proof that live secret values and
+assignments remain out of checked-in files.
+
+Provider adapters expose generic operations only: write encrypted version,
+resolve metadata, resolve plaintext for an authorized in-process use,
+re-encrypt/rotate, disable/retire, and append audit evidence. Drivers, workers,
+and product-specific code request resolved secret bundles from Launchplane; they
+must not query secret tables, inspect ciphertext, choose encryption keys, or
+carry provider credentials as their own authority. Provider adapters do not own
+product, lane, topology, authz, or runtime configuration authority.
+
+## Plaintext Exposure And Audit
+
+Plaintext exists only at the last responsible moment for an authorized
+service-side use, such as rendering a provider request body, preparing a worker
+environment, or applying a runtime payload after authorization and runtime
+key-safety checks pass. Routine service, CLI, workflow, UI, and agent responses
+return metadata only.
+
+Any plaintext resolution or reveal attempt must append redacted audit evidence.
+Audit payloads may include actor or subject type, reason, trace id, operation or
+intent id, binding id, secret id, version id, encryption key id, destination
+class, and finding codes. They must not include plaintext, ciphertext, token
+prefixes, provider env dumps, request bodies that contain secrets, or values
+derived from secret material.
+
+Trusted operator reveal paths, if added later, must be deliberate, reasoned,
+scoped, audited, and separate from routine metadata reads. Missing authorization,
+missing runtime key-safety approval, missing secret version metadata, or missing
+decryption key state denies the reveal or resolution.
+
 ## Runtime Key-Safety Gates
 
 - Runtime key-safety gates classify managed secret bindings by binding key and
