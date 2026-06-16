@@ -53,9 +53,10 @@ Keep a compatibility surface only when it is one of these:
   shared store.
 - File-backed JSON state is local-dev/test scaffolding. Production truth is
   Launchplane service-owned persistence.
-- Protected artifact inventory uses the native FastAPI route for bearer-token
-  and human-session callers. The legacy WSGI branch is deleted; cleanup callers
-  use the service route instead of a second production implementation.
+- Protected artifact inventory and product environment config-status reads use
+  native FastAPI routes for bearer-token and human-session callers. Their legacy
+  WSGI branches are deleted; cleanup callers use the service route instead of a
+  second production implementation.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;

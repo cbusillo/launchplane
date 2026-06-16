@@ -214,6 +214,88 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["config_status"]["product"], "example-site")
 
+    async def test_config_status_accepts_terminal_agent_bearer_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="example-site",
+                    instance="prod",
+                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+            with patch.dict(
+                "os.environ",
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="SMTP_PASSWORD",
+                    plaintext_value="super-secret-password",
+                    binding_key="SMTP_PASSWORD",
+                    context_name="example-site",
+                    instance_name="prod",
+                    actor="test",
+                )
+            store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_product_environment_read_policy(
+                    context="example-site"
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _get_config_status(
+                app,
+                authorization="Bearer terminal-read-token",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        response_text = json.dumps(payload)
+        self.assertEqual(payload["config_status"]["product"], "example-site")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
+
+    async def test_config_status_rejects_wrong_terminal_agent_bearer_token(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_terminal_agent_product_environment_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-read-token",
+                terminal_agent_subject="local-owner-agent",
+                terminal_agent_token_label="local-owner-read",
+            ),
+        )
+
+        response = await _get_config_status(app, authorization="Bearer wrong-token")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
     async def test_config_status_owner_agent_identity_fails_closed_without_metadata(
         self,
     ) -> None:
@@ -1308,6 +1390,22 @@ def _local_operator_product_environment_read_policy(*, context: str) -> Launchpl
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["product_environment.read"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
                 {
                     "subjects": ["local-owner-agent"],
                     "token_labels": ["local-owner-read"],

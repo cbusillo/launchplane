@@ -17787,66 +17787,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "Product 'example-site' has no environment 'staging'.",
         )
 
-    def test_product_environment_config_status_endpoint_redacts_expected_config_status(
+    def test_product_environment_config_status_legacy_wsgi_route_is_retired(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="example-site",
-                    instance="prod",
-                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
-                    updated_at="2026-05-02T22:32:00Z",
-                    source_label="test",
-                )
-            )
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    name="SMTP_PASSWORD",
-                    plaintext_value="super-secret-password",
-                    binding_key="SMTP_PASSWORD",
-                    context_name="example-site",
-                    instance_name="prod",
-                    actor="test",
-                )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=root,
-                database_url=database_url,
             )
 
             status_code, payload = _invoke_app(
@@ -17855,147 +17805,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path="/v1/products/example-site/environments/prod/config-status",
             )
 
-        response_text = json.dumps(payload)
-        self.assertEqual(status_code, 200)
-        config_status = payload["config_status"]
-        runtime_statuses = {
-            item["key"]: item["status"] for item in config_status["runtime_settings"]
-        }
-        secret_statuses = {
-            item["binding_key"]: item["status"] for item in config_status["managed_secrets"]
-        }
-        self.assertEqual(
-            runtime_statuses,
-            {"INTERNAL_CALLBACK_URL": "configured", "RESEND_FROM_EMAIL": "missing"},
-        )
-        self.assertEqual(
-            secret_statuses,
-            {"SMTP_PASSWORD": "configured", "RESEND_API_KEY": "missing"},
-        )
-        self.assertNotIn("https://internal.example-site.invalid", response_text)
-        self.assertNotIn("super-secret-password", response_text)
-
-    def test_product_environment_config_status_endpoint_uses_lane_authorization(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site/environments/prod/config-status",
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_terminal_agent_read_token_can_read_redacted_product_environment(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="example-site",
-                    instance="prod",
-                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
-                    updated_at="2026-05-02T22:32:00Z",
-                    source_label="test",
-                )
-            )
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    name="SMTP_PASSWORD",
-                    plaintext_value="super-secret-password",
-                    binding_key="SMTP_PASSWORD",
-                    context_name="example-site",
-                    instance_name="prod",
-                    actor="test",
-                )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "terminal_agents": [
-                        {
-                            "subjects": ["local-owner-agent"],
-                            "token_labels": ["local-owner-read"],
-                            "products": ["example-site"],
-                            "contexts": ["example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                TERMINAL_AGENT_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/products/example-site/environments/prod/config-status",
-                    authorization="Bearer terminal-read-token",
-                )
-
-        response_text = json.dumps(payload)
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["config_status"]["product"], "example-site")
-        self.assertNotIn("https://internal.example-site.invalid", response_text)
-        self.assertNotIn("super-secret-password", response_text)
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_terminal_agent_read_token_rejects_non_read_routes_even_if_policy_grants_action(
         self,
@@ -18052,51 +17864,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
         self.assertIn("can only read", payload["error"]["message"])
-
-    def test_terminal_agent_read_token_requires_matching_configured_secret(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "terminal_agents": [
-                        {
-                            "subjects": ["local-owner-agent"],
-                            "token_labels": ["local-owner-read"],
-                            "products": ["example-site"],
-                            "contexts": ["example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            with patch.dict(
-                os.environ,
-                TERMINAL_AGENT_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/products/example-site/environments/prod/config-status",
-                    authorization="Bearer wrong-token",
-                )
-
-        self.assertEqual(status_code, 401)
-        self.assertEqual(payload["error"]["code"], "authentication_required")
 
     def test_product_context_cutover_endpoint_updates_profile_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -26524,7 +26291,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 read_status_code, read_payload = _invoke_app(
                     app,
                     method="GET",
-                    path="/v1/products/example-site/environments/prod/config-status",
+                    path="/v1/products/example-site/environments/prod",
                     authorization="Bearer terminal-read-token",
                 )
 
