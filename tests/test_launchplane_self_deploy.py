@@ -15,7 +15,10 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
                 "target_type": " Compose ",
                 "target_id": "compose-123",
                 "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
-                "oauth_env": {"LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example"},
+                "oauth_env": {
+                    "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
+                    "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": "provider-network",
+                },
                 "oauth_env_removals": ("LAUNCHPLANE_NPMPLUS_SECRET",),
                 "no_cache": True,
             }
@@ -47,7 +50,10 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
         self.assertEqual(result.target_type, "compose")
         self.assertEqual(result.target_id, "compose-123")
         self.assertTrue(result.image_reference_changed)
-        self.assertEqual(result.oauth_env_keys_changed, ("LAUNCHPLANE_PUBLIC_URL",))
+        self.assertEqual(
+            result.oauth_env_keys_changed,
+            ("LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK", "LAUNCHPLANE_PUBLIC_URL"),
+        )
         self.assertEqual(result.oauth_env_keys_removed, ("LAUNCHPLANE_NPMPLUS_SECRET",))
         update_env_mock.assert_called_once()
         updated_env_text = update_env_mock.call_args.kwargs["env_text"]
@@ -56,6 +62,7 @@ class LaunchplaneSelfDeployWorkflowTests(unittest.TestCase):
             updated_env_text,
         )
         self.assertIn("LAUNCHPLANE_PUBLIC_URL=https://launchplane.example", updated_env_text)
+        self.assertIn("LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=provider-network", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_NPMPLUS_SECRET=", updated_env_text)
         trigger_mock.assert_called_once_with(
             host="https://dokploy.example.com",

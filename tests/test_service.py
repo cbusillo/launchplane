@@ -25854,6 +25854,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
                                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
                                 "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": "info@shinycomputers.com",
+                                "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": "provider-network",
                                 "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "webhook-secret",
                                 "LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN": "github-app-token",
                                 "LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR": "shiny-code-bot",
@@ -25896,6 +25897,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", updated_env_text)
         self.assertIn("LAUNCHPLANE_GITHUB_CLIENT_ID=client-id", updated_env_text)
         self.assertIn("LAUNCHPLANE_PUBLIC_URL=https://launchplane.example", updated_env_text)
+        self.assertIn("LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=provider-network", updated_env_text)
         self.assertIn(
             "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS=info@shinycomputers.com",
             updated_env_text,
