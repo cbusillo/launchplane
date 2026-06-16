@@ -643,6 +643,12 @@ launchplane service odoo-workers run` is the foreground loop intended for an
 status` reports pending, running, stalled, and recent terminal operation
   counts without exposing request payloads. `status` is read-only observation;
   stale lease mutation remains storage-owned recovery inside the worker pass.
+  The checked-in Launchplane compose topology starts a separate
+  `launchplane-odoo-workers` process with the same image, runtime volume, and
+  operator-supplied environment as the HTTP service. That process runs
+  `/app/scripts/start-launchplane-odoo-workers.sh`, refuses startup without
+  `LAUNCHPLANE_DATABASE_URL`, and only accepts generic worker timing knobs as
+  process wiring; live operation selection remains in Launchplane records.
   Production activation stays gated on Alembic reaching head, supervised worker
   startup, status showing no unexpected stalled leases, stale active record
   reconciliation, and at least one rehearsed or real operation completed through
