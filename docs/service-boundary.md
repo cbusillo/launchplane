@@ -748,6 +748,39 @@ returns sanitized binding keys, policy ids, and finding codes only. It never
 returns plaintext secret values, ciphertext, provider env dumps, or token
 prefixes to the agent.
 
+### OpenFGA Candidate Mapping
+
+The current DB-backed policy records remain the active authorization path.
+OpenFGA may replace or augment those checks only after #1327's relation model,
+tuple ownership, consistency, and audit rules are implemented and proven.
+
+Future OpenFGA checks consume the normalized subject facts described above plus
+Launchplane resource facts. They should map existing service actions to generic
+relations without storing real tuple assignments in this repo:
+
+- provider inspect: `dokploy_target.inspect` and provider-target audit/read
+  actions check inspect permission on a provider-neutral target resource.
+- private health apply/read: `private_health_endpoint.apply` and
+  `private_health_endpoint.read` check apply or read permission on a private
+  health endpoint resource under the requested product context.
+- deploy: driver deploy actions check deploy permission on the target context
+  or deployment resource.
+- promotion: prod promotion actions check promote permission on the promotion
+  resource and its destination context.
+- agent delegated action: `agent/write-intents/evaluate` checks delegation or
+  preflight permission on an agent-intent resource before any later route can
+  execute the requested action.
+- policy/admin action: `authz_policy_grant.write` and related policy routes
+  check policy administration permission on a Launchplane policy resource.
+
+Grant and removal routes remain the only supported tuple-write boundary during
+migration. They may derive tuple proposals from active DB policy records,
+compare OpenFGA decisions with existing DB decisions, and later write provider
+tuples after parity is proven. Missing, ambiguous, stale, or unreachable tuple
+state denies access; it must not fall back to checked-in tuples, local files,
+workflow defaults, ambient GitHub CLI identity, or broader DB grants after
+cutover.
+
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
 matching `github_humans` rule exists. The GitHub OAuth client requests

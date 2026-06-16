@@ -433,6 +433,14 @@ The HTTP service admits product-driver POST routes from descriptor action and
 route-alias paths and reads product-driver handler authorization actions from
 descriptor route metadata, so new drivers do not need a second hardcoded router
 allowlist or authz-action entry.
+Future OpenFGA mapping should consume this same descriptor metadata. The
+`authz_action` and `alternate_authz_actions` fields can map driver dispatch to
+generic relation checks, but descriptors must never contain live tuple
+assignments, product/operator grants, provider targets, domains, or lane
+topology. OpenFGA does not make an advertised action executable by itself;
+backend handler registration, route dispatch, and fail-closed service
+authorization still have to agree.
+
 POST driver descriptor actions and route aliases use descriptor-backed service
 dispatch unless the service declares a narrow exemption for a deliberate
 non-dispatch route. The service validates this at startup, so adding a writable
