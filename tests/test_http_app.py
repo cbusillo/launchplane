@@ -594,6 +594,35 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["protected_artifacts"]["product"], "verireel")
 
+    async def test_protected_artifacts_rejects_terminal_agent_without_artifact_grant(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_artifact_protection_policy(
+                products=("verireel",),
+                contexts=("*",),
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="worker-agent",
+                terminal_agent_token_label="terminal-agent-read",
+            ),
+        )
+
+        response = await _get_protected_artifacts(
+            app,
+            product="verireel",
+            authorization="Bearer terminal-agent-token",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertNotIn("authz", payload)
+
     async def test_protected_artifacts_requires_supported_store(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),

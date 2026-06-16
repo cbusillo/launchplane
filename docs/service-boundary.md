@@ -1079,8 +1079,7 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/promotions/{record_id}`
 - `GET /v1/deployments/{record_id}`
 - `GET /v1/artifacts/protected` (native FastAPI for bearer-token and
-  human-session callers; legacy WSGI fallback retained until caller evidence is
-  complete)
+  human-session callers)
 - `GET /v1/contexts/{context}/secrets`
 - `GET /v1/contexts/{context}/instances/{instance}/secrets`
 - `GET /v1/secrets/{secret_id}`
