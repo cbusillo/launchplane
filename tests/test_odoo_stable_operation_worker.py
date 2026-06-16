@@ -23,6 +23,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
     build_odoo_stable_operation_worker_status,
+    reconcile_stale_odoo_stable_operation_records,
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
@@ -290,6 +291,81 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(worker_result.status, "idle")
             self.assertEqual(worker_result.operation_kind, "")
 
+    def test_reconcile_recovers_expired_leases_without_claiming_work(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_bootstrap_payload("bootstrap-expired-safe"),
+                        "status": "running",
+                        "phase": "created",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "old-worker",
+                        "lease_expires_at": "2026-05-17T00:02:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    _bootstrap_payload("bootstrap-pending")
+                )
+            )
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        **_replacement_payload("replacement-expired-unsafe"),
+                        "status": "running",
+                        "phase": "apply",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "old-worker",
+                        "lease_expires_at": "2026-05-17T00:02:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+
+            result = reconcile_stale_odoo_stable_operation_records(
+                record_store=store,
+                now="2026-05-17T00:03:00Z",
+            )
+
+            self.assertEqual(result.reconciled_bootstrap_ids, ("bootstrap-expired-safe",))
+            self.assertEqual(
+                result.reconciled_replacement_ids,
+                ("replacement-expired-unsafe",),
+            )
+            recovered = store.read_odoo_stable_bootstrap_operation_record("bootstrap-expired-safe")
+            pending = store.read_odoo_stable_bootstrap_operation_record("bootstrap-pending")
+            failed = store.read_odoo_stable_target_replacement_operation_record(
+                "replacement-expired-unsafe"
+            )
+            self.assertEqual(recovered.status, "pending")
+            self.assertEqual(recovered.phase, "created")
+            self.assertEqual(recovered.lease_owner, "")
+            self.assertEqual(recovered.started_at, "")
+            self.assertEqual(pending.status, "pending")
+            self.assertEqual(pending.lease_owner, "")
+            self.assertEqual(failed.status, "fail")
+            self.assertEqual(failed.phase, "failed")
+            self.assertIn("unsafe to retry", failed.error_message)
+            self.assertEqual(failed.lease_owner, "")
+
+    def test_reconcile_rejects_invalid_max_attempts(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+
+            with self.assertRaisesRegex(ValueError, "max_attempts must be positive"):
+                reconcile_stale_odoo_stable_operation_records(
+                    record_store=store,
+                    max_attempts=0,
+                )
+
     def test_worker_status_reports_pending_running_stalled_and_terminal_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -481,6 +557,47 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             self.assertEqual(payload["running_count"], 0)
             self.assertEqual(payload["operations"][0]["operation_id"], "operation-cm-testing")
             self.assertNotIn("request", payload["operations"][0])
+
+    def test_cli_reconcile_outputs_reconciled_ids_json(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_bootstrap_payload(),
+                        "status": "running",
+                        "phase": "created",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "old-worker",
+                        "lease_expires_at": "2000-01-01T00:00:00Z",
+                        "heartbeat_at": "2000-01-01T00:00:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+
+            with patch("control_plane.cli_service._store", return_value=store):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "service",
+                        "odoo-workers",
+                        "reconcile",
+                        "--database-url",
+                        "sqlite+pysqlite:///:memory:",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["reconciled_count"], 1)
+            self.assertEqual(
+                payload["reconciled_bootstrap_ids"],
+                ["operation-cm-testing"],
+            )
+            self.assertEqual(payload["reconciled_replacement_ids"], [])
 
     def test_cli_run_once_outputs_worker_result_json(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
