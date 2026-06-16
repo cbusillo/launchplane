@@ -638,11 +638,13 @@ state/
   current lease owner so stale workers cannot overwrite recovered work. Worker
   entry points require DB-backed storage: `uv run launchplane service
 odoo-workers run-once` performs one recovery/claim/execution pass, `uv run
-launchplane service odoo-workers run` is the foreground loop intended for an
-  external process supervisor, and `uv run launchplane service odoo-workers
-status` reports pending, running, stalled, and recent terminal operation
-  counts without exposing request payloads. `status` is read-only observation;
-  stale lease mutation remains storage-owned recovery inside the worker pass.
+launchplane service odoo-workers reconcile` performs the same expired-lease
+  recovery without claiming new work, `uv run launchplane service odoo-workers
+run` is the foreground loop intended for an external process supervisor, and
+  `uv run launchplane service odoo-workers status` reports pending, running,
+  stalled, and recent terminal operation counts without exposing request
+  payloads. `status` is read-only observation; stale lease mutation remains
+  storage-owned recovery in `reconcile`, `run-once`, and the worker loop.
   The deployed service exposes the same redacted read model at
   `GET /v1/service/odoo-workers/status` for callers authorized to
   `launchplane_service.read` on product/context `launchplane`, so operators can

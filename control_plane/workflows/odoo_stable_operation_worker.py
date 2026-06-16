@@ -172,6 +172,12 @@ class OdooStableOperationWorkerLoopResult:
     error_count: int
 
 
+@dataclass(frozen=True)
+class OdooStableOperationReconcileResult:
+    reconciled_bootstrap_ids: tuple[str, ...]
+    reconciled_replacement_ids: tuple[str, ...]
+
+
 def run_odoo_stable_operation_worker_once(
     *,
     record_store: OdooStableOperationWorkerStore,
@@ -255,6 +261,33 @@ def run_odoo_stable_operation_worker_once(
     return OdooStableOperationWorkerResult(
         status="idle",
         recovered_operation_ids=recovered_operation_ids,
+    )
+
+
+def reconcile_stale_odoo_stable_operation_records(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    now: str | None = None,
+) -> OdooStableOperationReconcileResult:
+    if max_attempts < 1:
+        raise ValueError("Odoo stable operation worker max_attempts must be positive.")
+    reconciled_at = now or _utc_now_timestamp()
+    reconciled_bootstrap_ids = record_store.recover_expired_odoo_stable_bootstrap_operation_records(
+        now=reconciled_at,
+        safe_phases=SAFE_BOOTSTRAP_RETRY_PHASES,
+        max_attempts=max_attempts,
+    )
+    reconciled_replacement_ids = (
+        record_store.recover_expired_odoo_stable_target_replacement_operation_records(
+            now=reconciled_at,
+            safe_phases=SAFE_TARGET_REPLACEMENT_RETRY_PHASES,
+            max_attempts=max_attempts,
+        )
+    )
+    return OdooStableOperationReconcileResult(
+        reconciled_bootstrap_ids=reconciled_bootstrap_ids,
+        reconciled_replacement_ids=reconciled_replacement_ids,
     )
 
 

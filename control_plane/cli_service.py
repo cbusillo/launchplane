@@ -23,6 +23,7 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS,
     OdooStableOperationWorkerStore,
     build_odoo_stable_operation_worker_status,
+    reconcile_stale_odoo_stable_operation_records,
     run_odoo_stable_operation_worker_loop,
     run_odoo_stable_operation_worker_once,
 )
@@ -328,6 +329,50 @@ def service_odoo_workers_run_once(
         max_attempts=max_attempts,
     )
     click.echo(json.dumps(result.__dict__, indent=2, sort_keys=True))
+
+
+@service_odoo_workers.command("reconcile")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    show_default=True,
+)
+def service_odoo_workers_reconcile(
+    state_dir: Path,
+    database_url: str,
+    max_attempts: int,
+) -> None:
+    """Recover expired Odoo worker leases without claiming new work."""
+    if not database_url.strip():
+        raise click.ClickException(
+            "Odoo operation worker reconciliation requires --database-url or "
+            "LAUNCHPLANE_DATABASE_URL."
+        )
+    result = reconcile_stale_odoo_stable_operation_records(
+        record_store=cast(
+            OdooStableOperationWorkerStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        max_attempts=max_attempts,
+    )
+    payload = {
+        "status": "ok",
+        "reconciled_bootstrap_ids": list(result.reconciled_bootstrap_ids),
+        "reconciled_replacement_ids": list(result.reconciled_replacement_ids),
+        "reconciled_count": len(result.reconciled_bootstrap_ids)
+        + len(result.reconciled_replacement_ids),
+    }
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @service_odoo_workers.command("run")
