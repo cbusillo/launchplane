@@ -36,6 +36,8 @@ The service boundary is implemented and deployed for the current Odoo and
 VeriReel product paths:
 
 - CLI: `uv run launchplane service serve`
+- server runtime: FastAPI served by Uvicorn, with legacy WSGI routes mounted as
+  the fallback while route ownership is migrated incrementally
 - health route: `GET /v1/health`
 - protected artifact inventory route:
   - `GET /v1/artifacts/protected`

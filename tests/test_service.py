@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -6,7 +7,8 @@ import json
 import os
 import tempfile
 import unittest
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2002,6 +2004,82 @@ def _invoke_raw_app(
         int(captured_status.split(" ", 1)[0]),
         dict(captured_headers),
         response_body,
+    )
+
+
+@dataclass(frozen=True)
+class _AsgiServiceTestResponse:
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+
+    def json(self) -> Any:
+        return json.loads(self.body.decode("utf-8"))
+
+
+async def _asgi_get_for_service_test(app: Any, path: str) -> _AsgiServiceTestResponse:
+    return await _asgi_request_for_service_test(app, method="GET", path=path)
+
+
+async def _asgi_request_for_service_test(
+    app: Any,
+    *,
+    method: str,
+    path: str,
+    payload: Mapping[str, object] | None = None,
+    authorization: str = "",
+    headers: Mapping[str, str] | None = None,
+) -> _AsgiServiceTestResponse:
+    body = json.dumps(payload).encode("utf-8") if payload is not None else b""
+    request_headers = [
+        (key.lower().encode("ascii"), value.encode("latin-1"))
+        for key, value in (headers or {}).items()
+    ]
+    if authorization:
+        request_headers.append((b"authorization", authorization.encode("latin-1")))
+    if body:
+        request_headers.append((b"content-type", b"application/json"))
+        request_headers.append((b"content-length", str(len(body)).encode("ascii")))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "headers": request_headers,
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+    messages = [
+        {"type": "http.request", "body": body, "more_body": False},
+    ]
+    sent: list[MutableMapping[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        if messages:
+            return messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"") for message in sent if message["type"] == "http.response.body"
+    )
+    response_headers = {
+        key.decode("latin-1"): value.decode("latin-1") for key, value in start.get("headers", [])
+    }
+    return _AsgiServiceTestResponse(
+        status_code=start["status"],
+        headers=response_headers,
+        body=body,
     )
 
 
@@ -14033,6 +14111,148 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("refuses startup without --audience", result.output)
+
+    def test_service_serve_runs_fastapi_app_with_legacy_wsgi_fallback(self) -> None:
+        fastapi_response: _AsgiServiceTestResponse | None = None
+        legacy_response: _AsgiServiceTestResponse | None = None
+        denied_config_response: _AsgiServiceTestResponse | None = None
+        grant_response: _AsgiServiceTestResponse | None = None
+        authorized_config_response: _AsgiServiceTestResponse | None = None
+
+        def capture_uvicorn_run(app: Any, **_kwargs: object) -> None:
+            nonlocal fastapi_response, legacy_response, denied_config_response
+            nonlocal grant_response, authorized_config_response
+            fastapi_response = asyncio.run(_asgi_get_for_service_test(app, "/openapi.json"))
+            legacy_response = asyncio.run(_asgi_get_for_service_test(app, "/v1/health"))
+            denied_config_response = asyncio.run(
+                _asgi_request_for_service_test(
+                    app,
+                    method="GET",
+                    path="/v1/products/example-site/environments/prod/config-status",
+                    authorization="Bearer valid-token",
+                )
+            )
+            grant_response = asyncio.run(
+                _asgi_request_for_service_test(
+                    app,
+                    method="POST",
+                    path="/v1/authz-policies/github-actions/grants",
+                    authorization="Bearer valid-token",
+                    payload={
+                        "schema_version": 1,
+                        "product": "launchplane",
+                        "mode": "apply",
+                        "reason": "Grant FastAPI config-status read for runtime policy refresh test.",
+                        "related_issue": "cbusillo/launchplane#1323",
+                        "grant": {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["example-site"],
+                            "contexts": ["example-site"],
+                            "actions": ["product_environment.read"],
+                            "source_label": "test:fastapi-runtime-policy-refresh",
+                        },
+                    },
+                    headers={"Idempotency-Key": "authz-grant:fastapi-runtime-refresh"},
+                )
+            )
+            authorized_config_response = asyncio.run(
+                _asgi_request_for_service_test(
+                    app,
+                    method="GET",
+                    path="/v1/products/example-site/environments/prod/config-status",
+                    authorization="Bearer valid-token",
+                )
+            )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy_file = root / "policy.toml"
+            policy_file.write_text(
+                "\n".join(
+                    (
+                        "schema_version = 1",
+                        "",
+                        "[[github_actions]]",
+                        'repository = "cbusillo/launchplane"',
+                        "workflow_refs = [",
+                        '  "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",',
+                        "]",
+                        'event_names = ["workflow_dispatch"]',
+                        'products = ["launchplane"]',
+                        'contexts = ["launchplane"]',
+                        'actions = ["authz_policy_grant.write"]',
+                        "",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.close()
+
+            with (
+                patch("uvicorn.run", side_effect=capture_uvicorn_run) as run_uvicorn,
+                patch(
+                    "control_plane.service_auth.GitHubOidcVerifier",
+                    return_value=_StubVerifier(
+                        _identity(
+                            repository="cbusillo/launchplane",
+                            workflow_ref=(
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ),
+                            event_name="workflow_dispatch",
+                        )
+                    ),
+                ),
+            ):
+                control_plane_service.serve_launchplane_service(
+                    state_dir=root / "state",
+                    policy_file=policy_file,
+                    host="127.0.0.1",
+                    port=8080,
+                    audience="launchplane-service",
+                    database_url=database_url,
+                )
+
+            run_uvicorn.assert_called_once()
+
+        self.assertIsNotNone(fastapi_response)
+        self.assertIsNotNone(legacy_response)
+        self.assertIsNotNone(denied_config_response)
+        self.assertIsNotNone(grant_response)
+        self.assertIsNotNone(authorized_config_response)
+        assert fastapi_response is not None
+        assert legacy_response is not None
+        assert denied_config_response is not None
+        assert grant_response is not None
+        assert authorized_config_response is not None
+        self.assertEqual(fastapi_response.status_code, 200)
+        self.assertIn(
+            "/v1/products/{product}/environments/{environment}/config-status",
+            fastapi_response.json()["paths"],
+        )
+        self.assertEqual(legacy_response.status_code, 200)
+        self.assertEqual(legacy_response.json()["status"], "ok")
+        self.assertEqual(legacy_response.json()["storage_backend"], "postgres")
+        self.assertEqual(
+            denied_config_response.status_code,
+            403,
+            msg=denied_config_response.body.decode("utf-8"),
+        )
+        self.assertEqual(grant_response.status_code, 202)
+        self.assertEqual(grant_response.json()["result"]["changed"], True)
+        self.assertEqual(authorized_config_response.status_code, 200)
+        self.assertEqual(
+            authorized_config_response.json()["config_status"]["product"], "example-site"
+        )
 
     def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

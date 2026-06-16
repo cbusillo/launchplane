@@ -4,18 +4,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import MutableMapping
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
+from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI
 from jwt import InvalidTokenError
+from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import GitHubActionsIdentity, LaunchplaneAuthzPolicy
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.test_service import create_launchplane_service_app
 from tests.test_service import _generic_site_profile_payload, _identity, _sqlite_database_url
 from tests.test_service import _StubVerifier
 
@@ -57,14 +61,16 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
                     actor="test",
                 )
             store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
 
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_environment_read_policy(context="example-site"),
-                database_url=database_url,
+                record_store_factory=lambda: app_store,
             )
 
             response = await _get_config_status(app)
+            app_store.close()
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -97,13 +103,15 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
                 LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
             )
             store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_environment_read_policy(context="launchplane"),
-                database_url=database_url,
+                record_store_factory=lambda: app_store,
             )
 
             response = await _get_config_status(app)
+            app_store.close()
 
         self.assertEqual(response.status_code, 403)
         payload = response.json()
@@ -120,13 +128,15 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
                 LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
             )
             store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_environment_read_policy(context="example-site"),
-                database_url=database_url,
+                record_store_factory=lambda: app_store,
             )
 
             response = await _get_config_status(app, environment="staging")
+            app_store.close()
 
         self.assertEqual(response.status_code, 404)
         payload = response.json()
@@ -182,6 +192,26 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(payload["status"], "rejected")
         self.assertEqual(payload["error"]["code"], "database_storage_required")
 
+    async def test_config_status_validation_errors_use_launchplane_error_shape(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/products/ /environments/prod/config-status",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertIn("trace_id", payload)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
     async def test_openapi_includes_config_status_route(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -198,6 +228,38 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         ]
         self.assertIn("ProductEnvironmentConfigStatusResponse", json.dumps(route))
         self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+
+    async def test_fastapi_app_can_mount_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(state_dir=root / "state")
+            policy = _product_environment_read_policy(context="example-site")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: record_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                local_record_store_for_tests=record_store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            openapi_response = await _asgi_get(app, "/openapi.json")
+            health_response = await _asgi_get(app, "/v1/health")
+
+        self.assertEqual(openapi_response.status_code, 200)
+        self.assertIn(
+            "/v1/products/{product}/environments/{environment}/config-status",
+            openapi_response.json()["paths"],
+        )
+        self.assertEqual(health_response.status_code, 200)
+        health_payload = health_response.json()
+        self.assertEqual(health_payload["status"], "ok")
+        self.assertEqual(health_payload["storage_backend"], "filesystem")
+        self.assertIn("trace_id", health_payload)
 
 
 def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:

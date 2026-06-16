@@ -4,11 +4,17 @@ from typing import Annotated, Protocol
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
@@ -47,13 +53,83 @@ class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
 
 
+class LaunchplaneAuthzPolicyRuntime:
+    def __init__(self, policy: LaunchplaneAuthzPolicy) -> None:
+        self._policy = policy
+
+    @property
+    def policy(self) -> LaunchplaneAuthzPolicy:
+        return self._policy
+
+    def update(self, policy: LaunchplaneAuthzPolicy) -> None:
+        self._policy = policy
+
+
+class ResolvedLaunchplaneAuthzPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policy: LaunchplaneAuthzPolicy
+    policy_sha256: str
+    source: str
+
+
+def resolve_launchplane_authz_policy(
+    *,
+    record_store: object,
+    bootstrap_policy: LaunchplaneAuthzPolicy,
+    policy_source: str,
+    now_timestamp: str,
+) -> ResolvedLaunchplaneAuthzPolicy:
+    list_records = getattr(record_store, "list_authz_policy_records", None)
+    if callable(list_records):
+        records = list_records(status="active", limit=1)
+        if records:
+            record = records[0]
+            return ResolvedLaunchplaneAuthzPolicy(
+                policy=record.policy,
+                policy_sha256=record.policy_sha256,
+                source="db",
+            )
+
+    policy_sha256 = authz_policy_sha256(bootstrap_policy)
+    write_record = getattr(record_store, "write_authz_policy_record", None)
+    if callable(write_record):
+        record = LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                updated_at=now_timestamp,
+                policy_sha256=policy_sha256,
+            ),
+            status="active",
+            source=policy_source,
+            updated_at=now_timestamp,
+            policy_sha256=policy_sha256,
+            policy=bootstrap_policy,
+        )
+        write_record(record)
+        return ResolvedLaunchplaneAuthzPolicy(
+            policy=record.policy,
+            policy_sha256=record.policy_sha256,
+            source="bootstrap_seeded_store",
+        )
+
+    return ResolvedLaunchplaneAuthzPolicy(
+        policy=bootstrap_policy,
+        policy_sha256=policy_sha256,
+        source="bootstrap",
+    )
+
+
 def create_launchplane_fastapi_app(
     *,
     verifier: TokenVerifier,
     authz_policy: LaunchplaneAuthzPolicy,
+    authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
     database_url: str | None = None,
     record_store_factory: _RecordStoreFactory | None = None,
 ) -> FastAPI:
+    resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
+        authz_policy
+    )
     shared_record_store: object | None = (
         None
         if record_store_factory is not None
@@ -97,8 +173,8 @@ def create_launchplane_fastapi_app(
             raise _authentication_required_error(str(error)) from error
 
     def read_product_environment_config_status(
-        product: Annotated[str, Path(min_length=1)],
-        environment: Annotated[str, Path(min_length=1)],
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
     ) -> ProductEnvironmentConfigStatusResponse:
@@ -107,7 +183,7 @@ def create_launchplane_fastapi_app(
         def product_action_allowed(
             requested_action: str, requested_product: str, requested_context: str
         ) -> bool:
-            return authz_policy.allows(
+            return resolved_authz_policy_runtime.policy.allows(
                 identity=identity,
                 action=requested_action,
                 product=requested_product,
@@ -196,6 +272,23 @@ def create_launchplane_fastapi_app(
             headers=http_error.headers,
         )
 
+    def launchplane_request_validation_exception_handler(
+        _request: Request, error: Exception
+    ) -> JSONResponse:
+        if not isinstance(error, RequestValidationError):
+            raise error
+        payload = LaunchplaneErrorResponse(
+            trace_id=next_trace_id(),
+            error=LaunchplaneErrorDetail(
+                code="invalid_request",
+                message="Launchplane request validation failed.",
+            ),
+        )
+        return JSONResponse(
+            status_code=400,
+            content=payload.model_dump(mode="json"),
+        )
+
     app.add_api_route(
         "/v1/products/{product}/environments/{environment}/config-status",
         read_product_environment_config_status,
@@ -210,6 +303,10 @@ def create_launchplane_fastapi_app(
         },
     )
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
+    app.add_exception_handler(
+        RequestValidationError,
+        launchplane_request_validation_exception_handler,
+    )
 
     return app
 
