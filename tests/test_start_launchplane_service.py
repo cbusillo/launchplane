@@ -372,5 +372,111 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("schema verification failed before migrations", result.stderr)
 
 
+class StartLaunchplaneOdooWorkersScriptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        self.script_path = repo_root / "scripts" / "start-launchplane-odoo-workers.sh"
+        self.compose_path = repo_root / "docker-compose.yml"
+
+    def _write_fake_uv(self, bin_dir: Path) -> None:
+        uv_path = bin_dir / "uv"
+        uv_path.write_text(
+            """#!/bin/sh
+printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
+""",
+            encoding="utf-8",
+        )
+        uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
+
+    def test_requires_database_url_for_worker_startup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            app_root.mkdir()
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": "",
+                },
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1, msg=result.stderr)
+        self.assertIn("refuse startup without LAUNCHPLANE_DATABASE_URL", result.stderr)
+
+    def test_worker_startup_uses_database_env_and_generic_timing_options(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            app_root = temporary_directory / "app"
+            bin_dir = temporary_directory / "bin"
+            capture_file = temporary_directory / "uv-args.txt"
+            app_root.mkdir()
+            bin_dir.mkdir()
+            self._write_fake_uv(bin_dir)
+
+            result = subprocess.run(
+                [str(self.script_path)],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "UV_CAPTURE_FILE": str(capture_file),
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "runtime"),
+                    "LAUNCHPLANE_DATABASE_URL": "postgresql+psycopg://launchplane:test@db/launchplane",
+                    "LAUNCHPLANE_ODOO_WORKER_LEASE_SECONDS": "120",
+                    "LAUNCHPLANE_ODOO_WORKER_HEARTBEAT_SECONDS": "20",
+                    "LAUNCHPLANE_ODOO_WORKER_MAX_ATTEMPTS": "2",
+                    "LAUNCHPLANE_ODOO_WORKER_POLL_SECONDS": "5",
+                    "LAUNCHPLANE_ODOO_WORKER_ERROR_BACKOFF_SECONDS": "15",
+                    "LAUNCHPLANE_ODOO_WORKER_MAX_CONSECUTIVE_ERRORS": "3",
+                },
+                check=False,
+            )
+
+            captured_args = capture_file.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(
+            captured_args[:5],
+            ["run", "launchplane", "service", "odoo-workers", "run"],
+        )
+        self.assertIn("--state-dir", captured_args)
+        self.assertNotIn("--database-url", captured_args)
+        self.assertNotIn("postgresql+psycopg://launchplane:test@db/launchplane", captured_args)
+        self.assertIn("--lease-seconds", captured_args)
+        self.assertIn("120", captured_args)
+        self.assertIn("--heartbeat-seconds", captured_args)
+        self.assertIn("20", captured_args)
+        self.assertIn("--max-attempts", captured_args)
+        self.assertIn("2", captured_args)
+        self.assertIn("--poll-seconds", captured_args)
+        self.assertIn("5", captured_args)
+        self.assertIn("--error-backoff-seconds", captured_args)
+        self.assertIn("15", captured_args)
+        self.assertIn("--max-consecutive-errors", captured_args)
+        self.assertIn("3", captured_args)
+
+    def test_compose_includes_supervised_odoo_worker_service(self) -> None:
+        compose_text = self.compose_path.read_text(encoding="utf-8")
+
+        self.assertIn("  launchplane-odoo-workers:\n", compose_text)
+        self.assertIn("image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text)
+        self.assertIn("restart: unless-stopped", compose_text)
+        self.assertIn("healthcheck:", compose_text)
+        self.assertIn("condition: service_healthy", compose_text)
+        self.assertIn("- /app/scripts/start-launchplane-odoo-workers.sh", compose_text)
+        self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
+        self.assertNotIn("cm-prod", compose_text)
+        self.assertNotIn("opw-prod", compose_text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,41 @@ services:
       LAUNCHPLANE_SERVICE_HOST: 0.0.0.0
       LAUNCHPLANE_SERVICE_PORT: 8080
       LAUNCHPLANE_STATE_DIR: /app/runtime
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json
+          import os
+          import urllib.request
+
+          port = os.environ.get("LAUNCHPLANE_SERVICE_PORT", "8080")
+          with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/health", timeout=5) as response:
+              payload = json.load(response)
+          raise SystemExit(0 if payload.get("status") == "ok" else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    volumes:
+      - launchplane-runtime:/app/runtime
+
+  launchplane-odoo-workers:
+    image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      launchplane:
+        condition: service_healthy
+    env_file:
+      - .env
+    command:
+      - /app/scripts/start-launchplane-odoo-workers.sh
+    environment:
+      DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
+      LAUNCHPLANE_STATE_DIR: /app/runtime
     volumes:
       - launchplane-runtime:/app/runtime
 
