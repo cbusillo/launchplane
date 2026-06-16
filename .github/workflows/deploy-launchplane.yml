@@ -36,6 +36,11 @@ on:
         required: false
         default: false
         type: boolean
+      omit_compose_external_network_env:
+        description: Temporarily omit compose external network env for one compatibility deploy.
+        required: false
+        default: false
+        type: boolean
       break_glass_confirm:
         description: Type ROLL BACK LAUNCHPLANE THROUGH DIRECT DOKPLOY to run the manual emergency rollback job.
         required: false
@@ -157,6 +162,10 @@ jobs:
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"
           : "${LAUNCHPLANE_DOKPLOY_TARGET_ID:?Missing LAUNCHPLANE_DOKPLOY_TARGET_ID variable}"
           : "${LAUNCHPLANE_DEPLOY_HEALTH_URLS:?Missing LAUNCHPLANE_DEPLOY_HEALTH_URLS variable}"
+          omit_compose_external_network_env="${{ inputs.omit_compose_external_network_env || false }}"
+          if [ "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" = "compose" ] && [ "$omit_compose_external_network_env" != "true" ]; then
+            : "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK variable}"
+          fi
 
       - name: Resolve Launchplane service endpoint
         id: service
@@ -308,6 +317,7 @@ jobs:
                 --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env || false }}' \
                 --argjson omit_owner_agent_env '${{ inputs.omit_owner_agent_env || false }}' \
                 --argjson omit_npmplus_env '${{ inputs.omit_npmplus_env || false }}' \
+                --argjson omit_compose_external_network_env '${{ inputs.omit_compose_external_network_env || false }}' \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -356,7 +366,7 @@ jobs:
                     end
                   )
                   + (
-                    if $compose_external_network != "" then
+                    if (($omit_compose_external_network_env | not) and $compose_external_network != "") then
                       {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}
                     else
                       {}

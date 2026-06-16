@@ -224,6 +224,7 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
 WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "inputs.omit_every_code_env.default": frozenset(("false",)),
+        "inputs.omit_compose_external_network_env.default": frozenset(("false",)),
         "inputs.omit_npmplus_env.default": frozenset(("false",)),
         "inputs.omit_owner_agent_env.default": frozenset(("false",)),
         "inputs.omit_terminal_agent_env.default": frozenset(("false",)),
@@ -371,6 +372,9 @@ WORKFLOW_LAUNCHPLANE_BOOTSTRAP_CONTEXT_PATH_VALUES = {
         "GHCR_TOKEN": frozenset(("${{ secrets.GHCR_TOKEN }}",)),
         "GHCR_USERNAME": frozenset(("${{ secrets.GHCR_USERNAME }}",)),
         "LAUNCHPLANE_AUTHZ_GRANTS_JSON": frozenset(("${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}",)),
+        "LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK": frozenset(
+            ("${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}",)
+        ),
         "LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS": frozenset(
             ("${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}",)
         ),
@@ -1350,9 +1354,7 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
             list_scalar = YAML_SCALAR_PATTERN.match(list_value)
             if list_scalar is not None:
                 yaml_key = _unquote(list_scalar.group("key"))
-                scalar_value = _unquote(
-                    _strip_inline_comment(list_scalar.group("value")).strip()
-                )
+                scalar_value = _unquote(_strip_inline_comment(list_scalar.group("value")).strip())
                 if yaml_key == "uses" and scalar_value == "actions/checkout@v6":
                     checkout_uses_indent = indent + 2
             else:
@@ -1364,7 +1366,11 @@ def _yaml_line_candidates(text: str) -> list[tuple[int, str, object]]:
         empty_match = YAML_EMPTY_MAPPING_PATTERN.match(line)
         if empty_match is not None:
             yaml_key = _unquote(empty_match.group("key"))
-            if yaml_key == "with" and checkout_uses_indent is not None and indent == checkout_uses_indent:
+            if (
+                yaml_key == "with"
+                and checkout_uses_indent is not None
+                and indent == checkout_uses_indent
+            ):
                 checkout_with_count += 1
                 yaml_key = f"checkout.with[{checkout_with_count}]"
                 checkout_uses_indent = None
