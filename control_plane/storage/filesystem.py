@@ -83,6 +83,10 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
 
+def _utc_now_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 class FilesystemRecordStore:
     odoo_stable_bootstrap_reservation_settle_timeout_seconds = 30.0
     odoo_stable_bootstrap_reservation_poll_seconds = 0.01
@@ -759,18 +763,14 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def write_private_health_endpoint_record(
-        self, record: PrivateHealthEndpointRecord
-    ) -> Path:
+    def write_private_health_endpoint_record(self, record: PrivateHealthEndpointRecord) -> Path:
         return self._write_model(
             "launchplane_private_health_endpoints",
             _private_health_endpoint_record_id(record.endpoint_key),
             record,
         )
 
-    def read_private_health_endpoint_record(
-        self, endpoint_key: str
-    ) -> PrivateHealthEndpointRecord:
+    def read_private_health_endpoint_record(self, endpoint_key: str) -> PrivateHealthEndpointRecord:
         return self._read_model(
             PrivateHealthEndpointRecord,
             "launchplane_private_health_endpoints",
@@ -1127,6 +1127,128 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def claim_next_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooStableBootstrapOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Odoo stable bootstrap operation claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError("Odoo stable bootstrap operation claim requires lease_expires_at.")
+        if not claimed_at.strip():
+            raise ValueError("Odoo stable bootstrap operation claim requires claimed_at.")
+        pending_records = self.list_odoo_stable_bootstrap_operation_records(statuses=("pending",))
+        if not pending_records:
+            return None
+        record = sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        )[0]
+        claimed_record = record.model_copy(
+            update={
+                "status": "running",
+                "phase": "running",
+                "started_at": record.started_at or claimed_at,
+                "updated_at": claimed_at,
+                "lease_owner": normalized_lease_owner,
+                "lease_expires_at": lease_expires_at.strip(),
+                "heartbeat_at": claimed_at.strip(),
+                "attempt": record.attempt + 1,
+            }
+        )
+        self.write_odoo_stable_bootstrap_operation_record(claimed_record)
+        return claimed_record
+
+    def heartbeat_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        record = self.read_odoo_stable_bootstrap_operation_record(operation_id)
+        if (
+            record.status != "running"
+            or record.lease_owner != lease_owner.strip()
+            or not record.lease_expires_at
+            or record.lease_expires_at <= heartbeat_at.strip()
+        ):
+            return False
+        heartbeat_record = record.model_copy(
+            update={
+                "heartbeat_at": heartbeat_at.strip(),
+                "lease_expires_at": lease_expires_at.strip(),
+                "updated_at": heartbeat_at.strip(),
+            }
+        )
+        self.write_odoo_stable_bootstrap_operation_record(heartbeat_record)
+        return True
+
+    def complete_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        record: OdooStableBootstrapOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        current_record = self.read_odoo_stable_bootstrap_operation_record(record.operation_id)
+        completed_at = _utc_now_timestamp()
+        if (
+            current_record.status != "running"
+            or current_record.lease_owner != lease_owner.strip()
+            or not current_record.lease_expires_at
+            or current_record.lease_expires_at <= completed_at
+        ):
+            return False
+        self.write_odoo_stable_bootstrap_operation_record(record)
+        return True
+
+    def recover_expired_odoo_stable_bootstrap_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        for record in self.list_odoo_stable_bootstrap_operation_records(statuses=("running",)):
+            if record.lease_expires_at and record.lease_expires_at >= now:
+                continue
+            affected_operation_ids.append(record.operation_id)
+            if record.phase in safe_phases and record.attempt < max_attempts:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "pending",
+                        "started_at": "",
+                        "updated_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                    }
+                )
+            else:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "updated_at": now,
+                        "finished_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "error_message": (
+                            f"Odoo stable bootstrap operation lease expired in "
+                            f"phase {record.phase!r}; unsafe to retry automatically."
+                        ),
+                    }
+                )
+            self.write_odoo_stable_bootstrap_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
+
     def _wait_for_odoo_stable_bootstrap_reservation_owner(
         self,
         reservation_path: Path,
@@ -1242,6 +1364,134 @@ class FilesystemRecordStore:
             )
         self.write_odoo_stable_target_replacement_operation_record(record)
         return record, True
+
+    def claim_next_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooStableTargetReplacementOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Odoo stable target replacement claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError("Odoo stable target replacement claim requires lease_expires_at.")
+        if not claimed_at.strip():
+            raise ValueError("Odoo stable target replacement claim requires claimed_at.")
+        pending_records = self.list_odoo_stable_target_replacement_operation_records(
+            statuses=("pending",)
+        )
+        if not pending_records:
+            return None
+        record = sorted(
+            pending_records,
+            key=lambda item: (item.created_at, item.operation_id),
+        )[0]
+        claimed_record = record.model_copy(
+            update={
+                "status": "running",
+                "phase": "running",
+                "started_at": record.started_at or claimed_at,
+                "updated_at": claimed_at,
+                "lease_owner": normalized_lease_owner,
+                "lease_expires_at": lease_expires_at.strip(),
+                "heartbeat_at": claimed_at.strip(),
+                "attempt": record.attempt + 1,
+            }
+        )
+        self.write_odoo_stable_target_replacement_operation_record(claimed_record)
+        return claimed_record
+
+    def heartbeat_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        record = self.read_odoo_stable_target_replacement_operation_record(operation_id)
+        if (
+            record.status != "running"
+            or record.lease_owner != lease_owner.strip()
+            or not record.lease_expires_at
+            or record.lease_expires_at <= heartbeat_at.strip()
+        ):
+            return False
+        heartbeat_record = record.model_copy(
+            update={
+                "heartbeat_at": heartbeat_at.strip(),
+                "lease_expires_at": lease_expires_at.strip(),
+                "updated_at": heartbeat_at.strip(),
+            }
+        )
+        self.write_odoo_stable_target_replacement_operation_record(heartbeat_record)
+        return True
+
+    def complete_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        record: OdooStableTargetReplacementOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        current_record = self.read_odoo_stable_target_replacement_operation_record(
+            record.operation_id
+        )
+        completed_at = _utc_now_timestamp()
+        if (
+            current_record.status != "running"
+            or current_record.lease_owner != lease_owner.strip()
+            or not current_record.lease_expires_at
+            or current_record.lease_expires_at <= completed_at
+        ):
+            return False
+        self.write_odoo_stable_target_replacement_operation_record(record)
+        return True
+
+    def recover_expired_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        for record in self.list_odoo_stable_target_replacement_operation_records(
+            statuses=("running",)
+        ):
+            if record.lease_expires_at and record.lease_expires_at >= now:
+                continue
+            affected_operation_ids.append(record.operation_id)
+            if record.phase in safe_phases and record.attempt < max_attempts:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "pending",
+                        "started_at": "",
+                        "updated_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                    }
+                )
+            else:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "updated_at": now,
+                        "finished_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "error_message": (
+                            f"Odoo stable target replacement operation lease expired in "
+                            f"phase {record.phase!r}; unsafe to retry automatically."
+                        ),
+                    }
+                )
+            self.write_odoo_stable_target_replacement_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
 
     def _wait_for_odoo_stable_target_replacement_reservation_owner(
         self,

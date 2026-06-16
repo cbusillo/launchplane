@@ -2,6 +2,9 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import socket
+from typing import cast
+import uuid
 
 import click
 
@@ -9,6 +12,13 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.service import serve_launchplane_service
+from control_plane.workflows.odoo_stable_operation_worker import (
+    DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
+    DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    OdooStableOperationWorkerStore,
+    run_odoo_stable_operation_worker_once,
+)
 
 
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
@@ -237,6 +247,80 @@ def service_serve(
         audience=audience,
         database_url=database_url,
     )
+
+
+@service.group("odoo-workers")
+def service_odoo_workers() -> None:
+    """Run Launchplane-owned Odoo operation workers."""
+
+
+@service_odoo_workers.command("run-once")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane shared-service core records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used by Odoo operation workflows.",
+)
+@click.option(
+    "--lease-owner",
+    default="",
+    help="Worker lease owner id. Defaults to a generated process-local id.",
+)
+@click.option(
+    "--lease-seconds",
+    type=int,
+    default=DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--heartbeat-seconds",
+    type=int,
+    default=DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
+    show_default=True,
+)
+@click.option(
+    "--max-attempts",
+    type=int,
+    default=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    show_default=True,
+)
+def service_odoo_workers_run_once(
+    state_dir: Path,
+    database_url: str,
+    control_plane_root: Path | None,
+    lease_owner: str,
+    lease_seconds: int,
+    heartbeat_seconds: int,
+    max_attempts: int,
+) -> None:
+    if not database_url.strip():
+        raise click.ClickException(
+            "Odoo operation workers require --database-url or LAUNCHPLANE_DATABASE_URL."
+        )
+    generated_lease_owner = (
+        f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
+    )
+    result = run_odoo_stable_operation_worker_once(
+        record_store=cast(
+            OdooStableOperationWorkerStore,
+            _store(state_dir=state_dir, database_url=database_url),
+        ),
+        control_plane_root_path=control_plane_root or _control_plane_root(),
+        lease_owner=generated_lease_owner,
+        lease_seconds=lease_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        max_attempts=max_attempts,
+    )
+    click.echo(json.dumps(result.__dict__, indent=2, sort_keys=True))
 
 
 @service.command("render-authz-policy")
