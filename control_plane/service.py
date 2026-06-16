@@ -183,7 +183,6 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
-from control_plane.contracts.protected_artifacts import build_protected_artifact_set
 from control_plane.contracts.product_environment_read_model import ProductReadModelStore
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -4624,8 +4623,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_work_request.read", {"request_id": segments[3]}
     if len(segments) == 2 and segments == ["v1", "drivers"]:
         return "driver.read", {}
-    if len(segments) == 3 and segments == ["v1", "artifacts", "protected"]:
-        return "artifact_protection.read", {}
     if len(segments) == 3 and segments[:2] == ["v1", "drivers"]:
         return "driver.read", {"driver_id": segments[2]}
     if (
@@ -10726,64 +10723,6 @@ def create_launchplane_service_app(
                             "drivers": [
                                 descriptor.model_dump(mode="json") for descriptor in descriptors
                             ],
-                        },
-                    )
-                if action == "artifact_protection.read":
-                    requested_product = _query_string_value(query, "product")
-                    requested_context = _query_string_value(query, "context")
-                    if not requested_product:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=400,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "invalid_query",
-                                    "message": "Protected artifact inventory requires a product query parameter.",
-                                },
-                            },
-                        )
-                    authz_product = requested_product
-                    authz_context = requested_context or _WHOLE_PRODUCT_CONTEXT
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product=authz_product,
-                        context=authz_context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read protected artifact inventory.",
-                                },
-                                "authz": _authz_diagnostic_payload(
-                                    identity=identity,
-                                    authz_policy_sha256_value=resolved_authz_policy_sha256,
-                                    authz_policy_source=resolved_authz_policy_source,
-                                    action=action,
-                                    product=authz_product,
-                                    context=authz_context,
-                                ),
-                            },
-                        )
-                    protected = build_protected_artifact_set(
-                        record_store,
-                        product=requested_product,
-                        context_name=requested_context,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "protected_artifacts": protected.model_dump(mode="json"),
                         },
                     )
                 if action == "ingress_route.plan":
