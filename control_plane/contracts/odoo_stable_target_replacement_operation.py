@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -50,6 +51,10 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     updated_at: str
     started_at: str = ""
     finished_at: str = ""
+    lease_owner: str = ""
+    lease_expires_at: str = ""
+    heartbeat_at: str = ""
+    attempt: int = Field(default=0, ge=0)
     result: OdooStableTargetReplacementApplyResult | None = None
     error_message: str = ""
     runner_trace_id: str = ""
@@ -85,6 +90,9 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
         )
         self.started_at = self.started_at.strip()
         self.finished_at = self.finished_at.strip()
+        self.lease_owner = self.lease_owner.strip()
+        self.lease_expires_at = self.lease_expires_at.strip()
+        self.heartbeat_at = self.heartbeat_at.strip()
         self.deployment_record_id = self.deployment_record_id.strip()
         self.error_message = self.error_message.strip()
         self.runner_trace_id = self.runner_trace_id.strip()
@@ -111,22 +119,32 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
 
 
 def build_odoo_stable_target_replacement_operation_id(
-    *, product: str, context: str, instance: str, created_at: str
+    *,
+    product: str,
+    context: str,
+    instance: str,
+    created_at: str,
+    idempotency_key: str = "",
+    idempotency_scope: str = "",
 ) -> str:
     normalized_product = product.strip().lower().replace("/", "-")
     normalized_context = context.strip().lower()
     normalized_instance = instance.strip().lower()
     normalized_created_at = created_at.strip().replace(":", "").replace("+", "z")
-    digest = hashlib.sha256(
-        "|".join(
-            (
-                normalized_product,
-                normalized_context,
-                normalized_instance,
-                normalized_created_at,
-            )
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    normalized_idempotency_key = idempotency_key.strip()
+    normalized_idempotency_scope = idempotency_scope.strip()
+    digest_input = json.dumps(
+        [
+            normalized_product,
+            normalized_context,
+            normalized_instance,
+            normalized_created_at,
+            normalized_idempotency_key,
+            normalized_idempotency_scope,
+        ],
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:16]
     return (
         "odoo-target-replacement-"
         f"{normalized_context}-{normalized_instance}-{normalized_created_at}-{digest}"

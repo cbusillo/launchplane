@@ -48,6 +48,10 @@ class OdooStableBootstrapOperationRecord(BaseModel):
     updated_at: str
     started_at: str = ""
     finished_at: str = ""
+    lease_owner: str = ""
+    lease_expires_at: str = ""
+    heartbeat_at: str = ""
+    attempt: int = Field(default=0, ge=0)
     result: OdooStableBootstrapResult | None = None
     error_message: str = ""
     runner_trace_id: str = ""
@@ -82,6 +86,9 @@ class OdooStableBootstrapOperationRecord(BaseModel):
         )
         self.started_at = self.started_at.strip()
         self.finished_at = self.finished_at.strip()
+        self.lease_owner = self.lease_owner.strip()
+        self.lease_expires_at = self.lease_expires_at.strip()
+        self.heartbeat_at = self.heartbeat_at.strip()
         self.deployment_record_id = self.deployment_record_id.strip()
         self.error_message = self.error_message.strip()
         self.runner_trace_id = self.runner_trace_id.strip()

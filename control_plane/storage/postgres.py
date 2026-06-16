@@ -121,6 +121,10 @@ CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 ProviderTargetCreateStatus = Literal["created", "exists"]
 
 
+def _utc_now_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 class _PayloadRow(Protocol):
     payload: PayloadDict
 
@@ -1205,6 +1209,12 @@ class LaunchplaneOdooStableBootstrapOperationRow(Base):
             postgresql_where=text("status IN ('pending', 'running')"),
             sqlite_where=text("status IN ('pending', 'running')"),
         ),
+        Index(
+            "launchplane_odoo_bootstrap_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
     )
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1216,6 +1226,10 @@ class LaunchplaneOdooStableBootstrapOperationRow(Base):
     phase: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1245,6 +1259,12 @@ class LaunchplaneOdooStableTargetReplacementOperationRow(Base):
             postgresql_where=text("status IN ('pending', 'running')"),
             sqlite_where=text("status IN ('pending', 'running')"),
         ),
+        Index(
+            "launchplane_odoo_replacement_worker_claim_idx",
+            "status",
+            "lease_expires_at",
+            "updated_at",
+        ),
     )
 
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1257,6 +1277,10 @@ class LaunchplaneOdooStableTargetReplacementOperationRow(Base):
     phase: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    lease_owner: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    lease_expires_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    heartbeat_at: Mapped[str] = mapped_column(String, nullable=False, server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1673,9 +1697,32 @@ class PostgresRecordStore(HumanSessionStore):
                 phase=record.phase,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                heartbeat_at=record.heartbeat_at,
+                attempt=record.attempt,
                 payload=self._payload_dict(record),
             )
         )
+
+    def _sync_odoo_stable_bootstrap_operation_row(
+        self,
+        row: LaunchplaneOdooStableBootstrapOperationRow,
+        record: OdooStableBootstrapOperationRecord,
+    ) -> None:
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.idempotency_key = record.idempotency_key
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
 
     def create_odoo_stable_bootstrap_operation_record_if_no_active_lane(
         self, record: OdooStableBootstrapOperationRecord
@@ -1692,6 +1739,10 @@ class PostgresRecordStore(HumanSessionStore):
                     phase=record.phase,
                     created_at=record.created_at,
                     updated_at=record.updated_at,
+                    lease_owner=record.lease_owner,
+                    lease_expires_at=record.lease_expires_at,
+                    heartbeat_at=record.heartbeat_at,
+                    attempt=record.attempt,
                     payload=self._payload_dict(record),
                 )
             )
@@ -1754,6 +1805,188 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def claim_next_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooStableBootstrapOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Odoo stable bootstrap operation claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError("Odoo stable bootstrap operation claim requires lease_expires_at.")
+        if not claimed_at.strip():
+            raise ValueError("Odoo stable bootstrap operation claim requires claimed_at.")
+        statement = (
+            select(LaunchplaneOdooStableBootstrapOperationRow)
+            .where(LaunchplaneOdooStableBootstrapOperationRow.status == "pending")
+            .order_by(
+                LaunchplaneOdooStableBootstrapOperationRow.created_at.asc(),
+                LaunchplaneOdooStableBootstrapOperationRow.operation_id.asc(),
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            record = self._read_payload(
+                model_type=OdooStableBootstrapOperationRecord,
+                payload=row.payload,
+            )
+            claimed_record = record.model_copy(
+                update={
+                    "status": "running",
+                    "phase": "running",
+                    "started_at": record.started_at or claimed_at,
+                    "updated_at": claimed_at,
+                    "lease_owner": normalized_lease_owner,
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "heartbeat_at": claimed_at.strip(),
+                    "attempt": record.attempt + 1,
+                }
+            )
+            self._sync_odoo_stable_bootstrap_operation_row(row, claimed_record)
+            session.commit()
+            return claimed_record
+
+    def heartbeat_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableBootstrapOperationRow)
+                .where(LaunchplaneOdooStableBootstrapOperationRow.operation_id == operation_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooStableBootstrapOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self._sync_odoo_stable_bootstrap_operation_row(row, heartbeat_record)
+            session.commit()
+            return True
+
+    def complete_odoo_stable_bootstrap_operation_record(
+        self,
+        *,
+        record: OdooStableBootstrapOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableBootstrapOperationRow)
+                .where(
+                    LaunchplaneOdooStableBootstrapOperationRow.operation_id == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooStableBootstrapOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self._sync_odoo_stable_bootstrap_operation_row(row, record)
+            session.commit()
+            return True
+
+    def recover_expired_odoo_stable_bootstrap_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        filters = (
+            LaunchplaneOdooStableBootstrapOperationRow.status == "running",
+            (
+                (LaunchplaneOdooStableBootstrapOperationRow.lease_expires_at == "")
+                | (LaunchplaneOdooStableBootstrapOperationRow.lease_expires_at < now)
+            ),
+        )
+        statement = select(LaunchplaneOdooStableBootstrapOperationRow).where(*filters)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            for row in rows:
+                record = self._read_payload(
+                    model_type=OdooStableBootstrapOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_message": (
+                                f"Odoo stable bootstrap operation lease expired in "
+                                f"phase {record.phase!r}; unsafe to retry automatically."
+                            ),
+                        }
+                    )
+                self._sync_odoo_stable_bootstrap_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
+
     def write_odoo_stable_target_replacement_operation_record(
         self, record: OdooStableTargetReplacementOperationRecord
     ) -> None:
@@ -1769,9 +2002,33 @@ class PostgresRecordStore(HumanSessionStore):
                 phase=record.phase,
                 created_at=record.created_at,
                 updated_at=record.updated_at,
+                lease_owner=record.lease_owner,
+                lease_expires_at=record.lease_expires_at,
+                heartbeat_at=record.heartbeat_at,
+                attempt=record.attempt,
                 payload=self._payload_dict(record),
             )
         )
+
+    def _sync_odoo_stable_target_replacement_operation_row(
+        self,
+        row: LaunchplaneOdooStableTargetReplacementOperationRow,
+        record: OdooStableTargetReplacementOperationRecord,
+    ) -> None:
+        row.product = record.product
+        row.context = record.context
+        row.instance = record.instance
+        row.idempotency_key = record.idempotency_key
+        row.idempotency_scope = record.idempotency_scope
+        row.status = record.status
+        row.phase = record.phase
+        row.created_at = record.created_at
+        row.updated_at = record.updated_at
+        row.lease_owner = record.lease_owner
+        row.lease_expires_at = record.lease_expires_at
+        row.heartbeat_at = record.heartbeat_at
+        row.attempt = record.attempt
+        row.payload = self._payload_dict(record)
 
     def create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
         self, record: OdooStableTargetReplacementOperationRecord
@@ -1789,6 +2046,10 @@ class PostgresRecordStore(HumanSessionStore):
                     phase=record.phase,
                     created_at=record.created_at,
                     updated_at=record.updated_at,
+                    lease_owner=record.lease_owner,
+                    lease_expires_at=record.lease_expires_at,
+                    heartbeat_at=record.heartbeat_at,
+                    attempt=record.attempt,
                     payload=self._payload_dict(record),
                 )
             )
@@ -1867,6 +2128,191 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def claim_next_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> OdooStableTargetReplacementOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("Odoo stable target replacement claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError("Odoo stable target replacement claim requires lease_expires_at.")
+        if not claimed_at.strip():
+            raise ValueError("Odoo stable target replacement claim requires claimed_at.")
+        statement = (
+            select(LaunchplaneOdooStableTargetReplacementOperationRow)
+            .where(LaunchplaneOdooStableTargetReplacementOperationRow.status == "pending")
+            .order_by(
+                LaunchplaneOdooStableTargetReplacementOperationRow.created_at.asc(),
+                LaunchplaneOdooStableTargetReplacementOperationRow.operation_id.asc(),
+            )
+            .limit(1)
+        )
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            record = self._read_payload(
+                model_type=OdooStableTargetReplacementOperationRecord,
+                payload=row.payload,
+            )
+            claimed_record = record.model_copy(
+                update={
+                    "status": "running",
+                    "phase": "running",
+                    "started_at": record.started_at or claimed_at,
+                    "updated_at": claimed_at,
+                    "lease_owner": normalized_lease_owner,
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "heartbeat_at": claimed_at.strip(),
+                    "attempt": record.attempt + 1,
+                }
+            )
+            self._sync_odoo_stable_target_replacement_operation_row(row, claimed_record)
+            session.commit()
+            return claimed_record
+
+    def heartbeat_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableTargetReplacementOperationRow)
+                .where(
+                    LaunchplaneOdooStableTargetReplacementOperationRow.operation_id == operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(operation_id)
+            record = self._read_payload(
+                model_type=OdooStableTargetReplacementOperationRecord,
+                payload=row.payload,
+            )
+            if (
+                record.status != "running"
+                or record.lease_owner != lease_owner.strip()
+                or not record.lease_expires_at
+                or record.lease_expires_at <= heartbeat_at.strip()
+            ):
+                return False
+            heartbeat_record = record.model_copy(
+                update={
+                    "heartbeat_at": heartbeat_at.strip(),
+                    "lease_expires_at": lease_expires_at.strip(),
+                    "updated_at": heartbeat_at.strip(),
+                }
+            )
+            self._sync_odoo_stable_target_replacement_operation_row(row, heartbeat_record)
+            session.commit()
+            return True
+
+    def complete_odoo_stable_target_replacement_operation_record(
+        self,
+        *,
+        record: OdooStableTargetReplacementOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneOdooStableTargetReplacementOperationRow)
+                .where(
+                    LaunchplaneOdooStableTargetReplacementOperationRow.operation_id
+                    == record.operation_id
+                )
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(record.operation_id)
+            current_record = self._read_payload(
+                model_type=OdooStableTargetReplacementOperationRecord,
+                payload=row.payload,
+            )
+            completed_at = _utc_now_timestamp()
+            if (
+                current_record.status != "running"
+                or current_record.lease_owner != lease_owner.strip()
+                or not current_record.lease_expires_at
+                or current_record.lease_expires_at <= completed_at
+            ):
+                return False
+            self._sync_odoo_stable_target_replacement_operation_row(row, record)
+            session.commit()
+            return True
+
+    def recover_expired_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        filters = (
+            LaunchplaneOdooStableTargetReplacementOperationRow.status == "running",
+            (
+                (LaunchplaneOdooStableTargetReplacementOperationRow.lease_expires_at == "")
+                | (LaunchplaneOdooStableTargetReplacementOperationRow.lease_expires_at < now)
+            ),
+        )
+        statement = select(LaunchplaneOdooStableTargetReplacementOperationRow).where(*filters)
+        if not self.database_url.startswith("sqlite"):
+            statement = statement.with_for_update(skip_locked=True)
+        affected_operation_ids: list[str] = []
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            for row in rows:
+                record = self._read_payload(
+                    model_type=OdooStableTargetReplacementOperationRecord,
+                    payload=row.payload,
+                )
+                affected_operation_ids.append(record.operation_id)
+                if record.phase in safe_phases and record.attempt < max_attempts:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "pending",
+                            "started_at": "",
+                            "updated_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                        }
+                    )
+                else:
+                    recovered_record = record.model_copy(
+                        update={
+                            "status": "fail",
+                            "phase": "failed",
+                            "updated_at": now,
+                            "finished_at": now,
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                            "heartbeat_at": "",
+                            "error_message": (
+                                f"Odoo stable target replacement operation lease expired in "
+                                f"phase {record.phase!r}; unsafe to retry automatically."
+                            ),
+                        }
+                    )
+                self._sync_odoo_stable_target_replacement_operation_row(row, recovered_record)
+            session.commit()
+        return tuple(affected_operation_ids)
 
     def write_session(self, session: LaunchplaneHumanSession) -> None:
         self._write_row(
@@ -3418,9 +3864,7 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def write_private_health_endpoint_record(
-        self, record: PrivateHealthEndpointRecord
-    ) -> None:
+    def write_private_health_endpoint_record(self, record: PrivateHealthEndpointRecord) -> None:
         self._write_row(
             LaunchplanePrivateHealthEndpointRow(
                 endpoint_key=record.endpoint_key,
@@ -3434,9 +3878,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
-    def read_private_health_endpoint_record(
-        self, endpoint_key: str
-    ) -> PrivateHealthEndpointRecord:
+    def read_private_health_endpoint_record(self, endpoint_key: str) -> PrivateHealthEndpointRecord:
         return self._read_model(
             model_type=PrivateHealthEndpointRecord,
             orm_model=LaunchplanePrivateHealthEndpointRow,

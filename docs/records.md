@@ -632,11 +632,15 @@ state/
   a dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route should create or replay the operation record and return the poll
   URL; request-process daemon threads are a compatibility path to remove once
-  the worker can claim, heartbeat, recover, and complete these records. Other
-  long-running work should use typed worker operation or lease records that
-  reference business evidence records, rather than making business evidence
-  records themselves the queue lease, unless a future ADR explicitly says
-  otherwise.
+  the worker can claim, heartbeat, recover, and complete these records. Operation
+  records carry execution fields for `attempt`, `lease_owner`,
+  `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
+  current lease owner so stale workers cannot overwrite recovered work. The first
+  runnable worker entry point is `uv run launchplane service odoo-workers
+run-once`, which requires DB-backed storage. Other long-running work should use
+  typed worker operation or lease records that reference business evidence
+  records, rather than making business evidence records themselves the queue
+  lease, unless a future ADR explicitly says otherwise.
 - Odoo prod rollback delegates the rollback deploy to stable target replacement,
   which writes the deployment record and prod release tuple. Rollback then
   refreshes prod inventory with rollback provenance and annotates the current

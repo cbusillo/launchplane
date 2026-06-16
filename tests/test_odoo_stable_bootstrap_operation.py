@@ -191,6 +191,159 @@ class OdooStableBootstrapOperationRecordTests(unittest.TestCase):
             self.assertFalse(created_second[1])
             self.assertEqual(created_first[0].operation_id, created_second[0].operation_id)
 
+    def test_postgres_store_claims_and_heartbeats_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            record = OdooStableBootstrapOperationRecord.model_validate(_operation_payload())
+            store.write_odoo_stable_bootstrap_operation_record(record)
+
+            claimed = store.claim_next_odoo_stable_bootstrap_operation_record(
+                lease_owner="worker-a",
+                lease_expires_at="2026-05-17T00:10:00Z",
+                claimed_at="2026-05-17T00:01:00Z",
+            )
+            second_claim = store.claim_next_odoo_stable_bootstrap_operation_record(
+                lease_owner="worker-b",
+                lease_expires_at="2026-05-17T00:11:00Z",
+                claimed_at="2026-05-17T00:02:00Z",
+            )
+            wrong_owner_heartbeat = store.heartbeat_odoo_stable_bootstrap_operation_record(
+                operation_id=record.operation_id,
+                lease_owner="worker-b",
+                heartbeat_at="2026-05-17T00:03:00Z",
+                lease_expires_at="2026-05-17T00:13:00Z",
+            )
+            owner_heartbeat = store.heartbeat_odoo_stable_bootstrap_operation_record(
+                operation_id=record.operation_id,
+                lease_owner="worker-a",
+                heartbeat_at="2026-05-17T00:04:00Z",
+                lease_expires_at="2026-05-17T00:14:00Z",
+            )
+
+            self.assertIsNotNone(claimed)
+            assert claimed is not None
+            self.assertEqual(claimed.status, "running")
+            self.assertEqual(claimed.phase, "running")
+            self.assertEqual(claimed.lease_owner, "worker-a")
+            self.assertEqual(claimed.heartbeat_at, "2026-05-17T00:01:00Z")
+            self.assertEqual(claimed.attempt, 1)
+            self.assertIsNone(second_claim)
+            self.assertFalse(wrong_owner_heartbeat)
+            self.assertTrue(owner_heartbeat)
+            loaded = store.read_odoo_stable_bootstrap_operation_record(record.operation_id)
+            self.assertEqual(loaded.heartbeat_at, "2026-05-17T00:04:00Z")
+            self.assertEqual(loaded.lease_expires_at, "2026-05-17T00:14:00Z")
+
+    def test_postgres_store_rejects_expired_lease_heartbeat_and_completion(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            record = OdooStableBootstrapOperationRecord.model_validate(_operation_payload())
+            store.write_odoo_stable_bootstrap_operation_record(record)
+
+            claimed = store.claim_next_odoo_stable_bootstrap_operation_record(
+                lease_owner="worker-a",
+                lease_expires_at="2026-05-17T00:02:00Z",
+                claimed_at="2026-05-17T00:01:00Z",
+            )
+            assert claimed is not None
+            expired_heartbeat = store.heartbeat_odoo_stable_bootstrap_operation_record(
+                operation_id=record.operation_id,
+                lease_owner="worker-a",
+                heartbeat_at="2026-05-17T00:03:00Z",
+                lease_expires_at="2026-05-17T00:13:00Z",
+            )
+            terminal_record = claimed.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "updated_at": "2026-05-17T00:03:00Z",
+                    "finished_at": "2026-05-17T00:03:00Z",
+                }
+            )
+            expired_completion = store.complete_odoo_stable_bootstrap_operation_record(
+                record=terminal_record,
+                lease_owner="worker-a",
+            )
+
+            self.assertFalse(expired_heartbeat)
+            self.assertFalse(expired_completion)
+            loaded = store.read_odoo_stable_bootstrap_operation_record(record.operation_id)
+            self.assertEqual(loaded.status, "running")
+            self.assertEqual(loaded.phase, "running")
+
+    def test_postgres_store_recovers_safe_expired_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_operation_payload(),
+                        "status": "running",
+                        "phase": "created",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "worker-a",
+                        "lease_expires_at": "2026-05-17T00:02:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+
+            affected = store.recover_expired_odoo_stable_bootstrap_operation_records(
+                now="2026-05-17T00:03:00Z",
+                safe_phases=("created",),
+                max_attempts=3,
+            )
+
+            self.assertEqual(affected, ("operation-cm-testing",))
+            loaded = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
+            self.assertEqual(loaded.status, "pending")
+            self.assertEqual(loaded.phase, "created")
+            self.assertEqual(loaded.lease_owner, "")
+            self.assertEqual(loaded.started_at, "")
+            self.assertEqual(loaded.attempt, 1)
+
+    def test_postgres_store_fails_unsafe_expired_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite:///{database_path}")
+            store.ensure_schema()
+            store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        **_operation_payload(),
+                        "status": "running",
+                        "phase": "bootstrap",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "worker-a",
+                        "lease_expires_at": "2026-05-17T00:02:00Z",
+                        "heartbeat_at": "2026-05-17T00:01:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+
+            affected = store.recover_expired_odoo_stable_bootstrap_operation_records(
+                now="2026-05-17T00:03:00Z",
+                safe_phases=("created",),
+                max_attempts=3,
+            )
+
+            self.assertEqual(affected, ("operation-cm-testing",))
+            loaded = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
+            self.assertEqual(loaded.status, "fail")
+            self.assertEqual(loaded.phase, "failed")
+            self.assertIn("unsafe to retry", loaded.error_message)
+            self.assertEqual(loaded.lease_owner, "")
+
 
 if __name__ == "__main__":
     unittest.main()

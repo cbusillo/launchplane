@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import secrets
-import threading
 import uuid
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterable, Literal, Protocol, cast
@@ -145,17 +144,14 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
     build_odoo_stable_bootstrap_operation_id,
-    odoo_stable_bootstrap_operation_is_terminal,
 )
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
-    OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementRequest,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
     build_odoo_stable_target_replacement_operation_id,
-    odoo_stable_target_replacement_operation_is_terminal,
 )
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -480,11 +476,6 @@ from control_plane.workflows.odoo_post_deploy import (
 )
 from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
-    OdooStableBootstrapResult,
-)
-from control_plane.workflows.odoo_stable_bootstrap import (
-    OdooStableBootstrapStore,
-    execute_odoo_stable_bootstrap,
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
@@ -513,7 +504,6 @@ from control_plane.workflows.odoo_prod_rollback import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     build_odoo_stable_target_replacement_plan,
-    execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
@@ -3368,12 +3358,6 @@ def _dispatch_odoo_target_replacement_apply(
                     "operation": _target_replacement_operation_payload(replacement_operation),
                 },
             )
-        _start_odoo_stable_target_replacement_operation_worker(
-            operation_id=replacement_operation.operation_id,
-            control_plane_root_path=control_plane_root_path,
-            record_store=record_store,
-            trace_id=trace_id,
-        )
         driver_result = _target_replacement_operation_payload(replacement_operation)
         result = {"odoo_stable_target_replacement_operation_id": replacement_operation.operation_id}
         if replacement_operation.deployment_record_id:
@@ -3497,12 +3481,6 @@ def _dispatch_odoo_stable_bootstrap(
             },
         )
 
-    _start_odoo_stable_bootstrap_operation_worker(
-        operation_id=operation.operation_id,
-        control_plane_root_path=control_plane_root_path,
-        record_store=record_store,
-        trace_id=trace_id,
-    )
     driver_result = _operation_payload(operation)
     result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
     return result, driver_result
@@ -7430,6 +7408,8 @@ def _build_odoo_stable_target_replacement_operation_record(
             context=context,
             instance=replacement_request.instance,
             created_at=created_at,
+            idempotency_key=idempotency_key,
+            idempotency_scope=idempotency_scope,
         ),
         product=replacement_request.product,
         context=context,
@@ -7442,198 +7422,6 @@ def _build_odoo_stable_target_replacement_operation_record(
         phase="created",
         created_at=created_at,
         updated_at=created_at,
-    )
-
-
-def _start_odoo_stable_bootstrap_operation_worker(
-    *,
-    operation_id: str,
-    control_plane_root_path: Path,
-    record_store: object,
-    trace_id: str,
-) -> None:
-    worker = threading.Thread(
-        target=_run_odoo_stable_bootstrap_operation_worker,
-        kwargs={
-            "operation_id": operation_id,
-            "control_plane_root_path": control_plane_root_path,
-            "record_store": record_store,
-            "trace_id": trace_id,
-        },
-        name=f"odoo-stable-bootstrap-{operation_id}",
-        daemon=True,
-    )
-    worker.start()
-
-
-def _start_odoo_stable_target_replacement_operation_worker(
-    *,
-    operation_id: str,
-    control_plane_root_path: Path,
-    record_store: object,
-    trace_id: str,
-) -> None:
-    worker = threading.Thread(
-        target=_run_odoo_stable_target_replacement_operation_worker,
-        kwargs={
-            "operation_id": operation_id,
-            "control_plane_root_path": control_plane_root_path,
-            "record_store": record_store,
-            "trace_id": trace_id,
-        },
-        name=f"odoo-target-replacement-{operation_id}",
-        daemon=True,
-    )
-    worker.start()
-
-
-def _run_odoo_stable_bootstrap_operation_worker(
-    *,
-    operation_id: str,
-    control_plane_root_path: Path,
-    record_store: object,
-    trace_id: str,
-) -> None:
-    operation_store = _odoo_stable_bootstrap_operation_store(record_store)
-    operation = operation_store.read_odoo_stable_bootstrap_operation_record(operation_id)
-    if odoo_stable_bootstrap_operation_is_terminal(operation):
-        return
-    started_at = _utc_now_timestamp()
-    running_operation = operation.model_copy(
-        update={
-            "status": "running",
-            "phase": "running",
-            "started_at": operation.started_at or started_at,
-            "updated_at": started_at,
-            "runner_trace_id": trace_id,
-        }
-    )
-    operation_store.write_odoo_stable_bootstrap_operation_record(running_operation)
-    try:
-        result = execute_odoo_stable_bootstrap(
-            control_plane_root=control_plane_root_path,
-            record_store=cast(OdooStableBootstrapStore, record_store),
-            request=running_operation.request,
-        )
-    except Exception as error:
-        logging.exception(
-            "Odoo stable bootstrap operation %s failed before producing a result.",
-            operation_id,
-        )
-        finished_at = _utc_now_timestamp()
-        failed_operation = running_operation.model_copy(
-            update={
-                "status": "fail",
-                "phase": "failed",
-                "updated_at": finished_at,
-                "finished_at": finished_at,
-                "error_message": str(error),
-            }
-        )
-        operation_store.write_odoo_stable_bootstrap_operation_record(failed_operation)
-        return
-    finished_at = _utc_now_timestamp()
-    passed = _odoo_stable_bootstrap_operation_result_passed(result)
-    terminal_operation = running_operation.model_copy(
-        update={
-            "status": "pass" if passed else "fail",
-            "phase": "completed" if passed else "failed",
-            "deployment_record_id": result.deployment_record_id,
-            "updated_at": finished_at,
-            "finished_at": finished_at,
-            "result": result,
-            "error_message": ""
-            if passed
-            else (result.error_message or "Odoo stable bootstrap failed."),
-        }
-    )
-    operation_store.write_odoo_stable_bootstrap_operation_record(terminal_operation)
-
-
-def _run_odoo_stable_target_replacement_operation_worker(
-    *,
-    operation_id: str,
-    control_plane_root_path: Path,
-    record_store: object,
-    trace_id: str,
-) -> None:
-    operation_store = _odoo_stable_target_replacement_operation_store(record_store)
-    operation = operation_store.read_odoo_stable_target_replacement_operation_record(operation_id)
-    if odoo_stable_target_replacement_operation_is_terminal(operation):
-        return
-    started_at = _utc_now_timestamp()
-    running_operation = operation.model_copy(
-        update={
-            "status": "running",
-            "phase": "running",
-            "started_at": operation.started_at or started_at,
-            "updated_at": started_at,
-            "runner_trace_id": trace_id,
-        }
-    )
-    operation_store.write_odoo_stable_target_replacement_operation_record(running_operation)
-    try:
-        result = execute_odoo_stable_target_replacement_apply(
-            control_plane_root=control_plane_root_path,
-            record_store=cast(OdooStableTargetReplacementStore, record_store),
-            request=running_operation.request,
-        )
-    except Exception as error:
-        logging.exception(
-            "Odoo stable target replacement operation %s failed before producing a result.",
-            operation_id,
-        )
-        finished_at = _utc_now_timestamp()
-        failed_operation = running_operation.model_copy(
-            update={
-                "status": "fail",
-                "phase": "failed",
-                "updated_at": finished_at,
-                "finished_at": finished_at,
-                "error_message": str(error),
-            }
-        )
-        operation_store.write_odoo_stable_target_replacement_operation_record(failed_operation)
-        return
-    finished_at = _utc_now_timestamp()
-    passed = _odoo_stable_target_replacement_operation_result_passed(result)
-    terminal_operation = running_operation.model_copy(
-        update={
-            "status": "pass" if passed else "fail",
-            "phase": "completed" if passed else "failed",
-            "deployment_record_id": result.deployment_record_id,
-            "updated_at": finished_at,
-            "finished_at": finished_at,
-            "result": result,
-            "error_message": ""
-            if passed
-            else (result.error_message or "Odoo stable target replacement failed."),
-        }
-    )
-    operation_store.write_odoo_stable_target_replacement_operation_record(terminal_operation)
-
-
-def _odoo_stable_bootstrap_operation_result_passed(
-    result: OdooStableBootstrapResult,
-) -> bool:
-    return (
-        result.bootstrap_status == "pass"
-        and result.post_deploy_status == "pass"
-        and result.health_status != "fail"
-        and result.canonical_status != "fail"
-        and result.logo_status != "fail"
-    )
-
-
-def _odoo_stable_target_replacement_operation_result_passed(
-    result: OdooStableTargetReplacementApplyResult,
-) -> bool:
-    return (
-        result.deploy_status == "pass"
-        and result.post_deploy_status == "pass"
-        and result.health_status != "fail"
-        and result.canonical_status != "fail"
-        and result.logo_status != "fail"
     )
 
 
