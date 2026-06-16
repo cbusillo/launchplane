@@ -224,7 +224,6 @@ WORKFLOW_BLOCK_MECHANIC_FIELD_PATH_VALUES = {
 WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES = {
     ".github/workflows/deploy-launchplane.yml": {
         "inputs.omit_every_code_env.default": frozenset(("false",)),
-        "inputs.omit_compose_external_network_env.default": frozenset(("false",)),
         "inputs.omit_npmplus_env.default": frozenset(("false",)),
         "inputs.omit_owner_agent_env.default": frozenset(("false",)),
         "inputs.omit_terminal_agent_env.default": frozenset(("false",)),

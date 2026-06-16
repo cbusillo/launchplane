@@ -80,14 +80,6 @@ Leave it unset for normal deploys so the ingress driver can build its provider
 client from the service target env until those provider credentials move behind
 managed runtime records.
 
-The manual `omit_compose_external_network_env` compatibility input omits
-Launchplane's external compose network process-wiring key for the one deploy
-that teaches an older running service to accept that key. During that bootstrap,
-the operator must seed the service target env directly through the provider
-target so the compose file can still resolve the required external network.
-Leave it unset for normal deploys and remove the compatibility input after the
-new service version is live.
-
 Public-ingress GitHub issue notifications use the platform-projected
 `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN` service env value from the same-named
 deploy secret. The token authenticates create, comment, and close delivery
