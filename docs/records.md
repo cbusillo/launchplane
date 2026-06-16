@@ -142,7 +142,10 @@ an ORM column/table or remains only in the evidence payload.
   grant audit metadata records the operator identity, reason, related issue,
   previous/new policy ids and shas, trace id, mode, and requested grant details;
   service responses redact that requested-grant detail to counts and scope
-  summaries.
+  summaries. During a future OpenFGA migration, these DB-backed policy records
+  remain the source evidence for dry-run tuple proposals and parity checks.
+  After a proven cutover, records should store import/audit/model-version
+  evidence rather than remain a second live authorization source.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed

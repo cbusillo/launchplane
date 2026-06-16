@@ -235,6 +235,76 @@ documents the relation schema, tuple ownership, consistency expectations,
 redaction/audit behavior, and why those relationships are safer outside the
 current compact DB-backed policy model.
 
+#### #1327 Boundary Record
+
+Issue #1327 records OpenFGA as a relationship-authorization candidate, not an
+accepted runtime dependency. The current DB-backed policy records remain the
+active authorization path until a later implementation slice proves tuple
+parity, failure behavior, and rollback posture.
+
+The checked-in OpenFGA surface, if adopted, may own only generic relation model
+code and validators. It must not contain live tuples or real product, tenant,
+repository, branch, domain, lane, provider-target, operator, client, group, or
+grant values. Live tuples, grants, and assignments belong in authorization
+provider state, Launchplane records, managed secrets when secret-shaped, or
+explicit scoped operator input.
+
+The candidate relation vocabulary is deliberately small:
+
+- `subject`: normalized caller identity from the service auth boundary.
+- `product`: durable Launchplane product workspace.
+- `context`: product-scoped lane or runtime context.
+- `provider_target`: provider-neutral target object under a context.
+- `private_health_endpoint`: private monitoring endpoint under a context.
+- `deployment` and `promotion`: evidence-backed operation resources.
+- `agent_intent`: delegated agent intent record.
+- `authz_policy`: policy administration resource.
+
+Representative checks for the model are generic and public-safe:
+
+- provider inspect: can `subject:example-workflow` inspect
+  `provider_target:example-product/example-context/example-target`?
+- private health apply: can `subject:example-operator` apply
+  `private_health_endpoint:example-product/example-context/example-check`?
+- private health read: can `subject:example-agent` read
+  `private_health_endpoint:example-product/example-context/example-check`?
+- deploy: can `subject:example-workflow` deploy
+  `context:example-product/example-context`?
+- promotion: can `subject:example-workflow` promote
+  `promotion:example-product/example-context/example-promotion`?
+- agent delegated action: can `subject:example-agent` delegate or preflight
+  `agent_intent:example-product/example-context/example-intent`?
+- policy/admin action: can `subject:example-admin` administer
+  `authz_policy:launchplane/example-policy`?
+
+Tuple writes must be service-owned. The current
+`POST /v1/authz-policies/*` grant and removal routes are the migration write
+boundary: they can plan tuple proposals from active DB-backed grants, run
+dry-run parity checks against the current DB policy result, and later write
+provider tuples only after the implementation slice proves reconciliation and
+rollback. Product repos, workflows, local files, and docs examples must not
+write tuple state directly.
+
+Consistency must be fail-closed. Missing, stale, ambiguous, or unreachable tuple
+state denies authorization rather than falling back to broader DB grants,
+checked-in defaults, local files, ambient CLI identity, or workflow defaults.
+Any mutation that depends on a newly written tuple must name its read-after-write
+behavior before apply. During migration, DB policy records may remain the source
+for parity comparison and repair evidence; after cutover, they must not stay as
+a second live authority by drift.
+
+OpenFGA audit output should be redacted and decision-oriented. Route responses
+or audit records may include subject type, resource kind, relation/action,
+decision, trace id, model version, tuple source digest, and policy record id.
+They must not dump raw tuple sets, provider payloads, secret values, real
+operator identities, domains, or target topology.
+
+OpenFGA is only safer than compact DB-backed policy records if it makes
+delegation paths, inherited product/context relationships, provider-target
+access, private-health access, and policy administration review more explicit
+than per-route string matching. If the representative checks do not prove that,
+the DB-backed policy model remains the simpler accepted path.
+
 ### Durable Workflows
 
 Issue #1328 resolves the first durable workflow decision: use a minimal
