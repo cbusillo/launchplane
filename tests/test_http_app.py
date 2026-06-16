@@ -1,6 +1,7 @@
 import json
 import unittest
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import MutableMapping
@@ -14,7 +15,9 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -27,6 +30,7 @@ from control_plane.service_human_auth import (
     GitHubOAuthConfig,
     HumanSessionManager,
     InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -853,6 +857,41 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["drivers"][0]["driver_id"], "generic-web")
         self.assertNotIn("Set-Cookie", response.headers)
 
+    async def test_driver_descriptors_renew_expiring_human_session_cookie(self) -> None:
+        session_store = InMemoryHumanSessionStore()
+        oauth_config = _github_oauth_config()
+        session_manager = HumanSessionManager(
+            config=oauth_config,
+            session_store=session_store,
+        )
+        session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_github_human_identity(),
+            created_at=datetime.now(timezone.utc) - timedelta(days=13),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+        )
+        session_store.write_session(session)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _get_driver_descriptors(
+            app,
+            authorization="",
+            headers={"Cookie": session_manager.session_cookie_header(session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        self.assertIn("Max-Age=1209600", response.headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, session.expires_at)
+
     async def test_openapi_includes_driver_descriptor_contracts(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -914,6 +953,172 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("authz", payload)
 
 
+class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_driver_instance_view_returns_lane_summary(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = _driver_context_store(Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_driver_read_policy(context="example-site"),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _get_driver_instance_view(app, "example-site", "testing")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["view"]["context"], "example-site")
+        self.assertEqual(payload["view"]["instance"], "testing")
+        self.assertEqual(payload["view"]["drivers"][0]["driver_id"], "example-site")
+        self.assertEqual(
+            payload["view"]["drivers"][0]["descriptor"]["base_driver_id"], "generic-web"
+        )
+        available_actions = {
+            action["action_id"]: action
+            for action in payload["view"]["drivers"][0]["available_actions"]
+        }
+        self.assertEqual(
+            available_actions["prod_promotion"]["route_path"],
+            "/v1/drivers/generic-web/prod-promotion",
+        )
+        self.assertEqual(
+            payload["view"]["drivers"][0]["lane_summary"]["latest_deployment"]["record_id"],
+            "deployment-example-site-testing",
+        )
+
+    async def test_driver_context_view_returns_context_summary(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = _driver_context_store(Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_driver_read_policy(context="example-site"),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _get_driver_context_view(app, "example-site")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["view"]["context"], "example-site")
+        self.assertEqual(payload["view"]["instance"], "")
+        self.assertEqual(payload["view"]["drivers"][0]["driver_id"], "example-site")
+        self.assertEqual(
+            payload["view"]["drivers"][0]["descriptor"]["base_driver_id"], "generic-web"
+        )
+
+    async def test_driver_context_view_requires_bearer_or_human_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_context_view(app, "example-site", authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
+
+    async def test_driver_context_view_rejects_wrong_context_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_driver_read_policy(context="other-context"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_instance_view(app, "example-site", "testing")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_driver_context_view_accepts_human_session_when_mounted_over_wsgi(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            policy = _github_human_driver_read_policy(context="example-site")
+            record_store = _driver_context_store(root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: record_store,
+                human_session_manager=session_manager,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                github_oauth_config=oauth_config,
+                human_session_store=session_store,
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_driver_context_view(
+                app,
+                "example-site",
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["view"]["drivers"][0]["driver_id"], "example-site")
+        self.assertEqual(
+            payload["view"]["drivers"][0]["descriptor"]["base_driver_id"], "generic-web"
+        )
+        self.assertNotIn("Set-Cookie", response.headers)
+
+    async def test_openapi_includes_driver_view_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        context_route = openapi["paths"]["/v1/contexts/{context}/driver-view"]["get"]
+        instance_route = openapi["paths"][
+            "/v1/contexts/{context}/instances/{instance}/driver-view"
+        ]["get"]
+        self.assertEqual(context_route["operationId"], "read_driver_context_view")
+        self.assertEqual(instance_route["operationId"], "read_driver_instance_view")
+        self.assertEqual(
+            context_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DriverContextViewResponse",
+        )
+        self.assertEqual(
+            instance_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DriverContextViewResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(context_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(instance_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["DriverContextViewResponse"]["additionalProperties"],
+            False,
+        )
+
+
 def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -963,6 +1168,39 @@ def _github_human_driver_read_policy(*, context: str = "launchplane") -> Launchp
             ]
         }
     )
+
+
+def _driver_context_store(state_dir: Path) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=state_dir)
+    store.write_product_profile_record(
+        LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+    )
+    store.write_deployment_record(
+        DeploymentRecord(
+            record_id="deployment-example-site-testing",
+            artifact_identity=ArtifactIdentityReference(
+                artifact_id="ghcr.io/every/example-site@sha256:abc123"
+            ),
+            context="example-site",
+            instance="testing",
+            source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application",
+                target_id="target-example-site-testing",
+                target_name="example-site-testing",
+            ),
+            deploy=DeploymentEvidence(
+                target_name="example-site-testing",
+                target_type="application",
+                deploy_mode="runtime-provider-api",
+                deployment_id="provider-deployment-example-site-testing",
+                status="pass",
+                started_at="2026-04-20T15:30:00Z",
+                finished_at="2026-04-20T15:32:00Z",
+            ),
+        )
+    )
+    return store
 
 
 def _local_operator_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
@@ -1121,6 +1359,38 @@ async def _get_driver_descriptor(
 ) -> _AsgiResponse:
     headers = {"Authorization": authorization} if authorization else {}
     return await _asgi_get(app, f"/v1/drivers/{driver_id}", headers=headers)
+
+
+async def _get_driver_context_view(
+    app: FastAPI,
+    context: str,
+    *,
+    authorization: str = "Bearer local-operator-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/driver-view",
+        headers=request_headers,
+    )
+
+
+async def _get_driver_instance_view(
+    app: FastAPI,
+    context: str,
+    instance: str,
+    *,
+    authorization: str = "Bearer local-operator-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/instances/{instance}/driver-view",
+        headers=headers,
+    )
 
 
 async def _asgi_get(
