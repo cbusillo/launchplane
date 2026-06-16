@@ -213,11 +213,7 @@ from control_plane.runtime_key_safety_http import (
     runtime_key_safety_database_required_response,
     validate_runtime_key_safety_policy_request,
 )
-from control_plane.drivers.registry import (
-    build_driver_context_view,
-    list_driver_descriptors,
-    read_driver_descriptor,
-)
+from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
 from control_plane.notifications import post_discord_webhook, public_discord_url_error
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
@@ -4621,10 +4617,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {"request_id": segments[3]}
-    if len(segments) == 2 and segments == ["v1", "drivers"]:
-        return "driver.read", {}
-    if len(segments) == 3 and segments[:2] == ["v1", "drivers"]:
-        return "driver.read", {"driver_id": segments[2]}
     if (
         len(segments) == 6
         and segments[:4] == ["v1", "drivers", "odoo", "stable-bootstrap"]
@@ -4637,15 +4629,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "driver-view":
-        return "driver.read", {"context": segments[2]}
-    if (
-        len(segments) == 6
-        and segments[:2] == ["v1", "contexts"]
-        and segments[3] == "instances"
-        and segments[5] == "driver-view"
-    ):
-        return "driver.read", {"context": segments[2], "instance": segments[4]}
     if len(segments) == 3 and segments[:2] == ["v1", "deployments"]:
         return "deployment.read", {"record_id": segments[2]}
     if len(segments) == 3 and segments[:2] == ["v1", "promotions"]:
@@ -10665,64 +10648,6 @@ def create_launchplane_service_app(
                                 if replacement_operation.result is not None
                                 else {}
                             ),
-                        },
-                    )
-                if action == "driver.read":
-                    context_name = params.get("context", _LAUNCHPLANE_SERVICE_CONTEXT)
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=context_name,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read driver metadata for the requested context.",
-                                },
-                            },
-                        )
-                    if "context" in params:
-                        view = build_driver_context_view(
-                            record_store=record_store,
-                            context_name=context_name,
-                            instance_name=params.get("instance", ""),
-                        )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "view": view.model_dump(mode="json"),
-                            },
-                        )
-                    if "driver_id" in params:
-                        descriptor = read_driver_descriptor(params["driver_id"])
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "driver": descriptor.model_dump(mode="json"),
-                            },
-                        )
-                    descriptors = list_driver_descriptors()
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "drivers": [
-                                descriptor.model_dump(mode="json") for descriptor in descriptors
-                            ],
                         },
                     )
                 if action == "ingress_route.plan":

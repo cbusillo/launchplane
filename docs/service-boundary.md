@@ -1237,11 +1237,11 @@ read-model contract documented in [driver-descriptors.md](driver-descriptors.md)
 - `GET /v1/contexts/{context}/instances/{instance}/driver-view`
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200`
 
-They use action `driver.read`. Descriptor discovery authorizes against context
-`launchplane` and is native FastAPI. Context and instance views authorize
-against the requested context and remain on the WSGI fallback until their route
-family is migrated. These routes expose Launchplane capabilities and
-repository-backed read state, not runtime-provider primitives.
+The descriptor and driver-view routes use action `driver.read` and are native
+FastAPI routes. Descriptor discovery authorizes against context `launchplane`;
+context and instance views authorize against the requested context. These routes
+expose Launchplane capabilities and repository-backed read state, not
+runtime-provider primitives.
 
 The logs route is the exception to the `driver.read` action because it reads live
 provider output. It uses action `target_logs.read`, resolves DB-backed tracked

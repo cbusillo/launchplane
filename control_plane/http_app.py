@@ -15,7 +15,7 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
-from control_plane.contracts.driver_descriptor import DriverDescriptor
+from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
@@ -24,7 +24,7 @@ from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactSet,
     build_protected_artifact_set,
 )
-from control_plane.drivers.registry import list_driver_descriptors
+from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
     BearerIdentityConfig,
@@ -101,6 +101,14 @@ class DriverDescriptorResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     driver: DriverDescriptor
+
+
+class DriverContextViewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    view: DriverContextView
 
 
 class ProtectedArtifactsResponse(BaseModel):
@@ -451,12 +459,17 @@ def create_launchplane_fastapi_app(
             protected_artifacts=protected_artifacts,
         )
 
-    def ensure_driver_read_allowed(*, identity: LaunchplaneIdentity, trace_id: str) -> None:
+    def ensure_driver_read_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        context: str = _LAUNCHPLANE_DRIVER_READ_CONTEXT,
+    ) -> None:
         if not resolved_authz_policy_runtime.policy.allows(
             identity=identity,
             action="driver.read",
             product=_LAUNCHPLANE_DRIVER_READ_PRODUCT,
-            context=_LAUNCHPLANE_DRIVER_READ_CONTEXT,
+            context=context,
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -491,6 +504,34 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         return DriverDescriptorResponse(trace_id=trace_id, driver=descriptor)
+
+    def read_driver_context_view(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DriverContextViewResponse:
+        trace_id = next_trace_id()
+        ensure_driver_read_allowed(identity=identity, trace_id=trace_id, context=context)
+        view = build_driver_context_view(
+            record_store=record_store,
+            context_name=context,
+        )
+        return DriverContextViewResponse(trace_id=trace_id, view=view)
+
+    def read_driver_instance_view(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DriverContextViewResponse:
+        trace_id = next_trace_id()
+        ensure_driver_read_allowed(identity=identity, trace_id=trace_id, context=context)
+        view = build_driver_context_view(
+            record_store=record_store,
+            context_name=context,
+            instance_name=instance,
+        )
+        return DriverContextViewResponse(trace_id=trace_id, view=view)
 
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
@@ -547,6 +588,32 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/driver-view",
+        read_driver_context_view,
+        methods=["GET"],
+        response_model=DriverContextViewResponse,
+        operation_id="read_driver_context_view",
+        summary="Read Launchplane driver view for a context",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/instances/{instance}/driver-view",
+        read_driver_instance_view,
+        methods=["GET"],
+        response_model=DriverContextViewResponse,
+        operation_id="read_driver_instance_view",
+        summary="Read Launchplane driver view for one context instance",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
         },
     )
 
