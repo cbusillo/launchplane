@@ -270,10 +270,24 @@ Pydantic models and FastAPI OpenAPI output are part of the service boundary, not
 only frontend convenience. UI-facing read models should move toward generated
 TypeScript types from OpenAPI instead of manual mirrors.
 
-The first generation slice should target a read-model route family because it is
-low-risk and exposes contract drift quickly. Generated examples and schemas must
-stay public-safe and must not include real product, domain, provider, authz, or
+The first contract proof targets the native FastAPI `GET /v1/health` route. It
+uses an explicit Pydantic `response_model`, a stable operation id, public-safe
+schema examples, and focused OpenAPI assertions that fail if the route loses its
+typed response contract. This is the pattern for follow-on read-model route
+families: backend Pydantic models own the contract, FastAPI emits OpenAPI, and
+tests assert the small contract details that generated clients depend on without
+snapshotting the whole document.
+
+Frontend TypeScript generation remains deferred until a UI-facing route family
+needs it. That future slice should consume FastAPI OpenAPI output instead of
+hand-maintaining frontend mirrors. Generated examples and schemas must stay
+public-safe and must not include real product, domain, provider, authz, or
 operator values.
+
+The legacy WSGI health route is retained only as part of the mounted fallback
+bridge while route ownership is migrated. Its removal belongs to the route
+migration checkpoint that retires or demotes the legacy WSGI surface after the
+native FastAPI route family is proven.
 
 ### Python 3.14
 
