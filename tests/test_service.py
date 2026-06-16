@@ -14491,6 +14491,200 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "operation_record_storage_required")
 
+    def test_service_odoo_workers_reconcile_endpoint_recovers_stale_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir)
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        "operation_id": "bootstrap-cm-testing",
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "idempotency_key": "bootstrap-cm-testing",
+                        "request_fingerprint": "fingerprint-123",
+                        "request": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "testing",
+                            "confirmation": "bootstrap cm testing",
+                        },
+                        "status": "running",
+                        "phase": "created",
+                        "created_at": "2026-05-17T00:00:00Z",
+                        "updated_at": "2026-05-17T00:01:00Z",
+                        "started_at": "2026-05-17T00:01:00Z",
+                        "lease_owner": "old-worker",
+                        "lease_expires_at": "2000-01-01T00:00:00Z",
+                        "heartbeat_at": "2000-01-01T00:00:00Z",
+                        "attempt": 1,
+                    }
+                )
+            )
+            policy = _local_operator_policy(
+                actions=("launchplane_service.reconcile_odoo_workers",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=record_store,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/service/odoo-workers/reconcile",
+                    payload={},
+                    authorization="Bearer local-operator-token",
+                )
+
+            self.assertEqual(status_code, 200)
+            reconcile_result = payload["reconcile_result"]
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(reconcile_result["reconciled_count"], 1)
+            self.assertEqual(
+                reconcile_result["reconciled_bootstrap_ids"],
+                ["bootstrap-cm-testing"],
+            )
+            self.assertEqual(reconcile_result["reconciled_replacement_ids"], [])
+            operation = record_store.read_odoo_stable_bootstrap_operation_record(
+                "bootstrap-cm-testing"
+            )
+            self.assertEqual(operation.status, "pending")
+            self.assertEqual(operation.lease_owner, "")
+
+    def test_service_odoo_workers_reconcile_endpoint_requires_reconcile_authz(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("launchplane_service.read",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/service/odoo-workers/reconcile",
+                    payload={},
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_service_odoo_workers_reconcile_endpoint_validates_max_attempts(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("launchplane_service.reconcile_odoo_workers",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/service/odoo-workers/reconcile",
+                    query_string="max_attempts=0",
+                    payload={},
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_query")
+
+    def test_service_odoo_workers_reconcile_endpoint_requires_operation_record_storage(
+        self,
+    ) -> None:
+        class _EmptyStore:
+            backend_name = "test-empty"
+
+            def close(self) -> None:
+                return None
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = _local_operator_policy(
+                actions=("launchplane_service.reconcile_odoo_workers",),
+                products=("launchplane",),
+                contexts=("launchplane",),
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=state_dir,
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    local_record_store_for_tests=cast(Any, _EmptyStore()),
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/service/odoo-workers/reconcile",
+                    payload={},
+                    authorization="Bearer local-operator-token",
+                )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "operation_record_storage_required")
+
     def test_service_uses_db_backed_authz_policy_when_present(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = (

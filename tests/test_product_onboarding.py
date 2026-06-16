@@ -1320,6 +1320,21 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         )
         self.assertIn("local-operator-launchplane-service-read", script_text)
 
+    def test_deploy_authz_grants_include_local_operator_odoo_worker_reconcile(
+        self,
+    ) -> None:
+        script_text = Path("scripts/deploy/ensure-authz-grants.sh").read_text(encoding="utf-8")
+
+        self.assertIn("launchplane_service.reconcile_odoo_workers", script_text)
+        self.assertIn(
+            "deploy:local-operator-launchplane-service-reconcile-odoo-workers-grant",
+            script_text,
+        )
+        self.assertIn(
+            "local-operator-launchplane-service-reconcile-odoo-workers",
+            script_text,
+        )
+
     def test_deploy_authz_grants_include_edge_endpoint_authority(
         self,
     ) -> None:

@@ -648,7 +648,11 @@ run` is the foreground loop intended for an external process supervisor, and
   The deployed service exposes the same redacted read model at
   `GET /v1/service/odoo-workers/status` for callers authorized to
   `launchplane_service.read` on product/context `launchplane`, so operators can
-  prove worker queue state without shelling into provider containers.
+  prove worker queue state without shelling into provider containers. The
+  deployed service also exposes `POST /v1/service/odoo-workers/reconcile` for
+  callers authorized to `launchplane_service.reconcile_odoo_workers` on the same
+  service context, so expired-lease reconciliation can be proven through
+  Launchplane itself rather than via provider shell access.
   The checked-in Launchplane compose topology starts a separate
   `launchplane-odoo-workers` process with the same image, runtime volume, and
   operator-supplied environment as the HTTP service. That process runs
