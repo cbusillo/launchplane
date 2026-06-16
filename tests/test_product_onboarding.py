@@ -976,7 +976,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
         self.assertIn("omit_terminal_agent_env", workflow_text)
         self.assertIn("omit_owner_agent_env", workflow_text)
-        self.assertIn("omit_compose_external_network_env", workflow_text)
         self.assertIn(
             "omit_terminal_agent_env:\n"
             "        description: Temporarily omit terminal-agent env for one compatibility deploy.\n"
@@ -995,34 +994,21 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertIn("if ($omit_owner_agent_env | not) then", workflow_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", workflow_text)
 
-    def test_deploy_launchplane_omits_compose_network_only_for_explicit_bootstrap(
+    def test_deploy_launchplane_requires_compose_network_for_compose_targets(
         self,
     ) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
 
-        self.assertIn("omit_compose_external_network_env", workflow_text)
-        self.assertIn(
-            "omit_compose_external_network_env:\n"
-            "        description: Temporarily omit compose external network env for one compatibility deploy.\n"
-            "        required: false\n"
-            "        default: false",
-            workflow_text,
-        )
-        self.assertIn(
-            "--argjson omit_compose_external_network_env '${{ inputs.omit_compose_external_network_env || false }}'",
-            workflow_text,
-        )
-        self.assertNotIn(
-            "github.event_name == 'workflow_run' || inputs.omit_compose", workflow_text
-        )
-        self.assertIn(
-            'if (($omit_compose_external_network_env | not) and $compose_external_network != "") then',
-            workflow_text,
-        )
         self.assertIn(
             "Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK variable",
             workflow_text,
         )
+        self.assertIn(
+            'if $compose_external_network != "" then\n'
+            "                      {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}",
+            workflow_text,
+        )
+        self.assertNotIn("omit_compose_external_network_env", workflow_text)
 
     def test_deploy_launchplane_omit_npmplus_env_removes_existing_keys(self) -> None:
         workflow_text = Path(".github/workflows/deploy-launchplane.yml").read_text(encoding="utf-8")
