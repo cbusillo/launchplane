@@ -79,6 +79,9 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.verireel_prod_backup_gate_operation import (
+    VeriReelProdBackupGateOperationRecord,
+)
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -1491,6 +1494,255 @@ class FilesystemRecordStore:
                     }
                 )
             self.write_odoo_stable_target_replacement_operation_record(recovered_record)
+        return tuple(affected_operation_ids)
+
+    def write_verireel_prod_backup_gate_operation_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> Path:
+        return self._write_model(
+            "verireel_prod_backup_gate_operations", record.operation_id, record
+        )
+
+    def create_verireel_prod_backup_gate_operation_record_if_no_active_record(
+        self, record: VeriReelProdBackupGateOperationRecord
+    ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
+        try:
+            return self.read_verireel_prod_backup_gate_operation_record(
+                record.operation_id
+            ), False
+        except FileNotFoundError:
+            pass
+        active_records = self.list_verireel_prod_backup_gate_operation_records(
+            backup_record_id=record.backup_record_id,
+            statuses=("pending", "running"),
+            limit=1,
+        )
+        if active_records:
+            return active_records[0], False
+        self.write_verireel_prod_backup_gate_operation_record(record)
+        return record, True
+
+    def read_verireel_prod_backup_gate_operation_record(
+        self, operation_id: str
+    ) -> VeriReelProdBackupGateOperationRecord:
+        return VeriReelProdBackupGateOperationRecord.model_validate(
+            self._read_model(
+                VeriReelProdBackupGateOperationRecord,
+                "verireel_prod_backup_gate_operations",
+                operation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_verireel_prod_backup_gate_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        backup_record_id: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                VeriReelProdBackupGateOperationRecord,
+                "verireel_prod_backup_gate_operations",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not backup_record_id or record.backup_record_id == backup_record_id)
+            and (not statuses or record.status in statuses)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def claim_next_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+    ) -> VeriReelProdBackupGateOperationRecord | None:
+        normalized_lease_owner = lease_owner.strip()
+        if not normalized_lease_owner:
+            raise ValueError("VeriReel prod backup gate operation claim requires lease_owner.")
+        if not lease_expires_at.strip():
+            raise ValueError(
+                "VeriReel prod backup gate operation claim requires lease_expires_at."
+            )
+        if not claimed_at.strip():
+            raise ValueError("VeriReel prod backup gate operation claim requires claimed_at.")
+        pending_records = self.list_verireel_prod_backup_gate_operation_records(
+            statuses=("pending",)
+        )
+        if not pending_records:
+            return None
+        record = sorted(pending_records, key=lambda item: (item.created_at, item.operation_id))[0]
+        claimed_record = record.model_copy(
+            update={
+                "status": "running",
+                "phase": "running",
+                "started_at": record.started_at or claimed_at,
+                "updated_at": claimed_at,
+                "lease_owner": normalized_lease_owner,
+                "lease_expires_at": lease_expires_at.strip(),
+                "heartbeat_at": claimed_at.strip(),
+                "attempt": record.attempt + 1,
+            }
+        )
+        self.write_verireel_prod_backup_gate_operation_record(claimed_record)
+        return claimed_record
+
+    def heartbeat_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        heartbeat_at: str,
+        lease_expires_at: str,
+    ) -> bool:
+        record = self.read_verireel_prod_backup_gate_operation_record(operation_id)
+        if (
+            record.status != "running"
+            or record.lease_owner != lease_owner.strip()
+            or not record.lease_expires_at
+            or record.lease_expires_at <= heartbeat_at.strip()
+        ):
+            return False
+        heartbeat_record = record.model_copy(
+            update={
+                "heartbeat_at": heartbeat_at.strip(),
+                "lease_expires_at": lease_expires_at.strip(),
+                "updated_at": heartbeat_at.strip(),
+            }
+        )
+        self.write_verireel_prod_backup_gate_operation_record(heartbeat_record)
+        return True
+
+    def mark_verireel_prod_backup_gate_operation_phase(
+        self,
+        *,
+        operation_id: str,
+        lease_owner: str,
+        phase: str,
+        updated_at: str,
+    ) -> VeriReelProdBackupGateOperationRecord | None:
+        record = self.read_verireel_prod_backup_gate_operation_record(operation_id)
+        if (
+            record.status != "running"
+            or record.lease_owner != lease_owner.strip()
+            or not record.lease_expires_at
+            or record.lease_expires_at <= updated_at.strip()
+        ):
+            return None
+        updated_record = record.model_copy(
+            update={
+                "phase": phase.strip(),
+                "updated_at": updated_at.strip(),
+            }
+        )
+        self.write_verireel_prod_backup_gate_operation_record(updated_record)
+        return updated_record
+
+    def complete_verireel_prod_backup_gate_operation_record(
+        self,
+        *,
+        record: VeriReelProdBackupGateOperationRecord,
+        lease_owner: str,
+    ) -> bool:
+        current_record = self.read_verireel_prod_backup_gate_operation_record(record.operation_id)
+        completed_at = _utc_now_timestamp()
+        if (
+            current_record.status != "running"
+            or current_record.lease_owner != lease_owner.strip()
+            or not current_record.lease_expires_at
+            or current_record.lease_expires_at <= completed_at
+        ):
+            return False
+        self.write_verireel_prod_backup_gate_operation_record(record)
+        return True
+
+    def complete_verireel_prod_backup_gate_operation_with_backup_gate_record(
+        self,
+        *,
+        operation_record: VeriReelProdBackupGateOperationRecord,
+        backup_gate_record: BackupGateRecord,
+        lease_owner: str,
+    ) -> bool:
+        current_record = self.read_verireel_prod_backup_gate_operation_record(
+            operation_record.operation_id
+        )
+        completed_at = _utc_now_timestamp()
+        if (
+            current_record.status != "running"
+            or current_record.lease_owner != lease_owner.strip()
+            or not current_record.lease_expires_at
+            or current_record.lease_expires_at <= completed_at
+        ):
+            return False
+        self.write_backup_gate_record(backup_gate_record)
+        self.write_verireel_prod_backup_gate_operation_record(operation_record)
+        return True
+
+    def recover_expired_verireel_prod_backup_gate_operation_records(
+        self,
+        *,
+        now: str,
+        safe_phases: tuple[str, ...],
+        max_attempts: int,
+    ) -> tuple[str, ...]:
+        affected_operation_ids: list[str] = []
+        for record in self.list_verireel_prod_backup_gate_operation_records(
+            statuses=("running",)
+        ):
+            if record.lease_expires_at and record.lease_expires_at >= now:
+                continue
+            affected_operation_ids.append(record.operation_id)
+            if record.phase in safe_phases and record.attempt < max_attempts:
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "pending",
+                        "started_at": "",
+                        "updated_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                    }
+                )
+            else:
+                error_message = (
+                    "VeriReel prod backup gate operation lease expired in "
+                    f"phase {record.phase!r}; unsafe to retry automatically."
+                )
+                recovered_record = record.model_copy(
+                    update={
+                        "status": "fail",
+                        "phase": "failed",
+                        "updated_at": now,
+                        "finished_at": now,
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "heartbeat_at": "",
+                        "error_message": error_message,
+                    }
+                )
+                self.write_backup_gate_record(
+                    BackupGateRecord(
+                        record_id=record.backup_record_id,
+                        context=record.context,
+                        instance=record.instance,
+                        created_at=now,
+                        source="launchplane-verireel-prod-backup-gate",
+                        required=True,
+                        status="fail",
+                        evidence={"error_message": error_message},
+                    )
+                )
+            self.write_verireel_prod_backup_gate_operation_record(recovered_record)
         return tuple(affected_operation_ids)
 
     def _wait_for_odoo_stable_target_replacement_reservation_owner(

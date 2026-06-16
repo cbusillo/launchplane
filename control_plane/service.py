@@ -101,6 +101,9 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
     build_ingress_route_audit_record_id,
 )
+from control_plane.contracts.verireel_prod_backup_gate import (
+    VeriReelProdBackupGateRequest,
+)
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -529,9 +532,8 @@ from control_plane.workflows.verireel_app_maintenance import (
     execute_verireel_app_maintenance,
 )
 from control_plane.workflows.verireel_prod_backup_gate import (
-    VeriReelProdBackupGateRequest,
-    VeriReelProdBackupGateStore,
-    execute_verireel_prod_backup_gate,
+    VeriReelProdBackupGateOperationStore,
+    enqueue_verireel_prod_backup_gate,
 )
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
@@ -3787,12 +3789,10 @@ def _handle_verireel_prod_backup_gate(
     record_store: object,
     control_plane_root_path: Path,
 ) -> _DescriptorDriverDispatchResult:
-    del resolved_context
-    driver_result = execute_verireel_prod_backup_gate(
-        control_plane_root=control_plane_root_path,
-        record_store=cast(VeriReelProdBackupGateStore, record_store),
+    del resolved_context, control_plane_root_path
+    driver_result = enqueue_verireel_prod_backup_gate(
+        record_store=cast(VeriReelProdBackupGateOperationStore, record_store),
         request=request.backup_gate,
-        run_async=True,
     )
     return _DescriptorDriverDispatchResult(
         result={"backup_gate_record_id": driver_result.backup_record_id},

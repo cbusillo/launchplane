@@ -593,6 +593,16 @@ state/
 - Odoo prod backup-gate records are created by the Launchplane Odoo driver after
   a real compose-local DB dump and filestore archive capture. They should not be
   synthesized with generic operator assertions for release drills.
+- VeriReel prod backup-gate records remain the promotion evidence and replay
+  authority, but long-running backup-gate execution is queued separately in
+  `launchplane_verireel_prod_backup_gate_operations` for DB-backed storage and
+  `verireel_prod_backup_gate_operations` for file-backed local state. The HTTP
+  route writes a pending backup-gate record plus a typed operation record; the
+  supervised `verireel-workers` process claims the operation, heartbeats its
+  lease, runs the delegated backup worker, writes the terminal backup-gate
+  evidence, and completes the operation record. Expired operations retry only
+  before the external backup side-effect boundary; once the phase reaches
+  `backup_gate`, lease expiry fails closed for operator review.
 - Promotion execution should fail closed unless the referenced backup-gate
   record exists, targets the same destination environment, and has `status`
   `pass`.
@@ -681,8 +691,14 @@ run` is the foreground loop intended for an external process supervisor, and
   `/app/scripts/start-launchplane-odoo-workers.sh`, refuses startup without
   `LAUNCHPLANE_DATABASE_URL`, and only accepts generic worker timing knobs as
   process wiring; live operation selection remains in Launchplane records.
-  Production operation remains observable through worker status and reconcile
-  service routes, and live operation selection remains in Launchplane records.
+  VeriReel backup-gate operation execution follows the same deployment model via
+  `launchplane-verireel-workers` and
+  `/app/scripts/start-launchplane-verireel-workers.sh`.
+  Production operation remains observable through the `launchplane service
+  verireel-workers status` and `launchplane service verireel-workers reconcile`
+  operator commands, and live operation selection remains in Launchplane
+  records. A service route should be added before non-operator callers need to
+  reconcile or read VeriReel worker status through the deployed HTTP API.
   Other long-running work should use typed worker operation or
   lease records that reference business evidence records, rather than making
   business evidence records themselves the queue lease, unless a future ADR
