@@ -24,6 +24,13 @@ Delete or demote a compatibility surface when all of these are true:
   product workflow wrapper
 - live evidence proves the route for at least one real context or product lane
 
+For the legacy WSGI HTTP fallback, apply the same rule route-family by
+route-family. A native FastAPI replacement must own the path before the mounted
+fallback, carry Pydantic/OpenAPI contract coverage, preserve the relevant legacy
+behavior in native route tests, and have caller evidence before the old WSGI
+handler is deleted or demoted. If a PR keeps the old handler reachable, it must
+name the removal condition or owning follow-up issue.
+
 Keep a compatibility surface only when it is one of these:
 
 - local-development scaffolding used by tests or operator rehearsal

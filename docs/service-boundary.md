@@ -139,6 +139,41 @@ VeriReel product paths:
   - `POST /v1/drivers/verireel/preview-inventory`
   - `POST /v1/drivers/verireel/preview-destroy`
 
+## Native Route Migration Checklist
+
+Move service routes from the legacy WSGI fallback to native FastAPI one route
+family at a time. Each migration PR should be small enough to review without a
+second plan hidden inside it.
+
+Before a migrated route is done, verify all of the following:
+
+- The native FastAPI route owns the path before the mounted WSGI fallback.
+- Pydantic request and response models define the HTTP contract; use
+  `extra="forbid"` for boundary models unless the route documents a narrower
+  reason not to.
+- OpenAPI coverage asserts the path, method, stable `operation_id`, primary
+  response schema reference, and declared error-envelope responses. Keep tests
+  focused; do not snapshot the whole OpenAPI document.
+- Public-safe examples are fake and generic. They must not contain real product,
+  tenant, repository, branch, lane, domain, provider target, operator, authz,
+  route, health-check, or runtime-environment authority.
+- Request hardening is named for the route family: JSON content-type behavior,
+  maximum body-size behavior, validation failures, authentication failures,
+  authorization failures, and expected `400`, `413`, `401`, and `403` envelope
+  shape where those statuses can apply.
+- Existing legacy behavior tests stay in place until equivalent native FastAPI
+  route tests cover the same behavior. A migration PR may add native tests first
+  and retire legacy tests only when the fallback path is no longer production
+  reachable for that route family.
+- The PR classifies the legacy impact as deleted, demoted to local-only or
+  diagnostic use, unchanged with a named removal condition, or intentionally
+  retained with an owning follow-up issue.
+
+`GET /v1/health` is the first proven pattern: native FastAPI route ownership,
+typed Pydantic response, focused OpenAPI assertions, and mounted-fallback
+precedence. Do not turn that route into a migration framework; use it as the
+small contract shape for the next route-family slice.
+
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,

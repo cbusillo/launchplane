@@ -69,6 +69,24 @@ The legacy WSGI app is retired when all production route families have native
 FastAPI ownership, route tests cover the native paths, and no production request
 needs the mounted fallback.
 
+Each HTTP migration slice moves one route family at a time. The route family is
+not considered migrated until the native FastAPI path wins ahead of the mounted
+WSGI fallback, Pydantic models define the request and response contracts,
+focused OpenAPI assertions cover the path and schema references, route tests
+preserve the legacy behavior, and the PR names the fallback impact: deleted,
+demoted, unchanged with a removal condition, or retained with an owning issue.
+Request hardening expectations belong in the same route-family slice: JSON
+content-type behavior, maximum body-size behavior, validation errors,
+authentication errors, authorization errors, and the consistent `400`, `413`,
+`401`, and `403` error-envelope shape where those statuses can apply.
+
+OpenAPI examples are contract examples, not operator inventory. They may use
+fake public-safe identifiers only; real product, tenant, repository, branch,
+lane, domain, provider target, operator, authz grant, route, health-check, and
+runtime-environment values remain service records, provider state, managed
+secrets, identity or authorization provider state, or explicit scoped operator
+input.
+
 Candidate route-family order:
 
 1. health, auth/session, and request/error envelope infrastructure
@@ -128,6 +146,12 @@ before moving mutation-heavy driver or workflow execution code.
 Implementation slices should avoid adding new v2 behavior directly to legacy
 WSGI routing. If a slice must touch the legacy surface, it must explain why and
 name the retirement checkpoint that removes or demotes that path.
+
+Do not delete a WSGI route family merely because the native route exists. Delete
+or demote it when native tests cover the path, OpenAPI covers the contract,
+callers no longer need the fallback, and live or rehearsed evidence proves the
+native path for the owning product/context class. Old WSGI code should not stay
+as a second production implementation after those checkpoints pass.
 
 ## Prove Or Defer Gates
 
