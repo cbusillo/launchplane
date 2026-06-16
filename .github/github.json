@@ -8,6 +8,7 @@
   "docs": {
     "index": "docs/README.md",
     "architecture": "docs/architecture.md",
+    "v2FoundationAdr": "docs/v2-foundation-adr.md",
     "configBoundary": "docs/config-boundary.md",
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
@@ -50,7 +51,8 @@
     },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit --ignore-vuln PYSEC-2025-183",
-      "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" ghcr.io/aquasecurity/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test"
+      "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" ghcr.io/aquasecurity/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test",
+      "configAuthority": "uv run launchplane service audit-config-authority --control-plane-root ."
     },
     "inspection": {
       "tool": "jetbrains",
