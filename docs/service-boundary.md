@@ -44,6 +44,11 @@ VeriReel product paths:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
     wildcard context
+- native FastAPI driver descriptor discovery routes:
+  - `GET /v1/drivers`, requiring `driver.read` for the Launchplane discovery
+    context
+  - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
+    discovery context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates`
   - `POST /v1/evidence/deployments`
@@ -1232,10 +1237,11 @@ read-model contract documented in [driver-descriptors.md](driver-descriptors.md)
 - `GET /v1/contexts/{context}/instances/{instance}/driver-view`
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200`
 
-They use action `driver.read`. Discovery authorizes against context
-`launchplane`; context and instance views authorize against the requested
-context. These routes expose Launchplane capabilities and repository-backed read
-state, not runtime-provider primitives.
+They use action `driver.read`. Descriptor discovery authorizes against context
+`launchplane` and is native FastAPI. Context and instance views authorize
+against the requested context and remain on the WSGI fallback until their route
+family is migrated. These routes expose Launchplane capabilities and
+repository-backed read state, not runtime-provider primitives.
 
 The logs route is the exception to the `driver.read` action because it reads live
 provider output. It uses action `target_logs.read`, resolves DB-backed tracked

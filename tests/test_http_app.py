@@ -701,6 +701,219 @@ class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("authz", payload)
 
 
+class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_driver_descriptors_return_provider_neutral_metadata(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        list_response = await _get_driver_descriptors(app)
+        show_response = await _get_driver_descriptor(app, "odoo")
+
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(
+            [driver["driver_id"] for driver in list_payload["drivers"]],
+            ["generic-web", "ingress", "odoo", "verireel"],
+        )
+        ingress_driver = next(
+            driver for driver in list_payload["drivers"] if driver["driver_id"] == "ingress"
+        )
+        self.assertEqual(ingress_driver["context_patterns"], [])
+        self.assertNotIn("Dokploy", json.dumps(list_payload["drivers"]))
+        self.assertTrue(str(list_payload["trace_id"]).startswith("launchplane_req_"))
+
+        self.assertEqual(show_response.status_code, 200)
+        show_payload = show_response.json()
+        self.assertEqual(show_payload["driver"]["driver_id"], "odoo")
+        rollback_actions = [
+            action
+            for action in show_payload["driver"]["actions"]
+            if action["action_id"] == "prod_rollback"
+        ]
+        self.assertEqual(rollback_actions[0]["safety"], "destructive")
+
+    async def test_driver_descriptor_returns_not_found_for_unknown_driver(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_descriptor(app, "missing")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_driver_descriptors_require_bearer_or_human_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_descriptors(app, authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
+
+    async def test_driver_descriptor_requires_bearer_or_human_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_descriptor(app, "odoo", authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(response.headers["WWW-Authenticate"], 'Bearer realm="Launchplane API"')
+
+    async def test_driver_descriptors_reject_wrong_context_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_driver_read_policy(context="other-context"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_descriptors(app)
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_driver_descriptor_rejects_wrong_context_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_driver_read_policy(context="other-context"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _get_driver_descriptor(app, "odoo")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_driver_descriptors_accept_human_session_when_mounted_over_wsgi(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            policy = _github_human_driver_read_policy()
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: _MissingProductReadStore(),
+                human_session_manager=session_manager,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                github_oauth_config=oauth_config,
+                human_session_store=session_store,
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_driver_descriptors(
+                app,
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["drivers"][0]["driver_id"], "generic-web")
+        self.assertNotIn("Set-Cookie", response.headers)
+
+    async def test_openapi_includes_driver_descriptor_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        list_route = openapi["paths"]["/v1/drivers"]["get"]
+        show_route = openapi["paths"]["/v1/drivers/{driver_id}"]["get"]
+        self.assertEqual(list_route["operationId"], "read_driver_descriptors")
+        self.assertEqual(show_route["operationId"], "read_driver_descriptor")
+        self.assertEqual(
+            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DriverDescriptorsResponse",
+        )
+        self.assertEqual(
+            show_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DriverDescriptorResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(list_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(show_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["DriverDescriptorsResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["DriverDescriptorResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_driver_descriptors_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = _driver_read_policy()
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=policy,
+                record_store_factory=lambda: _MissingProductReadStore(),
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_driver_descriptors(app)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("trace_id", payload)
+        self.assertNotIn("authz", payload)
+
+
 def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -714,6 +927,38 @@ def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                     "products": ["example-site"],
                     "contexts": [context],
                     "actions": ["product_environment.read"],
+                }
+            ]
+        }
+    )
+
+
+def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": [context],
+                    "actions": ["driver.read"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": [context],
+                    "actions": ["driver.read"],
                 }
             ]
         }
@@ -854,6 +1099,28 @@ async def _get_protected_artifacts(
         f"/v1/artifacts/protected{suffix}",
         headers=request_headers,
     )
+
+
+async def _get_driver_descriptors(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer local-operator-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, "/v1/drivers", headers=request_headers)
+
+
+async def _get_driver_descriptor(
+    app: FastAPI,
+    driver_id: str,
+    *,
+    authorization: str = "Bearer local-operator-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, f"/v1/drivers/{driver_id}", headers=headers)
 
 
 async def _asgi_get(
