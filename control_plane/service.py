@@ -506,8 +506,10 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     OdooStableOperationWorkerStore,
     build_odoo_stable_operation_worker_status,
+    reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
@@ -4899,6 +4901,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
         "/v1/products/public-ingress-monitor/run-once",
+        "/v1/service/odoo-workers/reconcile",
         "/v1/public-ingress/notification-policies/apply",
         "/v1/every-code/notification-policies/apply",
         "/v1/previews/pr-feedback/notification-policies/apply",
@@ -12331,6 +12334,84 @@ def create_launchplane_service_app(
                             record.model_dump(mode="json") for record in promotions
                         ],
                         "recent_previews": [record.model_dump(mode="json") for record in previews],
+                    },
+                )
+            if path == "/v1/service/odoo-workers/reconcile":
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service.reconcile_odoo_workers",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot reconcile Launchplane Odoo workers.",
+                            },
+                        },
+                    )
+                try:
+                    max_attempts = _query_int_value(
+                        query,
+                        "max_attempts",
+                        default=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                        minimum=1,
+                        maximum=100,
+                    )
+                    assert max_attempts is not None
+                    odoo_worker_reconcile_result = reconcile_stale_odoo_stable_operation_records(
+                        record_store=_odoo_stable_operation_worker_store(record_store),
+                        max_attempts=max_attempts,
+                    )
+                except click.ClickException as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "operation_record_storage_required",
+                                "message": str(error),
+                            },
+                        },
+                    )
+                except ValueError as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_query",
+                                "message": str(error),
+                            },
+                        },
+                    )
+                reconciled_bootstrap_ids = list(
+                    odoo_worker_reconcile_result.reconciled_bootstrap_ids
+                )
+                reconciled_replacement_ids = list(
+                    odoo_worker_reconcile_result.reconciled_replacement_ids
+                )
+                return _json_response(
+                    start_response=start_response,
+                    status_code=200,
+                    payload={
+                        "status": "ok",
+                        "trace_id": request_trace_id,
+                        "reconcile_result": {
+                            "reconciled_bootstrap_ids": reconciled_bootstrap_ids,
+                            "reconciled_replacement_ids": reconciled_replacement_ids,
+                            "reconciled_count": len(reconciled_bootstrap_ids)
+                            + len(reconciled_replacement_ids),
+                        },
                     },
                 )
             payload = _read_json_request(environ)

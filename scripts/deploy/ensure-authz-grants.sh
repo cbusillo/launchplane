@@ -661,6 +661,13 @@ post_local_owner_grant \
 	local-operator \
 	launchplane \
 	launchplane \
+	launchplane_service.reconcile_odoo_workers \
+	deploy:local-operator-launchplane-service-reconcile-odoo-workers-grant \
+	local-operator-launchplane-service-reconcile-odoo-workers
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
 	merge_train.policy_targets \
 	deploy:local-operator-merge-train-policy-targets-grant \
 	local-operator-merge-train-policy-targets
