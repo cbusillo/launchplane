@@ -29,9 +29,9 @@ owns its removal.
 - Relationship authorization: conditional candidate. OpenFGA is a candidate when
   the relationship model proves clearer and safer than compact DB-backed policy
   records.
-- Durable workflows: conditional candidate. Temporal, or a smaller comparable
-  engine, is a candidate when specific workflows need durability beyond the
-  current route/record pattern.
+- Durable workflows: accepted first path. Long-running work moves to a
+  Launchplane-owned DB-backed worker queue with leases and heartbeats. Temporal
+  remains a deferred candidate for workflows that outgrow that model.
 - Python runtime: compatibility target. Python 3.14 is desired only after
   dependencies, CI, deployment images, and workflow SDKs prove support.
 
@@ -50,12 +50,13 @@ Launchplane v2 uses these foundation boundaries:
 - OpenFGA or a justified relationship-authorization alternative only after the
   authz spike proves it improves safety, explainability, or reviewability beyond
   the current DB-backed policy records.
-- Temporal or a justified durable-workflow alternative only after named
-  workflows prove they need durability beyond a smaller DB-backed worker or
-  state-machine.
-- Python 3.14 only after dependency, CI, deployment-image, and workflow SDK
-  compatibility is proven. Until then, the runtime may remain on the latest
-  compatible Python version documented by the repo gates.
+- A Launchplane-owned DB-backed worker queue, lease, and heartbeat model for the
+  current long-running operation families.
+- Temporal or another workflow engine only after named workflows prove they need
+  durability beyond the DB-backed worker model.
+- Python 3.14 only after dependency, CI, deployment-image, and any future
+  workflow SDK compatibility is proven. Until then, the runtime may remain on
+  the latest compatible Python version documented by the repo gates.
 
 FastAPI is no longer speculative. The serving-boundary slice has landed and the
 legacy WSGI service is mounted only as a migration bridge. New service routes
@@ -178,25 +179,69 @@ current compact DB-backed policy model.
 
 ### Durable Workflows
 
-Before Temporal or another workflow engine becomes production-critical, name the
-workflows that need durability beyond a request/response route or a small
-DB-backed state machine:
+Issue #1328 resolves the first durable workflow decision: use a minimal
+Launchplane-owned DB-backed worker queue now, and defer Temporal or a comparable
+workflow engine until a named workflow proves the smaller model is not enough.
 
-- long-running provider operations
-- external waits and polling
-- retryable fan-out
-- human approval gates
-- compensating rollback paths
-- restart recovery after worker/process failure
+The current problem is concrete and narrower than general workflow orchestration.
+Odoo stable bootstrap and Odoo stable target replacement already write typed
+Launchplane operation records and expose poll/read boundaries, but their
+execution can still be started by request-process daemon threads. VeriReel async
+backup gate work has similar durability pressure because it is guarded by
+in-memory active sets; moving it to this model requires a typed worker operation
+record that references the backup evidence record instead of turning that
+evidence record into queue state. Those paths should move to a dedicated
+Launchplane worker process that claims DB-backed work, updates a lease/heartbeat,
+executes typed handlers, and writes terminal records.
 
-The workflow engine must not become a second source of product/runtime truth.
-Launchplane records remain the control-plane audit and read-model boundary;
-workflow state is execution evidence and recovery machinery.
+The DB-backed worker model owns execution mechanics only. Launchplane records
+remain the control-plane audit and read-model boundary; worker queue state is not
+runtime configuration, product authority, or a second source of product truth.
 
-Adoption trigger: Temporal or another engine becomes an implementation slice
-only after #1328 identifies concrete workflows, compares a minimal DB-backed
-queue/lease/heartbeat design, and documents operational footprint, observability,
-failure modes, and rollback posture.
+The first implementation target is intentionally small:
+
+- enqueue or replay a typed operation record from the HTTP route
+- claim pending work through storage-owned leases
+- record `running`, phase, attempt, lease owner, lease expiry, and heartbeat
+- write terminal `pass` or `fail` results; operator review is a failure
+  classification, reason, read-model field, or notification until a future
+  schema/API slice explicitly adds another persisted status
+- recover expired leases by retrying only explicitly safe phases and otherwise
+  failing closed for operator review
+- preserve existing idempotency and product/context/instance single-flight
+  behavior with DB constraints
+
+Before a production worker handles leases, each typed handler must declare its
+phase contract: phase name, idempotency and retry-safety, external side-effect
+boundary, resume behavior after an expired lease, terminal status mapping, max
+attempts, backoff, and whether an unsafe expired lease retries or fails closed.
+The worker deployment must be safe for more than one process: lease claims,
+heartbeats, and terminal writes are storage-owned concurrency boundaries, not
+in-process locks.
+
+Do not keep daemon-thread fallback once the worker path is proven. Proof requires
+the worker process to be deployed and supervised, migrations applied, claim,
+heartbeat, expiry, retry, and terminal paths covered by tests, stale active
+records reconciled, queue depth/stalled lease/worker health observability in
+place, rollback behavior defined for worker outage, and at least one rehearsed or
+real operation family completed through the worker path. Old code is recoverable
+from git; production code should converge on one durable execution path.
+
+Temporal remains a candidate, not a dependency. Re-open that decision when a
+specific Launchplane workflow needs several of these at once:
+
+- fan-out across many provider targets with a durable join
+- external waits or human approval signals inside the workflow lifecycle
+- multi-system compensating rollback that must resume after worker death
+- cross-worker pause, resume, cancel, or signal handling that is awkward in DB
+  state
+- evidence that the DB worker is accumulating bespoke timer, scheduler, or saga
+  machinery that Temporal would simplify
+
+Any future Temporal adoption must update this ADR and document operational owner,
+deployment topology, Python SDK compatibility, local/dev bootstrap, failure mode
+when Temporal is unavailable, rollback posture, and how Temporal history maps
+back to Launchplane records without becoming product/runtime authority.
 
 ### ORM And Migrations
 
@@ -233,9 +278,9 @@ operator values.
 Python 3.14 is a compatibility target, not an immediate foundation requirement.
 Before changing the repo baseline, prove support for the runtime, CI images,
 deployment image, `uv`, Ruff, mypy, FastAPI, Uvicorn, Pydantic, SQLAlchemy,
-Alembic, psycopg, cryptography, auth libraries, and any workflow SDK selected by
-issue #1328. A non-blocking CI matrix is acceptable before 3.14 becomes
-required.
+Alembic, psycopg, cryptography, auth libraries, and any workflow SDK added after
+a named workflow outgrows the DB-backed worker model. A non-blocking CI matrix is
+acceptable before 3.14 becomes required.
 
 ## Migration Rules
 
@@ -313,7 +358,7 @@ slice is still isolated.
 - #1325 tracks HTTP/FastAPI route migration and legacy fallback retirement.
 - #1326 tracks Keycloak identity boundary proof.
 - #1327 tracks OpenFGA authorization model proof.
-- #1328 tracks Temporal or comparable durable workflow proof.
+- #1328 tracks the DB-backed worker queue decision and Temporal deferral gates.
 - #1329 tracks ORM/Alembic invariants and Python runtime compatibility.
 - #1330 tracks Pydantic/OpenAPI contract strategy.
 - #1331 tracks managed secrets and key rotation.
