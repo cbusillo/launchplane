@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fnmatch import fnmatchcase
 import re
+import secrets
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,6 +89,82 @@ AgentAuthzDecision = Literal["allowed", "denied"]
 
 class TokenVerifier(Protocol):
     def verify(self, token: str) -> GitHubActionsIdentity: ...
+
+
+class BearerIdentityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    local_admin_token: str = ""
+    local_admin_subject: str = ""
+    local_admin_token_label: str = ""
+    local_operator_token: str = ""
+    local_operator_subject: str = ""
+    local_operator_token_label: str = ""
+    terminal_agent_token: str = ""
+    terminal_agent_subject: str = ""
+    terminal_agent_token_label: str = ""
+
+
+def read_bearer_token(authorization_header: str) -> str:
+    header = authorization_header.strip()
+    if not header:
+        raise PermissionError("Authorization header is required.")
+    scheme, _, token = header.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise PermissionError("Authorization header must use Bearer token format.")
+    return token.strip()
+
+
+def bearer_identity_from_token(
+    *, token: str, config: BearerIdentityConfig
+) -> TerminalAgentIdentity | LocalOperatorIdentity | LocalAdminIdentity | None:
+    if config.local_admin_token.strip() and secrets.compare_digest(
+        token, config.local_admin_token.strip()
+    ):
+        return LocalAdminIdentity(
+            subject=_required_bearer_identity_config_value(
+                config.local_admin_subject,
+                "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT",
+            ),
+            token_label=_required_bearer_identity_config_value(
+                config.local_admin_token_label,
+                "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL",
+            ),
+        )
+    if config.local_operator_token.strip() and secrets.compare_digest(
+        token, config.local_operator_token.strip()
+    ):
+        return LocalOperatorIdentity(
+            subject=_required_bearer_identity_config_value(
+                config.local_operator_subject,
+                "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT",
+            ),
+            token_label=_required_bearer_identity_config_value(
+                config.local_operator_token_label,
+                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
+            ),
+        )
+    if config.terminal_agent_token.strip() and secrets.compare_digest(
+        token, config.terminal_agent_token.strip()
+    ):
+        return TerminalAgentIdentity(
+            subject=_required_bearer_identity_config_value(
+                config.terminal_agent_subject,
+                "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT",
+            ),
+            token_label=_required_bearer_identity_config_value(
+                config.terminal_agent_token_label,
+                "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
+            ),
+        )
+    return None
+
+
+def _required_bearer_identity_config_value(value: str, env_var_name: str) -> str:
+    normalized_value = value.strip()
+    if not normalized_value:
+        raise PermissionError(f"{env_var_name} is required for configured bearer auth.")
+    return normalized_value
 
 
 class GitHubOidcVerifier:

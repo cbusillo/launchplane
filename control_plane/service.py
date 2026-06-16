@@ -312,6 +312,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.service_auth import (
     AgentAuthzDecision,
+    BearerIdentityConfig,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
@@ -321,7 +322,9 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     TokenVerifier,
     agent_authz_audit,
+    bearer_identity_from_token,
     load_authz_policy,
+    read_bearer_token,
 )
 from control_plane.service_human_auth import (
     GitHubOAuthClient,
@@ -8555,13 +8558,7 @@ def _decode_json_request_body(body_bytes: bytes) -> dict[str, object]:
 
 
 def _bearer_token(environ: dict[str, object]) -> str:
-    header = str(environ.get("HTTP_AUTHORIZATION", "")).strip()
-    if not header:
-        raise PermissionError("Authorization header is required.")
-    scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not token.strip():
-        raise PermissionError("Authorization header must use Bearer token format.")
-    return token.strip()
+    return read_bearer_token(str(environ.get("HTTP_AUTHORIZATION", "")))
 
 
 def _every_code_worker_token_from_env() -> str:
@@ -8604,75 +8601,29 @@ def _local_admin_token_label_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL", "").strip()
 
 
-def _required_bearer_identity_env_value(value: str, env_var_name: str) -> str:
-    if not value:
-        raise PermissionError(f"{env_var_name} is required for configured bearer auth.")
-    return value
+def _bearer_identity_config_from_env() -> BearerIdentityConfig:
+    return BearerIdentityConfig(
+        local_admin_token=_local_admin_token_from_env(),
+        local_admin_subject=_local_admin_subject_from_env(),
+        local_admin_token_label=_local_admin_token_label_from_env(),
+        local_operator_token=_local_operator_token_from_env(),
+        local_operator_subject=_local_operator_subject_from_env(),
+        local_operator_token_label=_local_operator_token_label_from_env(),
+        terminal_agent_token=_terminal_agent_read_token_from_env(),
+        terminal_agent_subject=_terminal_agent_subject_from_env(),
+        terminal_agent_token_label=_terminal_agent_token_label_from_env(),
+    )
 
 
-def _local_operator_identity_from_bearer(
-    environ: dict[str, object],
-) -> LocalOperatorIdentity | None:
-    expected_token = _local_operator_token_from_env()
-    if not expected_token:
-        return None
+def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> LaunchplaneIdentity | None:
     try:
         provided_token = _bearer_token(environ)
     except PermissionError:
         return None
-    if not secrets.compare_digest(provided_token, expected_token):
-        return None
-    subject = _required_bearer_identity_env_value(
-        _local_operator_subject_from_env(), "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT"
+    return bearer_identity_from_token(
+        token=provided_token,
+        config=_bearer_identity_config_from_env(),
     )
-    token_label = _required_bearer_identity_env_value(
-        _local_operator_token_label_from_env(),
-        "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL",
-    )
-    return LocalOperatorIdentity(subject=subject, token_label=token_label)
-
-
-def _local_admin_identity_from_bearer(
-    environ: dict[str, object],
-) -> LocalAdminIdentity | None:
-    expected_token = _local_admin_token_from_env()
-    if not expected_token:
-        return None
-    try:
-        provided_token = _bearer_token(environ)
-    except PermissionError:
-        return None
-    if not secrets.compare_digest(provided_token, expected_token):
-        return None
-    subject = _required_bearer_identity_env_value(
-        _local_admin_subject_from_env(), "LAUNCHPLANE_LOCAL_ADMIN_SUBJECT"
-    )
-    token_label = _required_bearer_identity_env_value(
-        _local_admin_token_label_from_env(), "LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL"
-    )
-    return LocalAdminIdentity(subject=subject, token_label=token_label)
-
-
-def _terminal_agent_identity_from_bearer(
-    environ: dict[str, object],
-) -> TerminalAgentIdentity | None:
-    expected_token = _terminal_agent_read_token_from_env()
-    if not expected_token:
-        return None
-    try:
-        provided_token = _bearer_token(environ)
-    except PermissionError:
-        return None
-    if not secrets.compare_digest(provided_token, expected_token):
-        return None
-    subject = _required_bearer_identity_env_value(
-        _terminal_agent_subject_from_env(), "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT"
-    )
-    token_label = _required_bearer_identity_env_value(
-        _terminal_agent_token_label_from_env(),
-        "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
-    )
-    return TerminalAgentIdentity(subject=subject, token_label=token_label)
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
@@ -9336,15 +9287,9 @@ def _read_identity(
     )
     if human_identity is not None:
         return human_identity
-    local_admin_identity = _local_admin_identity_from_bearer(environ)
-    if local_admin_identity is not None:
-        return local_admin_identity
-    local_operator_identity = _local_operator_identity_from_bearer(environ)
-    if local_operator_identity is not None:
-        return local_operator_identity
-    terminal_agent_identity = _terminal_agent_identity_from_bearer(environ)
-    if terminal_agent_identity is not None:
-        return terminal_agent_identity
+    owner_agent_identity = _owner_agent_identity_from_bearer(environ)
+    if owner_agent_identity is not None:
+        return owner_agent_identity
     token = _bearer_token(environ)
     try:
         return verifier.verify(token)
@@ -10233,15 +10178,16 @@ def create_launchplane_service_app(
     )
     resolved_authz_policy_runtime.update(authz_policy)
     resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
+    session_store = (
+        human_session_store
+        or _human_session_capable_store(record_store)
+        or InMemoryHumanSessionStore()
+    )
     oauth_login_states = OAuthLoginStateStore()
     session_manager = (
         HumanSessionManager(
             config=resolved_github_oauth_config,
-            session_store=(
-                human_session_store
-                or _human_session_capable_store(record_store)
-                or InMemoryHumanSessionStore()
-            ),
+            session_store=session_store,
         )
         if resolved_github_oauth_config is not None
         else None
@@ -10596,20 +10542,17 @@ def create_launchplane_service_app(
                         on_renewed_session=record_renewed_session,
                     )
                 else:
-                    local_admin_identity = _local_admin_identity_from_bearer(environ)
-                    if local_admin_identity is not None:
-                        identity = local_admin_identity
+                    owner_agent_identity = _owner_agent_identity_from_bearer(environ)
+                    if isinstance(
+                        owner_agent_identity,
+                        LocalAdminIdentity | LocalOperatorIdentity,
+                    ):
+                        identity = owner_agent_identity
                     else:
-                        local_operator_identity = _local_operator_identity_from_bearer(environ)
-                        if local_operator_identity is not None:
-                            identity = local_operator_identity
-                        else:
-                            token = _bearer_token(environ)
-                            identity = verifier.verify(token)
-                            if not isinstance(identity, GitHubActionsIdentity):
-                                raise PermissionError(
-                                    "Mutation routes require GitHub Actions OIDC."
-                                )
+                        token = _bearer_token(environ)
+                        identity = verifier.verify(token)
+                        if not isinstance(identity, GitHubActionsIdentity):
+                            raise PermissionError("Mutation routes require GitHub Actions OIDC.")
             if (
                 isinstance(identity, TerminalAgentIdentity)
                 and method != "GET"
@@ -17083,11 +17026,22 @@ def serve_launchplane_service(
         authz_policy_runtime=authz_policy_runtime,
         record_store_for_service=service_record_store,
     )
+    github_oauth_config = load_github_oauth_config_from_env()
+    human_session_manager = (
+        HumanSessionManager(
+            config=github_oauth_config,
+            session_store=service_record_store,
+        )
+        if github_oauth_config is not None
+        else None
+    )
     fastapi_application = create_launchplane_fastapi_app(
         verifier=verifier,
         authz_policy=resolved_fastapi_policy.policy,
         authz_policy_runtime=authz_policy_runtime,
         record_store_factory=lambda: service_record_store,
+        bearer_identity_config=_bearer_identity_config_from_env(),
+        human_session_manager=human_session_manager,
     )
     fastapi_application.mount(
         "/",

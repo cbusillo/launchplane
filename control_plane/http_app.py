@@ -1,9 +1,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
@@ -18,7 +18,20 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LaunchplaneIdentity, TokenVerifier
+from control_plane.contracts.protected_artifacts import (
+    ProtectedArtifactStore,
+    ProtectedArtifactSet,
+    build_protected_artifact_set,
+)
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+    TokenVerifier,
+    bearer_identity_from_token,
+)
+from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHumanSession
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.postgres import PostgresRecordStore
@@ -69,8 +82,60 @@ class ProductEnvironmentConfigStatusResponse(BaseModel):
     config_status: ProductEnvironmentConfigStatus
 
 
+class ProtectedArtifactsResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "ok",
+                    "trace_id": "launchplane_req_00000000000000000000000000000000",
+                    "protected_artifacts": {
+                        "schema_version": 1,
+                        "product": "example-product",
+                        "context": "",
+                        "entries": [],
+                        "artifact_ids": ["artifact-example-prod"],
+                        "image_references": ["ghcr.io/example-org/example-app@sha256:abc123"],
+                        "image_digests": ["sha256:abc123"],
+                        "warnings": [],
+                    },
+                }
+            ]
+        },
+    )
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    protected_artifacts: ProtectedArtifactSet
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
+
+
+def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
+    required_methods = (
+        "list_artifact_manifests",
+        "list_environment_inventory",
+        "list_product_profile_records",
+        "list_release_tuple_records",
+        "list_preview_records",
+        "list_preview_generation_records",
+        "list_preview_pr_feedback_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support protected artifact inventory "
+            f"reads: {missing_summary}"
+        )
+    return cast(ProtectedArtifactStore, record_store)
 
 
 class LaunchplaneAuthzPolicyRuntime:
@@ -146,6 +211,8 @@ def create_launchplane_fastapi_app(
     authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
     database_url: str | None = None,
     record_store_factory: _RecordStoreFactory | None = None,
+    bearer_identity_config: BearerIdentityConfig | None = None,
+    human_session_manager: HumanSessionManager | None = None,
 ) -> FastAPI:
     resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
         authz_policy
@@ -176,21 +243,67 @@ def create_launchplane_fastapi_app(
             raise RuntimeError("Launchplane record store is not initialized.")
         return shared_record_store
 
+    def read_human_session(
+        *,
+        cookie_header: str,
+    ) -> tuple[LaunchplaneHumanSession, bool] | None:
+        if human_session_manager is None:
+            return None
+        session = human_session_manager.read_cookie(cookie_header)
+        if session is None:
+            return None
+        renewed_session = human_session_manager.renew_if_needed(session)
+        if renewed_session is None:
+            return None
+        return renewed_session, renewed_session.expires_at != session.expires_at
+
+    def read_human_session_identity(
+        *,
+        cookie_header: str,
+        response: Response,
+    ) -> GitHubHumanIdentity | None:
+        session_result = read_human_session(cookie_header=cookie_header)
+        if session_result is None:
+            return None
+        session, was_renewed = session_result
+        if was_renewed and human_session_manager is not None:
+            response.headers.append(
+                "Set-Cookie", human_session_manager.session_cookie_header(session)
+            )
+        return session.identity
+
     def read_identity(
+        response: Response,
         authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
     ) -> LaunchplaneIdentity:
         header = authorization.strip()
-        if not header:
+        if header:
+            scheme, _, token = header.partition(" ")
+            if scheme.lower() != "bearer" or not token.strip():
+                raise _authentication_required_error(
+                    "Authorization header must use Bearer token format."
+                )
+            try:
+                owner_agent_identity = bearer_identity_from_token(
+                    token=token.strip(),
+                    config=bearer_identity_config or BearerIdentityConfig(),
+                )
+            except PermissionError as error:
+                raise _authentication_required_error(str(error)) from error
+            if owner_agent_identity is not None:
+                return owner_agent_identity
+            try:
+                return verifier.verify(token.strip())
+            except (InvalidTokenError, ValueError) as error:
+                raise _authentication_required_error(str(error)) from error
+        human_identity = read_human_session_identity(
+            cookie_header=cookie,
+            response=response,
+        )
+        if human_identity is None:
             raise _authentication_required_error("Authorization header is required.")
-        scheme, _, token = header.partition(" ")
-        if scheme.lower() != "bearer" or not token.strip():
-            raise _authentication_required_error(
-                "Authorization header must use Bearer token format."
-            )
-        try:
-            return verifier.verify(token.strip())
-        except (InvalidTokenError, ValueError) as error:
-            raise _authentication_required_error(str(error)) from error
+        return human_identity
 
     def read_product_environment_config_status(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -269,6 +382,54 @@ def create_launchplane_fastapi_app(
             config_status=config_status,
         )
 
+    def read_protected_artifacts(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+    ) -> ProtectedArtifactsResponse:
+        trace_id = next_trace_id()
+        requested_product = product.strip()
+        requested_context = context.strip()
+        if not requested_product:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message="Protected artifact inventory requires a product query parameter.",
+            )
+        authz_context = requested_context or "*"
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="artifact_protection.read",
+            product=requested_product,
+            context=authz_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read protected artifact inventory.",
+            )
+        try:
+            protected_artifact_store = require_protected_artifact_store(record_store)
+            protected_artifacts = build_protected_artifact_set(
+                protected_artifact_store,
+                product=requested_product,
+                context_name=requested_context,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return ProtectedArtifactsResponse(
+            trace_id=trace_id,
+            protected_artifacts=protected_artifacts,
+        )
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -282,6 +443,21 @@ def create_launchplane_fastapi_app(
         response_model=HealthResponse,
         operation_id="read_launchplane_health",
         summary="Read Launchplane service health",
+    )
+
+    app.add_api_route(
+        "/v1/artifacts/protected",
+        read_protected_artifacts,
+        methods=["GET"],
+        response_model=ProtectedArtifactsResponse,
+        operation_id="read_protected_artifacts",
+        summary="Read protected artifact inventory",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     def launchplane_http_exception_handler(_request: Request, error: Exception) -> JSONResponse:
