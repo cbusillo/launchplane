@@ -15,6 +15,7 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
@@ -141,6 +142,74 @@ class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_deployment_calls, 1)
         self.assertEqual(store.write_environment_inventory_calls, 1)
+
+
+class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backup_gate_evidence_accepts_store_with_only_backup_gate_method(self) -> None:
+        store = _BackupGateEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_backup_gate_write_identity()),
+            authz_policy=_backup_gate_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["backup_gate_record_id"], "backup-gate-example-site-prod"
+        )
+        self.assertEqual(
+            store.backup_gate_records["backup-gate-example-site-prod"]["context"],
+            "example-site",
+        )
+
+    async def test_backup_gate_evidence_requires_backup_gate_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_backup_gate_write_identity()),
+            authz_policy=_backup_gate_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_backup_gate_evidence_replays_idempotency_before_backup_gate_gate(self) -> None:
+        store = _IdempotencyOnlyBackupGateReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_backup_gate_write_identity()),
+            authz_policy=_backup_gate_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _backup_gate_evidence_payload()
+
+        first_response = await _post_backup_gate_evidence(
+            app,
+            request_payload,
+            idempotency_key="backup-gate-example-site-prod",
+        )
+        store.write_backup_gate_record = None
+        second_response = await _post_backup_gate_evidence(
+            app,
+            request_payload,
+            idempotency_key="backup-gate-example-site-prod",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_backup_gate_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -1360,6 +1429,251 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backup_gate_evidence_writes_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+            backup_gate = store.read_backup_gate_record("backup-gate-example-site-prod")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {"backup_gate_record_id": "backup-gate-example-site-prod"},
+        )
+        self.assertNotIn("replayed", payload)
+        self.assertEqual(backup_gate.context, "example-site")
+        self.assertEqual(backup_gate.instance, "prod")
+        self.assertEqual(backup_gate.status, "pass")
+        self.assertEqual(backup_gate.evidence["snapshot_name"], "snapshot-example-site-prod")
+
+    async def test_backup_gate_evidence_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="other-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_backup_gate_record("backup-gate-example-site-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_backup_gate_evidence_rejects_human_session_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+            )
+
+            response = await _post_backup_gate_evidence(
+                app,
+                _backup_gate_evidence_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_backup_gate_record("backup-gate-example-site-prod")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_backup_gate_evidence_rejects_terminal_agent_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _post_backup_gate_evidence(
+                app,
+                _backup_gate_evidence_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_backup_gate_record("backup-gate-example-site-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_backup_gate_evidence_validation_errors_use_launchplane_shape(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            invalid_payload = _backup_gate_evidence_payload()
+            invalid_payload["product"] = ""
+
+            response = await _post_backup_gate_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_backup_gate_evidence_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _backup_gate_evidence_payload()
+
+            first_response = await _post_backup_gate_evidence(
+                app,
+                request_payload,
+                idempotency_key="backup-gate-example-site-prod",
+            )
+            second_response = await _post_backup_gate_evidence(
+                app,
+                request_payload,
+                idempotency_key="backup-gate-example-site-prod",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+
+    async def test_backup_gate_evidence_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _backup_gate_evidence_payload()
+            changed_payload = _backup_gate_evidence_payload(
+                record_id="backup-gate-example-site-prod-2"
+            )
+
+            first_response = await _post_backup_gate_evidence(
+                app,
+                request_payload,
+                idempotency_key="backup-gate-example-site-prod",
+            )
+            second_response = await _post_backup_gate_evidence(
+                app,
+                changed_payload,
+                idempotency_key="backup-gate-example-site-prod",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_backup_gate_record("backup-gate-example-site-prod-2")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+
+    async def test_openapi_includes_backup_gate_evidence_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_backup_gate_write_identity()),
+            authz_policy=_backup_gate_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/backup-gates"]["post"]
+        self.assertEqual(route["operationId"], "write_backup_gate_evidence")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/BackupGateEvidenceRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
+        self.assertEqual(
+            openapi["components"]["schemas"]["BackupGateEvidenceRequest"]["additionalProperties"],
+            False,
+        )
+
+    async def test_backup_gate_evidence_native_route_precedes_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_backup_gate_write_identity()),
+                authz_policy=_backup_gate_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_backup_gate_evidence(app, _backup_gate_evidence_payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["backup_gate_record_id"], "backup-gate-example-site-prod"
+        )
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1643,6 +1957,86 @@ def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPoli
             ]
         }
     )
+
+
+def _backup_gate_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/example-site",
+        workflow_ref="every/example-site/.github/workflows/backup-gate.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _backup_gate_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/example-site",
+                    "workflow_refs": [
+                        "every/example-site/.github/workflows/backup-gate.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["backup_gate.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_backup_gate_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["backup_gate.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_backup_gate_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["backup_gate.write"],
+                }
+            ]
+        }
+    )
+
+
+def _backup_gate_evidence_payload(
+    *, record_id: str = "backup-gate-example-site-prod"
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "example-site",
+        "backup_gate": {
+            "record_id": record_id,
+            "context": "example-site",
+            "instance": "prod",
+            "created_at": "2026-04-21T18:05:00Z",
+            "source": "example-site-prod-gate",
+            "status": "pass",
+            "evidence": {
+                "snapshot_name": "snapshot-example-site-prod",
+                "manifest_path": "scratch/prod-gates/snapshot-example-site-prod.json",
+            },
+        },
+    }
 
 
 def _deployment_write_identity() -> GitHubActionsIdentity:
@@ -2003,6 +2397,28 @@ async def _get_driver_instance_view(
     )
 
 
+async def _post_backup_gate_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/backup-gates",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -2102,6 +2518,48 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _BackupGateEvidenceOnlyStore:
+    def __init__(self) -> None:
+        self.backup_gate_records: dict[str, dict[str, Any]] = {}
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> None:
+        self.backup_gate_records[record.record_id] = record.model_dump(mode="json")
+
+
+class _IdempotencyOnlyBackupGateReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_backup_gate_calls = 0
+        self._stored_record: Any | None = None
+        self.write_backup_gate_record: Callable[[BackupGateRecord], None] | None = (
+            self._write_backup_gate_record
+        )
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def _write_backup_gate_record(self, record: BackupGateRecord) -> None:
+        self.write_backup_gate_calls += 1
 
 
 class _DeploymentEvidenceOnlyStore:

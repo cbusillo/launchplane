@@ -50,7 +50,8 @@ VeriReel product paths:
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
 - authenticated evidence routes:
-  - `POST /v1/evidence/backup-gates`
+  - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
+    with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/promotions`
@@ -825,6 +826,11 @@ writes, not on every possible operator action.
 capability and any available idempotency store. Replay handling runs before the
 deployment-write capability check so a stored response can still be returned if
 the backing store is temporarily write-restricted for deployment evidence.
+
+`POST /v1/evidence/backup-gates` only requires the backup-gate record-write
+capability and any available idempotency store. Replay handling runs before the
+backup-gate capability check so a stored response can still be returned if the
+backing store is temporarily write-restricted for backup-gate evidence.
 
 ### Preview lifecycle endpoints
 
