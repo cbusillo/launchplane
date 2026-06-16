@@ -15,6 +15,7 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.driver_descriptor import DriverDescriptor
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
@@ -23,6 +24,8 @@ from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactSet,
     build_protected_artifact_set,
 )
+from control_plane.drivers.registry import list_driver_descriptors
+from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -38,6 +41,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
+_LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
+_LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -80,6 +85,22 @@ class ProductEnvironmentConfigStatusResponse(BaseModel):
     status: str = "ok"
     trace_id: str
     config_status: ProductEnvironmentConfigStatus
+
+
+class DriverDescriptorsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    drivers: tuple[DriverDescriptor, ...]
+
+
+class DriverDescriptorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    driver: DriverDescriptor
 
 
 class ProtectedArtifactsResponse(BaseModel):
@@ -430,6 +451,47 @@ def create_launchplane_fastapi_app(
             protected_artifacts=protected_artifacts,
         )
 
+    def ensure_driver_read_allowed(*, identity: LaunchplaneIdentity, trace_id: str) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="driver.read",
+            product=_LAUNCHPLANE_DRIVER_READ_PRODUCT,
+            context=_LAUNCHPLANE_DRIVER_READ_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read driver metadata for the requested context.",
+            )
+
+    def read_driver_descriptors(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+    ) -> DriverDescriptorsResponse:
+        trace_id = next_trace_id()
+        ensure_driver_read_allowed(identity=identity, trace_id=trace_id)
+        return DriverDescriptorsResponse(
+            trace_id=trace_id,
+            drivers=list_driver_descriptors(),
+        )
+
+    def read_driver_descriptor(
+        driver_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+    ) -> DriverDescriptorResponse:
+        trace_id = next_trace_id()
+        ensure_driver_read_allowed(identity=identity, trace_id=trace_id)
+        try:
+            descriptor = read_driver_descriptor_record(driver_id)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return DriverDescriptorResponse(trace_id=trace_id, driver=descriptor)
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -457,6 +519,34 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/drivers",
+        read_driver_descriptors,
+        methods=["GET"],
+        response_model=DriverDescriptorsResponse,
+        operation_id="read_driver_descriptors",
+        summary="Read Launchplane driver descriptors",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/drivers/{driver_id}",
+        read_driver_descriptor,
+        methods=["GET"],
+        response_model=DriverDescriptorResponse,
+        operation_id="read_driver_descriptor",
+        summary="Read one Launchplane driver descriptor",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
         },
     )
 
