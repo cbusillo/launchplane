@@ -280,6 +280,20 @@ used for uniqueness, active policy selection, idempotency, leases, authorization
 or cross-worker coordination. Application and Pydantic validation remain useful,
 but they do not replace database-enforced integrity for shared production state.
 
+Concrete invariant examples for new migrations:
+
+- Record ids and natural operation ids stay unique at the database boundary.
+- Active policy/config selections use DB constraints or transactional state
+  changes; application checks alone are not enough.
+- Idempotency records are keyed by caller scope, route path, and idempotency key.
+- Worker leases store owner and expiry fields that claim/update paths check
+  atomically before executing side effects.
+- Single-flight operation families use DB-backed uniqueness or equivalent
+  transactional guards, not in-process locks.
+- Authorization grant, relationship, and assignment records keep live tuples as
+  runtime authority while code owns only schemas, validators, and relation
+  contracts.
+
 Compatibility `ensure_schema()` behavior may exist for tests, local bootstrap,
 or bounded repair, but production schema evolution is migration-led. Schema
 changes should preserve rollback posture for the previous Launchplane image when
@@ -316,6 +330,8 @@ native FastAPI route family is proven.
 ### Python 3.14
 
 Python 3.14 is a compatibility target, not an immediate foundation requirement.
+Current verdict: no-go for the required baseline; Python 3.13 remains the active
+repo and deployment baseline until the gates below prove compatibility.
 Before changing the repo baseline, prove support for the runtime, CI images,
 deployment image, `uv`, Ruff, mypy, FastAPI, Uvicorn, Pydantic, SQLAlchemy,
 Alembic, psycopg, cryptography, auth libraries, and any workflow SDK added after
