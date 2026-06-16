@@ -24,6 +24,51 @@ from tests.test_service import _generic_site_profile_payload, _identity, _sqlite
 from tests.test_service import _StubVerifier
 
 
+class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_returns_typed_public_safe_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(app, "/v1/health")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"status", "storage_backend", "trace_id"})
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["storage_backend"], "filesystem")
+        self.assertTrue(str(payload["trace_id"]).startswith("launchplane_req_"))
+
+    async def test_openapi_includes_health_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/health"]["get"]
+        self.assertEqual(route["operationId"], "read_launchplane_health")
+        success_schema = route["responses"]["200"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/HealthResponse")
+        health_schema = openapi["components"]["schemas"]["HealthResponse"]
+        self.assertEqual(
+            set(health_schema["properties"]), {"status", "storage_backend", "trace_id"}
+        )
+        self.assertEqual(health_schema["additionalProperties"], False)
+        example_text = json.dumps(health_schema.get("examples", []))
+        self.assertIn("launchplane_req_00000000000000000000000000000000", example_text)
+        self.assertNotIn("example-site", example_text)
+        self.assertNotIn("shinycomputers", example_text)
+
+
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_config_status_redacts_expected_config_status(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -251,6 +296,10 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
             health_response = await _asgi_get(app, "/v1/health")
 
         self.assertEqual(openapi_response.status_code, 200)
+        self.assertIn(
+            "/v1/health",
+            openapi_response.json()["paths"],
+        )
         self.assertIn(
             "/v1/products/{product}/environments/{environment}/config-status",
             openapi_response.json()["paths"],

@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
@@ -20,6 +20,7 @@ from control_plane.contracts.product_environment_read_model import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy, LaunchplaneIdentity, TokenVerifier
 from control_plane.storage.factory import build_shared_record_store
+from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -39,6 +40,25 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
+
+
+class HealthResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "status": "ok",
+                    "trace_id": "launchplane_req_00000000000000000000000000000000",
+                    "storage_backend": "postgres",
+                }
+            ]
+        },
+    )
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    storage_backend: str
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -248,6 +268,21 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             config_status=config_status,
         )
+
+    def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
+        return HealthResponse(
+            trace_id=next_trace_id(),
+            storage_backend=storage_backend_name(record_store),
+        )
+
+    app.add_api_route(
+        "/v1/health",
+        read_health,
+        methods=["GET"],
+        response_model=HealthResponse,
+        operation_id="read_launchplane_health",
+        summary="Read Launchplane service health",
+    )
 
     def launchplane_http_exception_handler(_request: Request, error: Exception) -> JSONResponse:
         if not isinstance(error, HTTPException):

@@ -38,7 +38,8 @@ VeriReel product paths:
 - CLI: `uv run launchplane service serve`
 - server runtime: FastAPI served by Uvicorn, with legacy WSGI routes mounted as
   the fallback while route ownership is migrated incrementally
-- health route: `GET /v1/health`
+- native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
+  model and included in OpenAPI as the first v2 contract proof
 - protected artifact inventory route:
   - `GET /v1/artifacts/protected`
 - authenticated evidence routes:
@@ -759,11 +760,12 @@ carries `mode: "dry-run"` or `mode: "apply"` and a complete
 `preview_pr_feedback_notification_policy.apply`, DB-backed Launchplane storage,
 explicit product and context scope, and an idempotency key when a caller wants
 retry-safe service semantics. Local operator calls must include a non-empty
-reason. Policies store product/context/repository-scoped routing intent and managed secret record ids only; Discord
-webhook URLs and operator destination values must stay in managed secrets, not
-source or checked-in workflow defaults. When `/v1/previews/pr-feedback` records
-skipped or failed PR comment delivery, Launchplane attempts configured preview
-PR feedback notifications and records delivered or failed attempts under
+reason. Policies store product/context/repository-scoped routing intent and
+managed secret record ids only; Discord webhook URLs and operator destination
+values must stay in managed secrets, not source or checked-in workflow defaults.
+When `/v1/previews/pr-feedback` records skipped or failed PR comment delivery,
+Launchplane attempts configured preview PR feedback notifications and records
+delivered or failed attempts under
 `launchplane_preview_pr_feedback_notification_attempts`; operators can read
 those attempts with `GET /v1/previews/pr-feedback/notification-attempts`.
 
