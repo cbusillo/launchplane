@@ -630,9 +630,9 @@ state/
   so an interrupted writer cannot block the lane forever.
 - The v2 target execution model for these Odoo long-running operation records is
   a dedicated Launchplane worker process backed by DB leases and heartbeats. The
-  HTTP route should create or replay the operation record and return the poll
-  URL; request-process daemon threads are a compatibility path to remove once
-  the worker can claim, heartbeat, recover, and complete these records. Operation
+  HTTP route creates or replays the operation record and returns the poll URL;
+  execution is owned by the supervised worker process, not by request-process
+  daemon threads. Operation
   records carry execution fields for `attempt`, `lease_owner`,
   `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
   current lease owner so stale workers cannot overwrite recovered work. Worker
@@ -659,10 +659,9 @@ run` is the foreground loop intended for an external process supervisor, and
   `/app/scripts/start-launchplane-odoo-workers.sh`, refuses startup without
   `LAUNCHPLANE_DATABASE_URL`, and only accepts generic worker timing knobs as
   process wiring; live operation selection remains in Launchplane records.
-  Production activation stays gated on Alembic reaching head, supervised worker
-  startup, status showing no unexpected stalled leases, stale active record
-  reconciliation, and at least one rehearsed or real operation completed through
-  the worker path. Other long-running work should use typed worker operation or
+  Production operation remains observable through worker status and reconcile
+  service routes, and live operation selection remains in Launchplane records.
+  Other long-running work should use typed worker operation or
   lease records that reference business evidence records, rather than making
   business evidence records themselves the queue lease, unless a future ADR
   explicitly says otherwise.

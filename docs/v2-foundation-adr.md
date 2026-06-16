@@ -107,7 +107,7 @@ friction in places that should be platform primitives:
 
 - custom WSGI routing and error shaping
 - bespoke auth/session/policy wiring
-- request-process daemon threads for work that needs durable recovery
+- request-process daemon threads that previously handled durable work
 - manual API/frontend contract mirroring
 - mixed compatibility surfaces that are easy for future agents to revive
 
@@ -184,15 +184,15 @@ Launchplane-owned DB-backed worker queue now, and defer Temporal or a comparable
 workflow engine until a named workflow proves the smaller model is not enough.
 
 The current problem is concrete and narrower than general workflow orchestration.
-Odoo stable bootstrap and Odoo stable target replacement already write typed
-Launchplane operation records and expose poll/read boundaries, but their
-execution can still be started by request-process daemon threads. VeriReel async
-backup gate work has similar durability pressure because it is guarded by
-in-memory active sets; moving it to this model requires a typed worker operation
-record that references the backup evidence record instead of turning that
-evidence record into queue state. Those paths should move to a dedicated
-Launchplane worker process that claims DB-backed work, updates a lease/heartbeat,
-executes typed handlers, and writes terminal records.
+Odoo stable bootstrap and Odoo stable target replacement write typed Launchplane
+operation records, expose poll/read boundaries, and are executed by the
+supervised DB-backed worker. VeriReel async backup gate work has similar
+durability pressure because it is guarded by in-memory active sets; moving it to
+this model requires a typed worker operation record that references the backup
+evidence record instead of turning that evidence record into queue state. New
+durable paths should use a dedicated Launchplane worker process that claims
+DB-backed work, updates a lease/heartbeat, executes typed handlers, and writes
+terminal records.
 
 The DB-backed worker model owns execution mechanics only. Launchplane records
 remain the control-plane audit and read-model boundary; worker queue state is not
@@ -219,13 +219,14 @@ The worker deployment must be safe for more than one process: lease claims,
 heartbeats, and terminal writes are storage-owned concurrency boundaries, not
 in-process locks.
 
-Do not keep daemon-thread fallback once the worker path is proven. Proof requires
-the worker process to be deployed and supervised, migrations applied, claim,
-heartbeat, expiry, retry, and terminal paths covered by tests, stale active
-records reconciled, queue depth/stalled lease/worker health observability in
-place, rollback behavior defined for worker outage, and at least one rehearsed or
-real operation family completed through the worker path. Old code is recoverable
-from git; production code should converge on one durable execution path.
+Do not reintroduce request-process daemon-thread fallback after worker proof.
+Proof requires the worker process to be deployed and supervised, migrations
+applied, claim, heartbeat, expiry, retry, and terminal paths covered by tests,
+stale active records reconciled, queue depth/stalled lease/worker health
+observability in place, rollback behavior defined for worker outage, and at least
+one rehearsed or real operation family completed through the worker path. Old
+code is recoverable from git; production code should converge on one durable
+execution path.
 
 Temporal remains a candidate, not a dependency. Re-open that decision when a
 specific Launchplane workflow needs several of these at once:
