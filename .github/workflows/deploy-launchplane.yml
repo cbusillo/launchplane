@@ -113,6 +113,7 @@ jobs:
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS }}
       LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS: ${{ vars.LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS }}
       LAUNCHPLANE_AUTHZ_GRANTS_JSON: ${{ vars.LAUNCHPLANE_AUTHZ_GRANTS_JSON }}
+      LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: ${{ vars.LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
     steps:
@@ -299,6 +300,7 @@ jobs:
                 --arg local_admin_token "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN:-}" \
                 --arg local_admin_subject "${LAUNCHPLANE_LOCAL_ADMIN_SUBJECT:-}" \
                 --arg local_admin_token_label "${LAUNCHPLANE_LOCAL_ADMIN_TOKEN_LABEL:-}" \
+                --arg compose_external_network "${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:-}" \
                 --arg npmplus_base_url "${LAUNCHPLANE_NPMPLUS_BASE_URL:-}" \
                 --arg npmplus_identity "${LAUNCHPLANE_NPMPLUS_IDENTITY:-}" \
                 --arg npmplus_secret "${LAUNCHPLANE_NPMPLUS_SECRET:-}" \
@@ -349,6 +351,13 @@ jobs:
                         LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN: $every_code_github_token,
                         LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR: $every_code_github_actor
                       }
+                    else
+                      {}
+                    end
+                  )
+                  + (
+                    if $compose_external_network != "" then
+                      {LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK: $compose_external_network}
                     else
                       {}
                     end

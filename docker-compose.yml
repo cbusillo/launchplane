@@ -33,6 +33,9 @@ services:
       start_period: 20s
     volumes:
       - launchplane-runtime:/app/runtime
+    networks:
+      - default
+      - launchplane-external-network
 
   launchplane-odoo-workers:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
@@ -50,6 +53,14 @@ services:
       LAUNCHPLANE_STATE_DIR: /app/runtime
     volumes:
       - launchplane-runtime:/app/runtime
+    networks:
+      - default
+      - launchplane-external-network
+
+networks:
+  launchplane-external-network:
+    name: ${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK:?Missing LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK}
+    external: true
 
 volumes:
   launchplane-runtime: {}

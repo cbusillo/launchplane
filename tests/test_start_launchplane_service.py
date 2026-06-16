@@ -474,6 +474,10 @@ printf '%s\n' "$@" >>"$UV_CAPTURE_FILE"
         self.assertIn("condition: service_healthy", compose_text)
         self.assertIn("- /app/scripts/start-launchplane-odoo-workers.sh", compose_text)
         self.assertIn("- launchplane-runtime:/app/runtime", compose_text)
+        self.assertGreaterEqual(compose_text.count("- launchplane-external-network"), 2)
+        self.assertIn("  launchplane-external-network:\n", compose_text)
+        self.assertIn("name: ${LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK", compose_text)
+        self.assertIn("external: true", compose_text)
         self.assertNotIn("cm-prod", compose_text)
         self.assertNotIn("opw-prod", compose_text)
 
