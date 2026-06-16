@@ -180,6 +180,40 @@ Adoption trigger: Keycloak becomes an implementation slice only after #1326
 documents the concrete user/session/service-client gaps, local/dev bootstrap
 ergonomics, operational owner, failure mode, and rollback posture.
 
+#### #1326 Boundary Record
+
+Issue #1326 records Keycloak as an identity-boundary candidate, not an accepted
+implementation dependency. The current identity classes remain GitHub Actions
+workflow subjects, GitHub browser humans, terminal-agent read subjects,
+local-operator write subjects, and local-admin write subjects. A future
+Keycloak slice may add OIDC human subjects and OIDC service-client subjects when
+it proves a concrete Launchplane need such as non-GitHub users, federation,
+service-client token exchange, or independent operator group management.
+
+Keycloak would act as an identity provider and session/token issuer only. It
+must not become product, tenant, lane, domain, provider-target, runtime,
+authorization-grant, or operator-assignment authority in checked-in files. The
+only repo/process-level configuration shape allowed for that future slice is
+minimal Launchplane OIDC bootstrap wiring: issuer or discovery endpoint,
+expected audience, Launchplane client id, client secret or managed platform
+secret reference, and session-signing root. Live users, groups, realm/client
+assignments, service-client grants, sessions, and operator membership remain
+identity-provider state, Launchplane records, OpenFGA tuples if adopted, managed
+secrets, or explicit scoped operator input.
+
+Any future OpenFGA integration should receive normalized caller facts from the
+authenticated identity, not raw provider authority. The minimum normalized
+identity facts are subject type, stable subject id, issuer, audience or client
+id, token expiry/freshness, optional display claims for audit, and normalized
+group or role identifiers when the provider supplies them. Resource facts such
+as action, product, context, instance, and resource id remain Launchplane
+request and record facts, not identity-provider facts.
+
+If Keycloak or OIDC validation is unavailable, missing, mismatched, expired, or
+ambiguous, Launchplane fails closed for Keycloak-authenticated subjects. A
+Keycloak outage must not silently fall back to a weaker local file, workflow
+default, ambient GitHub CLI identity, or broad bootstrap policy.
+
 ### OpenFGA
 
 Before OpenFGA replaces or augments the current DB-backed authz model, prove the
