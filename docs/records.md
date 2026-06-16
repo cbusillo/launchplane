@@ -36,10 +36,32 @@ LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head
 
 For an existing Launchplane database that already has the tables created by the
 pre-migration `create_all` path, adopt the baseline by stamping the database at
-the current revision after confirming the live table shape matches the ORM:
+the current revision only after the automated schema adoption verifier passes.
+The verifier inspects existing Launchplane-owned tables and fails closed when a
+live table is missing an ORM-managed column or has an unexpected column. A
+failure means the operator must stop and reconcile the schema before stamping;
+do not hand-edit the Alembic version table or skip the check.
+
+The hosted startup wrapper runs the verifier before stamping and then applies
+migrations:
 
 ```bash
-LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic stamp head
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... scripts/start-launchplane-service.sh
+```
+
+For a manual adoption rehearsal, run the verifier directly. It prints the
+revision to stamp when adoption is safe and exits non-zero when the live schema
+does not match the ORM-managed table shape:
+
+```bash
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run python -m control_plane.storage.schema_adoption
+```
+
+After a passing verifier result, stamp the printed revision and upgrade:
+
+```bash
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic stamp <printed-revision>
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head
 ```
 
 JSONB `payload` columns remain durable evidence envelopes and original typed
