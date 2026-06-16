@@ -654,6 +654,13 @@ post_local_owner_grant \
 	local-operator \
 	launchplane \
 	launchplane \
+	launchplane_service.read \
+	deploy:local-operator-launchplane-service-read-grant \
+	local-operator-launchplane-service-read
+post_local_owner_grant \
+	local-operator \
+	launchplane \
+	launchplane \
 	merge_train.policy_targets \
 	deploy:local-operator-merge-train-policy-targets-grant \
 	local-operator-merge-train-policy-targets
