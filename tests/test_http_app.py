@@ -1302,6 +1302,256 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_deployment_evidence(app, _deployment_evidence_payload())
+            deployment = store.read_deployment_record("deployment-example-site-prod")
+            inventory = store.read_environment_inventory(
+                context_name="example-site",
+                instance_name="prod",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "deployment_record_id": "deployment-example-site-prod",
+                "inventory_record_id": "example-site-prod",
+            },
+        )
+        self.assertNotIn("replayed", payload)
+        self.assertEqual(deployment.context, "example-site")
+        self.assertEqual(deployment.instance, "prod")
+        self.assertEqual(deployment.deploy.status, "pass")
+        self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+
+    async def test_deployment_evidence_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="other-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_deployment_evidence(app, _deployment_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_deployment_evidence_rejects_human_session_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+            )
+
+            response = await _post_deployment_evidence(
+                app,
+                _deployment_evidence_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_deployment_evidence_rejects_terminal_agent_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _post_deployment_evidence(
+                app,
+                _deployment_evidence_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_deployment_evidence_validation_errors_use_launchplane_shape(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            invalid_payload = _deployment_evidence_payload()
+            invalid_payload["product"] = ""
+
+            response = await _post_deployment_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_deployment_evidence_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _deployment_evidence_payload()
+
+            first_response = await _post_deployment_evidence(
+                app,
+                request_payload,
+                idempotency_key="deployment-example-site-prod",
+            )
+            second_response = await _post_deployment_evidence(
+                app,
+                request_payload,
+                idempotency_key="deployment-example-site-prod",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+
+    async def test_deployment_evidence_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _deployment_evidence_payload()
+            changed_payload = _deployment_evidence_payload(
+                record_id="deployment-example-site-prod-2"
+            )
+
+            first_response = await _post_deployment_evidence(
+                app,
+                request_payload,
+                idempotency_key="deployment-example-site-prod",
+            )
+            second_response = await _post_deployment_evidence(
+                app,
+                changed_payload,
+                idempotency_key="deployment-example-site-prod",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("deployment-example-site-prod-2")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+
+    async def test_openapi_includes_deployment_evidence_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_deployment_write_identity()),
+            authz_policy=_deployment_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/deployments"]["post"]
+        self.assertEqual(route["operationId"], "write_deployment_evidence")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DeploymentEvidenceRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
+        self.assertEqual(
+            openapi["components"]["schemas"]["DeploymentEvidenceRequest"]["additionalProperties"],
+            False,
+        )
+
+    async def test_deployment_evidence_native_route_precedes_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_deployment_evidence(app, _deployment_evidence_payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-example-site-prod")
+
+
 def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -1335,6 +1585,106 @@ def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPoli
             ]
         }
     )
+
+
+def _deployment_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/example-site",
+        workflow_ref="every/example-site/.github/workflows/deploy-prod.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/example-site",
+                    "workflow_refs": [
+                        "every/example-site/.github/workflows/deploy-prod.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["deployment.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["deployment.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["deployment.write"],
+                }
+            ]
+        }
+    )
+
+
+def _deployment_evidence_payload(
+    *, record_id: str = "deployment-example-site-prod"
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "example-site",
+        "deployment": {
+            "record_id": record_id,
+            "artifact_identity": {"artifact_id": "artifact-example-site-prod"},
+            "context": "example-site",
+            "instance": "prod",
+            "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+            "resolved_target": {
+                "target_type": "application",
+                "target_id": "target-example-site-prod",
+                "target_name": "example-site-prod",
+            },
+            "deploy": {
+                "target_name": "example-site-prod",
+                "target_type": "application",
+                "deploy_mode": "runtime-provider-api",
+                "deployment_id": "provider-deployment-example-site-prod",
+                "status": "pass",
+                "started_at": "2026-04-20T15:30:00Z",
+                "finished_at": "2026-04-20T15:32:00Z",
+            },
+            "post_deploy_update": {
+                "attempted": True,
+                "status": "pass",
+                "detail": "Update completed.",
+            },
+            "destination_health": {
+                "verified": True,
+                "urls": ["https://example.invalid/health"],
+                "timeout_seconds": 45,
+                "status": "pass",
+            },
+        },
+    }
 
 
 def _github_human_driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
@@ -1595,19 +1945,58 @@ async def _get_driver_instance_view(
     )
 
 
+async def _post_deployment_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/deployments",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _asgi_get(
     app: FastAPI, path: str, *, headers: dict[str, str] | None = None
 ) -> _AsgiResponse:
+    return await _asgi_request(app, "GET", path, headers=headers)
+
+
+async def _asgi_request(
+    app: FastAPI,
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str] | None = None,
+    payload: dict[str, object] | None = None,
+) -> _AsgiResponse:
     request_path, separator, raw_query_string = path.partition("?")
+    request_headers_dict = dict(headers or {})
+    body = b""
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        request_headers_dict.setdefault("Content-Type", "application/json")
+    request_headers_dict.setdefault("Content-Length", str(len(body)))
     request_headers = [
         (key.lower().encode("ascii"), value.encode("latin-1"))
-        for key, value in (headers or {}).items()
+        for key, value in request_headers_dict.items()
     ]
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
         "http_version": "1.1",
-        "method": "GET",
+        "method": method,
         "scheme": "http",
         "path": request_path,
         "raw_path": request_path.encode("ascii"),
@@ -1617,7 +2006,7 @@ async def _asgi_get(
         "server": ("testserver", 80),
     }
     messages = [
-        {"type": "http.request", "body": b"", "more_body": False},
+        {"type": "http.request", "body": body, "more_body": False},
     ]
     sent: list[MutableMapping[str, Any]] = []
 

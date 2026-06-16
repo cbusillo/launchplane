@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, Protocol, cast
@@ -7,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Reques
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane.contracts.authz_policy_record import (
@@ -15,7 +17,12 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    build_launchplane_idempotency_record_id,
+)
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
@@ -28,9 +35,13 @@ from control_plane.drivers.registry import build_driver_context_view, list_drive
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
+    TerminalAgentIdentity,
     TokenVerifier,
     bearer_identity_from_token,
 )
@@ -38,11 +49,17 @@ from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHum
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.evidence_ingestion import (
+    EvidenceIngestionStore,
+    apply_deployment_evidence,
+)
+from control_plane.workflows.ship import utc_now_timestamp
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
+_DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -139,8 +156,42 @@ class ProtectedArtifactsResponse(BaseModel):
     protected_artifacts: ProtectedArtifactSet
 
 
+class DeploymentEvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deployment: DeploymentRecord
+
+    def model_post_init(self, _context: object) -> None:
+        if not self.product.strip():
+            raise ValueError("deployment evidence requires product")
+
+
+class AcceptedEvidenceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["accepted"] = "accepted"
+    trace_id: str
+    records: dict[str, str]
+    replayed: bool | None = None
+    original_trace_id: str | None = None
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
+
+
+class _IdempotencyCapableStore(Protocol):
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None: ...
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -165,6 +216,62 @@ def require_protected_artifact_store(record_store: object) -> ProtectedArtifactS
             f"reads: {missing_summary}"
         )
     return cast(ProtectedArtifactStore, record_store)
+
+
+def require_evidence_ingestion_store(record_store: object) -> EvidenceIngestionStore:
+    required_methods = (
+        "write_deployment_record",
+        "read_deployment_record",
+        "read_promotion_record",
+        "write_promotion_record",
+        "write_environment_inventory",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support evidence ingestion writes: "
+            f"{missing_summary}"
+        )
+    return cast(EvidenceIngestionStore, record_store)
+
+
+def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
+    if callable(getattr(record_store, "read_idempotency_record", None)) and callable(
+        getattr(record_store, "write_idempotency_record", None)
+    ):
+        return cast(_IdempotencyCapableStore, record_store)
+    return None
+
+
+def idempotency_scope(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return "|".join(("github-human", identity.login, str(identity.github_id)))
+    if isinstance(identity, LocalOperatorIdentity):
+        return "|".join(("local-operator", identity.subject, identity.token_label))
+    if isinstance(identity, LocalAdminIdentity):
+        return "|".join(("local-admin", identity.subject, identity.token_label))
+    if isinstance(identity, TerminalAgentIdentity):
+        return "|".join(("terminal-agent", identity.subject, identity.token_label))
+    if isinstance(identity, GitHubActionsIdentity):
+        workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
+        return "|".join(
+            (
+                str(identity.repository).strip(),
+                str(workflow_ref).strip(),
+                str(identity.subject).strip(),
+            )
+        )
+    raise TypeError(f"Unsupported Launchplane identity type: {type(identity).__name__}")
+
+
+def request_fingerprint(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class LaunchplaneAuthzPolicyRuntime:
@@ -334,6 +441,40 @@ def create_launchplane_fastapi_app(
         if human_identity is not None:
             return human_identity
         raise _authentication_required_error("Authorization header is required.")
+
+    def read_write_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity:
+        header = authorization.strip()
+        if not header:
+            raise _authentication_required_error("Authorization header is required.")
+        scheme, _, token = header.partition(" ")
+        bearer_token = token.strip()
+        if scheme.lower() != "bearer" or not bearer_token:
+            raise _authentication_required_error("Bearer token is required.")
+        try:
+            owner_agent_identity = bearer_identity_from_token(
+                token=bearer_token,
+                config=bearer_identity_config or BearerIdentityConfig(),
+            )
+        except PermissionError as error:
+            raise _authentication_required_error(str(error)) from error
+        if isinstance(owner_agent_identity, LocalAdminIdentity | LocalOperatorIdentity):
+            return owner_agent_identity
+        if owner_agent_identity is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message=("Terminal agent credentials can only read redacted Launchplane context."),
+            )
+        try:
+            oidc_identity = verifier.verify(bearer_token)
+        except (InvalidTokenError, ValueError) as error:
+            raise _authentication_required_error(str(error)) from error
+        if not isinstance(oidc_identity, GitHubActionsIdentity):
+            raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
+        return oidc_identity
 
     def read_product_environment_config_status(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -534,6 +675,120 @@ def create_launchplane_fastapi_app(
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
 
+    def accepted_evidence_response(
+        *,
+        trace_id: str,
+        records: dict[str, str],
+        replayed: bool = False,
+        original_trace_id: str = "",
+    ) -> AcceptedEvidenceResponse:
+        return AcceptedEvidenceResponse(
+            trace_id=trace_id,
+            records=records,
+            replayed=True if replayed else None,
+            original_trace_id=original_trace_id or None,
+        )
+
+    def replay_idempotent_response(
+        *, trace_id: str, stored_record: LaunchplaneIdempotencyRecord
+    ) -> AcceptedEvidenceResponse:
+        stored_records = {
+            str(key): str(value)
+            for key, value in dict(stored_record.response_payload.get("records") or {}).items()
+        }
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records=stored_records,
+            replayed=True,
+            original_trace_id=stored_record.response_trace_id,
+        )
+
+    async def write_deployment_evidence(
+        request: Request,
+        deployment_request: DeploymentEvidenceRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="deployment.write",
+            product=deployment_request.product,
+            context=deployment_request.deployment.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write deployment evidence for the requested product/context."
+                ),
+            )
+
+        try:
+            evidence_store = require_evidence_ingestion_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_DEPLOYMENT_EVIDENCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        records = {
+            str(key): str(value)
+            for key, value in apply_deployment_evidence(
+                record_store=evidence_store,
+                deployment_record=deployment_request.deployment,
+            ).items()
+        }
+        response = accepted_evidence_response(trace_id=trace_id, records=records)
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_DEPLOYMENT_EVIDENCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -624,6 +879,24 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _DEPLOYMENT_EVIDENCE_ROUTE,
+        write_deployment_evidence,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_deployment_evidence",
+        summary="Write deployment evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 

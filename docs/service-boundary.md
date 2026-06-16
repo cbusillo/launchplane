@@ -51,7 +51,8 @@ VeriReel product paths:
     discovery context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates`
-  - `POST /v1/evidence/deployments`
+  - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,
+    with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
