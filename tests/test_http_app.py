@@ -892,6 +892,107 @@ class FastApiDriverDescriptorTests(unittest.IsolatedAsyncioTestCase):
         assert renewed_session is not None
         self.assertGreater(renewed_session.expires_at, session.expires_at)
 
+    async def test_driver_descriptors_preserve_renewed_session_cookie_on_denial(
+        self,
+    ) -> None:
+        session_store = InMemoryHumanSessionStore()
+        oauth_config = _github_oauth_config()
+        session_manager = HumanSessionManager(
+            config=oauth_config,
+            session_store=session_store,
+        )
+        session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_github_human_identity(),
+            created_at=datetime.now(timezone.utc) - timedelta(days=13),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+        )
+        session_store.write_session(session)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_driver_read_policy(context="other-context"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _get_driver_descriptors(
+            app,
+            authorization="",
+            headers={"Cookie": session_manager.session_cookie_header(session)},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, session.expires_at)
+
+    async def test_driver_descriptor_preserves_renewed_session_cookie_on_validation_error(
+        self,
+    ) -> None:
+        session_store = InMemoryHumanSessionStore()
+        oauth_config = _github_oauth_config()
+        session_manager = HumanSessionManager(
+            config=oauth_config,
+            session_store=session_store,
+        )
+        session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_github_human_identity(),
+            created_at=datetime.now(timezone.utc) - timedelta(days=13),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+        )
+        session_store.write_session(session)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _get_driver_descriptor(
+            app,
+            "bad driver id",
+            authorization="",
+            headers={"Cookie": session_manager.session_cookie_header(session)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertIn("launchplane_session=", response.headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, session.expires_at)
+
+    async def test_driver_descriptors_use_session_when_bearer_header_is_malformed(
+        self,
+    ) -> None:
+        oauth_config = _github_oauth_config()
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(
+            config=oauth_config,
+            session_store=session_store,
+        )
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _get_driver_descriptors(
+            app,
+            authorization="Token malformed",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["drivers"][0]["driver_id"], "generic-web")
+
     async def test_openapi_includes_driver_descriptor_contracts(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1356,9 +1457,12 @@ async def _get_driver_descriptor(
     driver_id: str,
     *,
     authorization: str = "Bearer local-operator-token",
+    headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_get(app, f"/v1/drivers/{driver_id}", headers=headers)
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, f"/v1/drivers/{driver_id}", headers=request_headers)
 
 
 async def _get_driver_context_view(
