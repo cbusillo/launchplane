@@ -34929,7 +34929,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 400)
             self.assertEqual(payload["error"]["code"], "invalid_request")
 
-    def test_odoo_stable_bootstrap_driver_creates_operation_for_authorized_workflow(
+    def test_odoo_stable_bootstrap_driver_enqueues_operation_without_execution(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -35002,7 +35002,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             stored_operation = store.read_odoo_stable_bootstrap_operation_record(str(operation_id))
             self.assertEqual(stored_operation.status, "pending")
+            self.assertEqual(stored_operation.phase, "created")
             self.assertEqual(stored_operation.idempotency_key, "bootstrap-cm-testing")
+            self.assertEqual(stored_operation.started_at, "")
+            self.assertEqual(stored_operation.finished_at, "")
+            self.assertEqual(stored_operation.deployment_record_id, "")
+            self.assertIsNone(stored_operation.result)
 
     def test_odoo_stable_bootstrap_driver_replays_existing_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -35762,7 +35767,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(second_payload["result"]["expected_next_target_name"], "cm-testing-b")
             self.assertEqual(plan_mock.call_count, 2)
 
-    def test_odoo_target_replacement_apply_driver_creates_operation_for_authorized_workflow(
+    def test_odoo_target_replacement_apply_driver_enqueues_operation_without_execution(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -35836,8 +35841,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 str(operation_id)
             )
             self.assertEqual(stored_operation.status, "pending")
+            self.assertEqual(stored_operation.phase, "created")
             self.assertTrue(stored_operation.request.verify_health)
             self.assertFalse(stored_operation.request.allow_empty_data)
+            self.assertEqual(stored_operation.started_at, "")
+            self.assertEqual(stored_operation.finished_at, "")
+            self.assertEqual(stored_operation.deployment_record_id, "")
+            self.assertIsNone(stored_operation.result)
 
     def test_odoo_target_replacement_apply_driver_replays_existing_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
