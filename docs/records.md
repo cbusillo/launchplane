@@ -635,12 +635,21 @@ state/
   the worker can claim, heartbeat, recover, and complete these records. Operation
   records carry execution fields for `attempt`, `lease_owner`,
   `lease_expires_at`, and `heartbeat_at`; terminal writes are guarded by the
-  current lease owner so stale workers cannot overwrite recovered work. The first
-  runnable worker entry point is `uv run launchplane service odoo-workers
-run-once`, which requires DB-backed storage. Other long-running work should use
-  typed worker operation or lease records that reference business evidence
-  records, rather than making business evidence records themselves the queue
-  lease, unless a future ADR explicitly says otherwise.
+  current lease owner so stale workers cannot overwrite recovered work. Worker
+  entry points require DB-backed storage: `uv run launchplane service
+odoo-workers run-once` performs one recovery/claim/execution pass, `uv run
+launchplane service odoo-workers run` is the foreground loop intended for an
+  external process supervisor, and `uv run launchplane service odoo-workers
+status` reports pending, running, stalled, and recent terminal operation
+  counts without exposing request payloads. `status` is read-only observation;
+  stale lease mutation remains storage-owned recovery inside the worker pass.
+  Production activation stays gated on Alembic reaching head, supervised worker
+  startup, status showing no unexpected stalled leases, stale active record
+  reconciliation, and at least one rehearsed or real operation completed through
+  the worker path. Other long-running work should use typed worker operation or
+  lease records that reference business evidence records, rather than making
+  business evidence records themselves the queue lease, unless a future ADR
+  explicitly says otherwise.
 - Odoo prod rollback delegates the rollback deploy to stable target replacement,
   which writes the deployment record and prod release tuple. Rollback then
   refreshes prod inventory with rollback provenance and annotates the current

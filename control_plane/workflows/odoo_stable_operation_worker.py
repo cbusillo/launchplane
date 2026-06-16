@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 from threading import Event, Thread
-from typing import Protocol, cast
+from typing import Callable, Protocol, cast
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
@@ -28,12 +28,26 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 
 DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS = 300
 DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS = 60
+DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS = 10
+DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS = 30
 DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
+DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 SAFE_BOOTSTRAP_RETRY_PHASES = ("created",)
 SAFE_TARGET_REPLACEMENT_RETRY_PHASES = ("created",)
 
 
 class OdooStableOperationWorkerStore(Protocol):
+    def list_odoo_stable_bootstrap_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableBootstrapOperationRecord, ...]: ...
+
     def claim_next_odoo_stable_bootstrap_operation_record(
         self,
         *,
@@ -65,6 +79,18 @@ class OdooStableOperationWorkerStore(Protocol):
         safe_phases: tuple[str, ...],
         max_attempts: int,
     ) -> tuple[str, ...]: ...
+
+    def list_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        idempotency_scope: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
 
     def claim_next_odoo_stable_target_replacement_operation_record(
         self,
@@ -108,6 +134,44 @@ class OdooStableOperationWorkerResult:
     terminal_write_committed: bool = False
 
 
+@dataclass(frozen=True)
+class OdooStableOperationLeaseSummary:
+    operation_kind: str
+    operation_id: str
+    product: str
+    context: str
+    instance: str
+    status: str
+    phase: str
+    attempt: int
+    lease_owner: str
+    lease_expires_at: str
+    heartbeat_at: str
+    heartbeat_age_seconds: int | None
+    lease_expired: bool
+
+
+@dataclass(frozen=True)
+class OdooStableOperationWorkerStatus:
+    status: str
+    recorded_at: str
+    pending_count: int
+    running_count: int
+    stalled_count: int
+    terminal_count: int
+    counts_by_kind_status: dict[str, int]
+    operations: tuple[OdooStableOperationLeaseSummary, ...]
+
+
+@dataclass(frozen=True)
+class OdooStableOperationWorkerLoopResult:
+    status: str
+    iterations: int
+    worked_count: int
+    idle_count: int
+    error_count: int
+
+
 def run_odoo_stable_operation_worker_once(
     *,
     record_store: OdooStableOperationWorkerStore,
@@ -144,11 +208,12 @@ def run_odoo_stable_operation_worker_once(
         )
     )
     recovered_operation_ids = recovered_bootstrap_ids + recovered_replacement_ids
-    claim_expires_at = _timestamp_after(now, seconds=lease_seconds)
+    claim_started_at = _utc_now_timestamp()
+    claim_expires_at = _timestamp_after(claim_started_at, seconds=lease_seconds)
     bootstrap_operation = record_store.claim_next_odoo_stable_bootstrap_operation_record(
         lease_owner=normalized_lease_owner,
         lease_expires_at=claim_expires_at,
-        claimed_at=now,
+        claimed_at=claim_started_at,
     )
     if bootstrap_operation is not None:
         terminal_write_committed = _execute_bootstrap_operation(
@@ -169,7 +234,7 @@ def run_odoo_stable_operation_worker_once(
     replacement_operation = record_store.claim_next_odoo_stable_target_replacement_operation_record(
         lease_owner=normalized_lease_owner,
         lease_expires_at=claim_expires_at,
-        claimed_at=now,
+        claimed_at=claim_started_at,
     )
     if replacement_operation is not None:
         terminal_write_committed = _execute_target_replacement_operation(
@@ -190,6 +255,142 @@ def run_odoo_stable_operation_worker_once(
     return OdooStableOperationWorkerResult(
         status="idle",
         recovered_operation_ids=recovered_operation_ids,
+    )
+
+
+def run_odoo_stable_operation_worker_loop(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    control_plane_root_path: Path,
+    lease_owner: str,
+    lease_seconds: int = DEFAULT_ODOO_STABLE_WORKER_LEASE_SECONDS,
+    heartbeat_seconds: int = DEFAULT_ODOO_STABLE_WORKER_HEARTBEAT_SECONDS,
+    max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    poll_seconds: int = DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS,
+    error_backoff_seconds: int = DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS,
+    max_consecutive_errors: int = DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS,
+    stop_event: Event | None = None,
+    max_iterations: int | None = None,
+    iteration_callback: Callable[[OdooStableOperationWorkerResult], None] | None = None,
+) -> OdooStableOperationWorkerLoopResult:
+    if poll_seconds < 1:
+        raise ValueError("Odoo stable operation worker poll_seconds must be positive.")
+    if error_backoff_seconds < 1:
+        raise ValueError("Odoo stable operation worker error_backoff_seconds must be positive.")
+    if max_consecutive_errors < 1:
+        raise ValueError("Odoo stable operation worker max_consecutive_errors must be positive.")
+    if max_iterations is not None and max_iterations < 1:
+        raise ValueError("Odoo stable operation worker max_iterations must be positive.")
+    worker_stop_event = stop_event or Event()
+    iterations = 0
+    worked_count = 0
+    idle_count = 0
+    error_count = 0
+    consecutive_errors = 0
+    while not worker_stop_event.is_set():
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        try:
+            result = run_odoo_stable_operation_worker_once(
+                record_store=record_store,
+                control_plane_root_path=control_plane_root_path,
+                lease_owner=lease_owner,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+                max_attempts=max_attempts,
+            )
+        except Exception:
+            error_count += 1
+            consecutive_errors += 1
+            logging.exception("Odoo stable operation worker iteration failed.")
+            if consecutive_errors >= max_consecutive_errors:
+                raise
+            worker_stop_event.wait(timeout=float(error_backoff_seconds))
+            continue
+        iterations += 1
+        consecutive_errors = 0
+        if iteration_callback is not None:
+            iteration_callback(result)
+        if result.status == "worked":
+            worked_count += 1
+            continue
+        idle_count += 1
+        worker_stop_event.wait(timeout=float(poll_seconds))
+    return OdooStableOperationWorkerLoopResult(
+        status="stopped" if worker_stop_event.is_set() else "completed",
+        iterations=iterations,
+        worked_count=worked_count,
+        idle_count=idle_count,
+        error_count=error_count,
+    )
+
+
+def build_odoo_stable_operation_worker_status(
+    *,
+    record_store: OdooStableOperationWorkerStore,
+    now: str | None = None,
+    recent_terminal_limit: int = 10,
+) -> OdooStableOperationWorkerStatus:
+    if recent_terminal_limit < 0:
+        raise ValueError("Odoo stable operation worker recent_terminal_limit cannot be negative.")
+    recorded_at = now or _utc_now_timestamp()
+    active_bootstrap_records = record_store.list_odoo_stable_bootstrap_operation_records(
+        statuses=("pending", "running")
+    )
+    active_replacement_records = record_store.list_odoo_stable_target_replacement_operation_records(
+        statuses=("pending", "running")
+    )
+    terminal_bootstrap_records = record_store.list_odoo_stable_bootstrap_operation_records(
+        statuses=("pass", "fail"),
+        limit=recent_terminal_limit,
+    )
+    terminal_replacement_records = (
+        record_store.list_odoo_stable_target_replacement_operation_records(
+            statuses=("pass", "fail"),
+            limit=recent_terminal_limit,
+        )
+    )
+    summaries = tuple(
+        _lease_summary(
+            operation_kind="odoo_stable_bootstrap",
+            record=record,
+            recorded_at=recorded_at,
+        )
+        for record in active_bootstrap_records
+    ) + tuple(
+        _lease_summary(
+            operation_kind="odoo_stable_target_replacement",
+            record=record,
+            recorded_at=recorded_at,
+        )
+        for record in active_replacement_records
+    )
+    counts_by_kind_status: dict[str, int] = {}
+    for kind, records in (
+        ("odoo_stable_bootstrap", active_bootstrap_records + terminal_bootstrap_records),
+        (
+            "odoo_stable_target_replacement",
+            active_replacement_records + terminal_replacement_records,
+        ),
+    ):
+        for record in records:
+            key = f"{kind}:{record.status}"
+            counts_by_kind_status[key] = counts_by_kind_status.get(key, 0) + 1
+    stalled_count = sum(1 for summary in summaries if summary.lease_expired)
+    pending_count = sum(1 for summary in summaries if summary.status == "pending")
+    running_count = sum(1 for summary in summaries if summary.status == "running")
+    terminal_count = len(terminal_bootstrap_records) + len(terminal_replacement_records)
+    return OdooStableOperationWorkerStatus(
+        status="stalled" if stalled_count else "ok",
+        recorded_at=recorded_at,
+        pending_count=pending_count,
+        running_count=running_count,
+        stalled_count=stalled_count,
+        terminal_count=terminal_count,
+        counts_by_kind_status=counts_by_kind_status,
+        operations=tuple(
+            sorted(summaries, key=lambda summary: (summary.status, summary.operation_id))
+        ),
     )
 
 
@@ -251,6 +452,42 @@ def _execute_bootstrap_operation(
     return record_store.complete_odoo_stable_bootstrap_operation_record(
         record=terminal_operation,
         lease_owner=lease_owner,
+    )
+
+
+def _lease_summary(
+    *,
+    operation_kind: str,
+    record: OdooStableBootstrapOperationRecord | OdooStableTargetReplacementOperationRecord,
+    recorded_at: str,
+) -> OdooStableOperationLeaseSummary:
+    lease_expired = record.status == "running" and (
+        not record.lease_expires_at or record.lease_expires_at <= recorded_at
+    )
+    heartbeat_age_seconds: int | None = None
+    if record.heartbeat_at:
+        heartbeat_age_seconds = max(
+            int(
+                (
+                    _parse_timestamp(recorded_at) - _parse_timestamp(record.heartbeat_at)
+                ).total_seconds()
+            ),
+            0,
+        )
+    return OdooStableOperationLeaseSummary(
+        operation_kind=operation_kind,
+        operation_id=record.operation_id,
+        product=record.product,
+        context=record.context,
+        instance=record.instance,
+        status=record.status,
+        phase=record.phase,
+        attempt=record.attempt,
+        lease_owner=record.lease_owner,
+        lease_expires_at=record.lease_expires_at,
+        heartbeat_at=record.heartbeat_at,
+        heartbeat_age_seconds=heartbeat_age_seconds,
+        lease_expired=lease_expired,
     )
 
 
