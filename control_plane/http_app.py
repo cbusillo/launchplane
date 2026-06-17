@@ -42,6 +42,10 @@ from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAu
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
 )
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.contracts.runner_lane_registration_evidence import (
+    RunnerLaneRegistrationAuditEvidenceEnvelope,
+)
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
@@ -84,6 +88,7 @@ _PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
 _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
+_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -255,6 +260,13 @@ class _RunnerHostHygieneAuditEvidenceStore(Protocol):
     ) -> object: ...
 
 
+class _RunnerLaneRegistrationAuditEvidenceStore(Protocol):
+    def write_runner_lane_registration_audit_record(
+        self,
+        record: RunnerLaneRegistrationAuditRecord,
+    ) -> object: ...
+
+
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
     required_methods = (
         "list_artifact_manifests",
@@ -395,6 +407,24 @@ def require_runner_host_hygiene_audit_evidence_store(
             f"evidence writes: {missing_summary}"
         )
     return cast(_RunnerHostHygieneAuditEvidenceStore, record_store)
+
+
+def require_runner_lane_registration_audit_evidence_store(
+    record_store: object,
+) -> _RunnerLaneRegistrationAuditEvidenceStore:
+    required_methods = ("write_runner_lane_registration_audit_record",)
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support runner lane registration audit "
+            f"evidence writes: {missing_summary}"
+        )
+    return cast(_RunnerLaneRegistrationAuditEvidenceStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -1425,6 +1455,106 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def write_runner_lane_registration_audit_evidence(
+        request: Request,
+        runner_lane_registration_request: RunnerLaneRegistrationAuditEvidenceEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="runner_lane_registration_audit.write",
+            product=runner_lane_registration_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write runner lane registration audit evidence.",
+            )
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        try:
+            evidence_store = require_runner_lane_registration_audit_evidence_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        evidence_store.write_runner_lane_registration_audit_record(
+            runner_lane_registration_request.audit
+        )
+        records = {
+            "runner_lane_registration_audit_record_key": (
+                runner_lane_registration_request.audit.audit_record_key
+            ),
+        }
+        result: dict[str, object] = {
+            "runner_lane_registration_audit_record_key": (
+                runner_lane_registration_request.audit.audit_record_key
+            ),
+            "repository": runner_lane_registration_request.audit.request.repository,
+            "host_name": runner_lane_registration_request.audit.request.host_name,
+            "lane_name": runner_lane_registration_request.audit.request.lane_name,
+            "audit_status": runner_lane_registration_request.audit.status,
+            "mutate": runner_lane_registration_request.audit.request.mutate,
+            "audit": runner_lane_registration_request.audit.model_dump(mode="json"),
+        }
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=result,
+        )
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -1599,6 +1729,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_runner_host_hygiene_audit_evidence",
         summary="Write runner host hygiene audit evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE,
+        write_runner_lane_registration_audit_evidence,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_runner_lane_registration_audit_evidence",
+        summary="Write runner lane registration audit evidence",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

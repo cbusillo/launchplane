@@ -65,6 +65,9 @@ VeriReel product paths:
   - `POST /v1/evidence/runner-host-hygiene/audits` (native FastAPI for
     bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
     replay preservation, and runner-host hygiene audit storage)
+  - `POST /v1/evidence/runner-lane-registration/audits` (native FastAPI for
+    bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
+    replay preservation, and runner-lane registration audit storage)
 - product profile routes:
   - `GET /v1/product-profiles`
   - `GET /v1/product-profiles/{product}`
@@ -828,6 +831,8 @@ writes, not on every possible operator action.
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
+- `POST /v1/evidence/runner-host-hygiene/audits`
+- `POST /v1/evidence/runner-lane-registration/audits`
 
 `POST /v1/evidence/deployments` only requires the deployment-write record-store
 capability and any available idempotency store. Replay handling runs before the
@@ -872,6 +877,14 @@ and returns the accepted record key plus result details for the stored audit.
 Replay handling runs before the audit-write capability check so a stored
 response can still be returned if the backing store is temporarily
 write-restricted for runner-host hygiene audit evidence.
+
+`POST /v1/evidence/runner-lane-registration/audits` requires any available
+idempotency store plus runner-lane registration audit write capability. It
+accepts only product/context `launchplane/launchplane`, writes the typed audit
+record, and returns the accepted record key plus result details for the stored
+audit. Replay handling runs before the audit-write capability check so a stored
+response can still be returned if the backing store is temporarily
+write-restricted for runner-lane registration audit evidence.
 
 ### Preview lifecycle endpoints
 
@@ -1773,9 +1786,11 @@ Request payload:
 
 The route requires `runner_lane_registration_audit.write` for product/context
 `launchplane/launchplane`, writes the typed audit record to Launchplane-owned
-storage, and returns the `runner_lane_registration_audit_record_key`. It is
-evidence ingress only; the host-side registration executor owns any GitHub
-registration token request and runner `config.sh` execution.
+storage, and returns the `runner_lane_registration_audit_record_key` in both the
+accepted records and result details. It is native FastAPI evidence ingress for
+bearer-token callers with OpenAPI contract coverage and idempotency replay
+preservation. The host-side registration executor owns any GitHub registration
+token request and runner `config.sh` execution.
 
 For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate

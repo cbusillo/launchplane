@@ -204,9 +204,11 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
+)
+from control_plane.contracts.runner_lane_registration_evidence import (
+    RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
@@ -946,23 +948,6 @@ class DeploymentEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("deployment evidence requires product")
-        return self
-
-
-class RunnerLaneRegistrationAuditEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    audit: RunnerLaneRegistrationAuditRecord
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "RunnerLaneRegistrationAuditEvidenceEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError(
-                "runner lane registration audit evidence requires product 'launchplane'"
-            )
-        self.product = "launchplane"
         return self
 
 
