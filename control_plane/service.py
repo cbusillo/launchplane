@@ -26,7 +26,6 @@ from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     inspect_dokploy_target,
 )
-from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
@@ -4556,12 +4555,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_environment.read", {"repo_product_mapping": "true"}
     if len(segments) == 2 and segments == ["v1", "product-profiles"]:
         return "product_profile.read", {}
-    if (
-        len(segments) == 4
-        and segments[:2] == ["v1", "product-profiles"]
-        and segments[3] == "context-cutover-audit"
-    ):
-        return "product_profile.read", {"product": segments[2], "context_cutover_audit": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "product-profiles"]:
         return "product_profile.read", {"product": segments[2]}
     if len(segments) == 2 and segments == ["v1", "products"]:
@@ -11378,77 +11371,6 @@ def create_launchplane_service_app(
                                         authz_policy_sha256_value=resolved_authz_policy_sha256,
                                         authz_policy_source=resolved_authz_policy_source,
                                     ),
-                                },
-                            )
-                        if params.get("context_cutover_audit") == "true":
-                            if not isinstance(record_store, PostgresRecordStore):
-                                return _json_response(
-                                    start_response=start_response,
-                                    status_code=503,
-                                    payload={
-                                        "status": "rejected",
-                                        "trace_id": request_trace_id,
-                                        "error": {
-                                            "code": "database_required",
-                                            "message": "Context cutover audit requires Launchplane database storage.",
-                                        },
-                                    },
-                                )
-                            source_context = str(
-                                (query.get("source_context") or [""])[0] or ""
-                            ).strip()
-                            target_context = str(
-                                (query.get("target_context") or [""])[0] or ""
-                            ).strip()
-                            preview_context = str(
-                                (query.get("preview_context") or [""])[0] or ""
-                            ).strip()
-                            if not _product_profile_context_cutover_contexts_allowed(
-                                profile=profile,
-                                source_context=source_context,
-                                target_context=target_context,
-                                preview_context=preview_context,
-                            ):
-                                return _json_response(
-                                    start_response=start_response,
-                                    status_code=403,
-                                    payload={
-                                        "status": "rejected",
-                                        "trace_id": request_trace_id,
-                                        "error": {
-                                            "code": "context_not_in_product_boundary",
-                                            "message": "Requested audit contexts are not owned by the product profile.",
-                                        },
-                                    },
-                                )
-                            try:
-                                audit_payload = control_plane_product_context_audit.build_product_context_cutover_audit(
-                                    record_store=record_store,
-                                    product=profile.product,
-                                    source_context=source_context,
-                                    target_context=target_context,
-                                    preview_context=preview_context,
-                                )
-                            except ValueError:
-                                return _json_response(
-                                    start_response=start_response,
-                                    status_code=400,
-                                    payload={
-                                        "status": "rejected",
-                                        "trace_id": request_trace_id,
-                                        "error": {
-                                            "code": "invalid_context_cutover_audit_request",
-                                            "message": "Context cutover audit request is invalid.",
-                                        },
-                                    },
-                                )
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=200,
-                                payload={
-                                    "status": "ok",
-                                    "trace_id": request_trace_id,
-                                    "audit": audit_payload,
                                 },
                             )
                         return _json_response(
