@@ -50,8 +50,8 @@ VeriReel product paths:
     context
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
-- native FastAPI deployment, promotion, preview, inventory, and operations
-  reads:
+- native FastAPI deployment, promotion, preview, inventory, operations, and
+  managed-secret status reads:
   - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
     stored record context
   - `GET /v1/promotions/{record_id}`, requiring `promotion.read` for the stored
@@ -64,6 +64,12 @@ VeriReel product paths:
     the stored inventory context
   - `GET /v1/contexts/{context}/operations/recent`, requiring
     `operations.read` for the path context
+  - `GET /v1/contexts/{context}/secrets`, requiring `secret.list` for the path
+    context
+  - `GET /v1/contexts/{context}/instances/{instance}/secrets`, requiring
+    `secret.list` for the path context
+  - `GET /v1/secrets/{secret_id}`, requiring `secret.read` for the stored
+    secret context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
@@ -1263,9 +1269,12 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `GET /v1/artifacts/protected` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/contexts/{context}/secrets`
-- `GET /v1/contexts/{context}/instances/{instance}/secrets`
-- `GET /v1/secrets/{secret_id}`
+- `GET /v1/contexts/{context}/secrets` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/contexts/{context}/instances/{instance}/secrets` (native FastAPI
+  for bearer-token and human-session callers)
+- `GET /v1/secrets/{secret_id}` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/contexts/{context}/operations/recent` (native FastAPI for
   bearer-token and human-session callers)
 - `GET /v1/product-profiles/{product}/context-cutover-audit`
@@ -1288,8 +1297,13 @@ against the path context before store access, then verify the stored inventory
 context before returning the typed record envelope. Recent operations reads
 authorize `operations.read` against the path context before store access, then
 return the typed recent inventory/deployment/promotion/preview operation
-envelope. Their legacy WSGI branches are deleted; direct fallback calls fail
-closed while the mounted fallback remains for retained non-native routes.
+envelope. Managed-secret status list reads authorize `secret.list` against the
+path context before store access. Single managed-secret status reads load the
+metadata-only secret status to discover the stored secret context, then check
+`secret.read` against product `launchplane` and that stored context before
+returning the typed status envelope. Their legacy WSGI branches are deleted;
+direct fallback calls fail closed while the mounted fallback remains for
+retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,

@@ -2338,6 +2338,253 @@ class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
+class FastApiSecretStatusReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_secret_status_routes_return_metadata_only_models(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            secret_ids = _write_secret_status_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="secret.list",
+                    context="example-site",
+                    extra_actions=("secret.read",),
+                ),
+                record_store_factory=lambda: app_store,
+            )
+
+            context_response = await _get_context_secret_statuses(app, "example-site")
+            instance_response = await _get_instance_secret_statuses(
+                app,
+                "example-site",
+                "prod",
+            )
+            show_response = await _get_secret_status(app, secret_ids["context"])
+            app_store.close()
+
+        self.assertEqual(context_response.status_code, 200)
+        self.assertEqual(instance_response.status_code, 200)
+        self.assertEqual(show_response.status_code, 200)
+        context_payload = context_response.json()
+        instance_payload = instance_response.json()
+        show_payload = show_response.json()
+        self.assertEqual(context_payload["status"], "ok")
+        self.assertEqual(context_payload["context"], "example-site")
+        self.assertEqual(context_payload["instance"], "")
+        self.assertEqual(
+            {secret["secret_id"] for secret in context_payload["secrets"]},
+            {secret_ids["global"], secret_ids["context"]},
+        )
+        self.assertEqual(instance_payload["context"], "example-site")
+        self.assertEqual(instance_payload["instance"], "prod")
+        self.assertEqual(
+            {secret["secret_id"] for secret in instance_payload["secrets"]},
+            {secret_ids["global"], secret_ids["context"], secret_ids["instance"]},
+        )
+        self.assertNotIn(secret_ids["other_instance"], json.dumps(instance_payload))
+        self.assertEqual(show_payload["status"], "ok")
+        self.assertEqual(show_payload["secret"]["secret_id"], secret_ids["context"])
+        self.assertEqual(show_payload["secret"]["context"], "example-site")
+        self.assertEqual(
+            show_payload["secret"]["binding"]["binding_key"],
+            "GITHUB_WEBHOOK_SECRET",
+        )
+        response_text = json.dumps(
+            {"context": context_payload, "instance": instance_payload, "show": show_payload}
+        )
+        self.assertNotIn("global-token", response_text)
+        self.assertNotIn("plain-secret-value-alpha", response_text)
+        self.assertNotIn("plain-secret-value-beta", response_text)
+        self.assertNotIn("plain-secret-value-gamma", response_text)
+        self.assertNotIn("ciphertext", response_text)
+
+    async def test_secret_status_routes_require_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="secret.list", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        list_response = await _get_context_secret_statuses(
+            app,
+            "example-site",
+            authorization="",
+        )
+        show_response = await _get_secret_status(
+            app,
+            "secret-runtime-environment-github-webhook-secret-example-site",
+            authorization="",
+        )
+
+        self.assertEqual(list_response.status_code, 401)
+        self.assertEqual(list_response.json()["error"]["code"], "authentication_required")
+        self.assertEqual(show_response.status_code, 401)
+        self.assertEqual(show_response.json()["error"]["code"], "authentication_required")
+
+    async def test_secret_list_rejects_wrong_context_before_store_access(self) -> None:
+        store = _SecretStatusProbeStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="secret.list", context="other-site"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _get_context_secret_statuses(app, "example-site")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(store.calls, [])
+
+    async def test_secret_read_uses_stored_context_for_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            secret_ids = _write_secret_status_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="secret.read", context="other-site"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_secret_status(app, secret_ids["context"])
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertNotIn("plain-secret-value-alpha", json.dumps(payload))
+
+    async def test_secret_status_routes_require_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="secret.list",
+                context="example-site",
+                extra_actions=("secret.read",),
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        list_response = await _get_context_secret_statuses(app, "example-site")
+        show_response = await _get_secret_status(
+            app,
+            "secret-runtime-environment-github-webhook-secret-example-site",
+        )
+
+        self.assertEqual(list_response.status_code, 503)
+        self.assertEqual(show_response.status_code, 503)
+        self.assertEqual(list_response.json()["error"]["code"], "database_storage_required")
+        self.assertEqual(show_response.json()["error"]["code"], "database_storage_required")
+        self.assertIn("read_secret_record", list_response.json()["error"]["message"])
+        self.assertIn("read_secret_record", show_response.json()["error"]["message"])
+
+    async def test_secret_read_returns_not_found_for_missing_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="secret.read", context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_secret_status(app, "secret-runtime-environment-missing")
+            store.close()
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_secret_status_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="secret.list", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route_expectations = {
+            "/v1/contexts/{context}/secrets": (
+                "list_context_secret_statuses",
+                "SecretStatusListResponse",
+            ),
+            "/v1/contexts/{context}/instances/{instance}/secrets": (
+                "list_instance_secret_statuses",
+                "SecretStatusListResponse",
+            ),
+            "/v1/secrets/{secret_id}": ("read_secret_status", "SecretStatusResponse"),
+        }
+        for path, (operation_id, response_model) in route_expectations.items():
+            route = openapi["paths"][path]["get"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                f"#/components/schemas/{response_model}",
+            )
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+            for status_code in ("401", "403", "404", "503"):
+                self.assertIn(status_code, route["responses"])
+        for schema_name in (
+            "SecretStatusResponse",
+            "SecretStatusListResponse",
+            "SecretStatusReadModel",
+            "SecretStatusBinding",
+            "SecretStatusAuditEvent",
+        ):
+            self.assertEqual(
+                openapi["components"]["schemas"][schema_name]["additionalProperties"],
+                False,
+            )
+        schema_text = json.dumps(openapi["components"]["schemas"]["SecretStatusReadModel"])
+        self.assertNotIn("ciphertext", schema_text)
+        self.assertNotIn("plaintext", schema_text)
+
+    async def test_fastapi_secret_status_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            secret_ids = _write_secret_status_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            policy = _record_read_policy(
+                action="secret.list",
+                context="example-site",
+                extra_actions=("secret.read",),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: app_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            list_response = await _get_context_secret_statuses(app, "example-site")
+            show_response = await _get_secret_status(app, secret_ids["context"])
+            app_store.close()
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(show_response.status_code, 200)
+        self.assertEqual(list_response.json()["status"], "ok")
+        self.assertEqual(show_response.json()["status"], "ok")
+
+
 class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_preview_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -5178,6 +5425,64 @@ def _write_recent_operations_records(store: FilesystemRecordStore) -> None:
     store.write_preview_record(_preview_read_record())
 
 
+def _write_secret_status_records(database_url: str) -> dict[str, str]:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    with patch.dict(
+        "os.environ",
+        {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+        clear=True,
+    ):
+        global_secret = control_plane_secrets.write_secret_value(
+            record_store=store,
+            scope="global",
+            integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+            name="token",
+            plaintext_value="global-token",
+            binding_key="DOKPLOY_TOKEN",
+            actor="test",
+        )
+        context_secret = control_plane_secrets.write_secret_value(
+            record_store=store,
+            scope="context",
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            name="GITHUB_WEBHOOK_SECRET",
+            plaintext_value="plain-secret-value-alpha",
+            binding_key="GITHUB_WEBHOOK_SECRET",
+            context_name="example-site",
+            actor="test",
+        )
+        instance_secret = control_plane_secrets.write_secret_value(
+            record_store=store,
+            scope="context_instance",
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            name="SMTP_PASSWORD",
+            plaintext_value="plain-secret-value-beta",
+            binding_key="SMTP_PASSWORD",
+            context_name="example-site",
+            instance_name="prod",
+            actor="test",
+        )
+        other_instance_secret = control_plane_secrets.write_secret_value(
+            record_store=store,
+            scope="context_instance",
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            name="SMTP_PASSWORD",
+            plaintext_value="plain-secret-value-gamma",
+            binding_key="SMTP_PASSWORD",
+            context_name="example-site",
+            instance_name="testing",
+            actor="test",
+        )
+    store.close()
+    return {
+        "global": str(global_secret["secret_id"]),
+        "context": str(context_secret["secret_id"]),
+        "instance": str(instance_secret["secret_id"]),
+        "other_instance": str(other_instance_secret["secret_id"]),
+    }
+
+
 def _preview_destroyed_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -5871,6 +6176,54 @@ async def _get_recent_operations(
     )
 
 
+async def _get_context_secret_statuses(
+    app: FastAPI,
+    context: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/secrets",
+        headers=request_headers,
+    )
+
+
+async def _get_instance_secret_statuses(
+    app: FastAPI,
+    context: str,
+    instance: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/instances/{instance}/secrets",
+        headers=request_headers,
+    )
+
+
+async def _get_secret_status(
+    app: FastAPI,
+    secret_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, f"/v1/secrets/{secret_id}", headers=request_headers)
+
+
 async def _get_preview_record(
     app: FastAPI,
     preview_id: str,
@@ -6132,6 +6485,51 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _SecretStatusProbeStore:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def read_secret_record(self, secret_id: str) -> object:
+        self.calls.append(f"read_secret_record:{secret_id}")
+        raise FileNotFoundError(secret_id)
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[object, ...]:
+        del integration, context_name, instance_name, limit
+        self.calls.append("list_secret_records")
+        return ()
+
+    def read_secret_version(self, version_id: str) -> object:
+        self.calls.append(f"read_secret_version:{version_id}")
+        raise FileNotFoundError(version_id)
+
+    def list_secret_versions(self, *, secret_id: str) -> tuple[object, ...]:
+        self.calls.append(f"list_secret_versions:{secret_id}")
+        return ()
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[object, ...]:
+        del integration, context_name, instance_name, limit
+        self.calls.append("list_secret_bindings")
+        return ()
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[object, ...]:
+        self.calls.append(f"list_secret_audit_events:{secret_id}")
+        return ()
 
 
 class _RecentOperationsProbeStore:
