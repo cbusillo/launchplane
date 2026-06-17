@@ -4513,17 +4513,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 3 and segments[:2] == ["v1", "secrets"]:
-        return "secret.read", {"secret_id": segments[2]}
-    if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "secrets":
-        return "secret.list", {"context": segments[2]}
-    if (
-        len(segments) == 6
-        and segments[:2] == ["v1", "contexts"]
-        and segments[3] == "instances"
-        and segments[5] == "secrets"
-    ):
-        return "secret.list", {"context": segments[2], "instance": segments[4]}
     if (
         len(segments) == 6
         and segments[:2] == ["v1", "contexts"]
@@ -10950,102 +10939,6 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in canary_records
                             ],
-                        },
-                    )
-                if action == "secret.read":
-                    secret_store = _secret_capable_store(record_store)
-                    if secret_store is None:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=404,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "not_found",
-                                    "message": "Launchplane secret status routes require the Postgres storage backend.",
-                                },
-                            },
-                        )
-                    secret_status = control_plane_secrets.build_secret_status(
-                        secret_store,
-                        secret_id=params["secret_id"],
-                    )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=str(secret_status["context"]),
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Launchplane managed secret status for the requested context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "secret": secret_status,
-                        },
-                    )
-                if action == "secret.list":
-                    context_name = params["context"]
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=context_name,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot list Launchplane managed secret status for the requested context.",
-                                },
-                            },
-                        )
-                    secret_store = _secret_capable_store(record_store)
-                    if secret_store is None:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=404,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "not_found",
-                                    "message": "Launchplane secret status routes require the Postgres storage backend.",
-                                },
-                            },
-                        )
-                    statuses = control_plane_secrets.list_secret_statuses(
-                        secret_store,
-                        context_name=context_name,
-                        instance_name=params.get("instance", ""),
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "context": context_name,
-                            "instance": params.get("instance", ""),
-                            "secrets": statuses,
                         },
                     )
                 if action == "target_logs.read":

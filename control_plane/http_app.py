@@ -13,6 +13,7 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import product_read_service as control_plane_product_read_service
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -49,6 +50,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
+from control_plane.contracts.secret_record import SecretScope
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
@@ -213,6 +215,70 @@ class RecentOperationsResponse(BaseModel):
     recent_deployments: tuple[DeploymentRecord, ...]
     recent_promotions: tuple[PromotionRecord, ...]
     recent_previews: tuple[PreviewRecord, ...]
+
+
+class SecretStatusBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_id: str
+    binding_type: str
+    binding_key: str
+    status: str
+    context: str
+    instance: str
+    updated_at: str
+
+
+class SecretStatusAuditEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    event_type: str
+    recorded_at: str
+    actor: str
+    detail: str
+    metadata: dict[str, str]
+
+
+class SecretStatusReadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    secret_id: str
+    scope: SecretScope
+    integration: str
+    name: str
+    context: str
+    instance: str
+    policy: str
+    status: str
+    description: str
+    created_at: str
+    updated_at: str
+    updated_by: str
+    last_validated_at: str
+    current_version_id: str
+    version_count: int
+    current_version_created_at: str
+    binding: SecretStatusBinding | None = None
+    recent_audit_events: tuple[SecretStatusAuditEvent, ...]
+
+
+class SecretStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    secret: SecretStatusReadModel
+
+
+class SecretStatusListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    context: str
+    instance: str
+    secrets: tuple[SecretStatusReadModel, ...]
 
 
 class ProtectedArtifactsResponse(BaseModel):
@@ -620,6 +686,28 @@ def require_recent_operations_read_store(record_store: object) -> _RecentOperati
             f"Launchplane record store does not support recent operation reads: {missing_summary}"
         )
     return cast(_RecentOperationsReadStore, record_store)
+
+
+def require_secret_status_read_store(record_store: object) -> control_plane_secrets.SecretReadStore:
+    required_methods = (
+        "read_secret_record",
+        "list_secret_records",
+        "read_secret_version",
+        "list_secret_versions",
+        "list_secret_bindings",
+        "list_secret_audit_events",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support secret status reads: {missing_summary}"
+        )
+    return cast(control_plane_secrets.SecretReadStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -1336,6 +1424,124 @@ def create_launchplane_fastapi_app(
             recent_deployments=recent_deployments,
             recent_promotions=recent_promotions,
             recent_previews=recent_previews,
+        )
+
+    def read_secret_status(
+        secret_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> SecretStatusResponse:
+        trace_id = next_trace_id()
+        try:
+            secret_store = require_secret_status_read_store(record_store)
+            secret_status = SecretStatusReadModel.model_validate(
+                control_plane_secrets.build_secret_status(
+                    secret_store,
+                    secret_id=secret_id,
+                )
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="secret.read",
+            product="launchplane",
+            context=secret_status.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read Launchplane managed secret status for the requested context.",
+            )
+        return SecretStatusResponse(trace_id=trace_id, secret=secret_status)
+
+    def list_context_secret_statuses(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> SecretStatusListResponse:
+        return list_secret_statuses_for_context(
+            context=context,
+            instance="",
+            identity=identity,
+            record_store=record_store,
+        )
+
+    def list_instance_secret_statuses(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> SecretStatusListResponse:
+        return list_secret_statuses_for_context(
+            context=context,
+            instance=instance,
+            identity=identity,
+            record_store=record_store,
+        )
+
+    def list_secret_statuses_for_context(
+        *,
+        context: str,
+        instance: str,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+    ) -> SecretStatusListResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="secret.list",
+            product="launchplane",
+            context=context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot list Launchplane managed secret status for the requested context.",
+            )
+        try:
+            secret_store = require_secret_status_read_store(record_store)
+            statuses = tuple(
+                SecretStatusReadModel.model_validate(status)
+                for status in control_plane_secrets.list_secret_statuses(
+                    secret_store,
+                    context_name=context,
+                    instance_name=instance,
+                )
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return SecretStatusListResponse(
+            trace_id=trace_id,
+            context=context,
+            instance=instance,
+            secrets=statuses,
         )
 
     def accepted_evidence_response(
@@ -2211,6 +2417,54 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/secrets",
+        list_context_secret_statuses,
+        methods=["GET"],
+        response_model=SecretStatusListResponse,
+        operation_id="list_context_secret_statuses",
+        summary="List Launchplane managed secret status for a context",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/instances/{instance}/secrets",
+        list_instance_secret_statuses,
+        methods=["GET"],
+        response_model=SecretStatusListResponse,
+        operation_id="list_instance_secret_statuses",
+        summary="List Launchplane managed secret status for an instance",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/secrets/{secret_id}",
+        read_secret_status,
+        methods=["GET"],
+        response_model=SecretStatusResponse,
+        operation_id="read_secret_status",
+        summary="Read Launchplane managed secret status",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

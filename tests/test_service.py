@@ -37462,6 +37462,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="GET",
                 path="/v1/contexts/opw/operations/recent",
             )
+            context_secrets_status_code, context_secrets_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/opw/secrets",
+            )
+            instance_secrets_status_code, instance_secrets_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/opw/instances/prod/secrets",
+            )
+            secret_status_code, secret_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/secrets/secret-runtime-environment-github-webhook-secret-opw",
+            )
 
         self.assertEqual(deployment_status_code, 404)
         self.assertEqual(deployment_payload["status"], "rejected")
@@ -37481,85 +37496,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(recent_operations_status_code, 404)
         self.assertEqual(recent_operations_payload["status"], "rejected")
         self.assertEqual(recent_operations_payload["error"]["code"], "not_found")
-
-    def test_secret_status_endpoints_return_operator_read_models(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="global",
-                    integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
-                    name="token",
-                    plaintext_value="dokploy-token",
-                    binding_key="DOKPLOY_TOKEN",
-                    actor="test",
-                )
-                context_secret = control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    name="GITHUB_WEBHOOK_SECRET",
-                    plaintext_value="webhook-secret",
-                    binding_key="GITHUB_WEBHOOK_SECRET",
-                    context_name="opw",
-                    actor="test",
-                )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "contexts": ["opw"],
-                            "actions": ["secret.read", "secret.list"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                },
-                clear=True,
-            ):
-                list_status_code, list_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/contexts/opw/secrets",
-                )
-                show_status_code, show_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path=f"/v1/secrets/{context_secret['secret_id']}",
-                )
-
-            self.assertEqual(list_status_code, 200)
-            self.assertEqual(list_payload["context"], "opw")
-            self.assertEqual(len(list_payload["secrets"]), 2)
-            self.assertEqual(show_status_code, 200)
-            self.assertEqual(show_payload["secret"]["secret_id"], context_secret["secret_id"])
-            self.assertEqual(
-                show_payload["secret"]["binding"]["binding_key"], "GITHUB_WEBHOOK_SECRET"
-            )
+        self.assertEqual(context_secrets_status_code, 404)
+        self.assertEqual(context_secrets_payload["status"], "rejected")
+        self.assertEqual(context_secrets_payload["error"]["code"], "not_found")
+        self.assertEqual(instance_secrets_status_code, 404)
+        self.assertEqual(instance_secrets_payload["status"], "rejected")
+        self.assertEqual(instance_secrets_payload["error"]["code"], "not_found")
+        self.assertEqual(secret_status_code, 404)
+        self.assertEqual(secret_payload["status"], "rejected")
+        self.assertEqual(secret_payload["error"]["code"], "not_found")
