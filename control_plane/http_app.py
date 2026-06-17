@@ -29,9 +29,14 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
 )
+from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.product_environment_read_model import (
+    ProductActivityReadModel,
     ProductEnvironmentConfigStatus,
+    ProductEnvironmentDetail,
+    ProductEnvironmentSummary,
     ProductReadModelStore,
+    ProductSiteOverview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_evidence import (
@@ -141,6 +146,53 @@ class ProductEnvironmentConfigStatusResponse(BaseModel):
     status: str = "ok"
     trace_id: str
     config_status: ProductEnvironmentConfigStatus
+
+
+class ProductEnvironmentListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    products: tuple[ProductSiteOverview, ...]
+
+
+class ProductOverviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: ProductSiteOverview
+
+
+class ProductActivityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    activity: ProductActivityReadModel
+
+
+class ProductEnvironmentsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    display_name: str
+    repository: str
+    driver_id: str
+    base_driver_id: str = ""
+    environments: tuple[ProductEnvironmentSummary, ...]
+    trust_state: FreshnessStatus
+    provenance: DataProvenance
+
+
+class ProductEnvironmentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    environment: ProductEnvironmentDetail
 
 
 class DriverDescriptorsResponse(BaseModel):
@@ -1157,6 +1209,241 @@ def create_launchplane_fastapi_app(
         return ProductEnvironmentConfigStatusResponse(
             trace_id=trace_id,
             config_status=config_status,
+        )
+
+    def product_environment_action_allowed(
+        identity: LaunchplaneIdentity,
+        requested_action: str,
+        requested_product: str,
+        requested_context: str,
+    ) -> bool:
+        return resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=requested_action,
+            product=requested_product,
+            context=requested_context,
+        )
+
+    def build_product_environment_read_result(
+        *,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+        params: dict[str, str],
+    ) -> control_plane_product_read_service.ProductEnvironmentReadServiceResult:
+        def action_allowed(
+            requested_action: str, requested_product: str, requested_context: str
+        ) -> bool:
+            return product_environment_action_allowed(
+                identity,
+                requested_action,
+                requested_product,
+                requested_context,
+            )
+
+        try:
+            product_read_store = (
+                control_plane_product_read_service.require_product_environment_read_model_store(
+                    record_store
+                )
+            )
+            return control_plane_product_read_service.build_product_environment_read_service_result(
+                record_store=product_read_store,
+                params=params,
+                action_allowed=action_allowed,
+            )
+        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+
+    def require_product_environment_result_authorization(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        result: control_plane_product_read_service.ProductEnvironmentReadServiceResult,
+    ) -> None:
+        if product_environment_action_allowed(
+            identity,
+            "product_environment.read",
+            result.authorization_product,
+            result.authorization_context,
+        ):
+            return
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message=result.denial_message,
+        )
+
+    def list_product_environment_overviews(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductEnvironmentListResponse:
+        trace_id = next_trace_id()
+
+        def action_allowed(
+            requested_action: str, requested_product: str, requested_context: str
+        ) -> bool:
+            return product_environment_action_allowed(
+                identity,
+                requested_action,
+                requested_product,
+                requested_context,
+            )
+
+        if not product_environment_action_allowed(
+            identity,
+            "product_environment.read",
+            "launchplane",
+            _LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot list product overviews.",
+            )
+        try:
+            product_read_store = (
+                control_plane_product_read_service.require_product_environment_read_model_store(
+                    record_store
+                )
+            )
+            payload = (
+                control_plane_product_read_service.build_product_environment_list_service_payload(
+                    record_store=product_read_store,
+                    action_allowed=action_allowed,
+                )
+            )
+        except control_plane_product_read_service.ProductReadModelStoreCapabilityError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        products = tuple(
+            ProductSiteOverview.model_validate(product)
+            for product in cast(list[object], payload["products"])
+        )
+        return ProductEnvironmentListResponse(trace_id=trace_id, products=products)
+
+    def read_product_overview(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductOverviewResponse:
+        trace_id = next_trace_id()
+        result = build_product_environment_read_result(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product},
+        )
+        require_product_environment_result_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        overview = ProductSiteOverview.model_validate(result.payload["product"])
+        return ProductOverviewResponse(trace_id=trace_id, product=overview)
+
+    def read_product_activity(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductActivityResponse:
+        trace_id = next_trace_id()
+        result = build_product_environment_read_result(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product, "activity": "true"},
+        )
+        require_product_environment_result_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        activity = ProductActivityReadModel.model_validate(result.payload["activity"])
+        return ProductActivityResponse(trace_id=trace_id, activity=activity)
+
+    def list_product_environments(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductEnvironmentsResponse:
+        trace_id = next_trace_id()
+        result = build_product_environment_read_result(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product, "environments": "true"},
+        )
+        require_product_environment_result_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        payload = result.payload
+        environments = tuple(
+            ProductEnvironmentSummary.model_validate(environment)
+            for environment in cast(list[object], payload["environments"])
+        )
+        provenance = DataProvenance.model_validate(payload["provenance"])
+        return ProductEnvironmentsResponse(
+            trace_id=trace_id,
+            product=str(payload["product"]),
+            display_name=str(payload["display_name"]),
+            repository=str(payload["repository"]),
+            driver_id=str(payload["driver_id"]),
+            base_driver_id=str(payload.get("base_driver_id", "")),
+            environments=environments,
+            trust_state=cast(FreshnessStatus, payload["trust_state"]),
+            provenance=provenance,
+        )
+
+    def read_product_environment(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        environment: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductEnvironmentResponse:
+        trace_id = next_trace_id()
+        result = build_product_environment_read_result(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+            params={"product": product, "environment": environment},
+        )
+        require_product_environment_result_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            result=result,
+        )
+        environment_detail = ProductEnvironmentDetail.model_validate(result.payload["environment"])
+        return ProductEnvironmentResponse(
+            trace_id=trace_id,
+            environment=environment_detail,
         )
 
     def read_protected_artifacts(
@@ -2704,6 +2991,64 @@ def create_launchplane_fastapi_app(
             403: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
+    )
+
+    product_environment_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        404: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
+
+    app.add_api_route(
+        "/v1/products",
+        list_product_environment_overviews,
+        methods=["GET"],
+        response_model=ProductEnvironmentListResponse,
+        operation_id="list_products",
+        summary="List product environment overviews",
+        responses=product_environment_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/products/{product}",
+        read_product_overview,
+        methods=["GET"],
+        response_model=ProductOverviewResponse,
+        operation_id="read_product",
+        summary="Read a product environment overview",
+        responses=product_environment_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/products/{product}/activity",
+        read_product_activity,
+        methods=["GET"],
+        response_model=ProductActivityResponse,
+        operation_id="read_product_activity",
+        summary="Read product activity",
+        responses=product_environment_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/products/{product}/environments",
+        list_product_environments,
+        methods=["GET"],
+        response_model=ProductEnvironmentsResponse,
+        operation_id="list_product_environments",
+        summary="List product environments",
+        responses=product_environment_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/products/{product}/environments/{environment}",
+        read_product_environment,
+        methods=["GET"],
+        response_model=ProductEnvironmentResponse,
+        operation_id="read_product_environment",
+        summary="Read one product environment",
+        responses=product_environment_error_responses,
     )
 
     app.add_api_route(

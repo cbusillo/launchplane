@@ -28,7 +28,6 @@ from control_plane.dokploy_target_inspect import (
 )
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
-from control_plane import product_read_service as control_plane_product_read_service
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
@@ -4552,8 +4551,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "work_graph.issue_inbox", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
         return "product_environment.read", {"repo_product_mapping": "true"}
-    if len(segments) == 2 and segments == ["v1", "products"]:
-        return "product_environment.read", {}
     if len(segments) == 4 and segments == [
         "v1",
         "products",
@@ -4583,14 +4580,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "apply",
     ]:
         return "preview_pr_feedback_notification_policy.apply", {}
-    if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
-        return "product_environment.read", {"product": segments[2], "activity": "true"}
-    if len(segments) == 3 and segments[:2] == ["v1", "products"]:
-        return "product_environment.read", {"product": segments[2]}
-    if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
-        return "product_environment.read", {"product": segments[2], "environments": "true"}
-    if len(segments) == 5 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
-        return "product_environment.read", {"product": segments[2], "environment": segments[4]}
     return None
 
 
@@ -11336,17 +11325,6 @@ def create_launchplane_service_app(
                         },
                     )
                 if action == "product_environment.read":
-
-                    def product_action_allowed(
-                        requested_action: str, requested_product: str, requested_context: str
-                    ) -> bool:
-                        return authz_policy.allows(
-                            identity=identity,
-                            action=requested_action,
-                            product=requested_product,
-                            context=requested_context,
-                        )
-
                     if params.get("agent_context") == "true":
                         if not agent_context_allowed(
                             authz_policy=authz_policy,
@@ -11398,136 +11376,6 @@ def create_launchplane_service_app(
                             json_response=_json_response,
                             start_response=start_response,
                         )
-
-                    if control_plane_product_read_service.is_product_environment_detail_request(
-                        params
-                    ):
-                        try:
-                            product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
-                                record_store
-                            )
-                        except (
-                            control_plane_product_read_service.ProductReadModelStoreCapabilityError
-                        ) as error:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=503,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "database_storage_required",
-                                        "message": str(error),
-                                    },
-                                },
-                            )
-                        try:
-                            product_read_result = control_plane_product_read_service.build_product_environment_read_service_result(
-                                record_store=product_read_store,
-                                params=params,
-                                action_allowed=product_action_allowed,
-                            )
-                        except FileNotFoundError as error:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=404,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "not_found",
-                                        "message": str(error),
-                                    },
-                                },
-                            )
-                        except ValueError as error:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=400,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "invalid_request",
-                                        "message": str(error),
-                                    },
-                                },
-                            )
-                        if not product_action_allowed(
-                            "product_environment.read",
-                            product_read_result.authorization_product,
-                            product_read_result.authorization_context,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": product_read_result.denial_message,
-                                    },
-                                },
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                **product_read_result.payload,
-                            },
-                        )
-                    if not product_action_allowed(
-                        "product_environment.read",
-                        "launchplane",
-                        _LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot list product overviews.",
-                                },
-                            },
-                        )
-                    try:
-                        product_read_store = control_plane_product_read_service.require_product_environment_read_model_store(
-                            record_store
-                        )
-                    except (
-                        control_plane_product_read_service.ProductReadModelStoreCapabilityError
-                    ) as error:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=503,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "database_storage_required",
-                                    "message": str(error),
-                                },
-                            },
-                        )
-                    product_list_payload = control_plane_product_read_service.build_product_environment_list_service_payload(
-                        record_store=product_read_store,
-                        action_allowed=product_action_allowed,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            **product_list_payload,
-                        },
-                    )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(
                     identity=identity,

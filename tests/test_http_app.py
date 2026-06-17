@@ -15,8 +15,12 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -936,6 +940,362 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(health_payload["status"], "ok")
         self.assertEqual(health_payload["storage_backend"], "filesystem")
         self.assertIn("trace_id", health_payload)
+
+
+class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_products_returns_db_backed_overviews(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(
+                    context="launchplane", products=("launchplane", "example-site")
+                ),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_products(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        response_text = json.dumps(payload)
+        self.assertEqual(set(payload), {"status", "trace_id", "products"})
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual([product["product"] for product in payload["products"]], ["example-site"])
+        self.assertEqual(payload["products"][0]["driver_id"], "generic-web")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
+
+    async def test_read_product_returns_overview(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="launchplane"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_product(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"status", "trace_id", "product"})
+        product = payload["product"]
+        self.assertEqual(product["product"], "example-site")
+        self.assertEqual(product["driver_id"], "generic-web")
+        self.assertEqual(
+            [environment["environment"] for environment in product["environments"]],
+            ["testing", "prod"],
+        )
+
+    async def test_read_product_activity_returns_timeline(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="launchplane"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_product_activity(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"status", "trace_id", "activity"})
+        self.assertEqual(payload["activity"]["product"], "example-site")
+        self.assertEqual(payload["activity"]["events"][0]["event_type"], "authz_policy")
+
+    async def test_list_product_environments_returns_redacted_summaries(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="launchplane"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_product_environments(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        response_text = json.dumps(payload)
+        self.assertEqual(payload["product"], "example-site")
+        self.assertEqual(
+            [environment["environment"] for environment in payload["environments"]],
+            ["testing", "prod"],
+        )
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
+
+    async def test_read_product_environment_redacts_runtime_and_secret_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_product_environment(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        response_text = json.dumps(payload)
+        environment = payload["environment"]
+        self.assertEqual(environment["product"], "example-site")
+        self.assertEqual(environment["environment"], "prod")
+        self.assertEqual(environment["target"]["target_name"], "example-site-prod")
+        self.assertTrue(environment["target"]["target_id_recorded"])
+        self.assertEqual(environment["runtime_settings"][0]["env_keys"], ["INTERNAL_CALLBACK_URL"])
+        self.assertEqual(environment["managed_secrets"][0]["binding_key"], "SMTP_PASSWORD")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
+
+    async def test_product_environment_reads_require_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        responses = [
+            await _get_products(app, authorization=""),
+            await _get_product(app, authorization=""),
+            await _get_product_activity(app, authorization=""),
+            await _get_product_environments(app, authorization=""),
+            await _get_product_environment(app, authorization=""),
+        ]
+
+        for response in responses:
+            self.assertEqual(response.status_code, 401)
+            self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_list_products_rejects_unauthorized_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_products(app)
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_product_environment_reads_reject_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="launchplane"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_product_environment(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_product_environment_reads_return_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: app_store,
+            )
+
+            missing_product = await _get_product_environment(app, product="missing-site")
+            missing_environment = await _get_product_environment(app, environment="staging")
+            app_store.close()
+
+        self.assertEqual(missing_product.status_code, 404)
+        self.assertEqual(
+            missing_product.json()["error"]["message"], "Product 'missing-site' was not found."
+        )
+        self.assertEqual(missing_environment.status_code, 404)
+        self.assertEqual(
+            missing_environment.json()["error"]["message"],
+            "Product 'example-site' has no environment 'staging'.",
+        )
+
+    async def test_product_environment_reads_require_db_backed_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(
+                context="launchplane", products=("launchplane", "example-site")
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        list_response = await _get_products(app)
+        detail_response = await _get_product_environment(app)
+
+        self.assertEqual(list_response.status_code, 503)
+        self.assertEqual(detail_response.status_code, 503)
+        self.assertEqual(list_response.json()["error"]["code"], "database_storage_required")
+        self.assertEqual(detail_response.json()["error"]["code"], "database_storage_required")
+
+    async def test_product_environment_reads_accept_local_operator_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_product_environment_read_policy(
+                    context="example-site"
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _get_product_environment(
+                app,
+                authorization="Bearer local-operator-token",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["environment"]["product"], "example-site")
+
+    async def test_product_environment_reads_accept_terminal_agent_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_product_environment_read_policy(
+                    context="example-site"
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _get_product_environment(
+                app,
+                authorization="Bearer terminal-read-token",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["environment"]["product"], "example-site")
+
+    async def test_openapi_includes_product_environment_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        expected_routes = {
+            "/v1/products": ("list_products", "ProductEnvironmentListResponse"),
+            "/v1/products/{product}": ("read_product", "ProductOverviewResponse"),
+            "/v1/products/{product}/activity": (
+                "read_product_activity",
+                "ProductActivityResponse",
+            ),
+            "/v1/products/{product}/environments": (
+                "list_product_environments",
+                "ProductEnvironmentsResponse",
+            ),
+            "/v1/products/{product}/environments/{environment}": (
+                "read_product_environment",
+                "ProductEnvironmentResponse",
+            ),
+        }
+        for path, (operation_id, response_model_name) in expected_routes.items():
+            route = openapi["paths"][path]["get"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                f"#/components/schemas/{response_model_name}",
+            )
+            for status_code in ("400", "401", "403", "404", "503"):
+                self.assertIn(
+                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
+                )
+            self.assertFalse(
+                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
+            )
+
+    async def test_fastapi_product_environment_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_product_environment_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            policy = _product_environment_read_policy(
+                contexts=("launchplane", "example-site"),
+                products=("launchplane", "example-site"),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: app_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "legacy-state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            list_response = await _get_products(app)
+            overview_response = await _get_product(app)
+            activity_response = await _get_product_activity(app)
+            environments_response = await _get_product_environments(app)
+            config_status_response = await _get_config_status(app)
+            app_store.close()
+
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(overview_response.status_code, 200)
+        self.assertEqual(activity_response.status_code, 200)
+        self.assertEqual(environments_response.status_code, 200)
+        self.assertEqual(config_status_response.status_code, 200)
 
 
 class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
@@ -5425,7 +5785,13 @@ class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["deployment_record_id"], "deployment-example-site-prod")
 
 
-def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+def _product_environment_read_policy(
+    *,
+    context: str = "launchplane",
+    contexts: tuple[str, ...] | None = None,
+    products: tuple[str, ...] = ("example-site",),
+) -> LaunchplaneAuthzPolicy:
+    allowed_contexts = contexts if contexts is not None else (context,)
     return LaunchplaneAuthzPolicy.model_validate(
         {
             "github_actions": [
@@ -5435,8 +5801,8 @@ def _product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                         "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
                     ],
                     "event_names": ["pull_request"],
-                    "products": ["example-site"],
-                    "contexts": [context],
+                    "products": list(products),
+                    "contexts": list(allowed_contexts),
                     "actions": ["product_environment.read"],
                 }
             ]
@@ -6421,6 +6787,99 @@ def _write_context_cutover_audit_records(database_url: str) -> None:
         store.close()
 
 
+def _seed_product_environment_read_records(database_url: str) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="example-site",
+                instance="prod",
+                env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
+                updated_at="2026-05-02T22:32:00Z",
+                source_label="test",
+            )
+        )
+        store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="example-site",
+                instance="prod",
+                target_type="application",
+                target_name="example-site-prod",
+                updated_at="2026-05-02T22:33:00Z",
+                source_label="test",
+            )
+        )
+        store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="example-site",
+                instance="prod",
+                target_id="app-prod-123",
+                updated_at="2026-05-02T22:33:00Z",
+                source_label="test",
+            )
+        )
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="example-site",
+                instance="prod",
+                provider_id="dokploy",
+                target_category="application",
+                target_id="app-prod-123",
+                display_name="example-site-prod",
+                provider_target_type="application",
+                updated_at="2026-05-02T22:33:00Z",
+                source_label="test",
+            )
+        )
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+            clear=True,
+        ):
+            control_plane_secrets.write_secret_value(
+                record_store=store,
+                scope="context_instance",
+                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                name="SMTP_PASSWORD",
+                plaintext_value="super-secret-password",
+                binding_key="SMTP_PASSWORD",
+                context_name="example-site",
+                instance_name="prod",
+                actor="test",
+            )
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["example-site"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_environment.read"],
+                    }
+                ]
+            }
+        )
+        store.write_authz_policy_record(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="launchplane-authz-policy-product-environment-read-test",
+                source="test",
+                updated_at="2026-05-02T22:35:00Z",
+                policy=policy,
+            )
+        )
+    finally:
+        store.close()
+
+
 def _product_profile_read_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -6563,6 +7022,60 @@ async def _get_config_status(
     return await _asgi_get(
         app,
         f"/v1/products/{product}/environments/{environment}/config-status",
+        headers=headers,
+    )
+
+
+async def _get_products(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, "/v1/products", headers=headers)
+
+
+async def _get_product(
+    app: FastAPI,
+    product: str = "example-site",
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, f"/v1/products/{product}", headers=headers)
+
+
+async def _get_product_activity(
+    app: FastAPI,
+    product: str = "example-site",
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, f"/v1/products/{product}/activity", headers=headers)
+
+
+async def _get_product_environments(
+    app: FastAPI,
+    product: str = "example-site",
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, f"/v1/products/{product}/environments", headers=headers)
+
+
+async def _get_product_environment(
+    app: FastAPI,
+    product: str = "example-site",
+    environment: str = "prod",
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(
+        app,
+        f"/v1/products/{product}/environments/{environment}",
         headers=headers,
     )
 
