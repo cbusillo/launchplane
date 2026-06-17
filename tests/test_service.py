@@ -13641,7 +13641,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     control_plane_root_path=Path(temporary_directory_name),
                 )
 
-    def test_health_endpoint_reports_explicit_local_test_storage_backend(self) -> None:
+    def test_health_route_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
@@ -13656,9 +13656,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 app, method="GET", path="/v1/health", authorization=""
             )
 
-            self.assertEqual(status_code, 200)
-            self.assertEqual(payload["status"], "ok")
-            self.assertEqual(payload["storage_backend"], "filesystem")
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_service_serve_rejects_missing_database_url(self) -> None:
         runner = CliRunner()
