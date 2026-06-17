@@ -48,6 +48,11 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationDestination,
     PreviewPrFeedbackNotificationPolicyRecord,
 )
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.merge_train_stack_collapse import (
     MergeTrainStackCollapseEntry,
     MergeTrainStackCollapseMutation,
@@ -135,6 +140,58 @@ def _health_pass() -> HealthcheckEvidence:
         urls=("https://prod.example.com/web/health",),
         timeout_seconds=45,
         status="pass",
+    )
+
+
+def _preview_record(
+    *,
+    preview_id: str = "preview-example-site-pr-42",
+    generation_id: str = "preview-example-site-pr-42-generation-0001",
+) -> PreviewRecord:
+    return PreviewRecord(
+        preview_id=preview_id,
+        context="example-site",
+        anchor_repo="example-site",
+        anchor_pr_number=42,
+        anchor_pr_url="https://github.com/example/site/pull/42",
+        preview_label="example-site/example-site/pr-42",
+        canonical_url="https://pr-42.example-preview.test",
+        state="active",
+        created_at="2026-05-03T00:00:00Z",
+        updated_at="2026-05-03T00:05:00Z",
+        eligible_at="2026-05-03T00:00:00Z",
+        active_generation_id=generation_id,
+        serving_generation_id=generation_id,
+        latest_generation_id=generation_id,
+        latest_manifest_fingerprint="preview-manifest-123",
+    )
+
+
+def _preview_generation_record(
+    *,
+    generation_id: str = "preview-example-site-pr-42-generation-0001",
+    preview_id: str = "preview-example-site-pr-42",
+) -> PreviewGenerationRecord:
+    return PreviewGenerationRecord(
+        generation_id=generation_id,
+        preview_id=preview_id,
+        sequence=1,
+        state="ready",
+        requested_reason="external_preview_refresh",
+        requested_at="2026-05-03T00:01:00Z",
+        ready_at="2026-05-03T00:05:00Z",
+        finished_at="2026-05-03T00:05:00Z",
+        resolved_manifest_fingerprint="preview-manifest-123",
+        artifact_id="artifact-preview-42",
+        anchor_summary=PreviewPullRequestSummary(
+            repo="example-site",
+            pr_number=42,
+            head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+            pr_url="https://github.com/example/site/pull/42",
+        ),
+        deploy_status="pass",
+        verify_status="pass",
+        overall_health_status="pass",
     )
 
 
@@ -1573,6 +1630,52 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_promotion.record_id, promotion_record.record_id)
             self.assertEqual(loaded_inventory.promotion_record_id, promotion_record.record_id)
             self.assertEqual(loaded_inventory.promoted_from_instance, "testing")
+
+    def test_write_preview_generation_evidence_records_writes_generation_and_preview(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            preview = _preview_record()
+            generation = _preview_generation_record()
+
+            generation_path, preview_path = store.write_preview_generation_evidence_records(
+                preview_record=preview,
+                generation_record=generation,
+            )
+            loaded_generation = store.read_preview_generation_record(generation.generation_id)
+            loaded_preview = store.read_preview_record(preview.preview_id)
+
+            self.assertTrue(generation_path.exists())
+            self.assertTrue(preview_path.exists())
+            self.assertEqual(loaded_generation.generation_id, generation.generation_id)
+            self.assertEqual(loaded_preview.preview_id, preview.preview_id)
+            self.assertEqual(loaded_preview.serving_generation_id, generation.generation_id)
+
+    def test_write_preview_generation_evidence_records_rolls_back_generation_on_preview_failure(
+        self,
+    ) -> None:
+        class FailingPreviewFilesystemRecordStore(FilesystemRecordStore):
+            def write_preview_record(self, record: PreviewRecord) -> Path:
+                raise RuntimeError("preview write failed")
+
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FailingPreviewFilesystemRecordStore(state_dir=state_dir)
+            preview = _preview_record()
+            generation = _preview_generation_record()
+
+            with self.assertRaises(RuntimeError):
+                store.write_preview_generation_evidence_records(
+                    preview_record=preview,
+                    generation_record=generation,
+                )
+
+            with self.assertRaises(FileNotFoundError):
+                store.read_preview_generation_record(generation.generation_id)
+            with self.assertRaises(FileNotFoundError):
+                store.read_preview_record(preview.preview_id)
 
     def test_list_promotion_records_filters_and_sorts_latest_first(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

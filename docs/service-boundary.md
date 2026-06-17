@@ -56,7 +56,9 @@ VeriReel product paths:
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/promotions` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
-  - `POST /v1/evidence/previews/generations`
+  - `POST /v1/evidence/previews/generations` (native FastAPI for bearer-token
+    callers, with Pydantic/OpenAPI contract coverage, idempotency replay
+    preservation, and bundled preview/generation evidence storage)
   - `POST /v1/evidence/previews/destroyed`
   - `POST /v1/evidence/runner-host-hygiene/audits`
 - product profile routes:
@@ -842,6 +844,15 @@ validation.
 Replay handling runs before those capability checks so a stored response can
 still be returned if the backing store is temporarily write-restricted for
 promotion evidence.
+
+`POST /v1/evidence/previews/generations` requires any available idempotency
+store plus preview record list, preview generation list, preview write,
+generation write, and the bundled preview-generation evidence write capability.
+The bundled write commits the generation record and transitioned preview record
+together after request validation, avoiding a partial initial-preview write on
+native FastAPI ingestion. Replay handling runs before those capability checks so
+a stored response can still be returned if the backing store is temporarily
+write-restricted for preview generation evidence.
 
 ### Preview lifecycle endpoints
 

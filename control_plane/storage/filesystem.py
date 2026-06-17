@@ -2009,6 +2009,30 @@ class FilesystemRecordStore:
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
         return self._write_model("launchplane_preview_generations", record.generation_id, record)
 
+    def write_preview_generation_evidence_records(
+        self,
+        *,
+        preview_record: PreviewRecord,
+        generation_record: PreviewGenerationRecord,
+    ) -> tuple[Path, Path]:
+        generation_path = self._record_path(
+            "launchplane_preview_generations",
+            generation_record.generation_id,
+        )
+        preview_path = self._record_path("launchplane_previews", preview_record.preview_id)
+        previous_generation = generation_path.read_bytes() if generation_path.exists() else None
+        previous_preview = preview_path.read_bytes() if preview_path.exists() else None
+        try:
+            written_generation_path = self.write_preview_generation_record(generation_record)
+            written_preview_path = self.write_preview_record(preview_record)
+        except Exception:
+            with suppress(Exception):
+                self._restore_record_path(generation_path, previous_generation)
+            with suppress(Exception):
+                self._restore_record_path(preview_path, previous_preview)
+            raise
+        return written_generation_path, written_preview_path
+
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
         return PreviewGenerationRecord.model_validate(
             self._read_model(

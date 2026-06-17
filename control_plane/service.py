@@ -161,6 +161,10 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_evidence import (
+    PreviewDestroyedEvidenceEnvelope,
+    PreviewGenerationEvidenceEnvelope,
+)
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
@@ -927,43 +931,6 @@ _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class PreviewGenerationEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    preview: PreviewMutationRequest
-    generation: PreviewGenerationMutationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "PreviewGenerationEvidenceEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview generation evidence requires product")
-        if self.preview.context != self.generation.context:
-            raise ValueError("preview generation evidence requires matching contexts")
-        if self.preview.anchor_repo != self.generation.anchor_repo:
-            raise ValueError("preview generation evidence requires matching anchor_repo")
-        if self.preview.anchor_pr_number != self.generation.anchor_pr_number:
-            raise ValueError("preview generation evidence requires matching anchor_pr_number")
-        if self.preview.anchor_pr_url != self.generation.anchor_pr_url:
-            raise ValueError("preview generation evidence requires matching anchor_pr_url")
-        return self
-
-
-class PreviewDestroyedEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    destroy: PreviewDestroyMutationRequest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "PreviewDestroyedEvidenceEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview destroyed evidence requires product")
-        return self
 
 
 class DeploymentEvidenceEnvelope(BaseModel):
@@ -16895,6 +16862,7 @@ def serve_launchplane_service(
         record_store_factory=lambda: service_record_store,
         bearer_identity_config=_bearer_identity_config_from_env(),
         human_session_manager=human_session_manager,
+        control_plane_root_path=control_plane_root(),
     )
     fastapi_application.mount(
         "/",
