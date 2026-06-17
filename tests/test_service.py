@@ -37419,70 +37419,36 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_deployment_read_endpoint_returns_record_for_authorized_workflow(self) -> None:
+    def test_deployment_and_promotion_read_routes_are_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_deployment_record(
-                DeploymentRecord(
-                    record_id="deployment-20260420T153000Z-opw-testing",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    context="opw",
-                    instance="testing",
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    resolved_target=ResolvedTargetEvidence(
-                        target_type="compose",
-                        target_id="compose-123",
-                        target_name="opw-testing",
-                    ),
-                    deploy=DeploymentEvidence(
-                        target_name="opw-testing",
-                        target_type="compose",
-                        deploy_mode="dokploy-compose-api",
-                        deployment_id="delegated-compose-ship",
-                        status="pass",
-                        started_at="2026-04-20T15:30:00Z",
-                        finished_at="2026-04-20T15:32:10Z",
-                    ),
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "contexts": ["opw"],
-                            "actions": ["deployment.read"],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
                 control_plane_root_path=root,
             )
 
-            status_code, payload = _invoke_app(
+            deployment_status_code, deployment_payload = _invoke_app(
                 app,
                 method="GET",
                 path="/v1/deployments/deployment-20260420T153000Z-opw-testing",
             )
-
-            self.assertEqual(status_code, 200)
-            self.assertEqual(payload["status"], "ok")
-            self.assertEqual(
-                payload["record"]["record_id"], "deployment-20260420T153000Z-opw-testing"
+            promotion_status_code, promotion_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/promotions/promotion-20260420T153500Z-opw-testing-to-prod",
             )
-            self.assertEqual(payload["record"]["resolved_target"]["target_id"], "compose-123")
+
+        self.assertEqual(deployment_status_code, 404)
+        self.assertEqual(deployment_payload["status"], "rejected")
+        self.assertEqual(deployment_payload["error"]["code"], "not_found")
+        self.assertEqual(promotion_status_code, 404)
+        self.assertEqual(promotion_payload["status"], "rejected")
+        self.assertEqual(promotion_payload["error"]["code"], "not_found")
 
     def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(
         self,

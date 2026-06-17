@@ -50,6 +50,11 @@ VeriReel product paths:
     context
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
+- native FastAPI deployment and promotion single-record reads:
+  - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
+    stored record context
+  - `GET /v1/promotions/{record_id}`, requiring `promotion.read` for the stored
+    record context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
@@ -1240,8 +1245,10 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/previews/{preview_id}`
 - `GET /v1/previews/{preview_id}/history`
 - `GET /v1/inventory/{context}/{instance}`
-- `GET /v1/promotions/{record_id}`
-- `GET /v1/deployments/{record_id}`
+- `GET /v1/promotions/{record_id}` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/deployments/{record_id}` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/artifacts/protected` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/contexts/{context}/secrets`
@@ -1256,6 +1263,13 @@ current Launchplane record nouns without forcing them to infer state from
 workflow logs or host-local files. Secret status reads return metadata only:
 Launchplane does not expose plaintext secret retrieval through the service
 boundary.
+
+Deployment and promotion single-record reads use the stored record context for
+authorization. The service reads the record first, maps a missing record to
+`404 not_found`, then checks `deployment.read` or `promotion.read` against
+product `launchplane` and the record context before returning the typed record
+envelope. Their legacy WSGI branches are deleted; direct fallback calls fail
+closed while the mounted fallback remains for retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,

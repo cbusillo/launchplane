@@ -158,6 +158,22 @@ class DriverContextViewResponse(BaseModel):
     view: DriverContextView
 
 
+class DeploymentRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: DeploymentRecord
+
+
+class PromotionRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: PromotionRecord
+
+
 class ProtectedArtifactsResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -265,6 +281,14 @@ class _RunnerLaneRegistrationAuditEvidenceStore(Protocol):
         self,
         record: RunnerLaneRegistrationAuditRecord,
     ) -> object: ...
+
+
+class _DeploymentReadStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+
+class _PromotionReadStore(Protocol):
+    def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -425,6 +449,26 @@ def require_runner_lane_registration_audit_evidence_store(
             f"evidence writes: {missing_summary}"
         )
     return cast(_RunnerLaneRegistrationAuditEvidenceStore, record_store)
+
+
+def require_deployment_read_store(record_store: object) -> _DeploymentReadStore:
+    read_record = getattr(record_store, "read_deployment_record", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support deployment record reads: "
+            "read_deployment_record"
+        )
+    return cast(_DeploymentReadStore, record_store)
+
+
+def require_promotion_read_store(record_store: object) -> _PromotionReadStore:
+    read_record = getattr(record_store, "read_promotion_record", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support promotion record reads: "
+            "read_promotion_record"
+        )
+    return cast(_PromotionReadStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -865,6 +909,80 @@ def create_launchplane_fastapi_app(
             instance_name=instance,
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
+
+    def read_deployment_record(
+        record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> DeploymentRecordResponse:
+        trace_id = next_trace_id()
+        try:
+            deployment_store = require_deployment_read_store(record_store)
+            deployment = deployment_store.read_deployment_record(record_id)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="deployment.read",
+            product="launchplane",
+            context=deployment.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read deployment records for the requested context.",
+            )
+        return DeploymentRecordResponse(trace_id=trace_id, record=deployment)
+
+    def read_promotion_record(
+        record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> PromotionRecordResponse:
+        trace_id = next_trace_id()
+        try:
+            promotion_store = require_promotion_read_store(record_store)
+            promotion = promotion_store.read_promotion_record(record_id)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="promotion.read",
+            product="launchplane",
+            context=promotion.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read promotion records for the requested context.",
+            )
+        return PromotionRecordResponse(trace_id=trace_id, record=promotion)
 
     def accepted_evidence_response(
         *,
@@ -1645,6 +1763,38 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/deployments/{record_id}",
+        read_deployment_record,
+        methods=["GET"],
+        response_model=DeploymentRecordResponse,
+        operation_id="read_deployment_record",
+        summary="Read one deployment record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/promotions/{record_id}",
+        read_promotion_record,
+        methods=["GET"],
+        response_model=PromotionRecordResponse,
+        operation_id="read_promotion_record",
+        summary="Read one promotion record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 
