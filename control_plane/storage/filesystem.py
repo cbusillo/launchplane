@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import time
+from contextlib import suppress
 from json import JSONDecodeError
 from pathlib import Path
 from typing import TypeVar
@@ -1507,9 +1508,7 @@ class FilesystemRecordStore:
         self, record: VeriReelProdBackupGateOperationRecord
     ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
         try:
-            return self.read_verireel_prod_backup_gate_operation_record(
-                record.operation_id
-            ), False
+            return self.read_verireel_prod_backup_gate_operation_record(record.operation_id), False
         except FileNotFoundError:
             pass
         active_records = self.list_verireel_prod_backup_gate_operation_records(
@@ -1571,9 +1570,7 @@ class FilesystemRecordStore:
         if not normalized_lease_owner:
             raise ValueError("VeriReel prod backup gate operation claim requires lease_owner.")
         if not lease_expires_at.strip():
-            raise ValueError(
-                "VeriReel prod backup gate operation claim requires lease_expires_at."
-            )
+            raise ValueError("VeriReel prod backup gate operation claim requires lease_expires_at.")
         if not claimed_at.strip():
             raise ValueError("VeriReel prod backup gate operation claim requires claimed_at.")
         pending_records = self.list_verireel_prod_backup_gate_operation_records(
@@ -1696,9 +1693,7 @@ class FilesystemRecordStore:
         max_attempts: int,
     ) -> tuple[str, ...]:
         affected_operation_ids: list[str] = []
-        for record in self.list_verireel_prod_backup_gate_operation_records(
-            statuses=("running",)
-        ):
+        for record in self.list_verireel_prod_backup_gate_operation_records(statuses=("running",)):
             if record.lease_expires_at and record.lease_expires_at >= now:
                 continue
             affected_operation_ids.append(record.operation_id)
@@ -1800,6 +1795,34 @@ class FilesystemRecordStore:
 
     def write_promotion_record(self, record: PromotionRecord) -> Path:
         return self._write_model("promotions", record.record_id, record)
+
+    def write_promotion_evidence_records(
+        self,
+        *,
+        promotion_record: PromotionRecord,
+        inventory: EnvironmentInventory,
+    ) -> Path:
+        promotion_path = self._record_path("promotions", promotion_record.record_id)
+        inventory_path = self._record_path("inventory", f"{inventory.context}-{inventory.instance}")
+        previous_promotion = promotion_path.read_bytes() if promotion_path.exists() else None
+        previous_inventory = inventory_path.read_bytes() if inventory_path.exists() else None
+        try:
+            self.write_environment_inventory(inventory)
+            return self.write_promotion_record(promotion_record)
+        except Exception:
+            with suppress(Exception):
+                self._restore_record_path(promotion_path, previous_promotion)
+            with suppress(Exception):
+                self._restore_record_path(inventory_path, previous_inventory)
+            raise
+
+    @staticmethod
+    def _restore_record_path(record_path: Path, payload: bytes | None) -> None:
+        if payload is None:
+            record_path.unlink(missing_ok=True)
+            return
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        record_path.write_bytes(payload)
 
     def read_promotion_record(self, record_id: str) -> PromotionRecord:
         return PromotionRecord.model_validate(

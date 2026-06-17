@@ -2409,9 +2409,7 @@ class PostgresRecordStore(HumanSessionStore):
         self, record: VeriReelProdBackupGateOperationRecord
     ) -> tuple[VeriReelProdBackupGateOperationRecord, bool]:
         try:
-            return self.read_verireel_prod_backup_gate_operation_record(
-                record.operation_id
-            ), False
+            return self.read_verireel_prod_backup_gate_operation_record(record.operation_id), False
         except FileNotFoundError:
             pass
         with self._session_factory() as session:
@@ -2477,8 +2475,7 @@ class PostgresRecordStore(HumanSessionStore):
             filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.instance == instance_name)
         if backup_record_id:
             filters.append(
-                LaunchplaneVeriReelProdBackupGateOperationRow.backup_record_id
-                == backup_record_id
+                LaunchplaneVeriReelProdBackupGateOperationRow.backup_record_id == backup_record_id
             )
         if statuses:
             filters.append(LaunchplaneVeriReelProdBackupGateOperationRow.status.in_(statuses))
@@ -2504,9 +2501,7 @@ class PostgresRecordStore(HumanSessionStore):
         if not normalized_lease_owner:
             raise ValueError("VeriReel prod backup gate operation claim requires lease_owner.")
         if not lease_expires_at.strip():
-            raise ValueError(
-                "VeriReel prod backup gate operation claim requires lease_expires_at."
-            )
+            raise ValueError("VeriReel prod backup gate operation claim requires lease_expires_at.")
         if not claimed_at.strip():
             raise ValueError("VeriReel prod backup gate operation claim requires claimed_at.")
         statement = (
@@ -2921,6 +2916,40 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def write_promotion_evidence_records(
+        self,
+        *,
+        promotion_record: PromotionRecord,
+        inventory: EnvironmentInventory,
+    ) -> None:
+        with self._session_factory() as session:
+            session.merge(
+                LaunchplanePromotionRow(
+                    record_id=promotion_record.record_id,
+                    context=promotion_record.context,
+                    from_instance=promotion_record.from_instance,
+                    to_instance=promotion_record.to_instance,
+                    artifact_id=promotion_record.artifact_identity.artifact_id,
+                    deploy_started_at=promotion_record.deploy.started_at,
+                    deploy_finished_at=promotion_record.deploy.finished_at,
+                    payload=self._payload_dict(promotion_record),
+                )
+            )
+            session.merge(
+                LaunchplaneInventoryRow(
+                    context=inventory.context,
+                    instance=inventory.instance,
+                    artifact_id=_artifact_id_from_model(inventory),
+                    source_git_ref=inventory.source_git_ref,
+                    updated_at=inventory.updated_at,
+                    deployment_record_id=inventory.deployment_record_id,
+                    promotion_record_id=inventory.promotion_record_id,
+                    promoted_from_instance=inventory.promoted_from_instance,
+                    payload=self._payload_dict(inventory),
+                )
+            )
+            session.commit()
 
     def read_promotion_record(self, record_id: str) -> PromotionRecord:
         return self._read_model(

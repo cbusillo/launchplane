@@ -4,7 +4,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal, Protocol, cast
 from uuid import uuid4
-
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,6 +26,7 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
     ProtectedArtifactSet,
@@ -52,7 +52,9 @@ from control_plane.storage.factory import storage_backend_name
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
+    PromotionEvidenceValidationError,
     apply_deployment_evidence,
+    apply_promotion_evidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -62,6 +64,7 @@ _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
 _LAUNCHPLANE_DRIVER_READ_CONTEXT = "launchplane"
 _DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
 _BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
+_PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -182,6 +185,18 @@ class BackupGateEvidenceRequest(BaseModel):
             raise ValueError("backup gate evidence requires product")
 
 
+class PromotionEvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    promotion: PromotionRecord
+
+    def model_post_init(self, _context: object) -> None:
+        if not self.product.strip():
+            raise ValueError("promotion evidence requires product")
+
+
 class AcceptedEvidenceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -250,6 +265,28 @@ def require_deployment_evidence_store(record_store: object) -> EvidenceIngestion
         missing_summary = ", ".join(missing_methods)
         raise TypeError(
             "Launchplane record store does not support deployment evidence writes: "
+            f"{missing_summary}"
+        )
+    return cast(EvidenceIngestionStore, record_store)
+
+
+def require_promotion_evidence_store(
+    record_store: object,
+    promotion_record: PromotionRecord,
+) -> EvidenceIngestionStore:
+    if promotion_record.deployment_record_id.strip():
+        required_methods = ["read_deployment_record", "write_promotion_evidence_records"]
+    else:
+        required_methods = ["write_promotion_record"]
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support promotion evidence writes: "
             f"{missing_summary}"
         )
     return cast(EvidenceIngestionStore, record_store)
@@ -903,6 +940,104 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def write_promotion_evidence(
+        request: Request,
+        promotion_request: PromotionEvidenceRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="promotion.write",
+            product=promotion_request.product,
+            context=promotion_request.promotion.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write promotion evidence for the requested product/context."
+                ),
+            )
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_PROMOTION_EVIDENCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        try:
+            evidence_store = require_promotion_evidence_store(
+                record_store,
+                promotion_request.promotion,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        try:
+            records = {
+                str(key): str(value)
+                for key, value in apply_promotion_evidence(
+                    record_store=evidence_store,
+                    promotion_record=promotion_request.promotion,
+                ).items()
+            }
+        except PromotionEvidenceValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error).strip() or "Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(trace_id=trace_id, records=records)
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_PROMOTION_EVIDENCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -1005,6 +1140,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_backup_gate_evidence",
         summary="Write backup gate evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PROMOTION_EVIDENCE_ROUTE,
+        write_promotion_evidence,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_promotion_evidence",
+        summary="Write promotion evidence",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

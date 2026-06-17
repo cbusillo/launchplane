@@ -57,8 +57,8 @@ Keep a compatibility surface only when it is one of these:
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a
   second production implementation.
-- Deployment and backup-gate evidence ingestion use native FastAPI routes for
-  bearer-token callers and preserve the existing `Idempotency-Key`
+- Deployment, backup-gate, and promotion evidence ingestion use native FastAPI
+  routes for bearer-token callers and preserve the existing `Idempotency-Key`
   replay/conflict contract. Their legacy WSGI branches are shadowed by native
   routes while the mounted fallback remains for the rest of the evidence family;
   delete those WSGI branches after caller evidence proves the native paths and

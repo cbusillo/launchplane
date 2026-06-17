@@ -20,6 +20,7 @@ class _FakeEvidenceStore:
         self.deployments: dict[str, DeploymentRecord] = {}
         self.promotions: dict[str, PromotionRecord] = {}
         self.inventories: dict[tuple[str, str], EnvironmentInventory] = {}
+        self.promotion_evidence_write_calls = 0
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployments[record.record_id] = record
@@ -30,11 +31,32 @@ class _FakeEvidenceStore:
     def write_promotion_record(self, record: PromotionRecord) -> None:
         self.promotions[record.record_id] = record
 
+    def write_promotion_evidence_records(
+        self,
+        *,
+        promotion_record: PromotionRecord,
+        inventory: EnvironmentInventory,
+    ) -> None:
+        self.promotion_evidence_write_calls += 1
+        self.promotions[promotion_record.record_id] = promotion_record
+        self.inventories[(inventory.context, inventory.instance)] = inventory
+
     def read_promotion_record(self, promotion_record_id: str) -> PromotionRecord:
         return self.promotions[promotion_record_id]
 
     def write_environment_inventory(self, inventory: EnvironmentInventory) -> None:
         self.inventories[(inventory.context, inventory.instance)] = inventory
+
+
+class _FailingPromotionEvidenceStore(_FakeEvidenceStore):
+    def write_promotion_evidence_records(
+        self,
+        *,
+        promotion_record: PromotionRecord,
+        inventory: EnvironmentInventory,
+    ) -> None:
+        self.promotion_evidence_write_calls += 1
+        raise RuntimeError("promotion evidence bundle failed")
 
 
 def _deployment_record(
@@ -112,6 +134,18 @@ class EvidenceIngestionTests(unittest.TestCase):
         inventory = store.inventories[("site", "prod")]
         self.assertEqual(inventory.promotion_record_id, "promotion-site-testing-to-prod")
         self.assertEqual(inventory.promoted_from_instance, "testing")
+        self.assertEqual(store.promotion_evidence_write_calls, 1)
+
+    def test_apply_promotion_evidence_uses_bundled_linked_write(self) -> None:
+        store = _FailingPromotionEvidenceStore()
+        store.write_deployment_record(_deployment_record())
+
+        with self.assertRaisesRegex(RuntimeError, "promotion evidence bundle failed"):
+            apply_promotion_evidence(record_store=store, promotion_record=_promotion_record())
+
+        self.assertEqual(store.promotion_evidence_write_calls, 1)
+        self.assertEqual(store.promotions, {})
+        self.assertEqual(store.inventories, {})
 
     def test_apply_promotion_evidence_rejects_mismatched_deployment_context(self) -> None:
         store = _FakeEvidenceStore()

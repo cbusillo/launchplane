@@ -54,7 +54,8 @@ VeriReel product paths:
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
-  - `POST /v1/evidence/promotions`
+  - `POST /v1/evidence/promotions` (native FastAPI for bearer-token callers,
+    with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
   - `POST /v1/evidence/runner-host-hygiene/audits`
@@ -831,6 +832,16 @@ the backing store is temporarily write-restricted for deployment evidence.
 capability and any available idempotency store. Replay handling runs before the
 backup-gate capability check so a stored response can still be returned if the
 backing store is temporarily write-restricted for backup-gate evidence.
+
+`POST /v1/evidence/promotions` requires any available idempotency store. Unlinked
+promotion evidence requires the promotion record-write capability. When a
+promotion links a deployment record, the route requires the linked deployment
+read capability and the bundled promotion-evidence write capability used to
+commit the promotion record and promoted inventory projection together after
+validation.
+Replay handling runs before those capability checks so a stored response can
+still be returned if the backing store is temporarily write-restricted for
+promotion evidence.
 
 ### Preview lifecycle endpoints
 

@@ -76,6 +76,15 @@ class _GenericWebPromotionStore:
     def write_promotion_record(self, record: PromotionRecord) -> None:
         self.promotions[record.record_id] = record
 
+    def write_promotion_evidence_records(
+        self,
+        *,
+        promotion_record: PromotionRecord,
+        inventory: EnvironmentInventory,
+    ) -> None:
+        self.promotions[promotion_record.record_id] = promotion_record
+        self.inventories[(inventory.context, inventory.instance)] = inventory
+
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.inventories[(record.context, record.instance)] = record
 
