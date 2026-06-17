@@ -202,6 +202,19 @@ class EnvironmentInventoryResponse(BaseModel):
     record: EnvironmentInventory
 
 
+class RecentOperationsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    context: str
+    storage_backend: str
+    inventory: tuple[EnvironmentInventory, ...]
+    recent_deployments: tuple[DeploymentRecord, ...]
+    recent_promotions: tuple[PromotionRecord, ...]
+    recent_previews: tuple[PreviewRecord, ...]
+
+
 class ProtectedArtifactsResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -341,6 +354,36 @@ class _EnvironmentInventoryReadStore(Protocol):
         context_name: str,
         instance_name: str,
     ) -> EnvironmentInventory: ...
+
+
+class _RecentOperationsReadStore(Protocol):
+    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]: ...
+
+    def list_deployment_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[DeploymentRecord, ...]: ...
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]: ...
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -557,6 +600,26 @@ def require_environment_inventory_read_store(
             "read_environment_inventory"
         )
     return cast(_EnvironmentInventoryReadStore, record_store)
+
+
+def require_recent_operations_read_store(record_store: object) -> _RecentOperationsReadStore:
+    required_methods = (
+        "list_environment_inventory",
+        "list_deployment_records",
+        "list_promotion_records",
+        "list_preview_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support recent operation reads: {missing_summary}"
+        )
+    return cast(_RecentOperationsReadStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -1220,6 +1283,60 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot read inventory for the requested context.",
             )
         return EnvironmentInventoryResponse(trace_id=trace_id, record=inventory)
+
+    def read_recent_operations(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> RecentOperationsResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="operations.read",
+            product="launchplane",
+            context=context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read recent operations for the requested context.",
+            )
+        try:
+            operations_store = require_recent_operations_read_store(record_store)
+            inventory = tuple(
+                record
+                for record in operations_store.list_environment_inventory()
+                if record.context == context
+            )
+            recent_deployments = operations_store.list_deployment_records(
+                context_name=context,
+                limit=10,
+            )
+            recent_promotions = operations_store.list_promotion_records(
+                context_name=context,
+                limit=10,
+            )
+            recent_previews = operations_store.list_preview_records(
+                context_name=context,
+                limit=10,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return RecentOperationsResponse(
+            trace_id=trace_id,
+            context=context,
+            storage_backend=storage_backend_name(record_store),
+            inventory=inventory,
+            recent_deployments=recent_deployments,
+            recent_promotions=recent_promotions,
+            recent_previews=recent_previews,
+        )
 
     def accepted_evidence_response(
         *,
@@ -2079,6 +2196,21 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/operations/recent",
+        read_recent_operations,
+        methods=["GET"],
+        response_model=RecentOperationsResponse,
+        operation_id="read_recent_operations",
+        summary="Read recent Launchplane operations for a context",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

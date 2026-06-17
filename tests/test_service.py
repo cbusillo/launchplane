@@ -37457,6 +37457,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="GET",
                 path="/v1/previews/preview-opw-opw-pr-42/history",
             )
+            recent_operations_status_code, recent_operations_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/opw/operations/recent",
+            )
 
         self.assertEqual(deployment_status_code, 404)
         self.assertEqual(deployment_payload["status"], "rejected")
@@ -37473,155 +37478,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(preview_history_status_code, 404)
         self.assertEqual(preview_history_payload["status"], "rejected")
         self.assertEqual(preview_history_payload["error"]["code"], "not_found")
-
-    def test_recent_operations_endpoint_returns_operator_read_model(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_record(
-                PreviewRecord(
-                    preview_id="preview-verireel-testing-verireel-pr-123",
-                    context="verireel-testing",
-                    anchor_repo="verireel",
-                    anchor_pr_number=123,
-                    anchor_pr_url="https://github.com/every/verireel/pull/123",
-                    preview_label="verireel/pr-123",
-                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
-                    state="active",
-                    created_at="2026-04-20T10:00:00Z",
-                    updated_at="2026-04-20T10:05:00Z",
-                    eligible_at="2026-04-20T10:05:00Z",
-                )
-            )
-            store.write_preview_generation_record(
-                PreviewGenerationRecord(
-                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
-                    preview_id="preview-verireel-testing-verireel-pr-123",
-                    sequence=1,
-                    state="ready",
-                    requested_reason="external_preview_refresh",
-                    requested_at="2026-04-20T10:01:00Z",
-                    ready_at="2026-04-20T10:05:00Z",
-                    finished_at="2026-04-20T10:05:00Z",
-                    resolved_manifest_fingerprint="preview-manifest-123",
-                    artifact_id="ghcr.io/every/verireel-app:pr-123",
-                    anchor_summary=PreviewPullRequestSummary(
-                        repo="verireel",
-                        pr_number=123,
-                        head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
-                        pr_url="https://github.com/every/verireel/pull/123",
-                    ),
-                    deploy_status="pass",
-                    verify_status="pass",
-                    overall_health_status="pass",
-                )
-            )
-            store.write_deployment_record(
-                DeploymentRecord(
-                    record_id="deployment-20260420T153000Z-verireel-testing",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    context="verireel-testing",
-                    instance="testing",
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    resolved_target=ResolvedTargetEvidence(
-                        target_type="application",
-                        target_id="app-123",
-                        target_name="verireel-testing",
-                    ),
-                    deploy=DeploymentEvidence(
-                        target_name="verireel-testing",
-                        target_type="application",
-                        deploy_mode="dokploy-application-api",
-                        deployment_id="delegated-app-ship",
-                        status="pass",
-                        started_at="2026-04-20T15:30:00Z",
-                        finished_at="2026-04-20T15:32:10Z",
-                    ),
-                )
-            )
-            store.write_promotion_record(
-                PromotionRecord(
-                    record_id="promotion-20260420T160500Z-verireel-testing-to-prod",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    deployment_record_id="deployment-20260420T153000Z-verireel-testing",
-                    backup_record_id="backup-verireel-prod-20260420T160000Z",
-                    context="verireel-testing",
-                    from_instance="testing",
-                    to_instance="prod",
-                    deploy=DeploymentEvidence(
-                        target_name="verireel-prod",
-                        target_type="application",
-                        deploy_mode="dokploy-application-api",
-                        deployment_id="delegated-app-promote",
-                        status="pass",
-                        started_at="2026-04-20T16:05:00Z",
-                        finished_at="2026-04-20T16:07:00Z",
-                    ),
-                )
-            )
-            store.write_environment_inventory(
-                EnvironmentInventory(
-                    context="verireel-testing",
-                    instance="testing",
-                    artifact_identity=ArtifactIdentityReference(
-                        artifact_id="artifact-20260420-a1b2c3d4"
-                    ),
-                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
-                    deploy=DeploymentEvidence(
-                        target_name="verireel-testing",
-                        target_type="application",
-                        deploy_mode="dokploy-application-api",
-                        deployment_id="delegated-app-ship",
-                        status="pass",
-                        started_at="2026-04-20T15:30:00Z",
-                        finished_at="2026-04-20T15:32:10Z",
-                    ),
-                    updated_at="2026-04-20T15:33:00Z",
-                    deployment_record_id="deployment-20260420T153000Z-verireel-testing",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "contexts": ["verireel-testing"],
-                            "actions": ["preview.read", "operations.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            operations_status_code, operations_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/contexts/verireel-testing/operations/recent",
-            )
-
-            self.assertEqual(operations_status_code, 200)
-            self.assertEqual(operations_payload["context"], "verireel-testing")
-            self.assertEqual(operations_payload["storage_backend"], "filesystem")
-            self.assertEqual(len(operations_payload["inventory"]), 1)
-            self.assertEqual(len(operations_payload["recent_deployments"]), 1)
-            self.assertEqual(len(operations_payload["recent_promotions"]), 1)
-            self.assertEqual(len(operations_payload["recent_previews"]), 1)
+        self.assertEqual(recent_operations_status_code, 404)
+        self.assertEqual(recent_operations_payload["status"], "rejected")
+        self.assertEqual(recent_operations_payload["error"]["code"], "not_found")
 
     def test_secret_status_endpoints_return_operator_read_models(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
