@@ -56,6 +56,10 @@ Keep a compatibility surface only when it is one of these:
 - The Launchplane health read uses the native FastAPI `GET /v1/health` route.
   Its legacy WSGI branch is deleted; direct fallback calls fail closed while
   the mounted fallback remains for retained non-native routes.
+- Launchplane service runtime and Odoo worker status reads use native FastAPI
+  routes for bearer-token and human-session callers. Their legacy WSGI branch is
+  deleted; direct fallback calls fail closed while the mounted fallback remains
+  for retained non-native routes.
 - Protected artifact inventory and product environment config-status reads use
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a

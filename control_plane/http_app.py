@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
+from control_plane import service_status as control_plane_service_status
 from control_plane.agent_context_service import (
     AgentContextPayload,
     agent_context_action_allowed,
@@ -190,6 +191,64 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     storage_backend: str
+
+
+class LaunchplaneRuntimeStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    authz_policy_sha256: str
+    authz_policy_source: str
+    bootstrap_authz_policy_sha256: str
+    docker_image_reference: str
+    service_audience: str
+    storage_backend: str
+
+
+class LaunchplaneRuntimeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    runtime: LaunchplaneRuntimeStatus
+
+
+class OdooStableOperationLeaseSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_kind: str
+    operation_id: str
+    product: str
+    context: str
+    instance: str
+    status: str
+    phase: str
+    attempt: int
+    lease_owner: str
+    lease_expires_at: str
+    heartbeat_at: str
+    heartbeat_age_seconds: int | None
+    lease_expired: bool
+
+
+class OdooStableOperationWorkerStatusResponseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    recorded_at: str
+    pending_count: int
+    running_count: int
+    stalled_count: int
+    terminal_count: int
+    counts_by_kind_status: dict[str, int]
+    operations: tuple[OdooStableOperationLeaseSummaryResponse, ...]
+
+
+class OdooStableOperationWorkerStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    worker_status: OdooStableOperationWorkerStatusResponseModel
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -970,15 +1029,40 @@ def request_fingerprint(payload: dict[str, object]) -> str:
 
 
 class LaunchplaneAuthzPolicyRuntime:
-    def __init__(self, policy: LaunchplaneAuthzPolicy) -> None:
+    def __init__(
+        self,
+        policy: LaunchplaneAuthzPolicy,
+        *,
+        policy_sha256: str = "",
+        source: str = "bootstrap",
+    ) -> None:
         self._policy = policy
+        self._policy_sha256 = policy_sha256 or authz_policy_sha256(policy)
+        self._source = source.strip() or "bootstrap"
 
     @property
     def policy(self) -> LaunchplaneAuthzPolicy:
         return self._policy
 
-    def update(self, policy: LaunchplaneAuthzPolicy) -> None:
+    @property
+    def policy_sha256(self) -> str:
+        return self._policy_sha256
+
+    @property
+    def source(self) -> str:
+        return self._source
+
+    def update(
+        self,
+        policy: LaunchplaneAuthzPolicy,
+        *,
+        policy_sha256: str = "",
+        source: str = "",
+    ) -> None:
         self._policy = policy
+        self._policy_sha256 = policy_sha256 or authz_policy_sha256(policy)
+        if source.strip():
+            self._source = source.strip()
 
 
 class ResolvedLaunchplaneAuthzPolicy(BaseModel):
@@ -1203,6 +1287,78 @@ def create_launchplane_fastapi_app(
         if not isinstance(oidc_identity, GitHubActionsIdentity):
             raise _authentication_required_error("Mutation routes require GitHub Actions OIDC.")
         return oidc_identity
+
+    def require_launchplane_service_read_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="launchplane_service.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read Launchplane service runtime state.",
+            )
+
+    def read_launchplane_runtime(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> LaunchplaneRuntimeResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        runtime = LaunchplaneRuntimeStatus.model_validate(
+            control_plane_service_status.launchplane_runtime_payload(
+                storage_backend=storage_backend_name(record_store),
+                authz_policy_sha256_value=resolved_authz_policy_runtime.policy_sha256,
+                authz_policy_source=resolved_authz_policy_runtime.source,
+            )
+        )
+        return LaunchplaneRuntimeResponse(trace_id=trace_id, runtime=runtime)
+
+    def read_odoo_stable_operation_worker_status(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        recent_terminal_limit: Annotated[str, Query()] = "10",
+    ) -> OdooStableOperationWorkerStatusResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_read_authorization(identity=identity, trace_id=trace_id)
+        try:
+            parsed_recent_terminal_limit = control_plane_service_status.query_int_value(
+                recent_terminal_limit,
+                "recent_terminal_limit",
+                default=10,
+                minimum=0,
+                maximum=100,
+            )
+            assert parsed_recent_terminal_limit is not None
+            worker_status = OdooStableOperationWorkerStatusResponseModel.model_validate(
+                control_plane_service_status.odoo_stable_operation_worker_status_payload(
+                    record_store=record_store,
+                    recent_terminal_limit=parsed_recent_terminal_limit,
+                )
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="operation_record_storage_required",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        return OdooStableOperationWorkerStatusResponse(
+            trace_id=trace_id,
+            worker_status=worker_status,
+        )
 
     def read_product_environment_config_status(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -3017,6 +3173,34 @@ def create_launchplane_fastapi_app(
         response_model=HealthResponse,
         operation_id="read_launchplane_health",
         summary="Read Launchplane service health",
+    )
+
+    app.add_api_route(
+        "/v1/service/runtime",
+        read_launchplane_runtime,
+        methods=["GET"],
+        response_model=LaunchplaneRuntimeResponse,
+        operation_id="read_launchplane_runtime",
+        summary="Read Launchplane service runtime",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/service/odoo-workers/status",
+        read_odoo_stable_operation_worker_status,
+        methods=["GET"],
+        response_model=OdooStableOperationWorkerStatusResponse,
+        operation_id="read_odoo_stable_operation_worker_status",
+        summary="Read Odoo stable operation worker status",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

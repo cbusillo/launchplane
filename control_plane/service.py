@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import base64
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -28,6 +27,7 @@ from control_plane.dokploy_target_inspect import (
 )
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
+from control_plane import service_status as control_plane_service_status
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
@@ -320,7 +320,7 @@ from control_plane.service_human_auth import (
     build_pkce_verifier,
     load_github_oauth_config_from_env,
 )
-from control_plane.storage.factory import build_shared_record_store, storage_backend_name
+from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.ui_static_http import serve_ui_route
@@ -371,7 +371,6 @@ from control_plane.workflows.ingress_provider import (
     default_ingress_provider,
 )
 from control_plane.workflows.launchplane_self_deploy import (
-    LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY,
     LaunchplaneSelfDeployRequest,
     execute_launchplane_self_deploy,
 )
@@ -494,8 +493,6 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
     DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
-    OdooStableOperationWorkerStore,
-    build_odoo_stable_operation_worker_status,
     reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.verireel_stable_deploy import (
@@ -4509,10 +4506,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[5] == "logs"
     ):
         return "target_logs.read", {"context": segments[2], "instance": segments[4]}
-    if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
-        return "launchplane_service.read", {}
-    if len(segments) == 4 and segments == ["v1", "service", "odoo-workers", "status"]:
-        return "launchplane_service.read", {"odoo_worker_status": "true"}
     if len(segments) == 4 and segments == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
@@ -6939,28 +6932,6 @@ def _odoo_stable_target_replacement_operation_store(
         return cast(_OdooStableTargetReplacementOperationStore, record_store)
     raise click.ClickException(
         "Odoo stable target replacement operations require Launchplane operation-record storage."
-    )
-
-
-def _odoo_stable_operation_worker_store(
-    record_store: object,
-) -> OdooStableOperationWorkerStore:
-    required_methods = (
-        "list_odoo_stable_bootstrap_operation_records",
-        "claim_next_odoo_stable_bootstrap_operation_record",
-        "heartbeat_odoo_stable_bootstrap_operation_record",
-        "complete_odoo_stable_bootstrap_operation_record",
-        "recover_expired_odoo_stable_bootstrap_operation_records",
-        "list_odoo_stable_target_replacement_operation_records",
-        "claim_next_odoo_stable_target_replacement_operation_record",
-        "heartbeat_odoo_stable_target_replacement_operation_record",
-        "complete_odoo_stable_target_replacement_operation_record",
-        "recover_expired_odoo_stable_target_replacement_operation_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(OdooStableOperationWorkerStore, record_store)
-    raise click.ClickException(
-        "Odoo stable operation worker status requires Launchplane operation-record storage."
     )
 
 
@@ -9417,41 +9388,6 @@ def _resolve_authz_policy(
     )
 
 
-def _launchplane_policy_sha256_from_env() -> str:
-    policy_toml = os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip()
-    if policy_toml:
-        return hashlib.sha256(policy_toml.encode("utf-8")).hexdigest()
-
-    policy_b64 = os.environ.get("LAUNCHPLANE_POLICY_B64", "").strip()
-    if policy_b64:
-        try:
-            policy_bytes = base64.b64decode(policy_b64, validate=True)
-        except Exception:
-            return ""
-        return hashlib.sha256(policy_bytes).hexdigest()
-
-    policy_file = os.environ.get("LAUNCHPLANE_POLICY_FILE", "").strip()
-    if not policy_file:
-        return ""
-    try:
-        return hashlib.sha256(Path(policy_file).read_bytes()).hexdigest()
-    except OSError:
-        return ""
-
-
-def _launchplane_runtime_payload(
-    *, storage_backend: str, authz_policy_sha256_value: str, authz_policy_source: str
-) -> dict[str, object]:
-    return {
-        "authz_policy_sha256": authz_policy_sha256_value,
-        "authz_policy_source": authz_policy_source,
-        "bootstrap_authz_policy_sha256": _launchplane_policy_sha256_from_env(),
-        "docker_image_reference": os.environ.get(LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
-        "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
-        "storage_backend": storage_backend,
-    }
-
-
 def _latest_preview_inventory_scan(
     *, record_store: object, context_name: str
 ) -> PreviewInventoryScanRecord | None:
@@ -9948,14 +9884,19 @@ def create_launchplane_service_app(
         or local_record_store_for_tests
         or build_shared_record_store(database_url=database_url),
     )
-    storage_backend = storage_backend_name(record_store)
     authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source = (
         _resolve_authz_policy(record_store=record_store, bootstrap_policy=authz_policy)
     )
     resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
-        authz_policy
+        authz_policy,
+        policy_sha256=resolved_authz_policy_sha256,
+        source=resolved_authz_policy_source,
     )
-    resolved_authz_policy_runtime.update(authz_policy)
+    resolved_authz_policy_runtime.update(
+        authz_policy,
+        policy_sha256=resolved_authz_policy_sha256,
+        source=resolved_authz_policy_source,
+    )
     resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
     session_store = (
         human_session_store
@@ -10963,87 +10904,6 @@ def create_launchplane_service_app(
                             **log_payload,
                         },
                     )
-                if action == "launchplane_service.read":
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Launchplane service runtime state.",
-                                },
-                            },
-                        )
-                    if params.get("odoo_worker_status") == "true":
-                        try:
-                            recent_terminal_limit = _query_int_value(
-                                query,
-                                "recent_terminal_limit",
-                                default=10,
-                                minimum=0,
-                                maximum=100,
-                            )
-                            assert recent_terminal_limit is not None
-                            worker_status = build_odoo_stable_operation_worker_status(
-                                record_store=_odoo_stable_operation_worker_store(record_store),
-                                recent_terminal_limit=recent_terminal_limit,
-                            )
-                        except click.ClickException as error:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=503,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "operation_record_storage_required",
-                                        "message": str(error),
-                                    },
-                                },
-                            )
-                        except ValueError as error:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=400,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "invalid_query",
-                                        "message": str(error),
-                                    },
-                                },
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "worker_status": asdict(worker_status),
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "runtime": _launchplane_runtime_payload(
-                                storage_backend=storage_backend,
-                                authz_policy_sha256_value=resolved_authz_policy_sha256,
-                                authz_policy_source=resolved_authz_policy_source,
-                            ),
-                        },
-                    )
                 if action == "every_code_work_request.read":
                     if not authz_policy.allows(
                         identity=identity,
@@ -11343,7 +11203,9 @@ def create_launchplane_service_app(
                     )
                     assert max_attempts is not None
                     odoo_worker_reconcile_result = reconcile_stale_odoo_stable_operation_records(
-                        record_store=_odoo_stable_operation_worker_store(record_store),
+                        record_store=control_plane_service_status.require_odoo_stable_operation_worker_store(
+                            record_store
+                        ),
                         max_attempts=max_attempts,
                     )
                 except click.ClickException as error:
@@ -13499,7 +13361,11 @@ def create_launchplane_service_app(
                     )
                 if authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -13618,7 +13484,11 @@ def create_launchplane_service_app(
                     )
                 if authz_removal_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -13737,7 +13607,11 @@ def create_launchplane_service_app(
                     )
                 if human_authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -13856,7 +13730,11 @@ def create_launchplane_service_app(
                     )
                 if terminal_authz_grant_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -13953,7 +13831,11 @@ def create_launchplane_service_app(
                     )
                 if local_operator_grant_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -14050,7 +13932,11 @@ def create_launchplane_service_app(
                     )
                 if local_admin_grant_request.mode == "apply":
                     authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(updated_policy)
+                    resolved_authz_policy_runtime.update(
+                        updated_policy,
+                        policy_sha256=authz_policy_record.policy_sha256,
+                        source="db",
+                    )
                     resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
                     resolved_authz_policy_source = "db"
                 result, driver_result = (
@@ -15726,7 +15612,11 @@ def serve_launchplane_service(
         policy_source=_bootstrap_policy_source_from_env(),
         now_timestamp=_now_timestamp(),
     )
-    authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(resolved_fastapi_policy.policy)
+    authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+        resolved_fastapi_policy.policy,
+        policy_sha256=resolved_fastapi_policy.policy_sha256,
+        source=resolved_fastapi_policy.source,
+    )
     work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
     work_graph_planning_facts_provider = (
         (lambda: build_github_project_planning_facts(work_graph_project_config))

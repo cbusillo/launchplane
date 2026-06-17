@@ -26,10 +26,6 @@ from control_plane import live_target_runtime as control_plane_live_target_runti
 from control_plane import secrets as control_plane_secrets
 from control_plane import service as control_plane_service
 from control_plane.notifications import public_discord_url_error, public_url_error
-from control_plane.contracts.authz_policy_record import (
-    LaunchplaneAuthzPolicyRecord,
-    authz_policy_sha256,
-)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_notifications import (
@@ -2331,41 +2327,6 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
         self.assertEqual(status_code, 200)
         self.assertEqual(payload["identity"]["login"], "alice")
-
-    def test_read_only_human_session_rejects_runtime_read(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_humans": [
-                    {
-                        "logins": ["alice"],
-                        "roles": ["read_only"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["driver.read"],
-                    }
-                ]
-            }
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as tmpdir:
-            app = create_launchplane_service_app(
-                state_dir=Path(tmpdir),
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-            )
-            cookie = self._signed_in_cookie(app)
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/service/runtime",
-                authorization="",
-                headers={"Cookie": cookie},
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_human_session_does_not_authorize_post_mutations(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -13298,6 +13259,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             self.assertEqual(payload["error"]["code"], "not_found")
 
+    def test_service_runtime_routes_are_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            runtime_status, runtime_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/service/runtime",
+                authorization="",
+            )
+            worker_status, worker_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/service/odoo-workers/status",
+                authorization="",
+            )
+
+        self.assertEqual(runtime_status, 404)
+        self.assertEqual(worker_status, 404)
+        self.assertEqual(runtime_payload["error"]["code"], "not_found")
+        self.assertEqual(worker_payload["error"]["code"], "not_found")
+
     def test_service_serve_rejects_missing_database_url(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -13483,247 +13473,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             authorized_config_response.json()["config_status"]["product"], "example-site"
         )
-
-    def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/launchplane",
-                            "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["launchplane_service.read"],
-                        }
-                    ]
-                }
-            )
-            policy_text = "schema_version = 1\n"
-            with patch.dict(
-                os.environ,
-                {
-                    "DOCKER_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:test",
-                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane.shinycomputers.com",
-                    "LAUNCHPLANE_POLICY_B64": base64.b64encode(policy_text.encode("utf-8")).decode(
-                        "ascii"
-                    ),
-                },
-                clear=True,
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=Path(temporary_directory_name) / "state",
-                    verifier=_StubVerifier(
-                        _identity(
-                            repository="cbusillo/launchplane",
-                            workflow_ref=(
-                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
-                            ),
-                            event_name="workflow_dispatch",
-                        )
-                    ),
-                    authz_policy=policy,
-                    control_plane_root_path=Path(temporary_directory_name),
-                )
-
-                status_code, payload = _invoke_app(app, method="GET", path="/v1/service/runtime")
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(
-            payload["runtime"]["docker_image_reference"],
-            "ghcr.io/cbusillo/launchplane@sha256:test",
-        )
-        self.assertEqual(
-            payload["runtime"]["authz_policy_sha256"],
-            authz_policy_sha256(policy),
-        )
-        self.assertEqual(payload["runtime"]["authz_policy_source"], "bootstrap_seeded_store")
-        self.assertEqual(
-            payload["runtime"]["bootstrap_authz_policy_sha256"],
-            hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
-        )
-        self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
-
-    def test_service_odoo_workers_status_endpoint_reports_queue_status(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            record_store = FilesystemRecordStore(state_dir)
-            record_store.write_odoo_stable_bootstrap_operation_record(
-                OdooStableBootstrapOperationRecord.model_validate(
-                    {
-                        "operation_id": "bootstrap-cm-testing",
-                        "product": "odoo-tenant-cm",
-                        "context": "cm",
-                        "instance": "testing",
-                        "idempotency_key": "bootstrap-cm-testing",
-                        "request_fingerprint": "fingerprint-123",
-                        "request": {
-                            "schema_version": 1,
-                            "product": "odoo-tenant-cm",
-                            "context": "cm",
-                            "instance": "testing",
-                            "confirmation": "bootstrap cm testing",
-                        },
-                        "status": "pending",
-                        "phase": "created",
-                        "created_at": "2026-05-17T00:00:00Z",
-                        "updated_at": "2026-05-17T00:00:00Z",
-                    }
-                )
-            )
-            policy = _local_operator_policy(
-                actions=("launchplane_service.read",),
-                products=("launchplane",),
-                contexts=("launchplane",),
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=state_dir,
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/service/odoo-workers/status",
-                    authorization="Bearer local-operator-token",
-                )
-
-        self.assertEqual(status_code, 200)
-        worker_status = payload["worker_status"]
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(worker_status["status"], "ok")
-        self.assertEqual(worker_status["pending_count"], 1)
-        self.assertEqual(worker_status["running_count"], 0)
-        self.assertEqual(worker_status["operations"][0]["operation_id"], "bootstrap-cm-testing")
-        self.assertNotIn("request", worker_status["operations"][0])
-
-    def test_service_odoo_workers_status_endpoint_requires_service_read_authz(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            policy = _local_operator_policy(
-                actions=("driver.read",),
-                products=("launchplane",),
-                contexts=("launchplane",),
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=state_dir,
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/service/odoo-workers/status",
-                    authorization="Bearer local-operator-token",
-                )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_service_odoo_workers_status_endpoint_validates_recent_terminal_limit(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            policy = _local_operator_policy(
-                actions=("launchplane_service.read",),
-                products=("launchplane",),
-                contexts=("launchplane",),
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=state_dir,
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=FilesystemRecordStore(state_dir),
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/service/odoo-workers/status",
-                    query_string="recent_terminal_limit=101",
-                    authorization="Bearer local-operator-token",
-                )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_query")
-
-    def test_service_odoo_workers_status_endpoint_requires_operation_record_storage(
-        self,
-    ) -> None:
-        class _EmptyStore:
-            backend_name = "test-empty"
-
-            def close(self) -> None:
-                return None
-
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            policy = _local_operator_policy(
-                actions=("launchplane_service.read",),
-                products=("launchplane",),
-                contexts=("launchplane",),
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=state_dir,
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=cast(Any, _EmptyStore()),
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/service/odoo-workers/status",
-                    authorization="Bearer local-operator-token",
-                )
-
-        self.assertEqual(status_code, 503)
-        self.assertEqual(payload["error"]["code"], "operation_record_storage_required")
 
     def test_service_odoo_workers_reconcile_endpoint_recovers_stale_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -13918,62 +13667,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "operation_record_storage_required")
-
-    def test_service_uses_db_backed_authz_policy_when_present(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = (
-                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'launchplane.sqlite3'}"
-            )
-            db_policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "cbusillo/launchplane",
-                            "workflow_refs": [
-                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["workflow_dispatch"],
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["launchplane_service.read"],
-                        }
-                    ]
-                }
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_authz_policy_record(
-                LaunchplaneAuthzPolicyRecord(
-                    record_id="launchplane-authz-policy-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-04-20T10:05:00Z",
-                    policy=db_policy,
-                )
-            )
-            store.close()
-
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/launchplane",
-                        workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                database_url=database_url,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-
-            status_code, payload = _invoke_app(app, method="GET", path="/v1/service/runtime")
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["runtime"]["authz_policy_sha256"], authz_policy_sha256(db_policy))
-        self.assertEqual(payload["runtime"]["authz_policy_source"], "db")
 
     def test_ui_route_serves_static_shell_without_authentication(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
