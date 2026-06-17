@@ -1035,6 +1035,47 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_inventory.promotion_record_id, promotion_record.record_id)
         self.assertEqual(loaded_inventory.promoted_from_instance, "testing")
 
+    def test_write_preview_generation_evidence_records_writes_generation_and_preview(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            generation_id = "preview-verireel-testing-verireel-pr-123-generation-0001"
+            preview = _preview_record(
+                preview_id="preview-verireel-testing-verireel-pr-123",
+                updated_at="2026-04-20T10:05:00Z",
+                pr_number=123,
+            ).model_copy(
+                update={
+                    "active_generation_id": generation_id,
+                    "serving_generation_id": generation_id,
+                    "latest_generation_id": generation_id,
+                    "latest_manifest_fingerprint": "preview-manifest-123",
+                }
+            )
+            generation = _preview_generation_record(
+                generation_id=generation_id,
+                preview_id=preview.preview_id,
+            )
+
+            store.write_preview_generation_evidence_records(
+                preview_record=preview,
+                generation_record=generation,
+            )
+            loaded_generation = store.read_preview_generation_record(generation_id)
+            loaded_preview = store.read_preview_record(preview.preview_id)
+            store.close()
+
+        self.assertEqual(loaded_generation.generation_id, generation_id)
+        self.assertEqual(loaded_generation.preview_id, preview.preview_id)
+        self.assertEqual(loaded_preview.preview_id, preview.preview_id)
+        self.assertEqual(loaded_preview.serving_generation_id, generation_id)
+
     def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

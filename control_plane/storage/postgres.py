@@ -3082,6 +3082,39 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def write_preview_generation_evidence_records(
+        self,
+        *,
+        preview_record: PreviewRecord,
+        generation_record: PreviewGenerationRecord,
+    ) -> tuple[None, None]:
+        with self._session_factory() as session:
+            session.merge(
+                LaunchplanePreviewGenerationRow(
+                    generation_id=generation_record.generation_id,
+                    preview_id=generation_record.preview_id,
+                    sequence=generation_record.sequence,
+                    state=generation_record.state,
+                    requested_at=generation_record.requested_at,
+                    finished_at=generation_record.finished_at,
+                    artifact_id=generation_record.artifact_id,
+                    payload=self._payload_dict(generation_record),
+                )
+            )
+            session.merge(
+                LaunchplanePreviewRow(
+                    preview_id=preview_record.preview_id,
+                    context=preview_record.context,
+                    anchor_repo=preview_record.anchor_repo,
+                    anchor_pr_number=preview_record.anchor_pr_number,
+                    state=preview_record.state,
+                    updated_at=preview_record.updated_at,
+                    payload=self._payload_dict(preview_record),
+                )
+            )
+            session.commit()
+        return None, None
+
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
         return self._read_model(
             model_type=PreviewGenerationRecord,

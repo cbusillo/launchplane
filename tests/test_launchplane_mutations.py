@@ -64,6 +64,39 @@ class _FakePreviewMutationStore:
         return f"generation://{record.generation_id}"
 
 
+class _BundledPreviewMutationStore(_FakePreviewMutationStore):
+    def __init__(self, *, fail_evidence_write: bool = False) -> None:
+        super().__init__()
+        self.fail_evidence_write = fail_evidence_write
+        self.preview_write_count = 0
+        self.generation_write_count = 0
+        self.evidence_write_count = 0
+
+    def write_preview_record(self, record: PreviewRecord) -> str:
+        self.preview_write_count += 1
+        return super().write_preview_record(record)
+
+    def write_preview_generation_record(self, record: PreviewGenerationRecord) -> str:
+        self.generation_write_count += 1
+        return super().write_preview_generation_record(record)
+
+    def write_preview_generation_evidence_records(
+        self,
+        *,
+        preview_record: PreviewRecord,
+        generation_record: PreviewGenerationRecord,
+    ) -> tuple[str, str]:
+        self.evidence_write_count += 1
+        if self.fail_evidence_write:
+            raise RuntimeError("bundled write failed")
+        self.generations[generation_record.generation_id] = generation_record
+        self.previews[preview_record.preview_id] = preview_record
+        return (
+            f"generation-evidence://{generation_record.generation_id}",
+            f"preview-evidence://{preview_record.preview_id}",
+        )
+
+
 def _preview_request(**updates: object) -> PreviewMutationRequest:
     payload: dict[str, object] = {
         "context": "site-testing",
@@ -131,6 +164,108 @@ class LaunchplaneMutationTests(unittest.TestCase):
         preview = store.previews["preview-site-testing-cbusillo-site-pr-42"]
         self.assertEqual(preview.state, "active")
         self.assertEqual(preview.serving_generation_id, result["generation_id"])
+
+    def test_generation_evidence_uses_bundled_store_write_when_available(self) -> None:
+        store = _BundledPreviewMutationStore()
+
+        result = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(),
+        )
+
+        self.assertEqual(store.preview_write_count, 0)
+        self.assertEqual(store.generation_write_count, 0)
+        self.assertEqual(store.evidence_write_count, 1)
+        self.assertEqual(
+            result["generation_path"],
+            "generation-evidence://preview-site-testing-cbusillo-site-pr-42-generation-0001",
+        )
+        self.assertEqual(
+            result["preview_path"],
+            "preview-evidence://preview-site-testing-cbusillo-site-pr-42",
+        )
+        preview = store.previews["preview-site-testing-cbusillo-site-pr-42"]
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.serving_generation_id, result["generation_id"])
+
+    def test_generation_evidence_bundled_write_failure_leaves_no_partial_preview(
+        self,
+    ) -> None:
+        store = _BundledPreviewMutationStore(fail_evidence_write=True)
+
+        with self.assertRaises(RuntimeError):
+            apply_launchplane_generation_evidence(
+                control_plane_root_path=Path("/launchplane"),
+                record_store=store,
+                preview_request=_preview_request(),
+                generation_request=_generation_request(),
+            )
+
+        self.assertEqual(store.preview_write_count, 0)
+        self.assertEqual(store.generation_write_count, 0)
+        self.assertEqual(store.evidence_write_count, 1)
+        self.assertEqual(store.previews, {})
+        self.assertEqual(store.generations, {})
+
+    def test_generation_evidence_retry_with_different_explicit_sequence_creates_new_generation(
+        self,
+    ) -> None:
+        store = _BundledPreviewMutationStore()
+        apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(),
+        )
+
+        result = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(sequence=2),
+        )
+
+        self.assertEqual(
+            result["generation_id"],
+            "preview-site-testing-cbusillo-site-pr-42-generation-0002",
+        )
+        self.assertEqual(
+            store.generations["preview-site-testing-cbusillo-site-pr-42-generation-0001"].sequence,
+            1,
+        )
+        self.assertEqual(
+            store.generations["preview-site-testing-cbusillo-site-pr-42-generation-0002"].sequence,
+            2,
+        )
+
+    def test_generation_evidence_preserves_existing_sequence_for_explicit_generation_id(
+        self,
+    ) -> None:
+        store = _BundledPreviewMutationStore()
+        first_result = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(),
+        )
+
+        result = apply_launchplane_generation_evidence(
+            control_plane_root_path=Path("/launchplane"),
+            record_store=store,
+            preview_request=_preview_request(),
+            generation_request=_generation_request(
+                generation_id=str(first_result["generation_id"]),
+                sequence=2,
+            ),
+        )
+
+        self.assertEqual(result["generation_id"], first_result["generation_id"])
+        self.assertEqual(
+            store.generations[str(first_result["generation_id"])].sequence,
+            1,
+        )
 
     def test_destroy_preview_requires_existing_preview(self) -> None:
         store = _FakePreviewMutationStore()

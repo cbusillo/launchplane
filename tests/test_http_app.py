@@ -17,6 +17,7 @@ from starlette.types import ASGIApp
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -306,6 +307,58 @@ class FastApiPromotionEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_promotion_calls, 1)
+
+
+class FastApiPreviewGenerationEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_generation_evidence_requires_preview_generation_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_generation_write_identity()),
+            authz_policy=_preview_generation_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_generation_evidence(
+            app,
+            _preview_generation_evidence_payload(),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_preview_generation_evidence_replays_idempotency_before_store_gate(
+        self,
+    ) -> None:
+        store = _IdempotencyOnlyPreviewGenerationReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_generation_write_identity()),
+            authz_policy=_preview_generation_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _preview_generation_evidence_payload()
+
+        first_response = await _post_preview_generation_evidence(
+            app,
+            request_payload,
+            idempotency_key="preview-generation-example-site-pr-42",
+        )
+        store.write_preview_generation_evidence_records = None
+        second_response = await _post_preview_generation_evidence(
+            app,
+            request_payload,
+            idempotency_key="preview-generation-example-site-pr-42",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_preview_generation_evidence_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -2082,6 +2135,355 @@ class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_generation_evidence_writes_records_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_generation_evidence(
+                app,
+                _preview_generation_evidence_payload(),
+            )
+            preview = store.read_preview_record("preview-example-site-example-site-pr-42")
+            generation = store.read_preview_generation_record(
+                "preview-example-site-example-site-pr-42-generation-0001"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["preview_id"],
+            "preview-example-site-example-site-pr-42",
+        )
+        self.assertEqual(
+            payload["records"]["generation_id"],
+            "preview-example-site-example-site-pr-42-generation-0001",
+        )
+        self.assertEqual(payload["records"]["transition"], "ready")
+        self.assertNotIn("replayed", payload)
+        self.assertEqual(preview.state, "active")
+        self.assertEqual(preview.serving_generation_id, generation.generation_id)
+        self.assertEqual(generation.state, "ready")
+        self.assertEqual(generation.artifact_id, "ghcr.io/every/example-site:pr-42-abcdef")
+
+    async def test_preview_generation_evidence_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="other-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_generation_evidence(
+                app,
+                _preview_generation_evidence_payload(),
+            )
+            self.assertEqual(store.list_preview_records(), ())
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_generation_evidence_rejects_human_session_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_generation_evidence(
+                app,
+                _preview_generation_evidence_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            self.assertEqual(store.list_preview_records(), ())
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_preview_generation_evidence_rejects_terminal_agent_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_preview_generation_write_policy(
+                    context="example-site"
+                ),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_generation_evidence(
+                app,
+                _preview_generation_evidence_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            self.assertEqual(store.list_preview_records(), ())
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_generation_evidence_validation_errors_use_launchplane_shape(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            invalid_payload = _preview_generation_evidence_payload()
+            invalid_payload["product"] = ""
+
+            response = await _post_preview_generation_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_preview_generation_evidence_rejects_mismatched_generation_context(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            invalid_payload = _preview_generation_evidence_payload()
+            generation = cast(dict[str, object], invalid_payload["generation"])
+            generation["context"] = "other-site"
+
+            response = await _post_preview_generation_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(store.list_preview_records(), ())
+
+    async def test_preview_generation_evidence_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _preview_generation_evidence_payload()
+
+            first_response = await _post_preview_generation_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-generation-example-site-pr-42",
+            )
+            second_response = await _post_preview_generation_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-generation-example-site-pr-42",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+
+    async def test_preview_generation_evidence_retry_after_idempotency_write_failure_converges(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = _FailingOnceIdempotencyPreviewGenerationStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _preview_generation_evidence_payload()
+
+            with self.assertRaises(RuntimeError):
+                await _post_preview_generation_evidence(
+                    app,
+                    request_payload,
+                    idempotency_key="preview-generation-example-site-pr-42",
+                )
+            generations_after_failure = store.list_preview_generation_records(
+                preview_id="preview-example-site-example-site-pr-42"
+            )
+
+            retry_response = await _post_preview_generation_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-generation-example-site-pr-42",
+            )
+            generations_after_retry = store.list_preview_generation_records(
+                preview_id="preview-example-site-example-site-pr-42"
+            )
+
+        self.assertEqual(
+            [record.generation_id for record in generations_after_failure],
+            ["preview-example-site-example-site-pr-42-generation-0001"],
+        )
+        self.assertEqual(retry_response.status_code, 202)
+        retry_payload = retry_response.json()
+        self.assertEqual(
+            retry_payload["records"]["generation_id"],
+            "preview-example-site-example-site-pr-42-generation-0001",
+        )
+        self.assertNotIn("replayed", retry_payload)
+        self.assertEqual(
+            [record.generation_id for record in generations_after_retry],
+            ["preview-example-site-example-site-pr-42-generation-0001"],
+        )
+
+    async def test_preview_generation_evidence_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _preview_generation_evidence_payload()
+            changed_payload = _preview_generation_evidence_payload(anchor_pr_number=43)
+
+            first_response = await _post_preview_generation_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-generation-example-site-pr-42",
+            )
+            second_response = await _post_preview_generation_evidence(
+                app,
+                changed_payload,
+                idempotency_key="preview-generation-example-site-pr-42",
+            )
+            preview_count = len(store.list_preview_records())
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(preview_count, 1)
+
+    async def test_openapi_includes_preview_generation_evidence_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_generation_write_identity()),
+            authz_policy=_preview_generation_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/previews/generations"]["post"]
+        self.assertEqual(route["operationId"], "write_preview_generation_evidence")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            request_schema["$ref"], "#/components/schemas/PreviewGenerationEvidenceEnvelope"
+        )
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        for status_code in ("400", "401", "403", "409", "503"):
+            error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
+            self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
+        envelope_schema = openapi["components"]["schemas"]["PreviewGenerationEvidenceEnvelope"]
+        self.assertFalse(envelope_schema["additionalProperties"])
+
+    async def test_preview_generation_evidence_native_route_precedes_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_generation_write_identity()),
+                authz_policy=_preview_generation_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_preview_generation_evidence(
+                app,
+                _preview_generation_evidence_payload(),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["generation_id"],
+            "preview-example-site-example-site-pr-42-generation-0001",
+        )
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2582,6 +2984,102 @@ def _promotion_evidence_store(
     return store
 
 
+def _preview_generation_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/example-site",
+        workflow_ref="every/example-site/.github/workflows/preview-control-plane.yml@refs/heads/main",
+        event_name="pull_request",
+    )
+
+
+def _preview_generation_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/example-site",
+                    "workflow_refs": [
+                        "every/example-site/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_generation.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_preview_generation_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_generation.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_preview_generation_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_generation.write"],
+                }
+            ]
+        }
+    )
+
+
+def _preview_generation_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
+    pr_url = f"https://github.com/every/example-site/pull/{anchor_pr_number}"
+    return {
+        "schema_version": 1,
+        "product": "example-site",
+        "preview": {
+            "schema_version": 1,
+            "context": "example-site",
+            "anchor_repo": "example-site",
+            "anchor_pr_number": anchor_pr_number,
+            "anchor_pr_url": pr_url,
+            "canonical_url": f"https://pr-{anchor_pr_number}.example.invalid",
+            "state": "active",
+            "updated_at": "2026-04-16T08:10:00Z",
+            "eligible_at": "2026-04-16T08:10:00Z",
+        },
+        "generation": {
+            "schema_version": 1,
+            "context": "example-site",
+            "anchor_repo": "example-site",
+            "anchor_pr_number": anchor_pr_number,
+            "anchor_pr_url": pr_url,
+            "anchor_head_sha": "abcdef1234567890abcdef1234567890abcdef12",
+            "state": "ready",
+            "requested_reason": "external_preview_refresh",
+            "requested_at": "2026-04-16T08:02:00Z",
+            "ready_at": "2026-04-16T08:10:00Z",
+            "finished_at": "2026-04-16T08:10:00Z",
+            "resolved_manifest_fingerprint": f"example-preview-pr-{anchor_pr_number}-abcdef",
+            "artifact_id": "ghcr.io/every/example-site:pr-42-abcdef",
+            "deploy_status": "pass",
+            "verify_status": "pass",
+            "overall_health_status": "pass",
+        },
+    }
+
+
 def _deployment_write_identity() -> GitHubActionsIdentity:
     return _identity(
         repository="every/example-site",
@@ -2984,6 +3482,28 @@ async def _post_promotion_evidence(
     )
 
 
+async def _post_preview_generation_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/previews/generations",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -3167,6 +3687,101 @@ class _IdempotencyOnlyPromotionReplayStore:
 
     def _write_promotion_record(self, record: PromotionRecord) -> None:
         self.write_promotion_calls += 1
+
+
+class _IdempotencyOnlyPreviewGenerationReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_preview_generation_evidence_calls = 0
+        self._stored_record: Any | None = None
+        self._preview_records: dict[str, Any] = {}
+        self._generation_records: dict[str, Any] = {}
+        self.write_preview_generation_evidence_records: Callable[..., tuple[str, str]] | None = (
+            self._write_preview_generation_evidence_records
+        )
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        records = [
+            record
+            for record in self._preview_records.values()
+            if (not context_name or record.context == context_name)
+            and (not anchor_repo or record.anchor_repo == anchor_repo)
+            and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
+        ]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_record(self, record: Any) -> str:
+        self._preview_records[record.preview_id] = record
+        return f"preview://{record.preview_id}"
+
+    def list_preview_generation_records(
+        self, *, preview_id: str = "", limit: int | None = None
+    ) -> tuple[Any, ...]:
+        records = [
+            record
+            for record in self._generation_records.values()
+            if not preview_id or record.preview_id == preview_id
+        ]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_generation_record(self, record: Any) -> str:
+        self._generation_records[record.generation_id] = record
+        return f"generation://{record.generation_id}"
+
+    def _write_preview_generation_evidence_records(
+        self,
+        *,
+        preview_record: Any,
+        generation_record: Any,
+    ) -> tuple[str, str]:
+        self.write_preview_generation_evidence_calls += 1
+        generation_path = self.write_preview_generation_record(generation_record)
+        preview_path = self.write_preview_record(preview_record)
+        return generation_path, preview_path
+
+
+class _FailingOnceIdempotencyPreviewGenerationStore(FilesystemRecordStore):
+    def __init__(self, *, state_dir: Path) -> None:
+        super().__init__(state_dir=state_dir)
+        self.fail_next_idempotency_write = True
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> Path:
+        if self.fail_next_idempotency_write:
+            self.fail_next_idempotency_write = False
+            raise RuntimeError("idempotency write failed")
+        return super().write_idempotency_record(record)
 
 
 class _DeploymentEvidenceOnlyStore:
