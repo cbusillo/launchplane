@@ -20,6 +20,11 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationState,
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -2192,6 +2197,248 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_read_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_preview_record(_preview_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="preview.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_preview_record(app, "preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["record"]["preview_id"], "preview-example-site-example-site-pr-42")
+        self.assertEqual(payload["record"]["context"], "example-site")
+        self.assertEqual(payload["record"]["state"], "active")
+
+    async def test_preview_history_returns_preview_and_generations(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            preview = _preview_read_record()
+            store.write_preview_record(preview)
+            store.write_preview_generation_record(
+                _preview_generation_read_record(sequence=1, state="ready")
+            )
+            store.write_preview_generation_record(
+                _preview_generation_read_record(sequence=2, state="verifying")
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="preview.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_preview_history(app, preview.preview_id)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            payload["preview"]["preview_id"], "preview-example-site-example-site-pr-42"
+        )
+        self.assertNotIn("record", payload)
+        self.assertEqual(
+            [generation["sequence"] for generation in payload["generations"]],
+            [2, 1],
+        )
+        self.assertEqual(payload["generations"][0]["state"], "verifying")
+
+    async def test_preview_read_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="preview.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_preview_record(
+            app,
+            "preview-example-site-example-site-pr-42",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_preview_read_rejects_wrong_context_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_preview_record(_preview_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="preview.read",
+                    context="other-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_preview_record(app, "preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_history_rejects_wrong_context_before_listing_generations(
+        self,
+    ) -> None:
+        store = _PreviewHistoryProbeStore(_preview_read_record())
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="preview.read",
+                context="other-site",
+            ),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _get_preview_history(
+            app,
+            "preview-example-site-example-site-pr-42",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(store.list_preview_generation_calls, 0)
+
+    async def test_preview_read_returns_not_found_for_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="preview.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_preview_record(app, "preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_preview_read_requires_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="preview.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_preview_record(app, "preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_preview_record", payload["error"]["message"])
+
+    async def test_preview_history_requires_history_capable_store(self) -> None:
+        store = _PreviewRecordOnlyStore(_preview_read_record())
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="preview.read", context="example-site"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _get_preview_history(app, "preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("list_preview_generation_records", payload["error"]["message"])
+
+    async def test_openapi_includes_preview_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="preview.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        preview_route = openapi["paths"]["/v1/previews/{preview_id}"]["get"]
+        history_route = openapi["paths"]["/v1/previews/{preview_id}/history"]["get"]
+        self.assertEqual(preview_route["operationId"], "read_preview_record")
+        self.assertEqual(history_route["operationId"], "read_preview_history")
+        self.assertEqual(
+            preview_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PreviewRecordResponse",
+        )
+        self.assertEqual(
+            history_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PreviewHistoryResponse",
+        )
+        for route in (preview_route, history_route):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+            self.assertIn("401", route["responses"])
+            self.assertIn("403", route["responses"])
+            self.assertIn("404", route["responses"])
+            self.assertIn("503", route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["PreviewRecordResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["PreviewHistoryResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_preview_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            preview = _preview_read_record()
+            store.write_preview_record(preview)
+            store.write_preview_generation_record(_preview_generation_read_record())
+            policy = _record_read_policy(
+                action="preview.read",
+                context="example-site",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            preview_response = await _get_preview_record(app, preview.preview_id)
+            history_response = await _get_preview_history(app, preview.preview_id)
+
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertEqual(history_response.status_code, 200)
+        self.assertEqual(preview_response.json()["status"], "ok")
+        self.assertEqual(history_response.json()["status"], "ok")
 
 
 class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -4750,6 +4997,41 @@ def _preview_record_for_destroy(*, anchor_pr_number: int = 42) -> PreviewRecord:
     )
 
 
+def _preview_read_record(*, anchor_pr_number: int = 42) -> PreviewRecord:
+    return _preview_record_for_destroy(anchor_pr_number=anchor_pr_number)
+
+
+def _preview_generation_read_record(
+    *,
+    anchor_pr_number: int = 42,
+    sequence: int = 1,
+    state: PreviewGenerationState = "ready",
+) -> PreviewGenerationRecord:
+    preview_id = f"preview-example-site-example-site-pr-{anchor_pr_number}"
+    generation_id = f"{preview_id}-generation-{sequence:04d}"
+    return PreviewGenerationRecord(
+        generation_id=generation_id,
+        preview_id=preview_id,
+        sequence=sequence,
+        state=state,
+        requested_reason="external_preview_refresh",
+        requested_at="2026-04-16T08:02:00Z",
+        ready_at="2026-04-16T08:10:00Z" if state == "ready" else "",
+        finished_at="2026-04-16T08:10:00Z" if state == "ready" else "",
+        resolved_manifest_fingerprint=f"example-preview-pr-{anchor_pr_number}-abcdef",
+        artifact_id=f"ghcr.io/every/example-site:pr-{anchor_pr_number}-abcdef",
+        anchor_summary=PreviewPullRequestSummary(
+            repo="example-site",
+            pr_number=anchor_pr_number,
+            head_sha="abcdef1234567890abcdef1234567890abcdef12",
+            pr_url=f"https://github.com/every/example-site/pull/{anchor_pr_number}",
+        ),
+        deploy_status="pass" if state == "ready" else "pending",
+        verify_status="pass" if state == "ready" else "pending",
+        overall_health_status="pass" if state == "ready" else "pending",
+    )
+
+
 def _preview_destroyed_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -5426,6 +5708,36 @@ async def _get_environment_inventory(
     )
 
 
+async def _get_preview_record(
+    app: FastAPI,
+    preview_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, f"/v1/previews/{preview_id}", headers=request_headers)
+
+
+async def _get_preview_history(
+    app: FastAPI,
+    preview_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/previews/{preview_id}/history",
+        headers=request_headers,
+    )
+
+
 async def _post_backup_gate_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -5657,6 +5969,37 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _PreviewRecordOnlyStore:
+    def __init__(self, record: PreviewRecord) -> None:
+        self._record = record
+
+    def read_preview_record(self, preview_id: str) -> PreviewRecord:
+        if preview_id != self._record.preview_id:
+            raise FileNotFoundError(f"No preview record found for {preview_id}.")
+        return self._record
+
+
+class _PreviewHistoryProbeStore:
+    def __init__(self, record: PreviewRecord) -> None:
+        self._record = record
+        self.list_preview_generation_calls = 0
+
+    def read_preview_record(self, preview_id: str) -> PreviewRecord:
+        if preview_id != self._record.preview_id:
+            raise FileNotFoundError(f"No preview record found for {preview_id}.")
+        return self._record
+
+    def list_preview_generation_records(
+        self,
+        *,
+        preview_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewGenerationRecord, ...]:
+        del preview_id, limit
+        self.list_preview_generation_calls += 1
+        return ()
 
 
 class _BackupGateEvidenceOnlyStore:

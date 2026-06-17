@@ -60,10 +60,10 @@ Keep a compatibility surface only when it is one of these:
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a
   second production implementation.
-- Deployment, promotion, and inventory single-record reads use native FastAPI
-  routes for bearer-token and human-session callers. Their legacy WSGI branches
-  are deleted; direct fallback calls fail closed while the mounted fallback
-  remains for retained non-native routes.
+- Deployment, promotion, preview, and inventory single-record reads use native
+  FastAPI routes for bearer-token and human-session callers. Their legacy WSGI
+  branches are deleted; direct fallback calls fail closed while the mounted
+  fallback remains for retained non-native routes.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the

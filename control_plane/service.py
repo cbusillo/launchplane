@@ -4513,10 +4513,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 3 and segments[:2] == ["v1", "previews"]:
-        return "preview.read", {"preview_id": segments[2]}
-    if len(segments) == 4 and segments[:2] == ["v1", "previews"] and segments[3] == "history":
-        return "preview.read", {"preview_id": segments[2], "include_history": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "secrets"]:
         return "secret.read", {"secret_id": segments[2]}
     if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "secrets":
@@ -10960,51 +10956,6 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in canary_records
                             ],
-                        },
-                    )
-                if action == "preview.read":
-                    preview = record_store.read_preview_record(params["preview_id"])
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=preview.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read previews for the requested context.",
-                                },
-                            },
-                        )
-                    if params.get("include_history") == "true":
-                        generations = record_store.list_preview_generation_records(
-                            preview_id=preview.preview_id
-                        )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "preview": preview.model_dump(mode="json"),
-                                "generations": [
-                                    generation.model_dump(mode="json") for generation in generations
-                                ],
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "record": preview.model_dump(mode="json"),
                         },
                     )
                 if action == "secret.read":

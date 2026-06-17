@@ -37447,6 +37447,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="GET",
                 path="/v1/inventory/opw/testing",
             )
+            preview_status_code, preview_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/preview-opw-opw-pr-42",
+            )
+            preview_history_status_code, preview_history_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/preview-opw-opw-pr-42/history",
+            )
 
         self.assertEqual(deployment_status_code, 404)
         self.assertEqual(deployment_payload["status"], "rejected")
@@ -37457,8 +37467,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(inventory_status_code, 404)
         self.assertEqual(inventory_payload["status"], "rejected")
         self.assertEqual(inventory_payload["error"]["code"], "not_found")
+        self.assertEqual(preview_status_code, 404)
+        self.assertEqual(preview_payload["status"], "rejected")
+        self.assertEqual(preview_payload["error"]["code"], "not_found")
+        self.assertEqual(preview_history_status_code, 404)
+        self.assertEqual(preview_history_payload["status"], "rejected")
+        self.assertEqual(preview_history_payload["error"]["code"], "not_found")
 
-    def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(
+    def test_recent_operations_endpoint_returns_operator_read_model(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -37593,23 +37609,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            history_status_code, history_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/previews/preview-verireel-testing-verireel-pr-123/history",
-            )
             operations_status_code, operations_payload = _invoke_app(
                 app,
                 method="GET",
                 path="/v1/contexts/verireel-testing/operations/recent",
             )
-
-            self.assertEqual(history_status_code, 200)
-            self.assertEqual(
-                history_payload["preview"]["preview_id"], "preview-verireel-testing-verireel-pr-123"
-            )
-            self.assertEqual(len(history_payload["generations"]), 1)
-            self.assertEqual(history_payload["generations"][0]["state"], "ready")
 
             self.assertEqual(operations_status_code, 200)
             self.assertEqual(operations_payload["context"], "verireel-testing")
