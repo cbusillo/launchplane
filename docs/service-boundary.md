@@ -50,11 +50,13 @@ VeriReel product paths:
     context
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
-- native FastAPI deployment and promotion single-record reads:
+- native FastAPI deployment, promotion, and inventory single-record reads:
   - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
     stored record context
   - `GET /v1/promotions/{record_id}`, requiring `promotion.read` for the stored
     record context
+  - `GET /v1/inventory/{context}/{instance}`, requiring `inventory.read` for
+    the stored inventory context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
@@ -1244,7 +1246,8 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/previews/{preview_id}`
 - `GET /v1/previews/{preview_id}/history`
-- `GET /v1/inventory/{context}/{instance}`
+- `GET /v1/inventory/{context}/{instance}` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/promotions/{record_id}` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/deployments/{record_id}` (native FastAPI for bearer-token and
@@ -1268,8 +1271,11 @@ Deployment and promotion single-record reads use the stored record context for
 authorization. The service reads the record first, maps a missing record to
 `404 not_found`, then checks `deployment.read` or `promotion.read` against
 product `launchplane` and the record context before returning the typed record
-envelope. Their legacy WSGI branches are deleted; direct fallback calls fail
-closed while the mounted fallback remains for retained non-native routes.
+envelope. Inventory single-record reads authorize `inventory.read` against the
+path context before store access, then verify the stored inventory context before
+returning the typed record envelope. Their legacy WSGI branches are deleted;
+direct fallback calls fail closed while the mounted fallback remains for
+retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,

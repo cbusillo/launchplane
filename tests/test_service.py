@@ -37419,7 +37419,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_deployment_and_promotion_read_routes_are_retired_from_legacy_wsgi_app(
+    def test_single_record_read_routes_are_retired_from_legacy_wsgi_app(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -37442,6 +37442,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="GET",
                 path="/v1/promotions/promotion-20260420T153500Z-opw-testing-to-prod",
             )
+            inventory_status_code, inventory_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/inventory/opw/testing",
+            )
 
         self.assertEqual(deployment_status_code, 404)
         self.assertEqual(deployment_payload["status"], "rejected")
@@ -37449,6 +37454,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(promotion_status_code, 404)
         self.assertEqual(promotion_payload["status"], "rejected")
         self.assertEqual(promotion_payload["error"]["code"], "not_found")
+        self.assertEqual(inventory_status_code, 404)
+        self.assertEqual(inventory_payload["status"], "rejected")
+        self.assertEqual(inventory_payload["error"]["code"], "not_found")
 
     def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(
         self,
