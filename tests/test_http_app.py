@@ -25,6 +25,15 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     PromotionRecord,
 )
+from control_plane.contracts.runner_host_hygiene import (
+    RunnerHostHygieneApplyAuditRecord,
+    RunnerHostHygieneApplyPolicy,
+    RunnerHostHygieneApplyRequest,
+    RunnerHostHygieneObservation,
+    RunnerHostHygienePolicy,
+    evaluate_runner_host_hygiene,
+    plan_runner_host_hygiene_apply,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -415,6 +424,59 @@ class FastApiPreviewDestroyedEvidenceStoreGateTests(unittest.IsolatedAsyncioTest
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_preview_record_calls, 1)
+
+
+class FastApiRunnerHostHygieneAuditEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_host_hygiene_audit_evidence_requires_audit_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_write_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_runner_host_hygiene_audit_evidence(
+            app,
+            _runner_host_hygiene_audit_payload(),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_runner_host_hygiene_audit_replays_idempotency_before_store_gate(
+        self,
+    ) -> None:
+        store = _IdempotencyOnlyRunnerHostHygieneAuditReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_write_policy(),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _runner_host_hygiene_audit_payload()
+
+        first_response = await _post_runner_host_hygiene_audit_evidence(
+            app,
+            request_payload,
+            idempotency_key="runner-host-hygiene:chris-testing:planned",
+        )
+        store.write_runner_host_hygiene_audit_record = None
+        second_response = await _post_runner_host_hygiene_audit_evidence(
+            app,
+            request_payload,
+            idempotency_key="runner-host-hygiene:chris-testing:planned",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_runner_host_hygiene_audit_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -2858,6 +2920,330 @@ class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"]["transition"], "destroyed")
 
 
+class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_host_hygiene_audit_evidence_writes_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+            )
+            records = store.list_runner_host_hygiene_audit_records(
+                host_name="chris-testing",
+                status="planned",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "runner_host_hygiene_audit_record_key": (
+                    "runner-host-hygiene/2026-05-23/chris-testing"
+                ),
+            },
+        )
+        self.assertEqual(
+            payload["result"]["runner_host_hygiene_audit_record_key"],
+            "runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        self.assertEqual(payload["result"]["host_name"], "chris-testing")
+        self.assertEqual(payload["result"]["audit_status"], "planned")
+        self.assertFalse(payload["result"]["mutate"])
+        self.assertEqual(payload["result"]["audit"]["status"], "planned")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0].audit_record_key,
+            "runner-host-hygiene/2026-05-23/chris-testing",
+        )
+        self.assertFalse(records[0].request.mutate)
+
+    async def test_runner_host_hygiene_audit_evidence_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+            )
+            records = store.list_runner_host_hygiene_audit_records()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_runner_host_hygiene_audit_evidence_requires_bearer_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+                authorization="",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_runner_host_hygiene_audit_evidence_rejects_human_session_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            records = store.list_runner_host_hygiene_audit_records()
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(records, ())
+
+    async def test_runner_host_hygiene_audit_evidence_rejects_terminal_agent_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            records = store.list_runner_host_hygiene_audit_records()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_runner_host_hygiene_audit_evidence_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(product="odoo"),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_runner_host_hygiene_audit_evidence_replays_idempotent_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_host_hygiene_audit_payload()
+
+            first_response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-host-hygiene:chris-testing:planned",
+            )
+            second_response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-host-hygiene:chris-testing:planned",
+            )
+            records = store.list_runner_host_hygiene_audit_records(
+                host_name="chris-testing",
+                status="planned",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(len(records), 1)
+
+    async def test_runner_host_hygiene_audit_evidence_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_host_hygiene_audit_payload()
+            changed_payload = _runner_host_hygiene_audit_payload(
+                audit_record_key="runner-host-hygiene/2026-05-23/chris-testing-retry"
+            )
+
+            first_response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-host-hygiene:chris-testing:planned",
+            )
+            second_response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                changed_payload,
+                idempotency_key="runner-host-hygiene:chris-testing:planned",
+            )
+            records = store.list_runner_host_hygiene_audit_records()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(len(records), 1)
+
+    async def test_openapi_includes_runner_host_hygiene_audit_evidence_contract(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+            authz_policy=_runner_host_hygiene_audit_write_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/runner-host-hygiene/audits"]["post"]
+        self.assertEqual(route["operationId"], "write_runner_host_hygiene_audit_evidence")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            request_schema["$ref"],
+            "#/components/schemas/RunnerHostHygieneAuditEvidenceEnvelope",
+        )
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        for status_code in ("400", "401", "403", "409", "503"):
+            error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
+            self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
+        envelope_schema = openapi["components"]["schemas"]["RunnerHostHygieneAuditEvidenceEnvelope"]
+        self.assertFalse(envelope_schema["additionalProperties"])
+
+    async def test_runner_host_hygiene_audit_evidence_native_route_precedes_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_host_hygiene_audit_write_identity()),
+                authz_policy=_runner_host_hygiene_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_runner_host_hygiene_audit_evidence(
+                app,
+                _runner_host_hygiene_audit_payload(),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["runner_host_hygiene_audit_record_key"],
+            "runner-host-hygiene/2026-05-23/chris-testing",
+        )
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3549,6 +3935,112 @@ def _preview_destroyed_evidence_payload(*, anchor_pr_number: int = 42) -> dict[s
     }
 
 
+def _runner_host_hygiene_audit_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref=(
+            "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+        ),
+        event_name="workflow_dispatch",
+    )
+
+
+def _runner_host_hygiene_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/runner-host-hygiene.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_host_hygiene_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_runner_host_hygiene_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_host_hygiene_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_runner_host_hygiene_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_host_hygiene_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _runner_host_hygiene_audit_payload(
+    *,
+    audit_record_key: str = "runner-host-hygiene/2026-05-23/chris-testing",
+    product: str = "launchplane",
+) -> dict[str, object]:
+    report = evaluate_runner_host_hygiene(
+        policy=RunnerHostHygienePolicy(required_warm_builders=("odoo-docker-chris-testing",)),
+        observation=RunnerHostHygieneObservation(
+            host_name="chris-testing",
+            observed_at="2026-05-23T13:00:00Z",
+            free_disk_bytes=500,
+            warm_builders=("odoo-docker-chris-testing",),
+        ),
+    )
+    request = RunnerHostHygieneApplyRequest(
+        action="prune_docker_cache",
+        host_name="chris-testing",
+        mutate=False,
+        retained_warm_builders=("odoo-docker-chris-testing",),
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_host_hygiene_apply(
+        policy=RunnerHostHygieneApplyPolicy(
+            approved_hosts=("chris-testing",),
+            required_retained_warm_builders=("odoo-docker-chris-testing",),
+            allow_docker_cache_prune=True,
+        ),
+        request=request,
+        report=report,
+    )
+    audit_record = RunnerHostHygieneApplyAuditRecord(
+        audit_record_key=audit_record_key,
+        status="planned",
+        request=request,
+        plan=plan,
+        pre_apply_report=report,
+        message="planned runner host hygiene apply; no host mutation was executed",
+    )
+    return {
+        "schema_version": 1,
+        "product": product,
+        "audit": audit_record.model_dump(mode="json"),
+    }
+
+
 def _deployment_write_identity() -> GitHubActionsIdentity:
     return _identity(
         repository="every/example-site",
@@ -3995,6 +4487,28 @@ async def _post_preview_destroyed_evidence(
     )
 
 
+async def _post_runner_host_hygiene_audit_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/runner-host-hygiene/audits",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -4136,6 +4650,43 @@ class _IdempotencyOnlyBackupGateReplayStore:
 
     def _write_backup_gate_record(self, record: BackupGateRecord) -> None:
         self.write_backup_gate_calls += 1
+
+
+class _IdempotencyOnlyRunnerHostHygieneAuditReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_runner_host_hygiene_audit_calls = 0
+        self._stored_record: Any | None = None
+        self.write_runner_host_hygiene_audit_record: (
+            Callable[[RunnerHostHygieneApplyAuditRecord], None] | None
+        ) = self._write_runner_host_hygiene_audit_record
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def _write_runner_host_hygiene_audit_record(
+        self,
+        record: RunnerHostHygieneApplyAuditRecord,
+    ) -> None:
+        self.write_runner_host_hygiene_audit_calls += 1
 
 
 class _PromotionEvidenceOnlyStore:

@@ -121,11 +121,13 @@ Launchplane storage supports durable runner-host hygiene audit records keyed by
 `audit_record_key`. Shared-service storage promotes the key, host, action,
 status, and mutate intent into columns, while the full typed request, plan,
 pre/post reports, retained warm-builder evidence, and operator message remain in
-the JSON payload. `POST /v1/evidence/runner-host-hygiene/audits` accepts planned,
+the JSON payload. `POST /v1/evidence/runner-host-hygiene/audits` is native
+FastAPI evidence ingress for bearer-token callers. It accepts planned,
 completed, and failed audit records for product/context `launchplane/launchplane`
-under `runner_host_hygiene_audit.write`. The local planner only prints the
-planned record; the approved executor calls the service route after it captures
-the required pre/post host evidence.
+under `runner_host_hygiene_audit.write`, preserves the `Idempotency-Key`
+replay/conflict contract, and returns the accepted record key plus audit result
+details. The local planner only prints the planned record; the approved executor
+calls the service route after it captures the required pre/post host evidence.
 
 ## Approved Ops-Lane Executor
 

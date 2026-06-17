@@ -62,7 +62,9 @@ VeriReel product paths:
   - `POST /v1/evidence/previews/destroyed` (native FastAPI for bearer-token
     callers, with Pydantic/OpenAPI contract coverage, idempotency replay
     preservation, and preview destroyed storage)
-  - `POST /v1/evidence/runner-host-hygiene/audits`
+  - `POST /v1/evidence/runner-host-hygiene/audits` (native FastAPI for
+    bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
+    replay preservation, and runner-host hygiene audit storage)
 - product profile routes:
   - `GET /v1/product-profiles`
   - `GET /v1/product-profiles/{product}`
@@ -862,6 +864,14 @@ existing Launchplane preview record to `destroyed`; it does not create missing
 previews. Replay handling runs before those capability checks so a stored
 response can still be returned if the backing store is temporarily
 write-restricted for preview destroyed evidence.
+
+`POST /v1/evidence/runner-host-hygiene/audits` requires any available
+idempotency store plus runner-host hygiene audit write capability. It accepts
+only product/context `launchplane/launchplane`, writes the typed audit record,
+and returns the accepted record key plus result details for the stored audit.
+Replay handling runs before the audit-write capability check so a stored
+response can still be returned if the backing store is temporarily
+write-restricted for runner-host hygiene audit evidence.
 
 ### Preview lifecycle endpoints
 
@@ -1732,8 +1742,10 @@ Request payload:
 
 The route requires `runner_host_hygiene_audit.write` for product/context
 `launchplane/launchplane`, writes the typed audit record to Launchplane-owned
-storage, and returns the `runner_host_hygiene_audit_record_key`. It is evidence
-ingress only: it records planned, completed, or failed audit facts supplied by a
+storage, and returns the `runner_host_hygiene_audit_record_key` in both the
+accepted records and result details. It is native FastAPI evidence ingress for
+bearer-token callers with OpenAPI contract coverage and idempotency replay
+preservation. It records planned, completed, or failed audit facts supplied by a
 future approved executor, but it does not mutate runner hosts itself.
 
 ### Runner lane registration audit evidence
