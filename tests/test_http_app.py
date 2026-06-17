@@ -1758,6 +1758,290 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deployment_read_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_deployment_record(_deployment_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="deployment.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_deployment_record(app, "deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["record"]["record_id"], "deployment-example-site-prod")
+        self.assertEqual(
+            payload["record"]["resolved_target"]["target_id"],
+            "target-example-site-prod",
+        )
+
+    async def test_deployment_read_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="deployment.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_deployment_record(
+            app,
+            "deployment-example-site-prod",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_deployment_read_rejects_wrong_context_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_deployment_record(_deployment_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="deployment.read",
+                    context="other-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_deployment_record(app, "deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_deployment_read_returns_not_found_for_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="deployment.read",
+                    context="other-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_deployment_record(app, "deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_deployment_read_requires_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="deployment.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_deployment_record(app, "deployment-example-site-prod")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_deployment_record", payload["error"]["message"])
+
+    async def test_promotion_read_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_promotion_record(_promotion_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="promotion.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_promotion_record(
+                app,
+                "promotion-example-site-testing-to-prod",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(
+            payload["record"]["record_id"],
+            "promotion-example-site-testing-to-prod",
+        )
+        self.assertEqual(payload["record"]["to_instance"], "prod")
+
+    async def test_promotion_read_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="promotion.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_promotion_record(
+            app,
+            "promotion-example-site-testing-to-prod",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_promotion_read_rejects_wrong_context_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_promotion_record(_promotion_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="promotion.read",
+                    context="other-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_promotion_record(
+                app,
+                "promotion-example-site-testing-to-prod",
+            )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_promotion_read_returns_not_found_for_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="promotion.read",
+                    context="other-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_promotion_record(
+                app,
+                "promotion-example-site-testing-to-prod",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_promotion_read_requires_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="promotion.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_promotion_record(
+            app,
+            "promotion-example-site-testing-to-prod",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_promotion_record", payload["error"]["message"])
+
+    async def test_openapi_includes_deployment_and_promotion_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="deployment.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        deployment_route = openapi["paths"]["/v1/deployments/{record_id}"]["get"]
+        promotion_route = openapi["paths"]["/v1/promotions/{record_id}"]["get"]
+        self.assertEqual(deployment_route["operationId"], "read_deployment_record")
+        self.assertEqual(promotion_route["operationId"], "read_promotion_record")
+        self.assertEqual(
+            deployment_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DeploymentRecordResponse",
+        )
+        self.assertEqual(
+            promotion_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PromotionRecordResponse",
+        )
+        for route in (deployment_route, promotion_route):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+            self.assertIn("401", route["responses"])
+            self.assertIn("403", route["responses"])
+            self.assertIn("404", route["responses"])
+            self.assertIn("503", route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["DeploymentRecordResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["PromotionRecordResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_record_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_deployment_record(_deployment_read_record())
+            store.write_promotion_record(_promotion_read_record())
+            policy = _record_read_policy(
+                action="deployment.read",
+                context="example-site",
+                extra_actions=("promotion.read",),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            deployment_response = await _get_deployment_record(
+                app,
+                "deployment-example-site-prod",
+            )
+            promotion_response = await _get_promotion_record(
+                app,
+                "promotion-example-site-testing-to-prod",
+            )
+
+        self.assertEqual(deployment_response.status_code, 200)
+        self.assertEqual(promotion_response.status_code, 200)
+        self.assertEqual(deployment_response.json()["status"], "ok")
+        self.assertEqual(promotion_response.json()["status"], "ok")
+
+
 class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_backup_gate_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4566,6 +4850,30 @@ def _deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     )
 
 
+def _record_read_policy(
+    *,
+    action: str,
+    context: str,
+    extra_actions: tuple[str, ...] = (),
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": [context],
+                    "actions": [action, *extra_actions],
+                }
+            ]
+        }
+    )
+
+
 def _github_human_deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -4637,6 +4945,16 @@ def _deployment_evidence_payload(
             },
         },
     }
+
+
+def _deployment_read_record() -> DeploymentRecord:
+    payload = _deployment_evidence_payload()["deployment"]
+    return DeploymentRecord.model_validate(payload)
+
+
+def _promotion_read_record() -> PromotionRecord:
+    payload = _promotion_evidence_payload()["promotion"]
+    return PromotionRecord.model_validate(payload)
 
 
 def _github_human_driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
@@ -4895,6 +5213,32 @@ async def _get_driver_instance_view(
         f"/v1/contexts/{context}/instances/{instance}/driver-view",
         headers=headers,
     )
+
+
+async def _get_deployment_record(
+    app: FastAPI,
+    record_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, f"/v1/deployments/{record_id}", headers=request_headers)
+
+
+async def _get_promotion_record(
+    app: FastAPI,
+    record_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(app, f"/v1/promotions/{record_id}", headers=request_headers)
 
 
 async def _post_backup_gate_evidence(

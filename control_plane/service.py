@@ -4513,10 +4513,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 3 and segments[:2] == ["v1", "deployments"]:
-        return "deployment.read", {"record_id": segments[2]}
-    if len(segments) == 3 and segments[:2] == ["v1", "promotions"]:
-        return "promotion.read", {"record_id": segments[2]}
     if len(segments) == 4 and segments[:2] == ["v1", "inventory"]:
         return "inventory.read", {"context": segments[2], "instance": segments[3]}
     if len(segments) == 3 and segments[:2] == ["v1", "previews"]:
@@ -10966,64 +10962,6 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in canary_records
                             ],
-                        },
-                    )
-                if action == "deployment.read":
-                    deployment = record_store.read_deployment_record(params["record_id"])
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=deployment.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read deployment records for the requested context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "record": deployment.model_dump(mode="json"),
-                        },
-                    )
-                if action == "promotion.read":
-                    promotion = record_store.read_promotion_record(params["record_id"])
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=promotion.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read promotion records for the requested context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "record": promotion.model_dump(mode="json"),
                         },
                     )
                 if action == "inventory.read":
