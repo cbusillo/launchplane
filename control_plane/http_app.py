@@ -33,6 +33,8 @@ from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
     PreviewGenerationEvidenceEnvelope,
 )
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
@@ -175,6 +177,23 @@ class PromotionRecordResponse(BaseModel):
     record: PromotionRecord
 
 
+class PreviewRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: PreviewRecord
+
+
+class PreviewHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    preview: PreviewRecord
+    generations: tuple[PreviewGenerationRecord, ...]
+
+
 class EnvironmentInventoryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -298,6 +317,21 @@ class _DeploymentReadStore(Protocol):
 
 class _PromotionReadStore(Protocol):
     def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
+
+
+class _PreviewReadStore(Protocol):
+    def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
+
+
+class _PreviewHistoryReadStore(Protocol):
+    def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
+
+    def list_preview_generation_records(
+        self,
+        *,
+        preview_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewGenerationRecord, ...]: ...
 
 
 class _EnvironmentInventoryReadStore(Protocol):
@@ -487,6 +521,30 @@ def require_promotion_read_store(record_store: object) -> _PromotionReadStore:
             "read_promotion_record"
         )
     return cast(_PromotionReadStore, record_store)
+
+
+def require_preview_read_store(record_store: object) -> _PreviewReadStore:
+    read_record = getattr(record_store, "read_preview_record", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support preview reads: read_preview_record"
+        )
+    return cast(_PreviewReadStore, record_store)
+
+
+def require_preview_history_read_store(record_store: object) -> _PreviewHistoryReadStore:
+    required_methods = ("read_preview_record", "list_preview_generation_records")
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support preview history reads: {missing_summary}"
+        )
+    return cast(_PreviewHistoryReadStore, record_store)
 
 
 def require_environment_inventory_read_store(
@@ -1013,6 +1071,102 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot read promotion records for the requested context.",
             )
         return PromotionRecordResponse(trace_id=trace_id, record=promotion)
+
+    def read_preview_record(
+        preview_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> PreviewRecordResponse:
+        trace_id = next_trace_id()
+        try:
+            preview_store = require_preview_read_store(record_store)
+            preview = preview_store.read_preview_record(preview_id)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview.read",
+            product="launchplane",
+            context=preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read previews for the requested context.",
+            )
+        return PreviewRecordResponse(trace_id=trace_id, record=preview)
+
+    def read_preview_history(
+        preview_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> PreviewHistoryResponse:
+        trace_id = next_trace_id()
+        try:
+            preview_store = require_preview_history_read_store(record_store)
+            preview = preview_store.read_preview_record(preview_id)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview.read",
+            product="launchplane",
+            context=preview.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read previews for the requested context.",
+            )
+        try:
+            generations = preview_store.list_preview_generation_records(
+                preview_id=preview.preview_id
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return PreviewHistoryResponse(
+            trace_id=trace_id,
+            preview=preview,
+            generations=generations,
+        )
 
     def read_environment_inventory(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -1872,6 +2026,38 @@ def create_launchplane_fastapi_app(
         response_model=PromotionRecordResponse,
         operation_id="read_promotion_record",
         summary="Read one promotion record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/previews/{preview_id}",
+        read_preview_record,
+        methods=["GET"],
+        response_model=PreviewRecordResponse,
+        operation_id="read_preview_record",
+        summary="Read one preview record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/previews/{preview_id}/history",
+        read_preview_history,
+        methods=["GET"],
+        response_model=PreviewHistoryResponse,
+        operation_id="read_preview_history",
+        summary="Read one preview record with generation history",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
