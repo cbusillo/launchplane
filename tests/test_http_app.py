@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import unittest
 from dataclasses import dataclass
@@ -5,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable, MutableMapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlencode
 from unittest.mock import patch
 
@@ -25,6 +27,9 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.odoo_stable_bootstrap_operation import (
+    OdooStableBootstrapOperationRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
@@ -55,7 +60,7 @@ from control_plane.contracts.runner_lane_registration import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
-from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, create_launchplane_fastapi_app
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -70,6 +75,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _generic_site_profile_payload,
@@ -125,6 +131,261 @@ class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("launchplane_req_00000000000000000000000000000000", example_text)
         self.assertNotIn("example-site", example_text)
         self.assertNotIn("shinycomputers", example_text)
+
+
+class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_reports_current_image_and_policy_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = _local_operator_launchplane_service_read_policy()
+            policy_text = "schema_version = 1\n"
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+                policy,
+                policy_sha256="resolved-policy-sha256",
+                source="db",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                authz_policy_runtime=authz_policy_runtime,
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: "ghcr.io/example/launchplane@sha256:test",
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane.example.com",
+                    "LAUNCHPLANE_POLICY_B64": base64.b64encode(policy_text.encode("utf-8")).decode(
+                        "ascii"
+                    ),
+                },
+                clear=True,
+            ):
+                response = await _asgi_get(
+                    app,
+                    "/v1/service/runtime",
+                    headers={"Authorization": "Bearer local-operator-token"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        runtime = payload["runtime"]
+        self.assertEqual(runtime["storage_backend"], "filesystem")
+        self.assertEqual(
+            runtime["docker_image_reference"],
+            "ghcr.io/example/launchplane@sha256:test",
+        )
+        self.assertEqual(runtime["service_audience"], "launchplane.example.com")
+        self.assertEqual(runtime["authz_policy_sha256"], "resolved-policy-sha256")
+        self.assertEqual(runtime["authz_policy_source"], "db")
+        self.assertEqual(
+            runtime["bootstrap_authz_policy_sha256"],
+            hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
+        )
+
+    async def test_worker_status_reports_queue_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _pending_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/odoo-workers/status",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        worker_status = payload["worker_status"]
+        self.assertEqual(worker_status["status"], "ok")
+        self.assertEqual(worker_status["pending_count"], 1)
+        self.assertEqual(worker_status["running_count"], 0)
+        self.assertEqual(worker_status["operations"][0]["operation_id"], "bootstrap-cm-testing")
+        self.assertNotIn("request", worker_status["operations"][0])
+
+    async def test_worker_status_requires_service_read_authz(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_driver_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/odoo-workers/status",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_service_runtime_routes_require_authentication(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        runtime_response = await _asgi_get(app, "/v1/service/runtime")
+        worker_response = await _asgi_get(app, "/v1/service/odoo-workers/status")
+
+        self.assertEqual(runtime_response.status_code, 401)
+        self.assertEqual(worker_response.status_code, 401)
+        self.assertEqual(runtime_response.json()["error"]["code"], "authentication_required")
+        self.assertEqual(worker_response.json()["error"]["code"], "authentication_required")
+
+    async def test_runtime_rejects_human_session_without_service_read_authz(self) -> None:
+        oauth_config = _github_oauth_config()
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(config=oauth_config, session_store=session_store)
+        human_session = session_manager.issue(_github_human_identity(role="read_only"))
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["example-operator"],
+                            "roles": ["read_only"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/runtime",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_worker_status_validates_recent_terminal_limit(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/odoo-workers/status?recent_terminal_limit=101",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    async def test_worker_status_requires_operation_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/service/odoo-workers/status",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "operation_record_storage_required")
+
+    async def test_openapi_includes_service_runtime_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        runtime_route = openapi["paths"]["/v1/service/runtime"]["get"]
+        worker_route = openapi["paths"]["/v1/service/odoo-workers/status"]["get"]
+        self.assertEqual(runtime_route["operationId"], "read_launchplane_runtime")
+        self.assertEqual(
+            runtime_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/LaunchplaneRuntimeResponse",
+        )
+        self.assertEqual(
+            worker_route["operationId"],
+            "read_odoo_stable_operation_worker_status",
+        )
+        self.assertEqual(
+            worker_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/OdooStableOperationWorkerStatusResponse",
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["LaunchplaneRuntimeResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["OdooStableOperationWorkerStatusResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+        self.assertTrue(set(runtime_route["responses"]) >= {"200", "401", "403"})
+        self.assertTrue(set(worker_route["responses"]) >= {"200", "400", "401", "403", "503"})
+
+    async def test_fastapi_service_runtime_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_read_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(),
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _asgi_get(
+                app,
+                "/v1/service/runtime",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
@@ -7252,6 +7513,46 @@ def _local_operator_product_environment_read_policy(*, context: str) -> Launchpl
     )
 
 
+def _local_operator_launchplane_service_read_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service.read"],
+                }
+            ]
+        }
+    )
+
+
+def _pending_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecord:
+    return OdooStableBootstrapOperationRecord.model_validate(
+        {
+            "operation_id": "bootstrap-cm-testing",
+            "product": "odoo-tenant-cm",
+            "context": "cm",
+            "instance": "testing",
+            "idempotency_key": "bootstrap-cm-testing",
+            "request_fingerprint": "fingerprint-123",
+            "request": {
+                "schema_version": 1,
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "confirmation": "bootstrap cm testing",
+            },
+            "status": "pending",
+            "phase": "created",
+            "created_at": "2026-05-17T00:00:00Z",
+            "updated_at": "2026-05-17T00:00:00Z",
+        }
+    )
+
+
 def _terminal_agent_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -7334,7 +7635,7 @@ def _github_oauth_config() -> GitHubOAuthConfig:
     )
 
 
-def _github_human_identity() -> GitHubHumanIdentity:
+def _github_human_identity(*, role: Literal["read_only", "admin"] = "admin") -> GitHubHumanIdentity:
     return GitHubHumanIdentity(
         login="example-operator",
         github_id=123,
@@ -7342,7 +7643,7 @@ def _github_human_identity() -> GitHubHumanIdentity:
         email="operator@example.com",
         organizations=frozenset({"example-org"}),
         teams=frozenset({"example-org/launchplane-operators"}),
-        role="admin",
+        role=role,
     )
 
 
@@ -7962,6 +8263,13 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _EmptyStore:
+    backend_name = "test-empty"
+
+    def close(self) -> None:
+        return None
 
 
 class _SecretStatusProbeStore:

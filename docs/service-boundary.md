@@ -41,6 +41,12 @@ VeriReel product paths:
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
   model, included in OpenAPI as the first v2 contract proof, and retired from
   the legacy WSGI fallback
+- native FastAPI Launchplane service runtime reads:
+  - `GET /v1/service/runtime`, requiring `launchplane_service.read` for the
+    Launchplane service context and returning runtime metadata only
+  - `GET /v1/service/odoo-workers/status`, requiring
+    `launchplane_service.read` for the Launchplane service context and returning
+    Odoo operation worker queue counters without request payloads
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
@@ -1295,6 +1301,10 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `GET /v1/product-profiles/{product}/context-cutover-audit` (native FastAPI
   for bearer-token and human-session callers)
+- `GET /v1/service/runtime` (native FastAPI for bearer-token and human-session
+  callers)
+- `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
+  human-session callers)
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
