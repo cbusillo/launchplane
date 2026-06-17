@@ -39,7 +39,8 @@ VeriReel product paths:
 - server runtime: FastAPI served by Uvicorn, with legacy WSGI routes mounted as
   the fallback while route ownership is migrated incrementally
 - native FastAPI health route: `GET /v1/health`, backed by a Pydantic response
-  model and included in OpenAPI as the first v2 contract proof
+  model, included in OpenAPI as the first v2 contract proof, and retired from
+  the legacy WSGI fallback
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
@@ -189,8 +190,8 @@ Before a migrated route is done, verify all of the following:
   retained with an owning follow-up issue.
 
 `GET /v1/health` is the first proven pattern: native FastAPI route ownership,
-typed Pydantic response, focused OpenAPI assertions, and mounted-fallback
-precedence. Do not turn that route into a migration framework; use it as the
+typed Pydantic response, focused OpenAPI assertions, and direct WSGI fallback
+retirement. Do not turn that route into a migration framework; use it as the
 small contract shape for the next route-family slice.
 
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts

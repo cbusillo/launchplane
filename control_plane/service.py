@@ -10243,16 +10243,6 @@ def create_launchplane_service_app(
                 json_response=_json_response,
                 http_status_text=_http_status_text,
             )
-        if method == "GET" and path == "/v1/health":
-            return _json_response(
-                start_response=start_response,
-                status_code=200,
-                payload={
-                    "status": "ok",
-                    "trace_id": request_trace_id,
-                    "storage_backend": storage_backend,
-                },
-            )
         read_route = _match_read_route(path)
         if path not in write_routes and read_route is None:
             return _not_found_response(
