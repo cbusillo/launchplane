@@ -61,11 +61,12 @@ Keep a compatibility surface only when it is one of these:
   WSGI branches are deleted; cleanup callers use the service route instead of a
   second production implementation.
 - Deployment, promotion, preview, inventory, recent-operations,
-  managed-secret status, product-profile, and product context cutover audit
-  reads use native FastAPI routes for bearer-token and human-session callers.
-  The product-profile collection also preserves the dedicated Every Code worker
-  token. Their legacy WSGI branches are deleted; direct fallback calls fail
-  closed while the mounted fallback remains for retained non-native routes.
+  managed-secret status, product-profile, product/site read-model, and product
+  context cutover audit reads use native FastAPI routes for bearer-token and
+  human-session callers. The product-profile collection also preserves the
+  dedicated Every Code worker token. Their legacy WSGI branches are deleted;
+  direct fallback calls fail closed while the mounted fallback remains for
+  retained non-native routes.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the

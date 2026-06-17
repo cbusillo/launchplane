@@ -1257,11 +1257,16 @@ only after a passing plan and a matching stored preview record are present.
 
 ### Operator read endpoints
 
-- `GET /v1/products`
-- `GET /v1/products/{product}`
-- `GET /v1/products/{product}/activity`
-- `GET /v1/products/{product}/environments`
-- `GET /v1/products/{product}/environments/{environment}`
+- `GET /v1/products` (native FastAPI for bearer-token and human-session
+  callers)
+- `GET /v1/products/{product}` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/products/{product}/activity` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/products/{product}/environments` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/products/{product}/environments/{environment}` (native FastAPI for
+  bearer-token and human-session callers)
 - `GET /v1/previews/{preview_id}` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/previews/{preview_id}/history` (native FastAPI for bearer-token and
@@ -1325,13 +1330,19 @@ the typed audit envelope. Their legacy WSGI branches are deleted; direct
 fallback calls fail closed while the mounted fallback remains for retained
 non-native routes.
 
-Product/site reads use action `product_environment.read`. They compose
-Launchplane-owned product profiles, driver descriptors, stable lane records,
-preview summaries, runtime-environment key summaries, managed secret binding
-metadata, action availability, and trust state. Raw context names and provider
-target identifiers remain evidence metadata; runtime values, secret plaintext,
-secret ciphertext, and product-specific driver payloads are not exposed as
-shared top-level fields.
+Product/site reads use action `product_environment.read`. They are native
+FastAPI routes backed by DB-owned product environment read-model composition.
+They compose Launchplane-owned product profiles, driver descriptors, stable lane
+records, preview summaries, runtime-environment key summaries, managed secret
+binding metadata, action availability, and trust state. The collection, product,
+activity, and environments routes authorize against the Launchplane service
+context. Single environment detail reads authorize against the selected lane
+context. Raw context names and provider target identifiers remain evidence
+metadata; runtime values, secret plaintext, secret ciphertext, and
+product-specific driver payloads are not exposed as shared top-level fields.
+Their legacy WSGI product-read branches are deleted; direct fallback calls fail
+closed while `/v1/repo-product-mapping` and `/v1/agent/context` remain on the
+retained fallback until their own native cutovers.
 
 `GET /v1/products/{product}/environments` returns the product's stable
 environment summaries from DB-backed Launchplane records. It is the collection

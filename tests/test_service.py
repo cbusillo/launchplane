@@ -17209,478 +17209,31 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "idempotency_key_required")
         self.assertEqual(provider_targets, ())
 
-    def test_product_overview_endpoint_is_generic_web_profile_driven(self) -> None:
+    def test_product_environment_read_legacy_wsgi_routes_are_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "example-site"],
-                            "contexts": ["launchplane", "example-site"],
-                            "actions": [
-                                "product_environment.read",
-                                "generic_web_prod_promotion.dispatch",
-                            ],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site",
-            )
-
-        self.assertEqual(status_code, 200)
-        product = payload["product"]
-        response_text = json.dumps(payload)
-        self.assertEqual(product["product"], "example-site")
-        self.assertEqual(product["driver_id"], "generic-web")
-        self.assertEqual(
-            [environment["environment"] for environment in product["environments"]],
-            ["testing", "prod"],
-        )
-        actions = {action["action_id"]: action for action in product["available_actions"]}
-        self.assertTrue(actions["prod_promotion_workflow"]["enabled"])
-        self.assertFalse(actions["prod_backup_gate"]["enabled"])
-        self.assertEqual(actions["prod_backup_gate"]["trust_state"], "unsupported")
-        self.assertNotIn("sellyouroutboard", response_text)
-
-    def test_products_endpoint_lists_db_backed_product_overviews(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "example-site"],
-                            "contexts": ["launchplane", "example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products",
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(
-            [product["product"] for product in payload["products"]],
-            ["example-site"],
-        )
-        self.assertEqual(payload["products"][0]["driver_id"], "generic-web")
-        self.assertEqual(
-            [environment["environment"] for environment in payload["products"][0]["environments"]],
-            ["testing", "prod"],
-        )
-
-    def test_products_endpoint_requires_database_backed_read_model_store(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "example-site"],
-                            "contexts": ["launchplane", "example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=root,
             )
 
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products",
-            )
-
-        self.assertEqual(status_code, 503)
-        self.assertEqual(payload["status"], "rejected")
-        self.assertEqual(payload["error"]["code"], "database_storage_required")
-        self.assertIn("DB-backed Launchplane storage", payload["error"]["message"])
-
-    def test_product_activity_endpoint_returns_product_timeline(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site/activity",
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["activity"]["product"], "example-site")
-        self.assertEqual(payload["activity"]["events"][0]["event_type"], "authz_policy")
-        self.assertEqual(payload["activity"]["events"][0]["action_id"], "authz_policy.update")
-
-    def test_product_environments_endpoint_lists_db_backed_environment_summaries(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="example-site",
-                    instance="prod",
-                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
-                    updated_at="2026-05-02T22:32:00Z",
-                    source_label="test",
+            responses = [
+                _invoke_app(app, method="GET", path=path)
+                for path in (
+                    "/v1/products",
+                    "/v1/products/example-site",
+                    "/v1/products/example-site/activity",
+                    "/v1/products/example-site/environments",
+                    "/v1/products/example-site/environments/prod",
                 )
-            )
-            store.write_dokploy_target_record(
-                DokployTargetRecord(
-                    context="example-site",
-                    instance="prod",
-                    target_type="application",
-                    target_name="example-site-prod",
-                    updated_at="2026-05-02T22:33:00Z",
-                    source_label="test",
-                )
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
+            ]
 
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site/environments",
-            )
-
-        response_text = json.dumps(payload)
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["product"], "example-site")
-        self.assertEqual(
-            [environment["environment"] for environment in payload["environments"]],
-            ["testing", "prod"],
-        )
-        prod_environment = payload["environments"][1]
-        self.assertEqual(prod_environment["context"], "example-site")
-        self.assertEqual(prod_environment["trust_state"], "missing")
-        self.assertEqual(payload["trust_state"], "missing")
-        self.assertNotIn("https://internal.example-site.invalid", response_text)
-
-    def test_product_environment_detail_redacts_runtime_and_secret_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_dokploy_target_record(
-                DokployTargetRecord(
-                    context="example-site",
-                    instance="prod",
-                    target_type="application",
-                    target_name="example-site-prod",
-                    updated_at="2026-05-02T22:31:00Z",
-                    source_label="test",
-                )
-            )
-            store.write_dokploy_target_id_record(
-                DokployTargetIdRecord(
-                    context="example-site",
-                    instance="prod",
-                    target_id="app-prod-123",
-                    updated_at="2026-05-02T22:31:00Z",
-                    source_label="test",
-                )
-            )
-            store.write_provider_target_record(
-                ProviderTargetRecord(
-                    context="example-site",
-                    instance="prod",
-                    provider_id="dokploy",
-                    target_category="application",
-                    target_id="app-prod-123",
-                    display_name="example-site-prod",
-                    provider_target_type="application",
-                    updated_at="2026-05-02T22:32:00Z",
-                    source_label="test",
-                )
-            )
-            store.write_runtime_environment_record(
-                RuntimeEnvironmentRecord(
-                    scope="instance",
-                    context="example-site",
-                    instance="prod",
-                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
-                    updated_at="2026-05-02T22:32:00Z",
-                    source_label="test",
-                )
-            )
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                control_plane_secrets.write_secret_value(
-                    record_store=store,
-                    scope="context_instance",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    name="SMTP_PASSWORD",
-                    plaintext_value="super-secret-password",
-                    binding_key="SMTP_PASSWORD",
-                    context_name="example-site",
-                    instance_name="prod",
-                    actor="test",
-                )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site/environments/prod",
-            )
-
-        response_text = json.dumps(payload)
-        self.assertEqual(status_code, 200)
-        environment = payload["environment"]
-        self.assertEqual(environment["target"]["target_name"], "example-site-prod")
-        self.assertTrue(environment["target"]["target_id_recorded"])
-        self.assertEqual(environment["runtime_settings"][0]["env_keys"], ["INTERNAL_CALLBACK_URL"])
-        self.assertEqual(environment["managed_secrets"][0]["binding_key"], "SMTP_PASSWORD")
-        self.assertNotIn("https://internal.example-site.invalid", response_text)
-        self.assertNotIn("super-secret-password", response_text)
-
-    def test_product_environment_detail_returns_not_found_for_unknown_product(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["missing-site"],
-                            "contexts": ["missing-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/missing-site/environments/prod",
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["status"], "rejected")
-        self.assertEqual(payload["error"]["code"], "not_found")
-        self.assertEqual(payload["error"]["message"], "Product 'missing-site' was not found.")
-
-    def test_product_environment_detail_returns_not_found_for_unknown_environment(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.close()
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["example-site"],
-                            "contexts": ["example-site"],
-                            "actions": ["product_environment.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/products/example-site/environments/staging",
-            )
-
-        self.assertEqual(status_code, 404)
-        self.assertEqual(payload["status"], "rejected")
-        self.assertEqual(payload["error"]["code"], "not_found")
-        self.assertEqual(
-            payload["error"]["message"],
-            "Product 'example-site' has no environment 'staging'.",
-        )
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["status"], "rejected")
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_product_environment_config_status_legacy_wsgi_route_is_retired(
         self,
@@ -25954,25 +25507,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-            with patch.dict(
-                os.environ,
-                TERMINAL_AGENT_AUTH_ENV,
-                clear=True,
-            ):
-                read_status_code, read_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/products/example-site/environments/prod",
-                    authorization="Bearer terminal-read-token",
-                )
-
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry_run")
         self.assertEqual(payload["result"]["changed"], True)
         self.assertEqual(len(active_records), 1)
         self.assertIsNone(dry_run_idempotency_record)
-        self.assertEqual(read_status_code, 403)
-        self.assertEqual(read_payload["error"]["code"], "authorization_denied")
+        self.assertFalse(
+            active_records[0].policy.allows(
+                identity=TerminalAgentIdentity(
+                    subject="local-owner-agent", token_label="local-owner-read"
+                ),
+                action="product_environment.read",
+                product="example-site",
+                context="example-site",
+            )
+        )
 
     def test_local_operator_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
         self,
