@@ -826,6 +826,10 @@ writes, not on every possible operator action.
 
 ### Evidence ingress endpoints
 
+These evidence-ingress paths are native FastAPI routes. The legacy WSGI fallback
+does not serve them; direct calls to the fallback fail closed while retained
+non-native routes continue to use the mounted fallback during migration.
+
 - `POST /v1/evidence/deployments`
 - `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/promotions`
