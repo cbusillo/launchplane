@@ -442,8 +442,9 @@ Workflow dispatches may select at most one non-`none` phase input across
 batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
 
-`GET /v1/repo-product-mapping` returns the repository ownership/awareness read
-model used by work graph and future agent context. The route requires
+`GET /v1/repo-product-mapping` is a native FastAPI route that returns the
+repository ownership/awareness read model used by work graph and agent context.
+The route requires
 `product_environment.read` for product/context `launchplane`, performs no
 writes, and distinguishes Launchplane-managed runtime repos from awareness-only
 Every Code work-request repos. Managed runtime entries come from product profile
@@ -471,15 +472,16 @@ until that secret exists, so prepared repo variables do not enable
 unauthenticated runtime reads. That token is not a Launchplane record and must
 remain outside the repo.
 
-`GET /v1/agent/context` is a thin read-only aggregation endpoint for public-safe
-skill preflight. It requires `product_environment.read` for product/context
-`launchplane`, accepts an optional `repository` filter, and composes the existing
-repo-product mapping, work graph snapshot, Every Code summary, and preview
-readiness projections under named sections. Each section reports `available`,
-`unauthorized`, or `unavailable`; optional work-graph planning provider failures
-mark only that section unavailable instead of dropping the whole context or
-silently omitting the failure. The endpoint writes no records, fetches no issue
-bodies, and must preserve the lower-level redaction/provenance rules.
+`GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
+for public-safe skill preflight. It requires `product_environment.read` for
+product/context `launchplane`, accepts an optional `repository` filter, and
+composes the existing repo-product mapping, work graph snapshot, Every Code
+summary, and preview readiness projections under named sections. Each section
+reports `available`, `unauthorized`, or `unavailable`; optional work-graph
+planning provider failures mark only that section unavailable instead of dropping
+the whole context or silently omitting the failure. The endpoint writes no
+records, fetches no issue bodies, and must preserve the lower-level
+redaction/provenance rules.
 
 `POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
 for one ordered-queue read or mutation pass. It resolves repository/base policy
@@ -1341,8 +1343,8 @@ context. Raw context names and provider target identifiers remain evidence
 metadata; runtime values, secret plaintext, secret ciphertext, and
 product-specific driver payloads are not exposed as shared top-level fields.
 Their legacy WSGI product-read branches are deleted; direct fallback calls fail
-closed while `/v1/repo-product-mapping` and `/v1/agent/context` remain on the
-retained fallback until their own native cutovers.
+closed. `/v1/repo-product-mapping` and `/v1/agent/context` are also native
+FastAPI routes, and their legacy WSGI branches are deleted.
 
 `GET /v1/products/{product}/environments` returns the product's stable
 environment summaries from DB-backed Launchplane records. It is the collection

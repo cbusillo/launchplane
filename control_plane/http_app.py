@@ -16,6 +16,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
+from control_plane.agent_context_service import (
+    AgentContextPayload,
+    agent_context_action_allowed,
+    agent_context_allowed,
+    build_agent_context_service_payload,
+)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -25,6 +31,8 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -39,6 +47,7 @@ from control_plane.contracts.product_environment_read_model import (
     ProductSiteOverview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
     PreviewGenerationEvidenceEnvelope,
@@ -91,6 +100,10 @@ from control_plane.workflows.evidence_ingestion import (
     apply_promotion_evidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.work_graph_service import (
+    WorkGraphPlanningFactsProvider,
+    build_repo_product_mapping_service_payload,
+)
 
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
@@ -104,6 +117,45 @@ _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+
+class RepoProductMappingReadStore(Protocol):
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+
+class AgentContextReadStore(ProductReadModelStore, Protocol):
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def list_every_code_preview_gate_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -193,6 +245,23 @@ class ProductEnvironmentResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     environment: ProductEnvironmentDetail
+
+
+class RepoProductMappingResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    mapping: RepoProductMapping
+    source: dict[str, object]
+
+
+class AgentContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    context: AgentContextPayload
 
 
 class DriverDescriptorsResponse(BaseModel):
@@ -976,6 +1045,7 @@ def create_launchplane_fastapi_app(
     bearer_identity_config: BearerIdentityConfig | None = None,
     human_session_manager: HumanSessionManager | None = None,
     control_plane_root_path: FilePath | None = None,
+    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
 ) -> FastAPI:
     resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
         authz_policy
@@ -1293,6 +1363,126 @@ def create_launchplane_fastapi_app(
             code="authorization_denied",
             message=result.denial_message,
         )
+
+    def require_agent_context_read_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str, message: str
+    ) -> None:
+        if agent_context_allowed(
+            authz_policy=resolved_authz_policy_runtime.policy,
+            identity=identity,
+        ):
+            return
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message=message,
+        )
+
+    def require_read_store_methods(
+        record_store: object,
+        *,
+        trace_id: str,
+        method_names: tuple[str, ...],
+        message: str,
+    ) -> None:
+        missing_methods = tuple(
+            method_name
+            for method_name in method_names
+            if not callable(getattr(record_store, method_name, None))
+        )
+        if not missing_methods:
+            if isinstance(record_store, PostgresRecordStore):
+                return
+            missing_methods = ("postgres_storage",)
+        missing_method_list = ", ".join(missing_methods)
+        raise _launchplane_http_error(
+            status_code=503,
+            trace_id=trace_id,
+            code="database_storage_required",
+            message=f"{message} Missing store method(s): {missing_method_list}.",
+        )
+
+    def require_repo_product_mapping_read_store(
+        record_store: object, *, trace_id: str
+    ) -> RepoProductMappingReadStore:
+        require_read_store_methods(
+            record_store,
+            trace_id=trace_id,
+            method_names=(
+                "list_product_profile_records",
+                "list_every_code_work_request_records",
+            ),
+            message="Repo product mapping reads require a database-backed record store.",
+        )
+        return cast(RepoProductMappingReadStore, record_store)
+
+    def require_agent_context_read_store(
+        record_store: object, *, trace_id: str
+    ) -> AgentContextReadStore:
+        require_read_store_methods(
+            record_store,
+            trace_id=trace_id,
+            method_names=(
+                "list_product_profile_records",
+                "read_product_profile_record",
+                "list_every_code_work_request_records",
+                "list_every_code_preview_gate_records",
+            ),
+            message="Agent context reads require a database-backed record store.",
+        )
+        return cast(AgentContextReadStore, record_store)
+
+    def read_repo_product_mapping(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> RepoProductMappingResponse:
+        trace_id = next_trace_id()
+        require_agent_context_read_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            message="Workflow cannot read the Launchplane repo product mapping.",
+        )
+        mapping_store = require_repo_product_mapping_read_store(
+            record_store,
+            trace_id=trace_id,
+        )
+        payload = build_repo_product_mapping_service_payload(
+            generated_at=utc_now_timestamp(),
+            product_store=mapping_store,
+            work_request_store=mapping_store,
+        )
+        return RepoProductMappingResponse(
+            trace_id=trace_id,
+            mapping=RepoProductMapping.model_validate(payload["mapping"]),
+            source=cast(dict[str, object], payload["source"]),
+        )
+
+    def read_agent_context(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        repository: Annotated[str, Query()] = "",
+    ) -> AgentContextResponse:
+        trace_id = next_trace_id()
+        require_agent_context_read_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            message="Workflow cannot read Launchplane agent context.",
+        )
+        context_store = require_agent_context_read_store(record_store, trace_id=trace_id)
+        context = build_agent_context_service_payload(
+            generated_at=utc_now_timestamp(),
+            repository=repository,
+            product_store=context_store,
+            work_request_store=context_store,
+            preview_readiness_store=context_store,
+            action_allowed=agent_context_action_allowed(
+                authz_policy=resolved_authz_policy_runtime.policy,
+                identity=identity,
+            ),
+            planning_facts_provider=work_graph_planning_facts_provider,
+        )
+        return AgentContextResponse(trace_id=trace_id, context=context)
 
     def list_product_environment_overviews(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -3000,6 +3190,32 @@ def create_launchplane_fastapi_app(
         404: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+
+    agent_context_error_responses: dict[int | str, dict[str, object]] = {
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
+
+    app.add_api_route(
+        "/v1/repo-product-mapping",
+        read_repo_product_mapping,
+        methods=["GET"],
+        response_model=RepoProductMappingResponse,
+        operation_id="read_repo_product_mapping",
+        summary="Read repository product mapping",
+        responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/agent/context",
+        read_agent_context,
+        methods=["GET"],
+        response_model=AgentContextResponse,
+        operation_id="read_agent_context",
+        summary="Read Launchplane agent context",
+        responses=agent_context_error_responses,
+    )
 
     app.add_api_route(
         "/v1/products",

@@ -13241,307 +13241,32 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["reconcile"]["added_count"], 1)
         self.assertEqual(payload["result"]["reconcile"]["items"][0]["action"], "added")
 
-    def test_repo_product_mapping_returns_managed_and_awareness_repos(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "product_environment.read",
-                            "every_code_work_request.write",
-                        ],
-                    }
-                ]
-            }
-        )
+    def test_agent_context_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            create_status, _ = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/tooling",
-                    "issue_number": 12,
-                    "issue_url": "https://github.com/cbusillo/tooling/issues/12",
-                    "issue_title": "Support repo follow-up",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-08T18:00:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-create-tooling-12"},
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/repo-product-mapping",
-            )
-
-        self.assertEqual(create_status, 202)
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["status"], "ok")
-        repositories = payload["mapping"]["repositories"]
-        by_repository = {repository["repository"]: repository for repository in repositories}
-        self.assertEqual(by_repository["every/example-site"]["classification"], "managed_runtime")
-        self.assertEqual(by_repository["every/example-site"]["product"], "example-site")
-        self.assertEqual(by_repository["every/example-site"]["environments"], ["testing", "prod"])
-        self.assertEqual(by_repository["cbusillo/tooling"]["classification"], "active_awareness")
-        self.assertEqual(payload["source"]["product_count"], 1)
-        self.assertEqual(payload["source"]["work_request_count"], 1)
-
-    def test_repo_product_mapping_rejects_unauthorized_identity(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
             )
-            status_code, payload = _invoke_app(
+
+            mapping_status, mapping_payload = _invoke_app(
                 app,
                 method="GET",
                 path="/v1/repo-product-mapping",
             )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_agent_context_returns_thin_aggregated_read_models(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane", "example-site"],
-                        "contexts": ["launchplane", "example-site"],
-                        "actions": [
-                            "product_environment.read",
-                            "every_code_work_request.write",
-                        ],
-                    }
-                ]
-            }
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_every_code_preview_gate_record(
-                EveryCodePreviewGateRecord(
-                    gate_id="every-code-preview-gate-every-example-site-190-31",
-                    request_id="every-code-every-example-site-190-test",
-                    repository="every/example-site",
-                    issue_number=190,
-                    issue_url="https://github.com/every/example-site/issues/190",
-                    pr_number=31,
-                    pr_url="https://github.com/every/example-site/pull/31",
-                    head_sha="abcdef1234567890",
-                    status="ready",
-                    created_at="2026-05-08T18:00:00Z",
-                    updated_at="2026-05-08T18:01:00Z",
-                    ready_at="2026-05-08T18:01:00Z",
-                    last_checked_at="2026-05-08T18:01:00Z",
-                )
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            create_status, _ = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "every/example-site",
-                    "issue_number": 190,
-                    "issue_url": "https://github.com/every/example-site/issues/190",
-                    "issue_title": "Build operator chooser",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-06T02:00:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-create-agent-context-190"},
-            )
-            status_code, payload = _invoke_app(
+            context_status, context_payload = _invoke_app(
                 app,
                 method="GET",
                 path="/v1/agent/context",
-                query_string="repository=every/example-site",
             )
 
-        self.assertEqual(create_status, 202)
-        self.assertEqual(status_code, 200)
-        context = payload["context"]
-        self.assertEqual(context["schema_version"], 1)
-        self.assertEqual(context["repository"], "every/example-site")
-        sections = context["sections"]
-        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
-        self.assertEqual(sections["preview_readiness"]["status"], "available")
-        summary = sections["every_code_summary"]["payload"]["summary"]
-        self.assertEqual(summary["repository"], "every/example-site")
-        self.assertEqual(summary["summaries"][0]["issue_number"], 190)
-        readiness = sections["preview_readiness"]["payload"]["readiness"]
-        self.assertEqual(readiness["repository"], "every/example-site")
-        self.assertEqual(readiness["items"][0]["readiness_status"], "ready")
-
-    def test_agent_context_rejects_unauthorized_identity(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(app, method="GET", path="/v1/agent/context")
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_terminal_agent_read_token_can_read_agent_context(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "terminal_agents": [
-                    {
-                        "subjects": ["local-owner-agent"],
-                        "token_labels": ["local-owner-read"],
-                        "products": ["launchplane", "example-site"],
-                        "contexts": ["launchplane", "example-site"],
-                        "actions": [
-                            "product_environment.read",
-                            "work_graph.rank",
-                            "every_code_work_request.read",
-                            "every_code_preview_gate.read",
-                        ],
-                    }
-                ]
-            }
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            store.write_every_code_preview_gate_record(
-                EveryCodePreviewGateRecord(
-                    gate_id="every-code-preview-gate-every-example-site-190-abcdef",
-                    request_id="every-code-every-example-site-190-test",
-                    repository="every/example-site",
-                    issue_number=190,
-                    issue_url="https://github.com/every/example-site/issues/190",
-                    pr_number=191,
-                    pr_url="https://github.com/every/example-site/pull/191",
-                    head_sha="abcdef1234567890",
-                    status="ready",
-                    created_at="2026-05-08T18:00:00Z",
-                    updated_at="2026-05-08T18:01:00Z",
-                    ready_at="2026-05-08T18:01:00Z",
-                    last_checked_at="2026-05-08T18:01:00Z",
-                )
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
-                    "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "local-owner-read",
-                },
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/agent/context",
-                    query_string="repository=every/example-site",
-                    authorization="Bearer terminal-read-token",
-                )
-
-        self.assertEqual(status_code, 200)
-        context = payload["context"]
-        self.assertEqual(context["repository"], "every/example-site")
-        sections = context["sections"]
-        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
-        self.assertEqual(sections["preview_readiness"]["status"], "available")
-
-    def test_agent_context_marks_work_graph_unavailable_without_dropping_sections(
-        self,
-    ) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["product_environment.read"],
-                    }
-                ]
-            }
-        )
-
-        def unavailable_planning_facts() -> tuple[WorkGraphPlanningIssueFacts, ...]:
-            raise RuntimeError("planning provider unavailable")
-
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-                work_graph_planning_facts_provider=unavailable_planning_facts,
-            )
-            status_code, payload = _invoke_app(app, method="GET", path="/v1/agent/context")
-
-        self.assertEqual(status_code, 200)
-        sections = payload["context"]["sections"]
-        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["work_graph_snapshot"]["status"], "unavailable")
-        self.assertEqual(sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
+        self.assertEqual(mapping_status, 404)
+        self.assertEqual(context_status, 404)
+        self.assertEqual(mapping_payload["error"]["code"], "not_found")
+        self.assertEqual(context_payload["error"]["code"], "not_found")
 
     def test_create_service_app_requires_database_url_without_explicit_local_test_store(
         self,
