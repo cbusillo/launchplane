@@ -28,7 +28,10 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
-from control_plane.contracts.preview_evidence import PreviewGenerationEvidenceEnvelope
+from control_plane.contracts.preview_evidence import (
+    PreviewDestroyedEvidenceEnvelope,
+    PreviewGenerationEvidenceEnvelope,
+)
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
@@ -51,7 +54,9 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHumanSession
 from control_plane.launchplane_mutations import (
+    LaunchplaneDestroyPreviewStore,
     LaunchplaneMutationStore,
+    apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence,
 )
 from control_plane.storage.factory import build_shared_record_store
@@ -73,6 +78,7 @@ _DEPLOYMENT_EVIDENCE_ROUTE = "/v1/evidence/deployments"
 _BACKUP_GATE_EVIDENCE_ROUTE = "/v1/evidence/backup-gates"
 _PROMOTION_EVIDENCE_ROUTE = "/v1/evidence/promotions"
 _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
+_PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -320,6 +326,27 @@ def require_preview_generation_evidence_store(record_store: object) -> Launchpla
             f"{missing_summary}"
         )
     return cast(LaunchplaneMutationStore, record_store)
+
+
+def require_preview_destroyed_evidence_store(
+    record_store: object,
+) -> LaunchplaneDestroyPreviewStore:
+    required_methods = (
+        "list_preview_records",
+        "write_preview_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support preview destroyed evidence writes: "
+            f"{missing_summary}"
+        )
+    return cast(LaunchplaneDestroyPreviewStore, record_store)
 
 
 def require_backup_gate_evidence_store(record_store: object) -> _BackupGateEvidenceStore:
@@ -1170,6 +1197,102 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def write_preview_destroyed_evidence(
+        request: Request,
+        preview_destroyed_request: PreviewDestroyedEvidenceEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_destroyed.write",
+            product=preview_destroyed_request.product,
+            context=preview_destroyed_request.destroy.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot write preview destroyed evidence for the "
+                    "requested product/context."
+                ),
+            )
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_PREVIEW_DESTROYED_EVIDENCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        try:
+            evidence_store = require_preview_destroyed_evidence_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        try:
+            records = {
+                str(key): str(value)
+                for key, value in apply_launchplane_destroy_preview(
+                    record_store=evidence_store,
+                    request=preview_destroyed_request.destroy,
+                ).items()
+            }
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error).strip() or "Request could not be completed.",
+            ) from error
+
+        response = accepted_evidence_response(trace_id=trace_id, records=records)
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_PREVIEW_DESTROYED_EVIDENCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=utc_now_timestamp(),
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     def read_health(record_store: Annotated[object, Depends(get_record_store)]) -> HealthResponse:
         return HealthResponse(
             trace_id=next_trace_id(),
@@ -1308,6 +1431,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="write_preview_generation_evidence",
         summary="Write preview generation evidence",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_DESTROYED_EVIDENCE_ROUTE,
+        write_preview_destroyed_evidence,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_preview_destroyed_evidence",
+        summary="Write preview destroyed evidence",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

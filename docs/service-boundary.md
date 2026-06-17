@@ -59,7 +59,9 @@ VeriReel product paths:
   - `POST /v1/evidence/previews/generations` (native FastAPI for bearer-token
     callers, with Pydantic/OpenAPI contract coverage, idempotency replay
     preservation, and bundled preview/generation evidence storage)
-  - `POST /v1/evidence/previews/destroyed`
+  - `POST /v1/evidence/previews/destroyed` (native FastAPI for bearer-token
+    callers, with Pydantic/OpenAPI contract coverage, idempotency replay
+    preservation, and preview destroyed storage)
   - `POST /v1/evidence/runner-host-hygiene/audits`
 - product profile routes:
   - `GET /v1/product-profiles`
@@ -853,6 +855,13 @@ together after request validation, avoiding a partial initial-preview write on
 native FastAPI ingestion. Replay handling runs before those capability checks so
 a stored response can still be returned if the backing store is temporarily
 write-restricted for preview generation evidence.
+
+`POST /v1/evidence/previews/destroyed` requires any available idempotency store
+plus preview record list and preview write capability. It transitions an
+existing Launchplane preview record to `destroyed`; it does not create missing
+previews. Replay handling runs before those capability checks so a stored
+response can still be returned if the backing store is temporarily
+write-restricted for preview destroyed evidence.
 
 ### Preview lifecycle endpoints
 
@@ -1675,6 +1684,11 @@ evidence ingestion only; it does not mutate provider state.
 ### Preview destroyed evidence
 
 `POST /v1/evidence/previews/destroyed`
+
+This route is native FastAPI for bearer-token callers. It applies the
+`preview_destroyed.write` policy action for the request product and destroy
+context, preserves `Idempotency-Key` replay/conflict behavior, and writes the
+destroyed transition to an existing preview record.
 
 ```json
 {

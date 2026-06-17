@@ -36,6 +36,10 @@ class LaunchplaneMutationStore(PreviewMutationRecordStore, Protocol):
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> object: ...
 
 
+class LaunchplaneDestroyPreviewStore(PreviewMutationRecordStore, Protocol):
+    def write_preview_record(self, record: PreviewRecord) -> object: ...
+
+
 class _PreviewGenerationEvidenceWriteStore(Protocol):
     def write_preview_generation_evidence_records(
         self,
@@ -290,7 +294,7 @@ def apply_launchplane_generation_evidence(
 
 def apply_launchplane_destroy_preview(
     *,
-    record_store: LaunchplaneMutationStore,
+    record_store: LaunchplaneDestroyPreviewStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
     preview_record = find_preview_record(
