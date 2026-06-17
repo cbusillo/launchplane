@@ -34,6 +34,13 @@ from control_plane.contracts.runner_host_hygiene import (
     evaluate_runner_host_hygiene,
     plan_runner_host_hygiene_apply,
 )
+from control_plane.contracts.runner_lane_inventory import build_runner_lane_inventory
+from control_plane.contracts.runner_lane_registration import (
+    RunnerLaneRegistrationAuditRecord,
+    RunnerLaneRegistrationPolicy,
+    RunnerLaneRegistrationRequest,
+    plan_runner_lane_registration,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -477,6 +484,61 @@ class FastApiRunnerHostHygieneAuditEvidenceStoreGateTests(unittest.IsolatedAsync
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_runner_host_hygiene_audit_calls, 1)
+
+
+class FastApiRunnerLaneRegistrationAuditEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_lane_registration_audit_evidence_requires_audit_store(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+            authz_policy=_runner_lane_registration_audit_write_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_runner_lane_registration_audit_evidence(
+            app,
+            _runner_lane_registration_audit_payload(),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_runner_lane_registration_audit_replays_idempotency_before_store_gate(
+        self,
+    ) -> None:
+        store = _IdempotencyOnlyRunnerLaneRegistrationAuditReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+            authz_policy=_runner_lane_registration_audit_write_policy(),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _runner_lane_registration_audit_payload()
+
+        first_response = await _post_runner_lane_registration_audit_evidence(
+            app,
+            request_payload,
+            idempotency_key="runner-lane-registration:cm-website:planned",
+        )
+        store.write_runner_lane_registration_audit_record = None
+        second_response = await _post_runner_lane_registration_audit_evidence(
+            app,
+            request_payload,
+            idempotency_key="runner-lane-registration:cm-website:planned",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_runner_lane_registration_audit_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -3244,6 +3306,338 @@ class FastApiRunnerHostHygieneAuditEvidenceTests(unittest.IsolatedAsyncioTestCas
         )
 
 
+class FastApiRunnerLaneRegistrationAuditEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_lane_registration_audit_evidence_writes_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+            )
+            records = store.list_runner_lane_registration_audit_records(
+                repository="cbusillo/odoo-tenant-cm-website",
+                host_name="chris-testing",
+                status="planned",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "runner_lane_registration_audit_record_key": (
+                    "runner-lane-registration/2026-06-08/cm-website/dry-run"
+                ),
+            },
+        )
+        self.assertEqual(
+            payload["result"]["runner_lane_registration_audit_record_key"],
+            "runner-lane-registration/2026-06-08/cm-website/dry-run",
+        )
+        self.assertEqual(payload["result"]["repository"], "cbusillo/odoo-tenant-cm-website")
+        self.assertEqual(payload["result"]["host_name"], "chris-testing")
+        self.assertEqual(payload["result"]["lane_name"], "cm-website-runner-1")
+        self.assertEqual(payload["result"]["audit_status"], "planned")
+        self.assertFalse(payload["result"]["mutate"])
+        self.assertEqual(payload["result"]["audit"]["status"], "planned")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0].audit_record_key,
+            "runner-lane-registration/2026-06-08/cm-website/dry-run",
+        )
+        self.assertFalse(records[0].request.mutate)
+
+    async def test_runner_lane_registration_audit_evidence_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+            )
+            records = store.list_runner_lane_registration_audit_records()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_runner_lane_registration_audit_evidence_requires_bearer_token(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+                authorization="",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_runner_lane_registration_audit_evidence_rejects_human_session_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            records = store.list_runner_lane_registration_audit_records()
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(records, ())
+
+    async def test_runner_lane_registration_audit_evidence_rejects_terminal_agent_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            records = store.list_runner_lane_registration_audit_records()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_runner_lane_registration_audit_evidence_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(product="odoo"),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_runner_lane_registration_audit_evidence_replays_idempotent_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_lane_registration_audit_payload()
+
+            first_response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-lane-registration:cm-website:planned",
+            )
+            second_response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-lane-registration:cm-website:planned",
+            )
+            records = store.list_runner_lane_registration_audit_records(
+                repository="cbusillo/odoo-tenant-cm-website",
+                host_name="chris-testing",
+                status="planned",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(len(records), 1)
+
+    async def test_runner_lane_registration_audit_evidence_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _runner_lane_registration_audit_payload()
+            changed_payload = _runner_lane_registration_audit_payload(
+                audit_record_key="runner-lane-registration/2026-06-08/cm-website/retry"
+            )
+
+            first_response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                request_payload,
+                idempotency_key="runner-lane-registration:cm-website:planned",
+            )
+            second_response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                changed_payload,
+                idempotency_key="runner-lane-registration:cm-website:planned",
+            )
+            records = store.list_runner_lane_registration_audit_records()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(len(records), 1)
+
+    async def test_openapi_includes_runner_lane_registration_audit_evidence_contract(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+            authz_policy=_runner_lane_registration_audit_write_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/runner-lane-registration/audits"]["post"]
+        self.assertEqual(route["operationId"], "write_runner_lane_registration_audit_evidence")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            request_schema["$ref"],
+            "#/components/schemas/RunnerLaneRegistrationAuditEvidenceEnvelope",
+        )
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        for status_code in ("400", "401", "403", "409", "503"):
+            error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
+            self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
+        envelope_schema = openapi["components"]["schemas"][
+            "RunnerLaneRegistrationAuditEvidenceEnvelope"
+        ]
+        self.assertFalse(envelope_schema["additionalProperties"])
+
+    async def test_runner_lane_registration_audit_evidence_native_route_precedes_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_runner_lane_registration_audit_write_identity()),
+                authz_policy=_runner_lane_registration_audit_write_policy(),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_runner_lane_registration_audit_evidence(
+                app,
+                _runner_lane_registration_audit_payload(),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["runner_lane_registration_audit_record_key"],
+            "runner-lane-registration/2026-06-08/cm-website/dry-run",
+        )
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4041,6 +4435,110 @@ def _runner_host_hygiene_audit_payload(
     }
 
 
+def _runner_lane_registration_audit_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref=(
+            "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+        ),
+        event_name="workflow_dispatch",
+    )
+
+
+def _runner_lane_registration_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/runner-lane-registration.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_lane_registration_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_runner_lane_registration_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_lane_registration_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_runner_lane_registration_audit_write_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runner_lane_registration_audit.write"],
+                }
+            ]
+        }
+    )
+
+
+def _runner_lane_registration_audit_payload(
+    *,
+    audit_record_key: str = "runner-lane-registration/2026-06-08/cm-website/dry-run",
+    product: str = "launchplane",
+) -> dict[str, object]:
+    inventory = build_runner_lane_inventory(
+        repository="cbusillo/odoo-tenant-cm-website",
+        observed_at="2026-06-08T17:30:00Z",
+        lanes=(),
+    )
+    request = RunnerLaneRegistrationRequest(
+        repository="cbusillo/odoo-tenant-cm-website",
+        host_name="chris-testing",
+        lane_name="cm-website-runner-1",
+        registration_root="/opt/actions-runners",
+        labels=("self-hosted", "launchplane", "launchplane-managed"),
+        mutate=False,
+        audit_record_key=audit_record_key,
+    )
+    plan = plan_runner_lane_registration(
+        policy=RunnerLaneRegistrationPolicy(
+            allowed_repositories=("cbusillo/odoo-tenant-cm-website",),
+            approved_hosts=("chris-testing",),
+            allowed_registration_roots=("/opt/actions-runners",),
+        ),
+        request=request,
+        inventory=inventory,
+    )
+    audit_record = RunnerLaneRegistrationAuditRecord(
+        audit_record_key=audit_record_key,
+        status="planned",
+        request=request,
+        plan=plan,
+        pre_inventory=inventory,
+        message="planned runner lane registration; no host mutation was executed",
+    )
+    return {
+        "schema_version": 1,
+        "product": product,
+        "audit": audit_record.model_dump(mode="json"),
+    }
+
+
 def _deployment_write_identity() -> GitHubActionsIdentity:
     return _identity(
         repository="every/example-site",
@@ -4509,6 +5007,28 @@ async def _post_runner_host_hygiene_audit_evidence(
     )
 
 
+async def _post_runner_lane_registration_audit_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/runner-lane-registration/audits",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -4687,6 +5207,43 @@ class _IdempotencyOnlyRunnerHostHygieneAuditReplayStore:
         record: RunnerHostHygieneApplyAuditRecord,
     ) -> None:
         self.write_runner_host_hygiene_audit_calls += 1
+
+
+class _IdempotencyOnlyRunnerLaneRegistrationAuditReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_runner_lane_registration_audit_calls = 0
+        self._stored_record: Any | None = None
+        self.write_runner_lane_registration_audit_record: (
+            Callable[[RunnerLaneRegistrationAuditRecord], None] | None
+        ) = self._write_runner_lane_registration_audit_record
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def _write_runner_lane_registration_audit_record(
+        self,
+        record: RunnerLaneRegistrationAuditRecord,
+    ) -> None:
+        self.write_runner_lane_registration_audit_calls += 1
 
 
 class _PromotionEvidenceOnlyStore:
