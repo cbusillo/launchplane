@@ -18,6 +18,7 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -359,6 +360,61 @@ class FastApiPreviewGenerationEvidenceStoreGateTests(unittest.IsolatedAsyncioTes
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_preview_generation_evidence_calls, 1)
+
+
+class FastApiPreviewDestroyedEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_destroyed_evidence_requires_preview_destroyed_store(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_destroyed_write_identity()),
+            authz_policy=_preview_destroyed_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_preview_destroyed_evidence(
+            app,
+            _preview_destroyed_evidence_payload(),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_preview_destroyed_evidence_replays_idempotency_before_store_gate(
+        self,
+    ) -> None:
+        store = _IdempotencyOnlyPreviewDestroyedReplayStore()
+        store.seed_preview(_preview_record_for_destroy())
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_destroyed_write_identity()),
+            authz_policy=_preview_destroyed_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _preview_destroyed_evidence_payload()
+
+        first_response = await _post_preview_destroyed_evidence(
+            app,
+            request_payload,
+            idempotency_key="preview-destroyed-example-site-pr-42",
+        )
+        store.write_preview_record = None
+        second_response = await _post_preview_destroyed_evidence(
+            app,
+            request_payload,
+            idempotency_key="preview-destroyed-example-site-pr-42",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_preview_record_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -2484,6 +2540,324 @@ class FastApiPreviewGenerationEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPreviewDestroyedEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_destroyed_evidence_writes_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(_preview_record_for_destroy())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+            )
+            preview = store.read_preview_record("preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["preview_id"],
+            "preview-example-site-example-site-pr-42",
+        )
+        self.assertEqual(payload["records"]["transition"], "destroyed")
+        self.assertNotIn("replayed", payload)
+        self.assertEqual(preview.state, "destroyed")
+        self.assertEqual(preview.destroyed_at, "2026-04-16T09:04:00Z")
+        self.assertEqual(preview.destroy_reason, "external_preview_cleanup_completed")
+
+    async def test_preview_destroyed_evidence_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(_preview_record_for_destroy())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="other-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+            )
+            preview = store.read_preview_record("preview-example-site-example-site-pr-42")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(preview.state, "active")
+
+    async def test_preview_destroyed_evidence_requires_bearer_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+                authorization="",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_preview_destroyed_evidence_rejects_human_session_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            self.assertEqual(store.list_preview_records(), ())
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_preview_destroyed_evidence_rejects_terminal_agent_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            self.assertEqual(store.list_preview_records(), ())
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_preview_destroyed_evidence_validation_errors_use_launchplane_shape(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            invalid_payload = _preview_destroyed_evidence_payload()
+            invalid_payload["product"] = ""
+
+            response = await _post_preview_destroyed_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_preview_destroyed_evidence_rejects_missing_preview(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    async def test_preview_destroyed_evidence_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(_preview_record_for_destroy())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _preview_destroyed_evidence_payload()
+
+            first_response = await _post_preview_destroyed_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-destroyed-example-site-pr-42",
+            )
+            second_response = await _post_preview_destroyed_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-destroyed-example-site-pr-42",
+            )
+            preview_count = len(store.list_preview_records())
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+        self.assertEqual(preview_count, 1)
+
+    async def test_preview_destroyed_evidence_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(_preview_record_for_destroy())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            request_payload = _preview_destroyed_evidence_payload()
+            changed_payload = _preview_destroyed_evidence_payload(anchor_pr_number=43)
+
+            first_response = await _post_preview_destroyed_evidence(
+                app,
+                request_payload,
+                idempotency_key="preview-destroyed-example-site-pr-42",
+            )
+            second_response = await _post_preview_destroyed_evidence(
+                app,
+                changed_payload,
+                idempotency_key="preview-destroyed-example-site-pr-42",
+            )
+            preview_count = len(store.list_preview_records())
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(preview_count, 1)
+
+    async def test_openapi_includes_preview_destroyed_evidence_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_preview_destroyed_write_identity()),
+            authz_policy=_preview_destroyed_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/previews/destroyed"]["post"]
+        self.assertEqual(route["operationId"], "write_preview_destroyed_evidence")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(
+            request_schema["$ref"], "#/components/schemas/PreviewDestroyedEvidenceEnvelope"
+        )
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        for status_code in ("400", "401", "403", "409", "503"):
+            error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
+            self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
+        envelope_schema = openapi["components"]["schemas"]["PreviewDestroyedEvidenceEnvelope"]
+        self.assertFalse(envelope_schema["additionalProperties"])
+
+    async def test_preview_destroyed_evidence_native_route_precedes_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record_for_destroy())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_preview_destroyed_write_identity()),
+                authz_policy=_preview_destroyed_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_preview_destroyed_evidence(
+                app,
+                _preview_destroyed_evidence_payload(),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["transition"], "destroyed")
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3043,6 +3417,65 @@ def _terminal_agent_preview_generation_write_policy(*, context: str) -> Launchpl
     )
 
 
+def _preview_destroyed_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/example-site",
+        workflow_ref="every/example-site/.github/workflows/preview-control-plane.yml@refs/heads/main",
+        event_name="pull_request",
+    )
+
+
+def _preview_destroyed_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/example-site",
+                    "workflow_refs": [
+                        "every/example-site/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_destroyed.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_preview_destroyed_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_destroyed.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_preview_destroyed_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["preview_destroyed.write"],
+                }
+            ]
+        }
+    )
+
+
 def _preview_generation_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
     pr_url = f"https://github.com/every/example-site/pull/{anchor_pr_number}"
     return {
@@ -3076,6 +3509,42 @@ def _preview_generation_evidence_payload(*, anchor_pr_number: int = 42) -> dict[
             "deploy_status": "pass",
             "verify_status": "pass",
             "overall_health_status": "pass",
+        },
+    }
+
+
+def _preview_record_for_destroy(*, anchor_pr_number: int = 42) -> PreviewRecord:
+    preview_id = f"preview-example-site-example-site-pr-{anchor_pr_number}"
+    return PreviewRecord(
+        preview_id=preview_id,
+        context="example-site",
+        anchor_repo="example-site",
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=f"https://github.com/every/example-site/pull/{anchor_pr_number}",
+        preview_label=f"example-site/example-site/pr-{anchor_pr_number}",
+        canonical_url=f"https://pr-{anchor_pr_number}.example.invalid",
+        state="active",
+        created_at="2026-04-16T08:00:00Z",
+        updated_at="2026-04-16T08:10:00Z",
+        eligible_at="2026-04-16T08:00:00Z",
+        active_generation_id=f"{preview_id}-generation-0001",
+        serving_generation_id=f"{preview_id}-generation-0001",
+        latest_generation_id=f"{preview_id}-generation-0001",
+        latest_manifest_fingerprint=f"example-preview-pr-{anchor_pr_number}-abcdef",
+    )
+
+
+def _preview_destroyed_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "example-site",
+        "destroy": {
+            "schema_version": 1,
+            "context": "example-site",
+            "anchor_repo": "example-site",
+            "anchor_pr_number": anchor_pr_number,
+            "destroyed_at": "2026-04-16T09:04:00Z",
+            "destroy_reason": "external_preview_cleanup_completed",
         },
     }
 
@@ -3504,6 +3973,28 @@ async def _post_preview_generation_evidence(
     )
 
 
+async def _post_preview_destroyed_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/previews/destroyed",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -3770,6 +4261,63 @@ class _IdempotencyOnlyPreviewGenerationReplayStore:
         generation_path = self.write_preview_generation_record(generation_record)
         preview_path = self.write_preview_record(preview_record)
         return generation_path, preview_path
+
+
+class _IdempotencyOnlyPreviewDestroyedReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_preview_record_calls = 0
+        self._stored_record: Any | None = None
+        self._preview_records: dict[str, Any] = {}
+        self.write_preview_record: Callable[[Any], str] | None = self._write_preview_record
+
+    def seed_preview(self, record: PreviewRecord) -> None:
+        self._preview_records[record.preview_id] = record
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[Any, ...]:
+        records = [
+            record
+            for record in self._preview_records.values()
+            if (not context_name or record.context == context_name)
+            and (not anchor_repo or record.anchor_repo == anchor_repo)
+            and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
+        ]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def _write_preview_record(self, record: Any) -> str:
+        self.write_preview_record_calls += 1
+        self._preview_records[record.preview_id] = record
+        return f"preview://{record.preview_id}"
 
 
 class _FailingOnceIdempotencyPreviewGenerationStore(FilesystemRecordStore):
