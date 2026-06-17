@@ -1,5 +1,6 @@
 import hashlib
 import json
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
@@ -30,6 +31,7 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
+    ProductReadModelStore,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_evidence import (
@@ -217,6 +219,23 @@ class RecentOperationsResponse(BaseModel):
     recent_deployments: tuple[DeploymentRecord, ...]
     recent_promotions: tuple[PromotionRecord, ...]
     recent_previews: tuple[PreviewRecord, ...]
+
+
+class ProductProfileListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    driver_id: str
+    profiles: tuple[LaunchplaneProductProfileRecord, ...]
+
+
+class ProductProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    profile: LaunchplaneProductProfileRecord
 
 
 class SecretStatusBinding(BaseModel):
@@ -698,6 +717,26 @@ def require_recent_operations_read_store(record_store: object) -> _RecentOperati
     return cast(_RecentOperationsReadStore, record_store)
 
 
+def require_product_profile_list_store(record_store: object) -> ProductReadModelStore:
+    list_records = getattr(record_store, "list_product_profile_records", None)
+    if not callable(list_records):
+        raise TypeError(
+            "Launchplane record store does not support product profile list reads: "
+            "list_product_profile_records"
+        )
+    return cast(ProductReadModelStore, record_store)
+
+
+def require_product_profile_read_store(record_store: object) -> ProductReadModelStore:
+    read_record = getattr(record_store, "read_product_profile_record", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support product profile reads: "
+            "read_product_profile_record"
+        )
+    return cast(ProductReadModelStore, record_store)
+
+
 def require_secret_status_read_store(record_store: object) -> control_plane_secrets.SecretReadStore:
     required_methods = (
         "read_secret_record",
@@ -980,6 +1019,34 @@ def create_launchplane_fastapi_app(
         if human_identity is not None:
             return human_identity
         raise _authentication_required_error("Authorization header is required.")
+
+    def every_code_worker_token_authorized(authorization: str) -> bool:
+        if bearer_identity_config is None:
+            return False
+        expected_token = bearer_identity_config.every_code_worker_token.strip()
+        if not expected_token:
+            return False
+        header = authorization.strip()
+        scheme, _, token = header.partition(" ")
+        bearer_token = token.strip()
+        if scheme.lower() != "bearer" or not bearer_token:
+            return False
+        return secrets.compare_digest(bearer_token, expected_token)
+
+    def read_product_profile_list_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity | None:
+        if every_code_worker_token_authorized(authorization):
+            return None
+        return read_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+        )
 
     def read_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -1490,6 +1557,89 @@ def create_launchplane_fastapi_app(
             recent_promotions=recent_promotions,
             recent_previews=recent_previews,
         )
+
+    def list_product_profiles(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_product_profile_list_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        driver_id: Annotated[str, Query()] = "",
+    ) -> ProductProfileListResponse:
+        trace_id = next_trace_id()
+        if identity is not None and not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot list Launchplane product profiles.",
+            )
+        normalized_driver_id = driver_id.strip()
+        try:
+            profile_store = require_product_profile_list_store(record_store)
+            product_profile_payload = (
+                control_plane_product_read_service.build_product_profile_list_service_payload(
+                    record_store=profile_store,
+                    driver_id=normalized_driver_id,
+                )
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        payload_profiles = cast(list[object], product_profile_payload["profiles"])
+        profiles = tuple(
+            LaunchplaneProductProfileRecord.model_validate(profile) for profile in payload_profiles
+        )
+        return ProductProfileListResponse(
+            trace_id=trace_id,
+            driver_id=str(product_profile_payload["driver_id"]),
+            profiles=profiles,
+        )
+
+    def read_product_profile(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> ProductProfileResponse:
+        trace_id = next_trace_id()
+        try:
+            profile_store = require_product_profile_read_store(record_store)
+            profile = profile_store.read_product_profile_record(product)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.read",
+            product=profile.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read the requested product profile.",
+            )
+        return ProductProfileResponse(trace_id=trace_id, profile=profile)
 
     def read_product_context_cutover_audit(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -2552,6 +2702,35 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/product-profiles",
+        list_product_profiles,
+        methods=["GET"],
+        response_model=ProductProfileListResponse,
+        operation_id="list_product_profiles",
+        summary="List Launchplane product profiles",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/product-profiles/{product}",
+        read_product_profile,
+        methods=["GET"],
+        response_model=ProductProfileResponse,
+        operation_id="read_product_profile",
+        summary="Read a Launchplane product profile",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

@@ -94,6 +94,7 @@ class TokenVerifier(Protocol):
 class BearerIdentityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    every_code_worker_token: str = ""
     local_admin_token: str = ""
     local_admin_subject: str = ""
     local_admin_token_label: str = ""

@@ -93,8 +93,10 @@ VeriReel product paths:
     bearer-token callers, with Pydantic/OpenAPI contract coverage, idempotency
     replay preservation, and runner-lane registration audit storage)
 - product profile routes:
-  - `GET /v1/product-profiles`
-  - `GET /v1/product-profiles/{product}`
+  - `GET /v1/product-profiles` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
+    human-session callers)
   - `POST /v1/product-profiles`
 - product config write route:
   - `POST /v1/product-config/apply`
@@ -1280,6 +1282,10 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `GET /v1/contexts/{context}/operations/recent` (native FastAPI for
   bearer-token and human-session callers)
+- `GET /v1/product-profiles` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
+  human-session callers)
 - `GET /v1/product-profiles/{product}/context-cutover-audit` (native FastAPI
   for bearer-token and human-session callers)
 
@@ -1305,13 +1311,19 @@ envelope. Managed-secret status list reads authorize `secret.list` against the
 path context before store access. Single managed-secret status reads load the
 metadata-only secret status to discover the stored secret context, then check
 `secret.read` against product `launchplane` and that stored context before
-returning the typed status envelope. Product context cutover audit reads load
-the product profile from DB-backed records, check `product_profile.read` against
-the stored profile product and Launchplane service context, and require the
-requested source, target, and optional preview contexts to belong to that
-profile before returning the typed audit envelope. Their legacy WSGI branches
-are deleted; direct fallback calls fail closed while the mounted fallback
-remains for retained non-native routes.
+returning the typed status envelope. Product profile list reads check
+`product_profile.read` against product `launchplane` in the Launchplane service
+context, preserve the `driver_id` filter, and continue accepting the dedicated
+Every Code worker token for the collection route only. Product profile show
+reads load the stored profile first, check `product_profile.read` against the
+stored profile product and Launchplane service context, and return the typed
+profile envelope. Product context cutover audit reads load the product profile
+from DB-backed records, check `product_profile.read` against the stored profile
+product and Launchplane service context, and require the requested source,
+target, and optional preview contexts to belong to that profile before returning
+the typed audit envelope. Their legacy WSGI branches are deleted; direct
+fallback calls fail closed while the mounted fallback remains for retained
+non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,

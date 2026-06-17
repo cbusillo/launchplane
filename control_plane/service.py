@@ -181,7 +181,6 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
-from control_plane.contracts.product_environment_read_model import ProductReadModelStore
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -4553,10 +4552,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "work_graph.issue_inbox", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
         return "product_environment.read", {"repo_product_mapping": "true"}
-    if len(segments) == 2 and segments == ["v1", "product-profiles"]:
-        return "product_profile.read", {}
-    if len(segments) == 3 and segments[:2] == ["v1", "product-profiles"]:
-        return "product_profile.read", {"product": segments[2]}
     if len(segments) == 2 and segments == ["v1", "products"]:
         return "product_environment.read", {}
     if len(segments) == 4 and segments == [
@@ -8415,6 +8410,7 @@ def _local_admin_token_label_from_env() -> str:
 
 def _bearer_identity_config_from_env() -> BearerIdentityConfig:
     return BearerIdentityConfig(
+        every_code_worker_token=_every_code_worker_token_from_env(),
         local_admin_token=_local_admin_token_from_env(),
         local_admin_subject=_local_admin_subject_from_env(),
         local_admin_token_label=_local_admin_token_label_from_env(),
@@ -8439,8 +8435,6 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
-    if method == "GET" and path == "/v1/product-profiles":
-        return True
     if method == "GET" and path == "/v1/previews/readiness":
         return True
     if method == "GET" and path == "/v1/every-code/summary":
@@ -8494,12 +8488,6 @@ def _every_code_read_payload(
     query: dict[str, list[str]],
 ) -> dict[str, object]:
     segments = [segment for segment in path.split("/") if segment]
-    if path == "/v1/product-profiles":
-        driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
-        return control_plane_product_read_service.build_product_profile_list_service_payload(
-            record_store=cast(ProductReadModelStore, record_store),
-            driver_id=driver_id_filter,
-        )
     every_code_store = _every_code_work_request_store(record_store)
     if path == "/v1/previews/readiness":
         repository_filter = str((query.get("repository") or [""])[0] or "").strip()
@@ -11345,78 +11333,6 @@ def create_launchplane_service_app(
                                 "policy_sha256": policy_record.policy_sha256,
                             },
                             "targets": targets,
-                        },
-                    )
-                if action == "product_profile.read":
-                    if "product" in params:
-                        profile = record_store.read_product_profile_record(params["product"])
-                        if not authz_policy.allows(
-                            identity=identity,
-                            action=action,
-                            product=profile.product,
-                            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read the requested product profile.",
-                                    },
-                                    "authz": _authz_diagnostic_payload(
-                                        identity=identity,
-                                        authz_policy_sha256_value=resolved_authz_policy_sha256,
-                                        authz_policy_source=resolved_authz_policy_source,
-                                    ),
-                                },
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "profile": profile.model_dump(mode="json"),
-                            },
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot list Launchplane product profiles.",
-                                },
-                                "authz": _authz_diagnostic_payload(
-                                    identity=identity,
-                                    authz_policy_sha256_value=resolved_authz_policy_sha256,
-                                    authz_policy_source=resolved_authz_policy_source,
-                                ),
-                            },
-                        )
-                    driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
-                    product_profile_payload = control_plane_product_read_service.build_product_profile_list_service_payload(
-                        record_store=record_store,
-                        driver_id=driver_id_filter,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            **product_profile_payload,
                         },
                     )
                 if action == "product_environment.read":
