@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
@@ -30,6 +31,7 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.product_environment_read_model import (
     ProductEnvironmentConfigStatus,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.preview_evidence import (
     PreviewDestroyedEvidenceEnvelope,
     PreviewGenerationEvidenceEnvelope,
@@ -279,6 +281,14 @@ class SecretStatusListResponse(BaseModel):
     context: str
     instance: str
     secrets: tuple[SecretStatusReadModel, ...]
+
+
+class ProductContextCutoverAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    audit: dict[str, object]
 
 
 class ProtectedArtifactsResponse(BaseModel):
@@ -708,6 +718,61 @@ def require_secret_status_read_store(record_store: object) -> control_plane_secr
             f"Launchplane record store does not support secret status reads: {missing_summary}"
         )
     return cast(control_plane_secrets.SecretReadStore, record_store)
+
+
+def require_product_context_audit_store(
+    record_store: object,
+) -> control_plane_product_context_audit.ProductContextAuditStore:
+    required_methods = (
+        "read_product_profile_record",
+        "list_runtime_environment_records",
+        "list_secret_records",
+        "list_secret_bindings",
+        "list_dokploy_target_records",
+        "list_dokploy_target_id_records",
+        "list_environment_inventory",
+        "list_release_tuple_records",
+        "list_backup_gate_records",
+        "list_deployment_records",
+        "list_promotion_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods or not isinstance(record_store, PostgresRecordStore):
+        missing_summary = ", ".join(missing_methods) or "postgres_storage"
+        raise TypeError(
+            "Launchplane record store does not support context cutover audit reads: "
+            f"{missing_summary}"
+        )
+    return cast(control_plane_product_context_audit.ProductContextAuditStore, record_store)
+
+
+def product_profile_context_cutover_allowed_contexts(
+    profile: LaunchplaneProductProfileRecord,
+) -> frozenset[str]:
+    contexts = {profile.product.strip()}
+    contexts.update(lane.context.strip() for lane in profile.lanes if lane.context.strip())
+    if profile.preview.enabled and profile.preview.context.strip():
+        contexts.add(profile.preview.context.strip())
+    return frozenset(context for context in contexts if context)
+
+
+def product_profile_context_cutover_contexts_allowed(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    source_context: str,
+    target_context: str,
+    preview_context: str,
+) -> bool:
+    allowed_contexts = product_profile_context_cutover_allowed_contexts(profile)
+    requested_contexts = {source_context.strip(), target_context.strip()}
+    if preview_context.strip():
+        requested_contexts.add(preview_context.strip())
+    requested_contexts.discard("")
+    return requested_contexts.issubset(allowed_contexts)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -1425,6 +1490,76 @@ def create_launchplane_fastapi_app(
             recent_promotions=recent_promotions,
             recent_previews=recent_previews,
         )
+
+    def read_product_context_cutover_audit(
+        product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        source_context: Annotated[str, Query()] = "",
+        target_context: Annotated[str, Query()] = "",
+        preview_context: Annotated[str, Query()] = "",
+    ) -> ProductContextCutoverAuditResponse:
+        trace_id = next_trace_id()
+        try:
+            audit_store = require_product_context_audit_store(record_store)
+            profile = audit_store.read_product_profile_record(product)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.read",
+            product=profile.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read the requested product profile.",
+            )
+        normalized_source_context = source_context.strip()
+        normalized_target_context = target_context.strip()
+        normalized_preview_context = preview_context.strip()
+        if not product_profile_context_cutover_contexts_allowed(
+            profile=profile,
+            source_context=normalized_source_context,
+            target_context=normalized_target_context,
+            preview_context=normalized_preview_context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="context_not_in_product_boundary",
+                message="Requested audit contexts are not owned by the product profile.",
+            )
+        try:
+            audit_payload = control_plane_product_context_audit.build_product_context_cutover_audit(
+                record_store=audit_store,
+                product=profile.product,
+                source_context=normalized_source_context,
+                target_context=normalized_target_context,
+                preview_context=normalized_preview_context,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_context_cutover_audit_request",
+                message="Context cutover audit request is invalid.",
+            ) from error
+        return ProductContextCutoverAuditResponse(trace_id=trace_id, audit=audit_payload)
 
     def read_secret_status(
         secret_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -2417,6 +2552,22 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/product-profiles/{product}/context-cutover-audit",
+        read_product_context_cutover_audit,
+        methods=["GET"],
+        response_model=ProductContextCutoverAuditResponse,
+        operation_id="read_product_context_cutover_audit",
+        summary="Read a product context cutover audit",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

@@ -64,7 +64,12 @@ from control_plane.service_human_auth import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_service import create_launchplane_service_app
-from tests.test_service import _generic_site_profile_payload, _identity, _sqlite_database_url
+from tests.test_service import (
+    _generic_site_profile_payload,
+    _identity,
+    _product_profile_payload_with_prod,
+    _sqlite_database_url,
+)
 from tests.test_service import _StubVerifier
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
 
@@ -930,6 +935,201 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(health_payload["status"], "ok")
         self.assertEqual(health_payload["storage_backend"], "filesystem")
         self.assertIn("trace_id", health_payload)
+
+
+class FastApiProductContextCutoverAuditReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_cutover_audit_returns_redacted_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_context_cutover_audit_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_context_cutover_audit(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        payload_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(set(payload), {"status", "trace_id", "audit"})
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["audit"]["status"], "ok")
+        self.assertEqual(payload["audit"]["product"], "sellyouroutboard")
+        self.assertEqual(
+            payload["audit"]["contexts"]["source"]["runtime_environment_records"][0]["env_keys"],
+            ["TAWK_PROPERTY_ID"],
+        )
+        self.assertEqual(
+            payload["audit"]["contexts"]["target"]["runtime_environment_records"][0]["env_keys"],
+            ["TAWK_WIDGET_ID"],
+        )
+        self.assertIn("SMTP_PASSWORD", payload_text)
+        self.assertNotIn("property-legacy", payload_text)
+        self.assertNotIn("widget-canonical", payload_text)
+        self.assertNotIn("smtp-password-secret", payload_text)
+        self.assertNotIn("ciphertext", payload_text)
+        self.assertNotIn("plaintext", payload_text)
+
+    async def test_context_cutover_audit_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_context_cutover_audit(app, authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_context_cutover_audit_rejects_unowned_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_context_cutover_audit_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_context_cutover_audit(
+                app,
+                source_context="other-site",
+                target_context="sellyouroutboard",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "context_not_in_product_boundary")
+
+    async def test_context_cutover_audit_invalid_request_is_generic(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_context_cutover_audit_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_context_cutover_audit(
+                app,
+                source_context="sellyouroutboard",
+                target_context="sellyouroutboard",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_context_cutover_audit_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Context cutover audit request is invalid.",
+        )
+
+    async def test_context_cutover_audit_rejects_unauthorized_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_context_cutover_audit_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_read_policy(product="verireel"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_context_cutover_audit(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertNotIn("authz", payload)
+
+    async def test_context_cutover_audit_requires_database_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_context_cutover_audit(app)
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_product_profile_record", payload["error"]["message"])
+
+    async def test_openapi_includes_context_cutover_audit_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_read_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/product-profiles/{product}/context-cutover-audit"]["get"]
+        self.assertEqual(route["operationId"], "read_product_context_cutover_audit")
+        self.assertEqual(
+            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ProductContextCutoverAuditResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+        for status_code in ("400", "401", "403", "404", "503"):
+            self.assertIn(status_code, route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["ProductContextCutoverAuditResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_context_cutover_audit_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_context_cutover_audit_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            policy = _product_profile_read_policy(product="sellyouroutboard")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: app_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_context_cutover_audit(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiProtectedArtifactsTests(unittest.IsolatedAsyncioTestCase):
@@ -5906,6 +6106,72 @@ def _driver_context_store(state_dir: Path) -> FilesystemRecordStore:
     return store
 
 
+def _write_context_cutover_audit_records(database_url: str) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+        )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                env={"TAWK_PROPERTY_ID": "property-legacy"},
+                updated_at="2026-05-01T00:03:00Z",
+                source_label="legacy",
+            )
+        )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard",
+                instance="prod",
+                env={"TAWK_WIDGET_ID": "widget-canonical"},
+                updated_at="2026-05-01T00:04:00Z",
+                source_label="operator:mistake",
+            )
+        )
+        with patch.dict(
+            "os.environ",
+            {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+            clear=True,
+        ):
+            control_plane_secrets.write_secret_value(
+                record_store=store,
+                scope="context_instance",
+                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                name="smtp-password",
+                plaintext_value="smtp-password-secret",
+                binding_key="SMTP_PASSWORD",
+                context_name="sellyouroutboard-testing",
+                instance_name="prod",
+                actor="test",
+            )
+    finally:
+        store.close()
+
+
+def _product_profile_read_policy(*, product: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": [product],
+                    "contexts": ["launchplane"],
+                    "actions": ["product_profile.read"],
+                }
+            ]
+        }
+    )
+
+
 def _local_operator_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -6172,6 +6438,32 @@ async def _get_recent_operations(
     return await _asgi_get(
         app,
         f"/v1/contexts/{context}/operations/recent",
+        headers=request_headers,
+    )
+
+
+async def _get_context_cutover_audit(
+    app: FastAPI,
+    *,
+    product: str = "sellyouroutboard",
+    source_context: str = "sellyouroutboard-testing",
+    target_context: str = "sellyouroutboard",
+    preview_context: str = "",
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {
+        "source_context": source_context,
+        "target_context": target_context,
+    }
+    if preview_context:
+        params["preview_context"] = preview_context
+    return await _asgi_get(
+        app,
+        f"/v1/product-profiles/{product}/context-cutover-audit?{urlencode(params)}",
         headers=request_headers,
     )
 

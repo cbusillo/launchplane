@@ -70,6 +70,9 @@ VeriReel product paths:
     `secret.list` for the path context
   - `GET /v1/secrets/{secret_id}`, requiring `secret.read` for the stored
     secret context
+  - `GET /v1/product-profiles/{product}/context-cutover-audit`, requiring
+    `product_profile.read` for the stored product profile in the Launchplane
+    service context and returning redacted current-authority metadata only
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
@@ -1277,7 +1280,8 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `GET /v1/contexts/{context}/operations/recent` (native FastAPI for
   bearer-token and human-session callers)
-- `GET /v1/product-profiles/{product}/context-cutover-audit`
+- `GET /v1/product-profiles/{product}/context-cutover-audit` (native FastAPI
+  for bearer-token and human-session callers)
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
@@ -1301,9 +1305,13 @@ envelope. Managed-secret status list reads authorize `secret.list` against the
 path context before store access. Single managed-secret status reads load the
 metadata-only secret status to discover the stored secret context, then check
 `secret.read` against product `launchplane` and that stored context before
-returning the typed status envelope. Their legacy WSGI branches are deleted;
-direct fallback calls fail closed while the mounted fallback remains for
-retained non-native routes.
+returning the typed status envelope. Product context cutover audit reads load
+the product profile from DB-backed records, check `product_profile.read` against
+the stored profile product and Launchplane service context, and require the
+requested source, target, and optional preview contexts to belong to that
+profile before returning the typed audit envelope. Their legacy WSGI branches
+are deleted; direct fallback calls fail closed while the mounted fallback
+remains for retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,
