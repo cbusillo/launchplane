@@ -1529,6 +1529,51 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_record.record_id, record.record_id)
             self.assertEqual(loaded_record.deploy.target_name, "opw-prod")
 
+    def test_write_promotion_evidence_records_writes_promotion_and_inventory(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            promotion_record = PromotionRecord(
+                record_id="promotion-20260410-182231-opw-testing-prod",
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
+                deployment_record_id="deployment-20260410T182231Z-opw-prod",
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    status="pass",
+                ),
+            )
+            inventory = EnvironmentInventory(
+                context="opw",
+                instance="prod",
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
+                source_git_ref="abc123",
+                deploy=promotion_record.deploy,
+                updated_at="2026-04-10T18:24:01Z",
+                deployment_record_id="deployment-20260410T182231Z-opw-prod",
+                promotion_record_id=promotion_record.record_id,
+                promoted_from_instance="testing",
+            )
+
+            written_path = store.write_promotion_evidence_records(
+                promotion_record=promotion_record,
+                inventory=inventory,
+            )
+            loaded_promotion = store.read_promotion_record(promotion_record.record_id)
+            loaded_inventory = store.read_environment_inventory(
+                context_name="opw", instance_name="prod"
+            )
+
+            self.assertTrue(written_path.exists())
+            self.assertEqual(loaded_promotion.record_id, promotion_record.record_id)
+            self.assertEqual(loaded_inventory.promotion_record_id, promotion_record.record_id)
+            self.assertEqual(loaded_inventory.promoted_from_instance, "testing")
+
     def test_list_promotion_records_filters_and_sorts_latest_first(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

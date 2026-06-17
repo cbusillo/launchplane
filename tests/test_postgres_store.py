@@ -1000,6 +1000,41 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(too_long_index_names, ())
 
+    def test_write_promotion_evidence_records_writes_promotion_and_inventory(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            promotion_record = _promotion_record(
+                record_id="promotion-20260420T160500Z-opw-testing-to-prod"
+            )
+            inventory = _inventory_record().model_copy(
+                update={
+                    "instance": "prod",
+                    "deploy": promotion_record.deploy,
+                    "promotion_record_id": promotion_record.record_id,
+                    "promoted_from_instance": "testing",
+                    "updated_at": "2026-04-20T16:08:00Z",
+                }
+            )
+
+            store.write_promotion_evidence_records(
+                promotion_record=promotion_record,
+                inventory=inventory,
+            )
+            loaded_promotion = store.read_promotion_record(promotion_record.record_id)
+            loaded_inventory = store.read_environment_inventory(
+                context_name="opw", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(loaded_promotion.record_id, promotion_record.record_id)
+        self.assertEqual(loaded_inventory.promotion_record_id, promotion_record.record_id)
+        self.assertEqual(loaded_inventory.promoted_from_instance, "testing")
+
     def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

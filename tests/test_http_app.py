@@ -18,7 +18,11 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    PromotionRecord,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -210,6 +214,98 @@ class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_backup_gate_calls, 1)
+
+
+class FastApiPromotionEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_promotion_evidence_accepts_record_only_store_without_deployment_methods(
+        self,
+    ) -> None:
+        store = _PromotionEvidenceOnlyStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_promotion_evidence(
+            app,
+            _promotion_evidence_payload(link_deployment=False),
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {"promotion_record_id": "promotion-example-site-testing-to-prod"},
+        )
+        self.assertEqual(
+            store.promotion_records["promotion-example-site-testing-to-prod"]["context"],
+            "example-site",
+        )
+
+    async def test_promotion_evidence_requires_linked_deployment_store_methods(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(context="example-site"),
+            record_store_factory=lambda: _PromotionEvidenceOnlyStore(),
+        )
+
+        response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_promotion_evidence_requires_promotion_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_promotion_evidence(
+            app,
+            _promotion_evidence_payload(link_deployment=False),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_promotion_evidence_replays_idempotency_before_promotion_gate(self) -> None:
+        store = _IdempotencyOnlyPromotionReplayStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(context="example-site"),
+            record_store_factory=lambda: store,
+        )
+        request_payload = _promotion_evidence_payload(link_deployment=False)
+
+        first_response = await _post_promotion_evidence(
+            app,
+            request_payload,
+            idempotency_key="promotion-example-site-testing-to-prod",
+        )
+        # The second request must replay before capability checks or write calls.
+        store.write_promotion_record = None
+        second_response = await _post_promotion_evidence(
+            app,
+            request_payload,
+            idempotency_key="promotion-example-site-testing-to-prod",
+        )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(store.read_idempotency_calls, 2)
+        self.assertEqual(store.write_promotion_calls, 1)
 
 
 class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCase):
@@ -1674,6 +1770,318 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_promotion_evidence_writes_record_and_inventory_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+            promotion = store.read_promotion_record("promotion-example-site-testing-to-prod")
+            inventory = store.read_environment_inventory(
+                context_name="example-site",
+                instance_name="prod",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {
+                "promotion_record_id": "promotion-example-site-testing-to-prod",
+                "inventory_record_id": "example-site-prod",
+            },
+        )
+        self.assertNotIn("replayed", payload)
+        self.assertEqual(promotion.context, "example-site")
+        self.assertEqual(promotion.from_instance, "testing")
+        self.assertEqual(promotion.to_instance, "prod")
+        self.assertEqual(promotion.deploy.status, "pass")
+        self.assertEqual(promotion.backup_gate.status, "pass")
+        self.assertEqual(inventory.deployment_record_id, "deployment-example-site-prod")
+        self.assertEqual(inventory.promotion_record_id, promotion.record_id)
+        self.assertEqual(inventory.promoted_from_instance, "testing")
+
+    async def test_promotion_evidence_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="other-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_promotion_evidence_rejects_human_session_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                human_session_manager=session_manager,
+            )
+
+            response = await _post_promotion_evidence(
+                app,
+                _promotion_evidence_payload(),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_promotion_evidence_rejects_terminal_agent_mutation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-agent-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _post_promotion_evidence(
+                app,
+                _promotion_evidence_payload(),
+                authorization="Bearer terminal-agent-token",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_promotion_evidence_validation_errors_use_launchplane_shape(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = _promotion_evidence_store(Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            invalid_payload = _promotion_evidence_payload()
+            invalid_payload["product"] = ""
+
+            response = await _post_promotion_evidence(app, invalid_payload)
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertNotIn("detail", payload)
+
+    async def test_promotion_evidence_rejects_mismatched_linked_deployment(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir, deployment_instance="testing")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    async def test_promotion_evidence_rejects_context_mismatched_linked_deployment(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir, deployment_context="other-site")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    async def test_promotion_evidence_rejects_missing_linked_deployment(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod")
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    async def test_promotion_evidence_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _promotion_evidence_payload()
+
+            first_response = await _post_promotion_evidence(
+                app,
+                request_payload,
+                idempotency_key="promotion-example-site-testing-to-prod",
+            )
+            second_response = await _post_promotion_evidence(
+                app,
+                request_payload,
+                idempotency_key="promotion-example-site-testing-to-prod",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+
+    async def test_promotion_evidence_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            request_payload = _promotion_evidence_payload()
+            changed_payload = _promotion_evidence_payload(
+                record_id="promotion-example-site-testing-to-prod-2"
+            )
+
+            first_response = await _post_promotion_evidence(
+                app,
+                request_payload,
+                idempotency_key="promotion-example-site-testing-to-prod",
+            )
+            second_response = await _post_promotion_evidence(
+                app,
+                changed_payload,
+                idempotency_key="promotion-example-site-testing-to-prod",
+            )
+            with self.assertRaises(FileNotFoundError):
+                store.read_promotion_record("promotion-example-site-testing-to-prod-2")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+
+    async def test_openapi_includes_promotion_evidence_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_promotion_write_identity()),
+            authz_policy=_promotion_write_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/evidence/promotions"]["post"]
+        self.assertEqual(route["operationId"], "write_promotion_evidence")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["$ref"], "#/components/schemas/PromotionEvidenceRequest")
+        success_schema = route["responses"]["202"]["content"]["application/json"]["schema"]
+        self.assertEqual(success_schema["$ref"], "#/components/schemas/AcceptedEvidenceResponse")
+        for status_code in ("400", "401", "403", "409", "503"):
+            error_schema = route["responses"][status_code]["content"]["application/json"]["schema"]
+            self.assertEqual(error_schema["$ref"], "#/components/schemas/LaunchplaneErrorResponse")
+        promotion_schema = openapi["components"]["schemas"]["PromotionEvidenceRequest"]
+        self.assertFalse(promotion_schema["additionalProperties"])
+
+    async def test_promotion_evidence_native_route_precedes_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = _promotion_evidence_store(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_promotion_write_identity()),
+                authz_policy=_promotion_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_promotion_evidence(app, _promotion_evidence_payload())
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"]["promotion_record_id"], "promotion-example-site-testing-to-prod"
+        )
+
+
 class FastApiDeploymentEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_evidence_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2037,6 +2445,141 @@ def _backup_gate_evidence_payload(
             },
         },
     }
+
+
+def _promotion_write_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="every/example-site",
+        workflow_ref="every/example-site/.github/workflows/promote-prod.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/example-site",
+                    "workflow_refs": [
+                        "every/example-site/.github/workflows/promote-prod.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["promotion.write"],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["promotion.write"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["example-site"],
+                    "contexts": [context],
+                    "actions": ["promotion.write"],
+                }
+            ]
+        }
+    )
+
+
+def _promotion_evidence_payload(
+    *,
+    record_id: str = "promotion-example-site-testing-to-prod",
+    link_deployment: bool = True,
+) -> dict[str, object]:
+    promotion: dict[str, object] = {
+        "record_id": record_id,
+        "artifact_identity": {"artifact_id": "artifact-example-site-prod"},
+        "backup_record_id": "backup-example-site-prod-20260420T155000Z",
+        "context": "example-site",
+        "from_instance": "testing",
+        "to_instance": "prod",
+        "backup_gate": {
+            "required": True,
+            "status": "pass",
+            "evidence": {"recorded_by": "launchplane-service"},
+        },
+        "deploy": {
+            "target_name": "example-site-prod",
+            "target_type": "application",
+            "deploy_mode": "runtime-provider-api",
+            "deployment_id": "provider-deployment-example-site-prod",
+            "status": "pass",
+            "started_at": "2026-04-20T16:05:00Z",
+            "finished_at": "2026-04-20T16:08:30Z",
+        },
+        "destination_health": {
+            "verified": True,
+            "urls": ["https://example.invalid/health"],
+            "timeout_seconds": 45,
+            "status": "pass",
+        },
+    }
+    if link_deployment:
+        promotion["deployment_record_id"] = "deployment-example-site-prod"
+    return {
+        "schema_version": 1,
+        "product": "example-site",
+        "promotion": promotion,
+    }
+
+
+def _promotion_evidence_store(
+    state_dir: Path,
+    *,
+    deployment_context: str = "example-site",
+    deployment_instance: str = "prod",
+    artifact_id: str = "artifact-example-site-prod",
+) -> FilesystemRecordStore:
+    store = FilesystemRecordStore(state_dir=state_dir)
+    store.write_deployment_record(
+        DeploymentRecord(
+            record_id="deployment-example-site-prod",
+            artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+            context=deployment_context,
+            instance=deployment_instance,
+            source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+            resolved_target=ResolvedTargetEvidence(
+                target_type="application",
+                target_id="target-example-site-prod",
+                target_name="example-site-prod",
+            ),
+            deploy=DeploymentEvidence(
+                target_name="example-site-prod",
+                target_type="application",
+                deploy_mode="runtime-provider-api",
+                deployment_id="provider-deployment-example-site-prod",
+                status="pass",
+                started_at="2026-04-20T16:05:00Z",
+                finished_at="2026-04-20T16:08:30Z",
+            ),
+        )
+    )
+    return store
 
 
 def _deployment_write_identity() -> GitHubActionsIdentity:
@@ -2419,6 +2962,28 @@ async def _post_backup_gate_evidence(
     )
 
 
+async def _post_promotion_evidence(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/evidence/promotions",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_deployment_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -2560,6 +3125,48 @@ class _IdempotencyOnlyBackupGateReplayStore:
 
     def _write_backup_gate_record(self, record: BackupGateRecord) -> None:
         self.write_backup_gate_calls += 1
+
+
+class _PromotionEvidenceOnlyStore:
+    def __init__(self) -> None:
+        self.promotion_records: dict[str, dict[str, Any]] = {}
+
+    def write_promotion_record(self, record: PromotionRecord) -> None:
+        self.promotion_records[record.record_id] = record.model_dump(mode="json")
+
+
+class _IdempotencyOnlyPromotionReplayStore:
+    def __init__(self) -> None:
+        self.read_idempotency_calls = 0
+        self.write_promotion_calls = 0
+        self._stored_record: Any | None = None
+        self.write_promotion_record: Callable[[PromotionRecord], None] | None = (
+            self._write_promotion_record
+        )
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> Any:
+        self.read_idempotency_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: Any) -> None:
+        self._stored_record = record
+
+    def _write_promotion_record(self, record: PromotionRecord) -> None:
+        self.write_promotion_calls += 1
 
 
 class _DeploymentEvidenceOnlyStore:
