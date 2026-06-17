@@ -56,7 +56,6 @@ from control_plane.contracts.agent_write_intent import (
     evaluate_agent_write_intent,
     secret_evidence_for_agent_write_intent,
 )
-from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -161,10 +160,6 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.contracts.preview_evidence import (
-    PreviewDestroyedEvidenceEnvelope,
-    PreviewGenerationEvidenceEnvelope,
-)
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
@@ -196,7 +191,6 @@ from control_plane.contracts.product_onboarding_manifest import ProductOnboardin
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
-    PromotionRecord,
     ReleaseStatus,
 )
 from control_plane.contracts.public_ingress_monitoring import (
@@ -204,12 +198,6 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.contracts.runner_host_hygiene_evidence import (
-    RunnerHostHygieneAuditEvidenceEnvelope,
-)
-from control_plane.contracts.runner_lane_registration_evidence import (
-    RunnerLaneRegistrationAuditEvidenceEnvelope,
-)
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
@@ -421,7 +409,6 @@ from control_plane.workflows.merge_train_controller import (
 from control_plane.workflows.evidence_ingestion import (
     EvidenceIngestionStore,
     apply_deployment_evidence,
-    apply_promotion_evidence,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
@@ -937,20 +924,6 @@ _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 _LOGGER = logging.getLogger(__name__)
 
 
-class DeploymentEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    deployment: DeploymentRecord
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
-        if not self.product.strip():
-            raise ValueError("deployment evidence requires product")
-        return self
-
-
 class PublicIngressMonitorRunOnceEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1172,20 +1145,6 @@ _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
 )
 
 
-class BackupGateEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    backup_gate: BackupGateRecord
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "BackupGateEvidenceEnvelope":
-        if not self.product.strip():
-            raise ValueError("backup gate evidence requires product")
-        return self
-
-
 class PreviewLifecyclePlanEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1323,20 +1282,6 @@ class PreviewPrFeedbackEnvelope(BaseModel):
             raise ValueError("preview PR feedback requires anchor_pr_url")
         if not self.marker.strip():
             raise ValueError("preview PR feedback requires marker")
-        return self
-
-
-class PromotionEvidenceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    promotion: PromotionRecord
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "PromotionEvidenceEnvelope":
-        if not self.product.strip():
-            raise ValueError("promotion evidence requires product")
         return self
 
 
@@ -4816,12 +4761,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/public-ingress/notification-policies/apply",
         "/v1/every-code/notification-policies/apply",
         "/v1/previews/pr-feedback/notification-policies/apply",
-        "/v1/evidence/deployments",
-        "/v1/evidence/backup-gates",
-        "/v1/evidence/runner-host-hygiene/audits",
-        "/v1/evidence/runner-lane-registration/audits",
-        "/v1/evidence/previews/generations",
-        "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -4847,7 +4786,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/previews/lifecycle-plan",
         "/v1/previews/lifecycle-sweep",
         "/v1/product-profiles",
-        "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
     }
     return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
@@ -14069,184 +14007,6 @@ def create_launchplane_service_app(
                     )
                 result = reconcile_result.model_dump(mode="json")
                 driver_result = {"reconcile": result}
-            elif path == "/v1/evidence/deployments":
-                deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="deployment.write",
-                    product=deployment_request.product,
-                    context=deployment_request.deployment.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write deployment evidence for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = dict[str, object](
-                    apply_deployment_evidence(
-                        record_store=cast(EvidenceIngestionStore, record_store),
-                        deployment_record=deployment_request.deployment,
-                    )
-                )
-            elif path == "/v1/evidence/backup-gates":
-                backup_gate_request = BackupGateEvidenceEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="backup_gate.write",
-                    product=backup_gate_request.product,
-                    context=backup_gate_request.backup_gate.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write backup gate evidence for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                record_store.write_backup_gate_record(backup_gate_request.backup_gate)
-                result = {"backup_gate_record_id": backup_gate_request.backup_gate.record_id}
-            elif path == "/v1/evidence/runner-host-hygiene/audits":
-                runner_host_hygiene_request = RunnerHostHygieneAuditEvidenceEnvelope.model_validate(
-                    payload
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="runner_host_hygiene_audit.write",
-                    product=runner_host_hygiene_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write runner host hygiene audit evidence."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                record_store.write_runner_host_hygiene_audit_record(
-                    runner_host_hygiene_request.audit
-                )
-                result = {
-                    "runner_host_hygiene_audit_record_key": runner_host_hygiene_request.audit.audit_record_key,
-                }
-                driver_result = {
-                    "runner_host_hygiene_audit_record_key": runner_host_hygiene_request.audit.audit_record_key,
-                    "host_name": runner_host_hygiene_request.audit.request.host_name,
-                    "audit_status": runner_host_hygiene_request.audit.status,
-                    "mutate": runner_host_hygiene_request.audit.request.mutate,
-                    "audit": runner_host_hygiene_request.audit.model_dump(mode="json"),
-                }
-            elif path == "/v1/evidence/runner-lane-registration/audits":
-                runner_lane_registration_request = (
-                    RunnerLaneRegistrationAuditEvidenceEnvelope.model_validate(payload)
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="runner_lane_registration_audit.write",
-                    product=runner_lane_registration_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write runner lane registration audit evidence."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                record_store.write_runner_lane_registration_audit_record(
-                    runner_lane_registration_request.audit
-                )
-                result = {
-                    "runner_lane_registration_audit_record_key": (
-                        runner_lane_registration_request.audit.audit_record_key
-                    ),
-                }
-                driver_result = {
-                    "runner_lane_registration_audit_record_key": (
-                        runner_lane_registration_request.audit.audit_record_key
-                    ),
-                    "repository": runner_lane_registration_request.audit.request.repository,
-                    "host_name": runner_lane_registration_request.audit.request.host_name,
-                    "lane_name": runner_lane_registration_request.audit.request.lane_name,
-                    "audit_status": runner_lane_registration_request.audit.status,
-                    "mutate": runner_lane_registration_request.audit.request.mutate,
-                    "audit": runner_lane_registration_request.audit.model_dump(mode="json"),
-                }
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(
@@ -16016,88 +15776,6 @@ def create_launchplane_service_app(
                     return idempotent_response
                 record_store.write_product_profile_record(product_profile_request)
                 result = {"product_profile": product_profile_request.product}
-            elif path == "/v1/evidence/promotions":
-                promotion_request = PromotionEvidenceEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="promotion.write",
-                    product=promotion_request.product,
-                    context=promotion_request.promotion.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write promotion evidence for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = dict[str, object](
-                    apply_promotion_evidence(
-                        record_store=cast(EvidenceIngestionStore, record_store),
-                        promotion_record=promotion_request.promotion,
-                    )
-                )
-            elif path == "/v1/evidence/previews/generations":
-                preview_generation_request = PreviewGenerationEvidenceEnvelope.model_validate(
-                    payload
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_generation.write",
-                    product=preview_generation_request.product,
-                    context=preview_generation_request.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write preview generation evidence for the"
-                                    " requested product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = apply_launchplane_generation_evidence(
-                    control_plane_root_path=resolved_root,
-                    record_store=record_store,
-                    preview_request=preview_generation_request.preview,
-                    generation_request=preview_generation_request.generation,
-                )
             elif path == "/v1/previews/lifecycle-plan":
                 preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
                     payload
@@ -16488,42 +16166,10 @@ def create_launchplane_service_app(
                     },
                 )
             else:
-                preview_destroyed_request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_destroyed.write",
-                    product=preview_destroyed_request.product,
-                    context=preview_destroyed_request.destroy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write preview destroyed evidence for the"
-                                    " requested product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
+                return _not_found_response(
                     start_response=start_response,
                     trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                result = apply_launchplane_destroy_preview(
-                    record_store=record_store,
-                    request=preview_destroyed_request.destroy,
+                    path=path,
                 )
         except (PermissionError, InvalidTokenError):
             return _json_response(
