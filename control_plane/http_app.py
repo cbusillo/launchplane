@@ -21,6 +21,7 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -174,6 +175,14 @@ class PromotionRecordResponse(BaseModel):
     record: PromotionRecord
 
 
+class EnvironmentInventoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: EnvironmentInventory
+
+
 class ProtectedArtifactsResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -289,6 +298,15 @@ class _DeploymentReadStore(Protocol):
 
 class _PromotionReadStore(Protocol):
     def read_promotion_record(self, record_id: str) -> PromotionRecord: ...
+
+
+class _EnvironmentInventoryReadStore(Protocol):
+    def read_environment_inventory(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+    ) -> EnvironmentInventory: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -469,6 +487,18 @@ def require_promotion_read_store(record_store: object) -> _PromotionReadStore:
             "read_promotion_record"
         )
     return cast(_PromotionReadStore, record_store)
+
+
+def require_environment_inventory_read_store(
+    record_store: object,
+) -> _EnvironmentInventoryReadStore:
+    read_record = getattr(record_store, "read_environment_inventory", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support environment inventory reads: "
+            "read_environment_inventory"
+        )
+    return cast(_EnvironmentInventoryReadStore, record_store)
 
 
 def idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -983,6 +1013,59 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot read promotion records for the requested context.",
             )
         return PromotionRecordResponse(trace_id=trace_id, record=promotion)
+
+    def read_environment_inventory(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> EnvironmentInventoryResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="inventory.read",
+            product="launchplane",
+            context=context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read inventory for the requested context.",
+            )
+        try:
+            inventory_store = require_environment_inventory_read_store(record_store)
+            inventory = inventory_store.read_environment_inventory(
+                context_name=context,
+                instance_name=instance,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="inventory.read",
+            product="launchplane",
+            context=inventory.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read inventory for the requested context.",
+            )
+        return EnvironmentInventoryResponse(trace_id=trace_id, record=inventory)
 
     def accepted_evidence_response(
         *,
@@ -1789,6 +1872,22 @@ def create_launchplane_fastapi_app(
         response_model=PromotionRecordResponse,
         operation_id="read_promotion_record",
         summary="Read one promotion record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/inventory/{context}/{instance}",
+        read_environment_inventory,
+        methods=["GET"],
+        response_model=EnvironmentInventoryResponse,
+        operation_id="read_environment_inventory",
+        summary="Read one environment inventory record",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

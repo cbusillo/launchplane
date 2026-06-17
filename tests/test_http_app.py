@@ -17,6 +17,7 @@ from starlette.types import ASGIApp
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -2040,6 +2041,157 @@ class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(promotion_response.status_code, 200)
         self.assertEqual(deployment_response.json()["status"], "ok")
         self.assertEqual(promotion_response.json()["status"], "ok")
+
+
+class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inventory_read_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_environment_inventory(_environment_inventory_read_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="inventory.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_environment_inventory(app, "example-site", "prod")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["record"]["context"], "example-site")
+        self.assertEqual(payload["record"]["instance"], "prod")
+        self.assertEqual(payload["record"]["deployment_record_id"], "deployment-example-site-prod")
+
+    async def test_inventory_read_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="inventory.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_environment_inventory(
+            app,
+            "example-site",
+            "prod",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_inventory_read_rejects_wrong_context_grant(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="inventory.read",
+                context="other-site",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_environment_inventory(app, "example-site", "prod")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_inventory_read_returns_not_found_for_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="inventory.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_environment_inventory(app, "example-site", "prod")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_inventory_read_requires_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="inventory.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_environment_inventory(app, "example-site", "prod")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_environment_inventory", payload["error"]["message"])
+
+    async def test_openapi_includes_inventory_read_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="inventory.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/inventory/{context}/{instance}"]["get"]
+        self.assertEqual(route["operationId"], "read_environment_inventory")
+        self.assertEqual(
+            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/EnvironmentInventoryResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+        self.assertIn("401", route["responses"])
+        self.assertIn("403", route["responses"])
+        self.assertIn("404", route["responses"])
+        self.assertIn("503", route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["EnvironmentInventoryResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_inventory_read_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_environment_inventory(_environment_inventory_read_record())
+            policy = _record_read_policy(
+                action="inventory.read",
+                context="example-site",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_environment_inventory(app, "example-site", "prod")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
@@ -4957,6 +5109,21 @@ def _promotion_read_record() -> PromotionRecord:
     return PromotionRecord.model_validate(payload)
 
 
+def _environment_inventory_read_record() -> EnvironmentInventory:
+    deployment = _deployment_read_record()
+    return EnvironmentInventory(
+        context=deployment.context,
+        instance=deployment.instance,
+        artifact_identity=deployment.artifact_identity,
+        source_git_ref=deployment.source_git_ref,
+        deploy=deployment.deploy,
+        post_deploy_update=deployment.post_deploy_update,
+        destination_health=deployment.destination_health,
+        updated_at="2026-04-20T15:33:00Z",
+        deployment_record_id=deployment.record_id,
+    )
+
+
 def _github_human_driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -5239,6 +5406,24 @@ async def _get_promotion_record(
     if authorization:
         request_headers["Authorization"] = authorization
     return await _asgi_get(app, f"/v1/promotions/{record_id}", headers=request_headers)
+
+
+async def _get_environment_inventory(
+    app: FastAPI,
+    context: str,
+    instance: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/inventory/{context}/{instance}",
+        headers=request_headers,
+    )
 
 
 async def _post_backup_gate_evidence(

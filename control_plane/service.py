@@ -4513,8 +4513,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 4 and segments[:2] == ["v1", "inventory"]:
-        return "inventory.read", {"context": segments[2], "instance": segments[3]}
     if len(segments) == 3 and segments[:2] == ["v1", "previews"]:
         return "preview.read", {"preview_id": segments[2]}
     if len(segments) == 4 and segments[:2] == ["v1", "previews"] and segments[3] == "history":
@@ -10962,38 +10960,6 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in canary_records
                             ],
-                        },
-                    )
-                if action == "inventory.read":
-                    inventory = record_store.read_environment_inventory(
-                        context_name=params["context"],
-                        instance_name=params["instance"],
-                    )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=inventory.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read inventory for the requested context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "record": inventory.model_dump(mode="json"),
                         },
                     )
                 if action == "preview.read":
