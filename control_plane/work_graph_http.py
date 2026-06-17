@@ -21,7 +21,6 @@ from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
     WorkGraphRankEnvelope,
     WorkGraphWorkRequestStore,
-    build_repo_product_mapping_service_payload,
     build_work_graph_rank_result,
     build_work_graph_snapshot_service_payload,
 )
@@ -181,52 +180,6 @@ def reconcile_work_graph_issue_inbox(
     if issue_inbox_reconcile_provider is None:
         raise ValueError("GitHub issue inbox reconciliation is not configured.")
     return issue_inbox_reconcile_provider(request)
-
-
-def handle_repo_product_mapping_read(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: ResolvedLaunchplaneIdentity,
-    trace_id: str,
-    product_store: ProductReadModelStore,
-    work_request_store: WorkGraphWorkRequestStore,
-    utc_now: UtcNow,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> list[bytes]:
-    if not authz_policy.allows(
-        identity=identity,
-        action="product_environment.read",
-        product="launchplane",
-        context=LAUNCHPLANE_SERVICE_CONTEXT,
-    ):
-        return json_response(
-            start_response=start_response,
-            status_code=403,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "authorization_denied",
-                    "message": "Workflow cannot read the Launchplane repo product mapping.",
-                },
-            },
-        )
-
-    mapping_payload = build_repo_product_mapping_service_payload(
-        generated_at=utc_now(),
-        product_store=product_store,
-        work_request_store=work_request_store,
-    )
-    return json_response(
-        start_response=start_response,
-        status_code=200,
-        payload={
-            "status": "ok",
-            "trace_id": trace_id,
-            **mapping_payload,
-        },
-    )
 
 
 def rank_work_graph_snapshot(

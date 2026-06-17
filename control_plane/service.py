@@ -36,11 +36,6 @@ from control_plane.http_app import (
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.agent_context_service import (
-    agent_context_action_allowed,
-    agent_context_allowed,
-    build_agent_context_service_payload,
-)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
 )
@@ -359,7 +354,6 @@ from control_plane.work_graph_service import (
 )
 from control_plane.work_graph_http import (
     handle_work_graph_issue_inbox_read,
-    handle_repo_product_mapping_read,
     handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
     reconcile_work_graph_issue_inbox,
@@ -4494,8 +4488,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "notification-attempts",
     ]:
         return "preview_pr_feedback_notification_attempt.read", {}
-    if len(segments) == 3 and segments == ["v1", "agent", "context"]:
-        return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {"request_id": segments[3]}
     if (
@@ -4549,8 +4541,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "work_graph.rank", {}
     if len(segments) == 4 and segments == ["v1", "work-graph", "github", "issues"]:
         return "work_graph.issue_inbox", {}
-    if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
-        return "product_environment.read", {"repo_product_mapping": "true"}
     if len(segments) == 4 and segments == [
         "v1",
         "products",
@@ -11324,58 +11314,6 @@ def create_launchplane_service_app(
                             "targets": targets,
                         },
                     )
-                if action == "product_environment.read":
-                    if params.get("agent_context") == "true":
-                        if not agent_context_allowed(
-                            authz_policy=authz_policy,
-                            identity=identity,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read Launchplane agent context.",
-                                    },
-                                },
-                            )
-                        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-                        agent_context = build_agent_context_service_payload(
-                            generated_at=_utc_now_timestamp(),
-                            repository=repository_filter,
-                            product_store=record_store,
-                            work_request_store=_every_code_work_request_store(record_store),
-                            preview_readiness_store=_every_code_work_request_store(record_store),
-                            action_allowed=agent_context_action_allowed(
-                                authz_policy=authz_policy,
-                                identity=identity,
-                            ),
-                            planning_facts_provider=work_graph_planning_facts_provider,
-                        )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "context": agent_context.model_dump(mode="json"),
-                            },
-                        )
-
-                    if params.get("repo_product_mapping") == "true":
-                        return handle_repo_product_mapping_read(
-                            authz_policy=authz_policy,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            product_store=record_store,
-                            work_request_store=_every_code_work_request_store(record_store),
-                            utc_now=_utc_now_timestamp,
-                            json_response=_json_response,
-                            start_response=start_response,
-                        )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(
                     identity=identity,
@@ -15848,6 +15786,7 @@ def serve_launchplane_service(
         bearer_identity_config=_bearer_identity_config_from_env(),
         human_session_manager=human_session_manager,
         control_plane_root_path=control_plane_root(),
+        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
     )
     fastapi_application.mount(
         "/",
