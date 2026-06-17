@@ -4531,12 +4531,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[5] == "logs"
     ):
         return "target_logs.read", {"context": segments[2], "instance": segments[4]}
-    if (
-        len(segments) == 5
-        and segments[:2] == ["v1", "contexts"]
-        and segments[3:] == ["operations", "recent"]
-    ):
-        return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
     if len(segments) == 4 and segments == ["v1", "service", "odoo-workers", "status"]:
@@ -11803,57 +11797,6 @@ def create_launchplane_service_app(
                             **product_list_payload,
                         },
                     )
-                context_name = params["context"]
-                if not authz_policy.allows(
-                    identity=identity,
-                    action=action,
-                    product="launchplane",
-                    context=context_name,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot read recent operations for the requested context.",
-                            },
-                        },
-                    )
-                deployments = record_store.list_deployment_records(
-                    context_name=context_name, limit=10
-                )
-                promotions = record_store.list_promotion_records(
-                    context_name=context_name, limit=10
-                )
-                previews = record_store.list_preview_records(context_name=context_name, limit=10)
-                recent_inventory = [
-                    record
-                    for record in record_store.list_environment_inventory()
-                    if record.context == context_name
-                ]
-                return _json_response(
-                    start_response=start_response,
-                    status_code=200,
-                    payload={
-                        "status": "ok",
-                        "trace_id": request_trace_id,
-                        "context": context_name,
-                        "storage_backend": storage_backend,
-                        "inventory": [
-                            record.model_dump(mode="json") for record in recent_inventory
-                        ],
-                        "recent_deployments": [
-                            record.model_dump(mode="json") for record in deployments
-                        ],
-                        "recent_promotions": [
-                            record.model_dump(mode="json") for record in promotions
-                        ],
-                        "recent_previews": [record.model_dump(mode="json") for record in previews],
-                    },
-                )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(
                     identity=identity,

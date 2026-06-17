@@ -2199,6 +2199,145 @@ class FastApiEnvironmentInventoryReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
+class FastApiRecentOperationsReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recent_operations_returns_operator_read_model(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_recent_operations_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="operations.read",
+                    context="example-site",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_recent_operations(app, "example-site")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["context"], "example-site")
+        self.assertEqual(payload["storage_backend"], "filesystem")
+        self.assertEqual(len(payload["inventory"]), 1)
+        self.assertEqual(len(payload["recent_deployments"]), 1)
+        self.assertEqual(len(payload["recent_promotions"]), 1)
+        self.assertEqual(len(payload["recent_previews"]), 1)
+        self.assertEqual(payload["inventory"][0]["context"], "example-site")
+        self.assertEqual(payload["recent_deployments"][0]["context"], "example-site")
+        self.assertEqual(payload["recent_promotions"][0]["context"], "example-site")
+        self.assertEqual(payload["recent_previews"][0]["context"], "example-site")
+
+    async def test_recent_operations_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="operations.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_recent_operations(
+            app,
+            "example-site",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_recent_operations_rejects_wrong_context_before_store_access(
+        self,
+    ) -> None:
+        store = _RecentOperationsProbeStore()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="operations.read",
+                context="other-site",
+            ),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _get_recent_operations(app, "example-site")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(store.calls, [])
+
+    async def test_recent_operations_requires_read_capable_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="operations.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_recent_operations(app, "example-site")
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("list_environment_inventory", payload["error"]["message"])
+
+    async def test_openapi_includes_recent_operations_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="operations.read", context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/contexts/{context}/operations/recent"]["get"]
+        self.assertEqual(route["operationId"], "read_recent_operations")
+        self.assertEqual(
+            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/RecentOperationsResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+        self.assertIn("401", route["responses"])
+        self.assertIn("403", route["responses"])
+        self.assertIn("503", route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["RecentOperationsResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_recent_operations_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            _write_recent_operations_records(store)
+            policy = _record_read_policy(
+                action="operations.read",
+                context="example-site",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_recent_operations(app, "example-site")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
 class FastApiPreviewReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_preview_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -5032,6 +5171,13 @@ def _preview_generation_read_record(
     )
 
 
+def _write_recent_operations_records(store: FilesystemRecordStore) -> None:
+    store.write_environment_inventory(_environment_inventory_read_record())
+    store.write_deployment_record(_deployment_read_record())
+    store.write_promotion_record(_promotion_read_record())
+    store.write_preview_record(_preview_read_record())
+
+
 def _preview_destroyed_evidence_payload(*, anchor_pr_number: int = 42) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -5708,6 +5854,23 @@ async def _get_environment_inventory(
     )
 
 
+async def _get_recent_operations(
+    app: FastAPI,
+    context: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/operations/recent",
+        headers=request_headers,
+    )
+
+
 async def _get_preview_record(
     app: FastAPI,
     preview_id: str,
@@ -5969,6 +6132,50 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _RecentOperationsProbeStore:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
+        self.calls.append("list_environment_inventory")
+        return ()
+
+    def list_deployment_records(
+        self,
+        *,
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[DeploymentRecord, ...]:
+        del context_name, instance_name, limit
+        self.calls.append("list_deployment_records")
+        return ()
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]:
+        del context_name, from_instance_name, to_instance_name, limit
+        self.calls.append("list_promotion_records")
+        return ()
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]:
+        del context_name, anchor_repo, anchor_pr_number, limit
+        self.calls.append("list_preview_records")
+        return ()
 
 
 class _PreviewRecordOnlyStore:

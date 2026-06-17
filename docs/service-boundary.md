@@ -50,7 +50,7 @@ VeriReel product paths:
     context
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
-- native FastAPI deployment, promotion, preview, and inventory single-record
+- native FastAPI deployment, promotion, preview, inventory, and operations
   reads:
   - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
     stored record context
@@ -62,6 +62,8 @@ VeriReel product paths:
     stored preview context
   - `GET /v1/inventory/{context}/{instance}`, requiring `inventory.read` for
     the stored inventory context
+  - `GET /v1/contexts/{context}/operations/recent`, requiring
+    `operations.read` for the path context
 - authenticated evidence routes:
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
@@ -1264,7 +1266,8 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/contexts/{context}/secrets`
 - `GET /v1/contexts/{context}/instances/{instance}/secrets`
 - `GET /v1/secrets/{secret_id}`
-- `GET /v1/contexts/{context}/operations/recent`
+- `GET /v1/contexts/{context}/operations/recent` (native FastAPI for
+  bearer-token and human-session callers)
 - `GET /v1/product-profiles/{product}/context-cutover-audit`
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
@@ -1282,9 +1285,11 @@ returning the typed record envelope. Preview history reads share the same stored
 preview authorization decision, then return the typed preview record plus its
 generation history. Inventory single-record reads authorize `inventory.read`
 against the path context before store access, then verify the stored inventory
-context before returning the typed record envelope. Their legacy WSGI branches
-are deleted; direct fallback calls fail closed while the mounted fallback remains
-for retained non-native routes.
+context before returning the typed record envelope. Recent operations reads
+authorize `operations.read` against the path context before store access, then
+return the typed recent inventory/deployment/promotion/preview operation
+envelope. Their legacy WSGI branches are deleted; direct fallback calls fail
+closed while the mounted fallback remains for retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They compose
 Launchplane-owned product profiles, driver descriptors, stable lane records,
