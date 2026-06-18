@@ -3129,83 +3129,6 @@ def _build_live_target_runtime_contract_payload(
     }
 
 
-def _sync_live_target_from_tracked_contract(
-    *,
-    context_name: str,
-    instance_name: str,
-) -> dict[str, object]:
-    control_plane_root = _control_plane_root()
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-        control_plane_root=control_plane_root,
-    )
-    target_definition = _require_dokploy_target_definition(
-        source_of_truth=source_of_truth,
-        context_name=context_name,
-        instance_name=instance_name,
-        operation_name="Live target sync",
-    )
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-        host=host,
-        token=token,
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-    )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    desired_env_map = dict(env_map)
-    for env_key, env_value in target_definition.env.items():
-        desired_env_map[env_key] = env_value
-
-    source_changes = {}
-    tracked_source_fields = {
-        "source_type": target_definition.source_type.strip(),
-        "custom_git_url": target_definition.custom_git_url.strip(),
-        "custom_git_branch": target_definition.custom_git_branch.strip(),
-        "compose_path": target_definition.compose_path.strip(),
-        "watch_paths": list(target_definition.watch_paths),
-        "enable_submodules": target_definition.enable_submodules,
-    }
-    raw_watch_paths = target_payload.get("watchPaths")
-    live_watch_paths = (
-        [str(item) for item in raw_watch_paths] if isinstance(raw_watch_paths, list) else []
-    )
-    live_source_fields = {
-        "source_type": str(target_payload.get("sourceType") or "").strip(),
-        "custom_git_url": str(target_payload.get("customGitUrl") or "").strip(),
-        "custom_git_branch": str(target_payload.get("customGitBranch") or "").strip(),
-        "compose_path": str(target_payload.get("composePath") or "").strip(),
-        "watch_paths": live_watch_paths,
-        "enable_submodules": bool(target_payload.get("enableSubmodules"))
-        if target_payload.get("enableSubmodules") is not None
-        else None,
-    }
-    for field_name, desired_value in tracked_source_fields.items():
-        if desired_value in ("", (), [], None):
-            continue
-        if live_source_fields.get(field_name) != desired_value:
-            source_changes[field_name] = {
-                "live": live_source_fields.get(field_name),
-                "tracked": desired_value,
-            }
-
-    env_changes = {}
-    for env_key, tracked_value in target_definition.env.items():
-        live_value = env_map.get(env_key, "")
-        if live_value != tracked_value:
-            env_changes[env_key] = {"live": live_value, "tracked": tracked_value}
-
-    payload = _build_live_target_runtime_contract_payload(
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    payload["sync_preview"] = {
-        "apply_changes": False,
-        "source_changes": source_changes,
-        "env_changes": env_changes,
-    }
-    return payload
-
-
 def _sync_artifact_image_reference_for_target(
     *,
     context_name: str,
@@ -3744,7 +3667,6 @@ register_runtime_environment_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     control_plane_root=_control_plane_root,
     build_live_target_runtime_contract_payload=_build_live_target_runtime_contract_payload,
-    sync_live_target_from_tracked_contract=_sync_live_target_from_tracked_contract,
 )
 register_dokploy_target_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]

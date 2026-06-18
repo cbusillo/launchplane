@@ -135,10 +135,10 @@ Keep a compatibility surface only when it is one of these:
 - Live target runtime apply uses `POST /v1/live-target-runtime/apply` and the
   `live-target-runtime.yml` workflow for shared and production live changes.
   The local checkout `environments apply-live-target` mutation command is
-  deleted, and `environments sync-live-target` is demoted to read-only drift
-  preview without a local `--apply` mutation mode. Operators use service/API
-  identity so Launchplane resolves current DB-backed target authority and
-  records sanitized key/count evidence.
+  deleted, and the local checkout `environments sync-live-target` drift-preview
+  compatibility command is deleted. Operators use service/API identity so
+  Launchplane resolves current DB-backed target authority and records sanitized
+  key/count evidence.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;
