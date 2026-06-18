@@ -55,6 +55,12 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.odoo_stable_bootstrap_operation import (
+    OdooStableBootstrapOperationRecord,
+)
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.merge_train_admission import (
     MergeTrainRunHistoryStore,
     build_merge_train_controller_status_read_model,
@@ -202,6 +208,18 @@ class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStor
     pass
 
 
+class OdooStableBootstrapOperationReadStore(Protocol):
+    def read_odoo_stable_bootstrap_operation_record(
+        self, operation_id: str
+    ) -> OdooStableBootstrapOperationRecord: ...
+
+
+class OdooStableTargetReplacementOperationReadStore(Protocol):
+    def read_odoo_stable_target_replacement_operation_record(
+        self, operation_id: str
+    ) -> OdooStableTargetReplacementOperationRecord: ...
+
+
 class LaunchplaneErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -292,6 +310,24 @@ class OdooStableOperationWorkerStatusResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     worker_status: OdooStableOperationWorkerStatusResponseModel
+
+
+class OdooStableBootstrapOperationStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    operation: dict[str, object]
+    result: dict[str, object] | None = None
+
+
+class OdooStableTargetReplacementOperationStatusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    operation: dict[str, object]
+    result: dict[str, object] | None = None
 
 
 class ProductEnvironmentConfigStatusResponse(BaseModel):
@@ -1322,6 +1358,54 @@ def require_recent_operations_read_store(record_store: object) -> _RecentOperati
     return cast(_RecentOperationsReadStore, record_store)
 
 
+def require_odoo_stable_bootstrap_operation_read_store(
+    record_store: object,
+) -> OdooStableBootstrapOperationReadStore:
+    read_record = getattr(record_store, "read_odoo_stable_bootstrap_operation_record", None)
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support Odoo stable bootstrap operation "
+            "status reads: read_odoo_stable_bootstrap_operation_record"
+        )
+    return cast(OdooStableBootstrapOperationReadStore, record_store)
+
+
+def require_odoo_stable_target_replacement_operation_read_store(
+    record_store: object,
+) -> OdooStableTargetReplacementOperationReadStore:
+    read_record = getattr(
+        record_store,
+        "read_odoo_stable_target_replacement_operation_record",
+        None,
+    )
+    if not callable(read_record):
+        raise TypeError(
+            "Launchplane record store does not support Odoo target replacement operation "
+            "status reads: read_odoo_stable_target_replacement_operation_record"
+        )
+    return cast(OdooStableTargetReplacementOperationReadStore, record_store)
+
+
+def odoo_stable_bootstrap_operation_status_payload(
+    operation: OdooStableBootstrapOperationRecord,
+) -> dict[str, object]:
+    payload = operation.model_dump(mode="json")
+    payload["poll_url"] = (
+        f"/v1/drivers/odoo/stable-bootstrap/operations/{operation.operation_id.strip()}"
+    )
+    return payload
+
+
+def odoo_stable_target_replacement_operation_status_payload(
+    operation: OdooStableTargetReplacementOperationRecord,
+) -> dict[str, object]:
+    payload = operation.model_dump(mode="json")
+    payload["poll_url"] = (
+        f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id.strip()}"
+    )
+    return payload
+
+
 def require_product_profile_list_store(record_store: object) -> ProductReadModelStore:
     list_records = getattr(record_store, "list_product_profile_records", None)
     if not callable(list_records):
@@ -1945,6 +2029,100 @@ def create_launchplane_fastapi_app(
         return OdooStableOperationWorkerStatusResponse(
             trace_id=trace_id,
             worker_status=worker_status,
+        )
+
+    def read_odoo_stable_bootstrap_operation_status(
+        operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> OdooStableBootstrapOperationStatusResponse:
+        trace_id = next_trace_id()
+        try:
+            operation_store = require_odoo_stable_bootstrap_operation_read_store(record_store)
+            operation = operation_store.read_odoo_stable_bootstrap_operation_record(operation_id)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="odoo_stable_bootstrap.execute",
+            product=operation.product,
+            context=operation.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read Odoo stable bootstrap operation status "
+                    "for the requested product/context."
+                ),
+            )
+        result = operation.result.model_dump(mode="json") if operation.result else None
+        return OdooStableBootstrapOperationStatusResponse(
+            trace_id=trace_id,
+            operation=odoo_stable_bootstrap_operation_status_payload(operation),
+            result=result,
+        )
+
+    def read_odoo_stable_target_replacement_operation_status(
+        operation_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> OdooStableTargetReplacementOperationStatusResponse:
+        trace_id = next_trace_id()
+        try:
+            operation_store = require_odoo_stable_target_replacement_operation_read_store(
+                record_store
+            )
+            operation = operation_store.read_odoo_stable_target_replacement_operation_record(
+                operation_id
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="odoo_target_replacement_apply.execute",
+            product=operation.product,
+            context=operation.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read Odoo target replacement operation status "
+                    "for the requested product/context."
+                ),
+            )
+        result = operation.result.model_dump(mode="json") if operation.result else None
+        return OdooStableTargetReplacementOperationStatusResponse(
+            trace_id=trace_id,
+            operation=odoo_stable_target_replacement_operation_status_payload(operation),
+            result=result,
         )
 
     def read_product_environment_config_status(
@@ -5200,6 +5378,38 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}",
+        read_odoo_stable_bootstrap_operation_status,
+        methods=["GET"],
+        response_model=OdooStableBootstrapOperationStatusResponse,
+        response_model_exclude_none=True,
+        operation_id="read_odoo_stable_bootstrap_operation_status",
+        summary="Read Odoo stable bootstrap operation status",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/drivers/odoo/target-replacement/operations/{operation_id}",
+        read_odoo_stable_target_replacement_operation_status,
+        methods=["GET"],
+        response_model=OdooStableTargetReplacementOperationStatusResponse,
+        response_model_exclude_none=True,
+        operation_id="read_odoo_target_replacement_operation_status",
+        summary="Read Odoo target replacement operation status",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
