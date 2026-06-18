@@ -176,9 +176,9 @@ VeriReel product paths:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
-  - `GET /v1/work-graph/merge-train/policy-targets`
-  - `GET /v1/work-graph/merge-train/admission`
-  - `GET /v1/work-graph/merge-train/controller/status`
+  - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
+  - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
+  - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
   - `POST /v1/work-graph/rank`
   - `POST /v1/work-graph/merge-train/run-once`
   - `POST /v1/work-graph/merge-train/pr-feedback`
@@ -410,29 +410,29 @@ configuration is missing; callers should use it for queued, waiting, blocked,
 stale-policy, and completed transition summaries instead of writing ad hoc
 comments from scheduler scripts.
 
-`GET /v1/work-graph/merge-train/policy-targets` returns the authorized
-repository/base-branch targets from the active DB-backed merge-train policy. It
-performs no GitHub reads or mutations and is the source of truth for operator UI
-target selection and scheduled runner intent; callers should not infer
-merge-train targets from product inventory, work-graph awareness items, or
-repository variables.
+`GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
+returns the authorized repository/base-branch targets from the active DB-backed
+merge-train policy. It performs no GitHub reads or mutations and is the source
+of truth for operator UI target selection and scheduled runner intent; callers
+should not infer merge-train targets from product inventory, work-graph
+awareness items, or repository variables.
 
-`GET /v1/work-graph/merge-train/admission` returns the stored-history scheduler
-admission decision for a requested `repository` and `base_branch`. It uses the
-same merge-train repository policy and `service_authz` scope as `run-once`, but
-performs no GitHub reads and no storage writes. Schedulers use this route to
-pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
-mutation.
+`GET /v1/work-graph/merge-train/admission` is a native FastAPI route that returns
+the stored-history scheduler admission decision for a requested `repository` and
+`base_branch`. It uses the same merge-train repository policy and `service_authz`
+scope as `run-once`, but performs no GitHub reads and no storage writes.
+Schedulers use this route to pace calls into `run-once`; execution still re-reads
+GitHub before any dry-run or mutation.
 
-`GET /v1/work-graph/merge-train/controller/status` returns the operator read
-model for the same repository/base branch. It uses the same authorization as the
-policy route, performs no GitHub reads, and composes stored scheduler admission,
-latest Level 1 run history, active batch candidates, landing plans, and
-stack-collapse plans. Only records that match the active repository policy key
-and digest can drive the advertised controller action; stale records stay visible
-with a stale reason. Operators can use this route to see the current controller
-action, durable record ids, PR numbers, candidate SHA/check state, and compact
-entry counts without invoking a worker mutation.
+`GET /v1/work-graph/merge-train/controller/status` is a native FastAPI route that
+returns the operator read model for the same repository/base branch. It uses the
+same authorization as the policy route, performs no GitHub reads, and composes
+stored scheduler admission, latest Level 1 run history, active batch candidates,
+landing plans, and stack-collapse plans. Only records that match the active
+repository policy key and digest can drive the advertised controller action;
+stale records stay visible with a stale reason. Operators can use this route to
+see the current controller action, durable record ids, PR numbers, candidate
+SHA/check state, and compact entry counts without invoking a worker mutation.
 
 `POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
 one-action controller for the full batch train. Request payloads name

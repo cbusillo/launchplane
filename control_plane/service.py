@@ -117,8 +117,6 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     build_merge_train_pr_feedback_id,
     merge_train_pr_feedback_marker,
 )
-from control_plane.merge_train_admission import build_merge_train_controller_status_read_model
-from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
 from control_plane.merge_train_policy_source import (
     MergeTrainPolicyStoreMissingError,
     resolve_merge_train_policy_record,
@@ -532,9 +530,6 @@ from control_plane.workflows.verireel_preview_driver import (
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _WHOLE_PRODUCT_CONTEXT = "*"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
-_MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
-_MERGE_TRAIN_CONTROLLER_STATUS_ROUTE = "/v1/work-graph/merge-train/controller/status"
-_MERGE_TRAIN_POLICY_TARGETS_ROUTE = "/v1/work-graph/merge-train/policy-targets"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
@@ -679,25 +674,6 @@ class MergeTrainControllerRunOnceEnvelope(BaseModel):
             raise ValueError("merge train repository must be owner/name")
         if not self.base_branch:
             raise ValueError("merge train controller requires base_branch")
-        return self
-
-
-class MergeTrainAdmissionEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository: str
-    base_branch: str = "main"
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "MergeTrainAdmissionEnvelope":
-        self.repository = self.repository.strip()
-        self.base_branch = self.base_branch.strip()
-        if not self.repository:
-            raise ValueError("merge train admission requires repository")
-        if "/" not in self.repository:
-            raise ValueError("merge train repository must be owner/name")
-        if not self.base_branch:
-            raise ValueError("merge train admission requires base_branch")
         return self
 
 
@@ -4425,12 +4401,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if path == _MERGE_TRAIN_ADMISSION_ROUTE:
-        return "merge_train.admission", {}
-    if path == _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE:
-        return "merge_train.controller_status", {}
-    if path == _MERGE_TRAIN_POLICY_TARGETS_ROUTE:
-        return "merge_train.policy_targets", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
     if len(segments) == 4 and segments == ["v1", "work-graph", "github", "issues"]:
@@ -10024,146 +9994,6 @@ def create_launchplane_service_app(
                         issue_inbox_provider=work_graph_issue_inbox_provider,
                         json_response=_json_response,
                         start_response=start_response,
-                    )
-                if action == "merge_train.admission":
-                    admission_request = MergeTrainAdmissionEnvelope.model_validate(
-                        {
-                            "repository": str((query.get("repository") or [""])[0] or ""),
-                            "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
-                        }
-                    )
-                    policy_record = resolve_merge_train_policy_record(record_store)
-                    policy = policy_record.policy
-                    repository_policy = policy.find_repository_policy(
-                        repository=admission_request.repository,
-                        base_branch=admission_request.base_branch,
-                    )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=repository_policy.service_authz.action,
-                        product=repository_policy.service_authz.product,
-                        context=repository_policy.service_authz.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read the requested merge train admission decision.",
-                                },
-                            },
-                        )
-                    admission_decision = evaluate_merge_train_admission_from_store(
-                        store=record_store,
-                        repository=admission_request.repository,
-                        base_branch=admission_request.base_branch,
-                        requested_at=_utc_now_timestamp(),
-                        current_policy_key=repository_policy.policy_key,
-                        current_policy_sha256=policy_record.policy_sha256,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "admission": admission_decision.model_dump(mode="json"),
-                        },
-                    )
-                if action == "merge_train.controller_status":
-                    status_request = MergeTrainAdmissionEnvelope.model_validate(
-                        {
-                            "repository": str((query.get("repository") or [""])[0] or ""),
-                            "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
-                        }
-                    )
-                    policy_record = resolve_merge_train_policy_record(record_store)
-                    policy = policy_record.policy
-                    repository_policy = policy.find_repository_policy(
-                        repository=status_request.repository,
-                        base_branch=status_request.base_branch,
-                    )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=repository_policy.service_authz.action,
-                        product=repository_policy.service_authz.product,
-                        context=repository_policy.service_authz.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read the requested merge train controller status.",
-                                },
-                            },
-                        )
-                    read_model = build_merge_train_controller_status_read_model(
-                        store=record_store,
-                        repository=status_request.repository,
-                        base_branch=status_request.base_branch,
-                        generated_at=_utc_now_timestamp(),
-                        current_policy_key=repository_policy.policy_key,
-                        current_policy_sha256=policy_record.policy_sha256,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "controller_status": read_model.model_dump(mode="json"),
-                        },
-                    )
-                if action == "merge_train.policy_targets":
-                    policy_record = resolve_merge_train_policy_record(record_store)
-                    targets = []
-                    local_operator_can_read_targets = authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    )
-                    for repository_policy in policy_record.policy.policies:
-                        service_authz_allowed = authz_policy.allows(
-                            identity=identity,
-                            action=repository_policy.service_authz.action,
-                            product=repository_policy.service_authz.product,
-                            context=repository_policy.service_authz.context,
-                        )
-                        if not service_authz_allowed and not local_operator_can_read_targets:
-                            continue
-                        targets.append(
-                            {
-                                "repository": repository_policy.repository,
-                                "base_branch": repository_policy.base_branch,
-                                "policy_key": repository_policy.policy_key,
-                                "scheduler": repository_policy.scheduler.model_dump(mode="json"),
-                                "service_authz": repository_policy.service_authz.model_dump(
-                                    mode="json"
-                                ),
-                            }
-                        )
-                    targets.sort(key=lambda target: (target["repository"], target["base_branch"]))
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "policy": {
-                                "record_id": policy_record.record_id,
-                                "updated_at": policy_record.updated_at,
-                                "policy_sha256": policy_record.policy_sha256,
-                            },
-                            "targets": targets,
-                        },
                     )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(

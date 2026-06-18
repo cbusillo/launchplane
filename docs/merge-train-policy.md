@@ -528,13 +528,14 @@ poll interval elapses. Other mutation records defer until the configured backoff
 interval elapses. Admission decisions are scheduling hints only; every admitted
 worker pass still reads a fresh GitHub snapshot before choosing an action.
 
-External schedulers can read the same decision from
+External schedulers can read the same decision from the native FastAPI route
 `GET /v1/work-graph/merge-train/admission?repository=owner/name&base_branch=main`.
 The route is policy-backed and authorized through the repository policy's
 `service_authz`, but it is store-only: it does not require a GitHub token, does
 not read GitHub, and does not write run records.
 
-Operator views can read the broader stored controller state from
+Operator views can read the broader stored controller state from the native
+FastAPI route
 `GET /v1/work-graph/merge-train/controller/status?repository=owner/name&base_branch=main`.
 That route returns the same admission decision plus the latest Level 1 run record
 and compact summaries for active batch candidates, landing plans, and stack
@@ -548,8 +549,9 @@ also store-only, so it can power dashboards and status summaries without
 consuming GitHub API capacity or advancing the train.
 
 The GitHub Actions scheduler in `.github/workflows/merge-train-runner.yml` reads
-authorized policy targets from `GET /v1/work-graph/merge-train/policy-targets`
-on every scheduled run. Exactly one target may have `scheduler.enabled = true`;
+authorized policy targets from the native FastAPI
+`GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
+Exactly one target may have `scheduler.enabled = true`;
 zero enabled targets make the scheduled pass a successful no-op, and multiple
 enabled targets fail closed until an operator narrows the DB-backed scheduler
 intent. The scheduler then uses the admission route before every worker call and
