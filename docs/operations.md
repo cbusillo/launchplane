@@ -772,9 +772,10 @@ context only, and `context_instance` has both context and instance.
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
-- `environments sync-live-target --apply` pushes the tracked Dokploy source and
-  tracked env overlay for a route into the live target before re-reading the
-  artifact-readiness summary.
+- `environments sync-live-target` previews tracked Dokploy source/env drift for
+  a route without mutating the live target. Shared and production live target
+  runtime changes use `POST /v1/live-target-runtime/apply` or the
+  `live-target-runtime.yml` workflow instead of a local checkout command.
 - `ship execute` and `promote execute` can take an explicit `--env-file` overlay
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,

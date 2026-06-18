@@ -437,15 +437,11 @@ def environments_logs(
 @environments.command("sync-live-target")
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
-@click.option("--apply", "apply_changes", is_flag=True, default=False)
-def environments_sync_live_target(
-    context_name: str, instance_name: str, apply_changes: bool
-) -> None:
+def environments_sync_live_target(context_name: str, instance_name: str) -> None:
     callbacks = _runtime_environment_callbacks()
     payload = callbacks.sync_live_target_from_tracked_contract(
         context_name=context_name,
         instance_name=instance_name,
-        apply_changes=apply_changes,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
