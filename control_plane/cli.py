@@ -60,7 +60,6 @@ from control_plane.cli_odoo import (
     _normalize_odoo_prod_rollback_source_channel as _normalize_odoo_prod_rollback_source_channel,
 )
 from control_plane.cli_preview_workflow import register_preview_workflow_commands
-from control_plane.cli_public_ingress_monitor import register_public_ingress_monitor_commands
 from control_plane.cli_policy_profiles import (
     PolicyProfileCliCallbacks,
     register_policy_profile_commands,
@@ -3781,10 +3780,6 @@ register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[red
 register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]
-register_public_ingress_monitor_commands(
-    cast(click.Group, main),  # type: ignore[redundant-cast]
-    store_factory=_store,
-)
 register_ingress_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     callbacks=IngressCliCallbacks(

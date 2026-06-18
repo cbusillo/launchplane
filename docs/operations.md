@@ -28,8 +28,6 @@ API path instead of running the local command from an arbitrary checkout.
 - `promotions`: write and inspect promotion records.
 - `product-config`: dry-run and apply trusted product runtime/secret config
   bundles from a live Launchplane context.
-- `public-ingress-monitor`: run shared synthetic public-ingress checks for
-  product lanes.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
