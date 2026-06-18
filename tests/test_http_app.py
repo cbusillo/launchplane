@@ -82,6 +82,7 @@ from tests.test_service import (
     _generic_site_profile_payload,
     _edge_endpoint_record,
     _identity,
+    _private_health_endpoint_record,
     _product_profile_payload,
     _product_profile_payload_with_prod,
     _seed_tracked_target_records,
@@ -3869,6 +3870,258 @@ class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):
             app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
 
             response = await _get_edge_endpoint_record(app, "cm-prod-dokploy")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_health_endpoint_read_returns_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_private_health_endpoint_record(_private_health_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_private_health_endpoint_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_private_health_endpoint_record(
+                app,
+                "repairshopr-sync-prod-runtime",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["record"]["endpoint_key"], "repairshopr-sync-prod-runtime")
+        self.assertEqual(payload["record"]["product"], "repairshopr-sync")
+        self.assertEqual(payload["record"]["url"], "http://10.0.0.5:8000/health")
+
+    async def test_private_health_endpoint_list_filters_records(self) -> None:
+        active_record = _private_health_endpoint_record()
+        disabled_record = active_record.model_copy(
+            update={
+                "endpoint_key": "repairshopr-sync-disabled-runtime",
+                "instance": "disabled",
+                "url": "http://10.0.0.6:8000/health",
+                "status": "disabled",
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_private_health_endpoint_record(active_record)
+            store.write_private_health_endpoint_record(disabled_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_private_health_endpoint_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_private_health_endpoint_records(
+                app,
+                instance="prod",
+                status="active",
+                limit="1",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["product"], "repairshopr-sync")
+        self.assertEqual(payload["context"], "repairshopr-sync")
+        self.assertEqual(payload["instance"], "prod")
+        self.assertEqual(payload["limit"], 1)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["records"][0]["endpoint_key"], "repairshopr-sync-prod-runtime")
+
+    async def test_private_health_endpoint_reads_require_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_private_health_endpoint_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_private_health_endpoint_records(app, authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_private_health_endpoint_reads_require_product_and_context(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_private_health_endpoint_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        missing_product = await _get_private_health_endpoint_records(app, product="")
+        missing_context = await _get_private_health_endpoint_record(
+            app,
+            "repairshopr-sync-prod-runtime",
+            context="",
+        )
+
+        self.assertEqual(missing_product.status_code, 400)
+        self.assertEqual(missing_context.status_code, 400)
+        self.assertEqual(missing_product.json()["error"]["code"], "invalid_query")
+        self.assertEqual(missing_context.json()["error"]["code"], "invalid_query")
+
+    async def test_private_health_endpoint_reads_require_authz_action(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="edge_endpoint.read",
+                context="repairshopr-sync",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_private_health_endpoint_record(
+            app,
+            "repairshopr-sync-prod-runtime",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_private_health_endpoint_reads_require_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_private_health_endpoint_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_private_health_endpoint_records(app)
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_private_health_endpoint_read_returns_not_found_for_missing_record(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_private_health_endpoint_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_private_health_endpoint_record(app, "missing-runtime")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_private_health_endpoint_read_returns_not_found_outside_scope(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_private_health_endpoint_record(_private_health_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_private_health_endpoint_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_private_health_endpoint_record(
+                app,
+                "repairshopr-sync-prod-runtime",
+                instance="preview",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_private_health_endpoint_list_validates_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_private_health_endpoint_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        low_response = await _get_private_health_endpoint_records(app, limit="0")
+        high_response = await _get_private_health_endpoint_records(app, limit="101")
+
+        self.assertEqual(low_response.status_code, 400)
+        self.assertEqual(high_response.status_code, 400)
+        self.assertEqual(low_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(high_response.json()["error"]["code"], "invalid_query")
+
+    async def test_openapi_includes_private_health_endpoint_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_private_health_endpoint_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        list_route = openapi["paths"]["/v1/private-health-endpoints/records"]["get"]
+        read_route = openapi["paths"]["/v1/private-health-endpoints/records/{endpoint_key}"]["get"]
+        self.assertEqual(list_route["operationId"], "list_private_health_endpoint_records")
+        self.assertEqual(read_route["operationId"], "read_private_health_endpoint_record")
+        self.assertEqual(
+            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PrivateHealthEndpointRecordsResponse",
+        )
+        self.assertEqual(
+            read_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PrivateHealthEndpointRecordResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(list_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(read_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["PrivateHealthEndpointRecordResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["PrivateHealthEndpointRecordsResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_private_health_endpoint_reads_precede_legacy_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_private_health_endpoint_record(_private_health_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_private_health_endpoint_read_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_private_health_endpoint_record(
+                app,
+                "repairshopr-sync-prod-runtime",
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
@@ -7875,6 +8128,25 @@ def _record_read_policy(
     )
 
 
+def _private_health_endpoint_read_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["repairshopr-sync"],
+                    "contexts": ["repairshopr-sync"],
+                    "actions": ["private_health_endpoint.read"],
+                }
+            ]
+        }
+    )
+
+
 def _github_human_deployment_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -8654,6 +8926,67 @@ async def _get_edge_endpoint_record(
     return await _asgi_get(
         app,
         f"/v1/edge-endpoints/records/{endpoint_key}",
+        headers=request_headers,
+    )
+
+
+async def _get_private_health_endpoint_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "repairshopr-sync",
+    context: str = "repairshopr-sync",
+    instance: str = "",
+    status: str = "",
+    limit: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if product:
+        params["product"] = product
+    if context:
+        params["context"] = context
+    if instance:
+        params["instance"] = instance
+    if status:
+        params["status"] = status
+    if limit:
+        params["limit"] = limit
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/private-health-endpoints/records{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_private_health_endpoint_record(
+    app: FastAPI,
+    endpoint_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "repairshopr-sync",
+    context: str = "repairshopr-sync",
+    instance: str = "prod",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if product:
+        params["product"] = product
+    if context:
+        params["context"] = context
+    if instance:
+        params["instance"] = instance
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/private-health-endpoints/records/{endpoint_key}{suffix}",
         headers=request_headers,
     )
 
