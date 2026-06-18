@@ -163,7 +163,6 @@ class ProductLaneHealthCheck(BaseModel):
     url: str = ""
     private_endpoint_key: str = ""
     require_runtime_identity: bool = False
-    alert_issue_url: str = ""
     provider: str = ""
     provider_check: str = ""
 
@@ -171,7 +170,6 @@ class ProductLaneHealthCheck(BaseModel):
     def _validate_check(self) -> "ProductLaneHealthCheck":
         self.name = self.name.strip()
         self.url = self.url.strip()
-        self.alert_issue_url = self.alert_issue_url.strip()
         self.provider = self.provider.strip()
         self.provider_check = self.provider_check.strip()
         if not self.name:

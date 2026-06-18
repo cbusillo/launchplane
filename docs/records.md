@@ -316,8 +316,12 @@ fail closed until a provider-specific monitor implementation is wired. The
 monitor records HTTP reachability, redirect failures, private/internal URL skips
 for public checks, and runtime identity comparison when current lane inventory
 or deployment evidence provides an expected identity. Check policy may carry an
-`alert_issue_url`; Launchplane uses that issue for fail/recover transition
-comments, not as runtime configuration authority.
+enabled flag and provider-specific routing details, but alert destinations are
+not lane text fields. Public ingress incident notifications are routed through
+DB-backed notification policy records. Legacy product-profile payloads that
+still contain `alert_issue_url` are tolerated during record reads and stripped
+from the migrated health-monitoring shape instead of being treated as runtime
+authority.
 
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,

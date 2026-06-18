@@ -17,7 +17,6 @@ from fastapi import FastAPI
 from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
-from control_plane import http_app as control_plane_http_app
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -96,7 +95,10 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
-from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
+from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressMonitorResult,
+    public_ingress_managed_secret_resolver,
+)
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _generic_site_profile_payload,
@@ -7248,9 +7250,7 @@ class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
                         actor="test",
                         source_label="test",
                     )
-                    resolver = control_plane_http_app.public_ingress_managed_secret_resolver(
-                        record_store=store
-                    )
+                    resolver = public_ingress_managed_secret_resolver(record_store=store)
                     incident = _public_ingress_incident(context="example-site", instance="prod")
                     other_incident = _public_ingress_incident(
                         context="example-site", instance="preview"

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.schema import Index
 
@@ -157,7 +157,7 @@ from control_plane.service_auth import (
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_shared_record_store
-from control_plane.storage.postgres import Base, PostgresRecordStore
+from control_plane.storage.postgres import Base, LaunchplaneProductProfileRow, PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
@@ -2519,6 +2519,45 @@ env_var = "GH_TOKEN"
         self.assertEqual(
             [record.product for record in listed_records], ["internal-tool", "sellyouroutboard"]
         )
+
+    def test_product_profile_reads_migrate_legacy_alert_issue_url(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            record = _product_profile_record()
+            store.write_product_profile_record(record)
+            payload = store._payload_dict(record)
+            lanes = payload["lanes"]
+            assert isinstance(lanes, list)
+            first_lane = lanes[0]
+            assert isinstance(first_lane, dict)
+            first_lane["health_monitoring"] = {
+                "checks": [
+                    {
+                        "name": "public-ingress",
+                        "kind": "public_http",
+                        "enabled": True,
+                        "alert_issue_url": "https://github.example.test/org/repo/issues/1",
+                    }
+                ]
+            }
+            with store._session_factory() as session:
+                session.execute(
+                    update(LaunchplaneProductProfileRow)
+                    .where(LaunchplaneProductProfileRow.product == record.product)
+                    .values(payload=payload)
+                )
+                session.commit()
+
+            loaded_record = store.read_product_profile_record("sellyouroutboard")
+            listed_records = store.list_product_profile_records(driver_id="generic-web")
+            store.close()
+
+        self.assertEqual(loaded_record.lanes[0].health_monitoring.checks[0].name, "public-ingress")
+        self.assertEqual([record.product for record in listed_records], ["sellyouroutboard"])
 
     def test_product_profiles_cli_upserts_lists_and_shows_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

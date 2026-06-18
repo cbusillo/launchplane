@@ -20,6 +20,7 @@ def migrate_product_profile_health_monitoring_payload(payload: object) -> object
             continue
         if "health_monitoring" in lane:
             lane.pop("public_ingress_monitoring", None)
+            _strip_legacy_alert_issue_urls(lane)
             continue
         old_policy = lane.pop("public_ingress_monitoring", None)
         if isinstance(old_policy, dict):
@@ -31,7 +32,6 @@ def migrate_product_profile_health_monitoring_payload(payload: object) -> object
                         require_runtime_identity=bool(
                             old_policy.get("require_runtime_identity", False)
                         ),
-                        alert_issue_url=str(old_policy.get("alert_issue_url") or ""),
                     )
                 ]
             }
@@ -74,7 +74,6 @@ def downgrade_product_profile_health_monitoring_payload(payload: object) -> obje
                 "require_runtime_identity": bool(
                     public_check.get("require_runtime_identity", False)
                 ),
-                "alert_issue_url": str(public_check.get("alert_issue_url") or ""),
             }
         else:
             lane["public_ingress_monitoring"] = {"enabled": False}
@@ -98,7 +97,6 @@ def _public_http_check(
     *,
     enabled: bool = True,
     require_runtime_identity: bool = False,
-    alert_issue_url: str = "",
 ) -> dict[str, object]:
     return {
         "name": "public-ingress",
@@ -106,10 +104,21 @@ def _public_http_check(
         "enabled": enabled,
         "url": "",
         "require_runtime_identity": require_runtime_identity,
-        "alert_issue_url": alert_issue_url,
         "provider": "",
         "provider_check": "",
     }
+
+
+def _strip_legacy_alert_issue_urls(lane: dict[str, object]) -> None:
+    health_monitoring = lane.get("health_monitoring")
+    if not isinstance(health_monitoring, dict):
+        return
+    checks = health_monitoring.get("checks")
+    if not isinstance(checks, list):
+        return
+    for check in checks:
+        if isinstance(check, dict):
+            check.pop("alert_issue_url", None)
 
 
 def _lane_has_public_http_surface(*, lane: dict[str, object], profile: dict[str, object]) -> bool:

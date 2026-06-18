@@ -83,6 +83,7 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
+    migrate_product_profile_health_monitoring_payload,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
@@ -4253,12 +4254,27 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
-    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        return self._read_model(
-            model_type=LaunchplaneProductProfileRecord,
-            orm_model=LaunchplaneProductProfileRow,
-            filters=(LaunchplaneProductProfileRow.product == product,),
+    def _read_product_profile_payload(
+        self, payload: PayloadDict
+    ) -> LaunchplaneProductProfileRecord:
+        return LaunchplaneProductProfileRecord.model_validate(
+            migrate_product_profile_health_monitoring_payload(payload)
         )
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        statement = (
+            select(LaunchplaneProductProfileRow)
+            .where(LaunchplaneProductProfileRow.product == product)
+            .limit(1)
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(
+                    "No Launchplane record found in launchplane_product_profiles "
+                    f"for product={product!r}"
+                )
+            return self._read_product_profile_payload(row.payload)
 
     def list_product_profile_records(
         self,
@@ -4268,12 +4284,13 @@ class PostgresRecordStore(HumanSessionStore):
         filters: list[object] = []
         if driver_id:
             filters.append(LaunchplaneProductProfileRow.driver_id == driver_id)
-        return self._list_models(
-            model_type=LaunchplaneProductProfileRecord,
-            orm_model=LaunchplaneProductProfileRow,
-            filters=filters,
-            order_by=(LaunchplaneProductProfileRow.product.asc(),),
-        )
+        statement = select(LaunchplaneProductProfileRow)
+        if filters:
+            statement = statement.where(*cast(Any, filters))
+        statement = statement.order_by(LaunchplaneProductProfileRow.product.asc())
+        with self._session_factory() as session:
+            rows = session.scalars(statement).all()
+            return tuple(self._read_product_profile_payload(row.payload) for row in rows)
 
     def write_public_ingress_observation_record(
         self, record: PublicIngressObservationRecord

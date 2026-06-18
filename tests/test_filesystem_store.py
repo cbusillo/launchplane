@@ -908,9 +908,12 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         self.assertEqual(check.name, "public-ingress")
         self.assertEqual(check.kind, "public_http")
         self.assertTrue(check.require_runtime_identity)
-        self.assertEqual(check.alert_issue_url, "https://github.example.test/org/repo/issues/1")
         self.assertEqual([record.product for record in listed_records], ["example-site"])
         self.assertNotIn("public_ingress_monitoring", persisted_payload["lanes"][0])
+        self.assertNotIn(
+            "alert_issue_url",
+            persisted_payload["lanes"][0]["health_monitoring"]["checks"][0],
+        )
         self.assertEqual(
             persisted_payload["lanes"][0]["health_monitoring"]["checks"][0]["name"],
             "public-ingress",

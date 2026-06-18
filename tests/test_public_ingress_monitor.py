@@ -6,6 +6,10 @@ from typing import Literal
 from unittest.mock import patch
 from urllib.request import Request
 
+import click
+from click.testing import CliRunner
+
+from control_plane.cli_public_ingress_monitor import register_public_ingress_monitor_commands
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -27,27 +31,25 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressTargetObservation
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
+    PublicIngressMonitorResult,
     PublicIngressNotificationDriverSet,
-    build_github_issue_notifier,
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
 )
 
 
 def _public_health_monitoring(
-    *, require_runtime_identity: bool = False, alert_issue_url: str = ""
+    *, require_runtime_identity: bool = False
 ) -> ProductLaneHealthMonitoringPolicy:
     return ProductLaneHealthMonitoringPolicy(
         checks=(
             ProductLaneHealthCheck(
                 name="public-ingress",
                 require_runtime_identity=require_runtime_identity,
-                alert_issue_url=alert_issue_url,
             ),
         )
     )
@@ -196,9 +198,7 @@ class _Store:
         ]
         self.notification_attempts.append(record)
 
-    def read_private_health_endpoint_record(
-        self, endpoint_key: str
-    ) -> PrivateHealthEndpointRecord:
+    def read_private_health_endpoint_record(self, endpoint_key: str) -> PrivateHealthEndpointRecord:
         try:
             return self.private_health_endpoints[endpoint_key]
         except KeyError as error:
@@ -222,9 +222,7 @@ def _profile(
                 instance="prod",
                 context="example-site",
                 base_url="https://example.test",
-                health_monitoring=_public_health_monitoring(
-                    alert_issue_url="https://github.com/cbusillo/launchplane/issues/929"
-                ),
+                health_monitoring=_public_health_monitoring(),
             ),
         ),
         updated_at="2026-05-29T12:00:00Z",
@@ -257,15 +255,6 @@ def _notification_policy(
         updated_at="2026-05-29T12:00:00Z",
         source="test",
     )
-
-
-def _record_notification(
-    notifications: list[tuple[str, str]],
-    record: PublicIngressObservationRecord,
-    previous: PublicIngressObservationRecord | None,
-) -> bool:
-    notifications.append((record.status, previous.status if previous else "missing"))
-    return True
 
 
 def _capture_github_call(
@@ -316,6 +305,42 @@ def _add_private_endpoint(
         status=status,
         updated_at="2026-05-29T12:00:00Z",
     )
+
+
+class PublicIngressMonitorCliTests(unittest.TestCase):
+    def test_run_once_wires_policy_backed_notification_drivers(self) -> None:
+        command_group = click.Group()
+        record_store = object()
+        notification_drivers = object()
+        register_public_ingress_monitor_commands(
+            command_group,
+            store_factory=lambda _state_dir, database_url="": record_store,
+        )
+
+        with patch(
+            "control_plane.cli_public_ingress_monitor.public_ingress_notification_drivers",
+            return_value=notification_drivers,
+        ) as build_drivers:
+            with patch(
+                "control_plane.cli_public_ingress_monitor.run_public_ingress_monitor_once"
+            ) as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-06-18T11:00:00Z",
+                    target_count=0,
+                    records=(),
+                )
+
+                result = CliRunner().invoke(
+                    command_group,
+                    ["public-ingress-monitor", "run-once", "--database-url", "sqlite:///test.db"],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        build_drivers.assert_called_once_with(record_store=record_store)
+        run_monitor.assert_called_once()
+        self.assertIs(run_monitor.call_args.kwargs["record_store"], record_store)
+        self.assertTrue(run_monitor.call_args.kwargs["notify"])
+        self.assertIs(run_monitor.call_args.kwargs["notification_drivers"], notification_drivers)
 
 
 class PublicIngressMonitorTests(unittest.TestCase):
@@ -841,9 +866,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(health.status, "fail")
         self.assertIn("deployment_record_id", health.runtime_identity_detail)
 
-    def test_notifies_on_failure_and_recovery_transitions(self) -> None:
+    def test_observations_do_not_use_standing_issue_notification_keys(self) -> None:
         store = _Store((_profile(),))
-        notifications: list[tuple[str, str]] = []
 
         run_public_ingress_monitor_once(
             record_store=store,
@@ -853,7 +877,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 final_url=url,
                 redirect_count=0,
             ),
-            notifier=lambda record, previous: _record_notification(notifications, record, previous),
         )
         run_public_ingress_monitor_once(
             record_store=store,
@@ -863,7 +886,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 final_url=url,
                 redirect_count=0,
             ),
-            notifier=lambda record, previous: _record_notification(notifications, record, previous),
         )
         run_public_ingress_monitor_once(
             record_store=store,
@@ -873,12 +895,11 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 final_url=url,
                 redirect_count=0,
             ),
-            notifier=lambda record, previous: _record_notification(notifications, record, previous),
         )
 
-        self.assertEqual(notifications, [("fail", "pass"), ("pass", "fail")])
-        self.assertTrue(store.records[1].notification_sent)
-        self.assertTrue(store.records[2].notification_sent)
+        self.assertEqual([record.status for record in store.records], ["pass", "fail", "pass"])
+        self.assertTrue(all(record.notification_key == "" for record in store.records))
+        self.assertTrue(all(not record.notification_sent for record in store.records))
 
     def test_opens_updates_and_resolves_public_ingress_incident(self) -> None:
         store = _Store((_profile(),))
@@ -1281,116 +1302,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(
             github_calls[1][1]["issue_url"],
             "https://github.com/cbusillo/launchplane/issues/123",
-        )
-
-    def test_github_issue_notifier_comments_on_alert_issue(self) -> None:
-        calls: list[tuple[str, dict[str, object]]] = []
-        notifier = build_github_issue_notifier(
-            github_client=lambda action, payload: _capture_github_call(calls, action, payload)
-        )
-        record = PublicIngressObservationRecord(
-            record_id="public-ingress-example-site-prod-20260529t122500z",
-            product="example-site",
-            context="example-site",
-            instance="prod",
-            observed_at="2026-05-29T12:25:00Z",
-            status="fail",
-            failure_code="http_error",
-            base_url="https://example.test",
-            targets=(
-                PublicIngressTargetObservation(
-                    target="base_url",
-                    url="https://example.test",
-                    status="fail",
-                    failure_code="http_error",
-                    summary="HTTP 503",
-                ),
-            ),
-            notification_key="https://github.com/cbusillo/launchplane/issues/929",
-            summary="Public ingress failed.",
-        )
-
-        self.assertTrue(notifier(record, None))
-        self.assertEqual(calls[0][0], "comment")
-        self.assertEqual(calls[0][1]["repository"], "cbusillo/launchplane")
-        self.assertEqual(calls[0][1]["issue_number"], 929)
-
-    def test_github_issue_notifier_fails_closed_without_managed_token(self) -> None:
-        notifier = build_github_issue_notifier()
-        record = PublicIngressObservationRecord(
-            record_id="public-ingress-example-site-prod-20260529t122500z",
-            product="example-site",
-            context="example-site",
-            instance="prod",
-            observed_at="2026-05-29T12:25:00Z",
-            status="fail",
-            failure_code="http_error",
-            base_url="https://example.test",
-            targets=(
-                PublicIngressTargetObservation(
-                    target="base_url",
-                    url="https://example.test",
-                    status="fail",
-                    failure_code="http_error",
-                    summary="HTTP 503",
-                ),
-            ),
-            notification_key="https://github.com/cbusillo/launchplane/issues/929",
-            summary="Public ingress failed.",
-        )
-
-        with patch.dict("os.environ", {}, clear=True):
-            self.assertFalse(notifier(record, None))
-
-    def test_github_issue_notifier_uses_managed_token_api(self) -> None:
-        requests: list[Request] = []
-
-        def fake_urlopen(request: Request, timeout: int) -> _GitHubResponse:
-            requests.append(request)
-            self.assertEqual(timeout, 15)
-            return _GitHubResponse(
-                {
-                    "html_url": "https://github.com/cbusillo/launchplane/issues/929#issuecomment-1",
-                    "id": 1,
-                }
-            )
-
-        notifier = build_github_issue_notifier(token="managed-token")
-        record = PublicIngressObservationRecord(
-            record_id="public-ingress-example-site-prod-20260529t122500z",
-            product="example-site",
-            context="example-site",
-            instance="prod",
-            observed_at="2026-05-29T12:25:00Z",
-            status="fail",
-            failure_code="http_error",
-            base_url="https://example.test",
-            targets=(
-                PublicIngressTargetObservation(
-                    target="base_url",
-                    url="https://example.test",
-                    status="fail",
-                    failure_code="http_error",
-                    summary="HTTP 503",
-                ),
-            ),
-            notification_key="https://github.com/cbusillo/launchplane/issues/929",
-            summary="Public ingress failed.",
-        )
-
-        with patch("control_plane.workflows.public_ingress_monitor.urlopen", fake_urlopen):
-            self.assertTrue(notifier(record, None))
-
-        request = requests[0]
-        self.assertEqual(
-            getattr(request, "full_url"),
-            "https://api.github.com/repos/cbusillo/launchplane/issues/929/comments",
-        )
-        self.assertEqual(request.get_method(), "POST")
-        self.assertEqual(request.get_header("Authorization"), "Bearer managed-token")
-        self.assertEqual(
-            json.loads(getattr(request, "data").decode("utf-8"))["body"].splitlines()[0],
-            "Launchplane public ingress FAILED: example-site/prod",
         )
 
     def test_default_github_incident_driver_uses_managed_token_api(self) -> None:
