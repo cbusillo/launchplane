@@ -32,14 +32,12 @@ def register_runtime_environment_commands(
     control_plane_root: Callable[[], Path],
     build_live_target_runtime_contract_payload: Callable[..., dict[str, object]],
     sync_live_target_from_tracked_contract: Callable[..., dict[str, object]],
-    apply_live_target_runtime_environment: Callable[..., dict[str, object]],
 ) -> None:
     global _RUNTIME_ENVIRONMENT_CALLBACKS
     _RUNTIME_ENVIRONMENT_CALLBACKS = _RuntimeEnvironmentCallbacks(
         control_plane_root=control_plane_root,
         build_live_target_runtime_contract_payload=build_live_target_runtime_contract_payload,
         sync_live_target_from_tracked_contract=sync_live_target_from_tracked_contract,
-        apply_live_target_runtime_environment=apply_live_target_runtime_environment,
     )
     main.add_command(environments)
 
@@ -452,42 +450,6 @@ def environments_sync_live_target(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@environments.command("apply-live-target")
-@click.option("--product", "product_name", required=True)
-@click.option("--context", "context_name", required=True)
-@click.option("--instance", "instance_name", required=True)
-@click.option("--dry-run", "dry_run", is_flag=True, default=False)
-@click.option("--apply", "apply_changes", is_flag=True, default=False)
-@click.option("--deploy", is_flag=True, default=False)
-@click.option("--no-cache", is_flag=True, default=False)
-@click.option("--deploy-timeout-seconds", type=int, default=None, show_default=False)
-def environments_apply_live_target(
-    product_name: str,
-    context_name: str,
-    instance_name: str,
-    dry_run: bool,
-    apply_changes: bool,
-    deploy: bool,
-    no_cache: bool,
-    deploy_timeout_seconds: int | None,
-) -> None:
-    if dry_run == apply_changes:
-        raise click.ClickException("Choose exactly one of --dry-run or --apply.")
-    if dry_run and (deploy or no_cache or deploy_timeout_seconds is not None):
-        raise click.ClickException("Deploy options require --apply.")
-    callbacks = _runtime_environment_callbacks()
-    payload = callbacks.apply_live_target_runtime_environment(
-        product_name=product_name,
-        context_name=context_name,
-        instance_name=instance_name,
-        apply_changes=apply_changes,
-        deploy=deploy,
-        no_cache=no_cache,
-        deploy_timeout_seconds=deploy_timeout_seconds,
-    )
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
 def summarize_runtime_environment_record(
     record: RuntimeEnvironmentRecord,
 ) -> dict[str, object]:
@@ -837,12 +799,10 @@ class _RuntimeEnvironmentCallbacks:
         control_plane_root: Callable[[], Path],
         build_live_target_runtime_contract_payload: Callable[..., dict[str, object]],
         sync_live_target_from_tracked_contract: Callable[..., dict[str, object]],
-        apply_live_target_runtime_environment: Callable[..., dict[str, object]],
     ) -> None:
         self.control_plane_root = control_plane_root
         self.build_live_target_runtime_contract_payload = build_live_target_runtime_contract_payload
         self.sync_live_target_from_tracked_contract = sync_live_target_from_tracked_contract
-        self.apply_live_target_runtime_environment = apply_live_target_runtime_environment
 
 
 _RUNTIME_ENVIRONMENT_CALLBACKS: _RuntimeEnvironmentCallbacks | None = None

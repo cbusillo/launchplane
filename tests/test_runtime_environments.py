@@ -273,22 +273,17 @@ class _FakeRuntimeEnvironmentStore:
 
 
 class RuntimeEnvironmentTests(unittest.TestCase):
-    def test_environments_apply_live_target_requires_product(self) -> None:
+    def test_environments_apply_live_target_command_is_retired(self) -> None:
         result = CliRunner().invoke(
             main,
             [
                 "environments",
                 "apply-live-target",
-                "--context",
-                "discord-blue",
-                "--instance",
-                "prod",
-                "--dry-run",
             ],
         )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Missing option '--product'", result.output)
+        self.assertIn("No such command 'apply-live-target'", result.output)
 
     def test_load_optional_runtime_definition_uses_structural_store_boundary(self) -> None:
         definition = control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(

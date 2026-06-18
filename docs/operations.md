@@ -724,22 +724,16 @@ Current derived-state behavior:
 - `environments resolve` reads the control-plane-owned runtime environment
   contract for a context and instance. Output redacts secret-shaped keys by
   default; use `--include-secret-values` only in a trusted operator shell.
-- `environments apply-live-target --dry-run|--apply` resolves the DB-backed
-  runtime environment and managed secret overlay for a tracked Dokploy target,
-  compares it against the live target env by key, and can apply those keys
-  without requiring an artifact manifest. It preserves unrelated live env keys,
-  verifies persistence by key/count metadata only, and never prints plaintext
-  env or secret values. Add `--deploy` with `--apply` when the app should be
-  explicitly redeployed/reloaded after the config update. This command is a
-  compatibility/local operator surface only: do not use it for shared or
-  production live changes from a local checkout. Use a deployed service API or
-  add one before applying live target runtime changes.
-- `POST /v1/live-target-runtime/apply` is the deployed service equivalent for
-  shared and production live changes. Use `mode: "dry-run"` first, confirm the
-  returned `changed_keys` are expected, then use `mode: "apply"` through an
-  authorized workflow or operator API caller. The `live-target-runtime.yml`
-  workflow wraps this route with GitHub OIDC and uploads the sanitized response
-  artifact.
+- `POST /v1/live-target-runtime/apply` is the deployed service path for shared
+  and production live changes. It resolves the DB-backed runtime environment
+  and managed secret overlay for a tracked Dokploy target, compares it against
+  the live target env by key, and can apply those keys without requiring an
+  artifact manifest. It preserves unrelated live env keys, verifies persistence
+  by key/count metadata only, and never prints plaintext env or secret values.
+  Use `mode: "dry-run"` first, confirm the returned `changed_keys` are expected,
+  then use `mode: "apply"` through an authorized workflow or operator API
+  caller. The `live-target-runtime.yml` workflow wraps this route with GitHub
+  OIDC and uploads the sanitized response artifact.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - Product repos and GitHub issues must not contain product secret values. Put
@@ -778,8 +772,6 @@ context only, and `context_instance` has both context and instance.
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
-- `environments apply-live-target` applies Launchplane DB-backed runtime env and
-  managed secret overlays to a tracked live target without shipping an artifact.
 - `environments sync-live-target --apply` pushes the tracked Dokploy source and
   tracked env overlay for a route into the live target before re-reading the
   artifact-readiness summary.
