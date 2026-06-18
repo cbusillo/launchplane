@@ -64,6 +64,10 @@ Keep a compatibility surface only when it is one of these:
   `GET /v1/contexts/{context}/instances/{instance}/logs` route. The legacy WSGI
   branch is deleted; direct fallback calls fail closed while the mounted fallback
   remains for retained non-native routes.
+- Edge endpoint record reads use native FastAPI `GET /v1/edge-endpoints/records`
+  and `GET /v1/edge-endpoints/records/{endpoint_key}` routes. Their legacy WSGI
+  read branch is deleted; edge endpoint apply remains on the retained fallback
+  until that write path has its own native replacement.
 - Protected artifact inventory and product environment config-status reads use
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a

@@ -56,6 +56,12 @@ VeriReel product paths:
     context
   - `GET /v1/drivers/{driver_id}`, requiring `driver.read` for the Launchplane
     discovery context
+- native FastAPI edge endpoint record reads:
+  - `GET /v1/edge-endpoints/records`, requiring `edge_endpoint.read` for the
+    Launchplane service context and supporting `provider`, `status`, and
+    bounded `limit` filters
+  - `GET /v1/edge-endpoints/records/{endpoint_key}`, requiring
+    `edge_endpoint.read` for the Launchplane service context
 - native FastAPI deployment, promotion, preview, inventory, operations, and
   managed-secret status reads:
   - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
@@ -1305,6 +1311,10 @@ only after a passing plan and a matching stored preview record are present.
   callers)
 - `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
   human-session callers)
+- `GET /v1/edge-endpoints/records` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/edge-endpoints/records/{endpoint_key}` (native FastAPI for
+  bearer-token and human-session callers)
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the

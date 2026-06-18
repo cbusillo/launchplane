@@ -860,14 +860,6 @@ class _EdgeEndpointRecordStore(Protocol):
 
     def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
 
-    def list_edge_endpoint_records(
-        self,
-        *,
-        provider: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[EdgeEndpointRecord, ...]: ...
-
 
 class _PrivateHealthEndpointRecordStore(Protocol):
     def write_private_health_endpoint_record(
@@ -4502,10 +4494,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_record_id": segments[4]}
-    if len(segments) == 3 and segments == ["v1", "edge-endpoints", "records"]:
-        return "edge_endpoint.read", {"edge_endpoint_list": "true"}
-    if len(segments) == 4 and segments[:3] == ["v1", "edge-endpoints", "records"]:
-        return "edge_endpoint.read", {"edge_endpoint_key": segments[3]}
     if len(segments) == 3 and segments == ["v1", "private-health-endpoints", "records"]:
         return "private_health_endpoint.read", {"private_health_endpoint_list": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "private-health-endpoints", "records"]:
@@ -6944,7 +6932,6 @@ def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStor
     required_methods = (
         "write_edge_endpoint_record",
         "read_edge_endpoint_record",
-        "list_edge_endpoint_records",
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EdgeEndpointRecordStore, record_store)
@@ -10494,83 +10481,6 @@ def create_launchplane_service_app(
                             "count": len(limited_records),
                             "records": [
                                 record.model_dump(mode="json") for record in limited_records
-                            ],
-                        },
-                    )
-                if action == "edge_endpoint.read":
-                    endpoint_store = _edge_endpoint_record_store(record_store)
-                    if "edge_endpoint_key" in params:
-                        if not authz_policy.allows(
-                            identity=identity,
-                            action=action,
-                            product="launchplane",
-                            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read Launchplane edge endpoint records.",
-                                    },
-                                },
-                            )
-                        try:
-                            endpoint_record = endpoint_store.read_edge_endpoint_record(
-                                params["edge_endpoint_key"]
-                            )
-                        except FileNotFoundError:
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "record": endpoint_record.model_dump(mode="json"),
-                            },
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Launchplane edge endpoint records.",
-                                },
-                            },
-                        )
-                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
-                    endpoint_records = endpoint_store.list_edge_endpoint_records(
-                        provider=_query_string_value(query, "provider"),
-                        status=_query_string_value(query, "status"),
-                        limit=limit,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "limit": limit,
-                            "count": len(endpoint_records),
-                            "records": [
-                                record.model_dump(mode="json") for record in endpoint_records
                             ],
                         },
                     )

@@ -33,6 +33,7 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
@@ -388,6 +389,24 @@ class TrackedTargetLogsResponse(BaseModel):
     logs: TrackedTargetLogLinesResponse
 
 
+class EdgeEndpointRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: EdgeEndpointRecord
+
+
+class EdgeEndpointRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    limit: int
+    count: int
+    records: tuple[EdgeEndpointRecord, ...]
+
+
 class DeploymentRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -700,6 +719,18 @@ class _RecentOperationsReadStore(Protocol):
         anchor_pr_number: int | None = None,
         limit: int | None = None,
     ) -> tuple[PreviewRecord, ...]: ...
+
+
+class _EdgeEndpointReadStore(Protocol):
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
+
+    def list_edge_endpoint_records(
+        self,
+        *,
+        provider: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EdgeEndpointRecord, ...]: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -1028,6 +1059,24 @@ def require_tracked_target_logs_store(
             f"Tracked target logs require DB-backed Launchplane storage: {missing_summary}"
         )
     return cast(control_plane_tracked_target_logs.TrackedTargetLogsStore, record_store)
+
+
+def require_edge_endpoint_read_store(record_store: object) -> _EdgeEndpointReadStore:
+    required_methods = (
+        "read_edge_endpoint_record",
+        "list_edge_endpoint_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support edge endpoint reads: {missing_summary}"
+        )
+    return cast(_EdgeEndpointReadStore, record_store)
 
 
 def product_profile_context_cutover_allowed_contexts(
@@ -2058,6 +2107,96 @@ def create_launchplane_fastapi_app(
         return TrackedTargetLogsResponse.model_validate(
             {"status": "ok", "trace_id": trace_id, **logs_payload}
         )
+
+    def ensure_edge_endpoint_read_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="edge_endpoint.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read Launchplane edge endpoint records.",
+            )
+
+    def list_edge_endpoint_records(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        limit: Annotated[str, Query()] = "25",
+        provider: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+    ) -> EdgeEndpointRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_edge_endpoint_read_allowed(identity=identity, trace_id=trace_id)
+        try:
+            normalized_limit = control_plane_service_status.query_int_value(
+                limit,
+                "limit",
+                default=25,
+                minimum=1,
+                maximum=100,
+            )
+            assert normalized_limit is not None
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        try:
+            edge_endpoint_store = require_edge_endpoint_read_store(record_store)
+            records = edge_endpoint_store.list_edge_endpoint_records(
+                provider=provider.strip(),
+                status=status.strip(),
+                limit=normalized_limit,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return EdgeEndpointRecordsResponse(
+            trace_id=trace_id,
+            limit=normalized_limit,
+            count=len(records),
+            records=records,
+        )
+
+    def read_edge_endpoint_record(
+        endpoint_key: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> EdgeEndpointRecordResponse:
+        trace_id = next_trace_id()
+        ensure_edge_endpoint_read_allowed(identity=identity, trace_id=trace_id)
+        try:
+            edge_endpoint_store = require_edge_endpoint_read_store(record_store)
+            record = edge_endpoint_store.read_edge_endpoint_record(endpoint_key)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return EdgeEndpointRecordResponse(trace_id=trace_id, record=record)
 
     def read_deployment_record(
         record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -3428,6 +3567,36 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/edge-endpoints/records",
+        list_edge_endpoint_records,
+        methods=["GET"],
+        response_model=EdgeEndpointRecordsResponse,
+        operation_id="list_edge_endpoint_records",
+        summary="List edge endpoint records",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/edge-endpoints/records/{endpoint_key}",
+        read_edge_endpoint_record,
+        methods=["GET"],
+        response_model=EdgeEndpointRecordResponse,
+        operation_id="read_edge_endpoint_record",
+        summary="Read one edge endpoint record",
+        responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
