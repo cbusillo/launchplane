@@ -171,12 +171,6 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
 )
-from control_plane.runtime_key_safety_http import (
-    RuntimeKeySafetyPolicyRouteResult,
-    apply_runtime_key_safety_policy_route,
-    runtime_key_safety_database_required_response,
-    validate_runtime_key_safety_policy_request,
-)
 from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
 from control_plane.notifications import post_discord_webhook, public_discord_url_error
 from control_plane.drivers.dispatch import (
@@ -4133,7 +4127,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/local-operators/grants",
         "/v1/authz-policies/local-admins/grants",
         "/v1/merge-train/policies/import",
-        "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
         "/v1/dokploy-targets/setup",
@@ -11533,46 +11526,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/runtime-key-safety/policies/apply":
-                runtime_policy_request, runtime_policy_response = (
-                    validate_runtime_key_safety_policy_request(
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        payload=payload,
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                )
-                if runtime_policy_response is not None:
-                    return runtime_policy_response
-                assert runtime_policy_request is not None
-                if not isinstance(record_store, PostgresRecordStore):
-                    return runtime_key_safety_database_required_response(
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                runtime_policy_result = apply_runtime_key_safety_policy_route(
-                    record_store=record_store,
-                    request=runtime_policy_request,
-                    now_timestamp=_now_timestamp,
-                    record_slug=_record_slug,
-                )
-                assert isinstance(runtime_policy_result, RuntimeKeySafetyPolicyRouteResult)
-                result = runtime_policy_result.result
-                driver_result = runtime_policy_result.driver_result
             elif path == "/v1/live-target-runtime/apply":
                 live_target_runtime_request = LiveTargetRuntimeApplyEnvelope.model_validate(payload)
                 action = (

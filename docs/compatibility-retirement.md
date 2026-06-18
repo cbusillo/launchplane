@@ -146,6 +146,12 @@ Keep a compatibility surface only when it is one of these:
   scope validation, and optional `Idempotency-Key` replay/conflict behavior.
   Their legacy WSGI write branches are deleted, and direct WSGI fallback calls
   to these policy-apply paths fail closed.
+- Runtime key-safety policy apply uses native FastAPI
+  `POST /v1/runtime-key-safety/policies/apply` for bearer-token callers and
+  preserves `runtime_key_safety.write` authorization, DB-backed storage
+  enforcement, metadata-only policy writes, and optional `Idempotency-Key`
+  replay/conflict behavior. Its legacy WSGI write branch and WSGI-only helper
+  code are deleted, and direct WSGI fallback calls fail closed.
 - Live target runtime apply uses `POST /v1/live-target-runtime/apply` and the
   `live-target-runtime.yml` workflow for shared and production live changes.
   The local checkout `environments apply-live-target` mutation command is

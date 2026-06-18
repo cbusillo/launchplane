@@ -153,6 +153,10 @@ VeriReel product paths:
   - `POST /v1/product-profiles`
 - product config write route:
   - `POST /v1/product-config/apply`
+- runtime key-safety policy route:
+  - `POST /v1/runtime-key-safety/policies/apply` (native FastAPI for
+    bearer-token callers, DB-backed storage, metadata-only policy writes, and
+    optional `Idempotency-Key` replay/conflict handling)
 - product onboarding route:
   - `POST /v1/product-onboarding/apply`
 - Dokploy target setup route:
@@ -1213,15 +1217,18 @@ should surface that action and stop. Applying product-config records does not by
 itself guarantee the live target process has been synchronized.
 
 Runtime key-safety policy reconciliation uses
-`POST /v1/runtime-key-safety/policies/apply`. The route is restricted to
-workflows with `runtime_key_safety.write` for product/context `launchplane`,
-requires DB-backed storage, and writes metadata-only policy records for managed
-runtime secret binding keys. It merges requested rules into the latest active
-policy by binding key so deploy-time bootstrap can add required classifications
-without dropping existing policy coverage. Request and response payloads must
-not include secret plaintext. Rules can carry exact context/instance scope and
-explicit preview instance patterns for dynamic PR lanes; policy apply merges
-those scopes additively without making checked-in files runtime authority.
+`POST /v1/runtime-key-safety/policies/apply`. The route is native FastAPI and
+its legacy WSGI fallback branch is deleted. It is restricted to workflows with
+`runtime_key_safety.write` for product/context `launchplane`, requires DB-backed
+storage, and writes metadata-only policy records for managed runtime secret
+binding keys. Optional `Idempotency-Key` headers preserve replay/conflict
+semantics for retry-safe service calls. It merges requested rules into the
+latest active policy by binding key so deploy-time bootstrap can add required
+classifications without dropping existing policy coverage. Request and response
+payloads must not include secret plaintext. Rules can carry exact
+context/instance scope and explicit preview instance patterns for dynamic PR
+lanes; policy apply merges those scopes additively without making checked-in
+files runtime authority.
 
 Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`

@@ -122,6 +122,10 @@ from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
+from control_plane.runtime_key_safety_http import (
+    RuntimeKeySafetyPolicyApplyEnvelope,
+    apply_runtime_key_safety_policy_route,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubActionsIdentity,
@@ -192,6 +196,7 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
 _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
@@ -5172,6 +5177,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_runtime_key_safety_policy_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Runtime key-safety policy writes require Launchplane database storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -6129,6 +6146,71 @@ def create_launchplane_fastapi_app(
         )
         return response
 
+    async def apply_runtime_key_safety_policy(
+        request: Request,
+        policy_request: RuntimeKeySafetyPolicyApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="runtime_key_safety.write",
+            product=policy_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write Launchplane runtime key-safety policy records.",
+            )
+        database_store = require_runtime_key_safety_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        route_result = apply_runtime_key_safety_policy_route(
+            record_store=database_store,
+            request=policy_request,
+            now_timestamp=utc_now_timestamp,
+            record_slug=_record_slug,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "runtime_key_safety_policy_record_id": str(
+                    route_result.result["runtime_key_safety_policy_record_id"]
+                ),
+            },
+            result=route_result.driver_result,
+        )
+        store_apply_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def apply_preview_pr_feedback_notification_policy(
         request: Request,
         policy_request: PreviewPrFeedbackNotificationPolicyApplyEnvelope,
@@ -7055,6 +7137,24 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_preview_pr_feedback_notification_policy",
         summary="Apply preview PR feedback notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE,
+        apply_runtime_key_safety_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_runtime_key_safety_policy",
+        summary="Apply runtime key-safety policy records",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -8040,6 +8140,14 @@ def _launchplane_http_error(
         status_code=status_code,
         detail={"trace_id": trace_id, "code": code, "message": message},
     )
+
+
+def _record_slug(value: str) -> str:
+    compact = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
+    normalized = "-".join(part for part in compact.split("-") if part)
+    return normalized or "launchplane-record"
 
 
 def _authentication_required_error(message: str) -> HTTPException:
