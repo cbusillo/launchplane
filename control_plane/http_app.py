@@ -42,7 +42,10 @@ from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
-from control_plane.contracts.every_code_notifications import EveryCodeNotificationAttemptRecord
+from control_plane.contracts.every_code_notifications import (
+    EveryCodeNotificationAttemptRecord,
+    EveryCodeNotificationPolicyRecord,
+)
 from control_plane.contracts.every_code_summary_read_model import (
     EveryCodeSummaryReadModel,
     build_every_code_summary_read_model,
@@ -88,6 +91,7 @@ from control_plane.contracts.preview_evidence import (
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationPolicyRecord,
 )
 from control_plane.contracts.preview_readiness_read_model import (
     PreviewReadinessReadModel,
@@ -111,6 +115,7 @@ from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
 from control_plane.service_auth import (
@@ -168,6 +173,11 @@ _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
+_PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
+_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-policies/apply"
+_PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
+    "/v1/previews/pr-feedback/notification-policies/apply"
+)
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -914,6 +924,52 @@ class AcceptedEvidenceResponse(BaseModel):
     original_trace_id: str | None = None
 
 
+class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: PublicIngressNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
+        if self.policy.product and self.policy.product != "launchplane":
+            raise ValueError(
+                "public ingress notification policy apply requires product 'launchplane'"
+            )
+        return self
+
+
+class EveryCodeNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: EveryCodeNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "EveryCodeNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
+        return self
+
+
+class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    policy: PreviewPrFeedbackNotificationPolicyRecord
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewPrFeedbackNotificationPolicyApplyEnvelope":
+        self.reason = self.reason.strip()
+        return self
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
 
@@ -945,6 +1001,27 @@ class _RunnerLaneRegistrationAuditEvidenceStore(Protocol):
     def write_runner_lane_registration_audit_record(
         self,
         record: RunnerLaneRegistrationAuditRecord,
+    ) -> object: ...
+
+
+class _PublicIngressNotificationPolicyApplyStore(Protocol):
+    def write_public_ingress_notification_policy_record(
+        self,
+        record: PublicIngressNotificationPolicyRecord,
+    ) -> object: ...
+
+
+class _EveryCodeNotificationPolicyApplyStore(Protocol):
+    def write_every_code_notification_policy_record(
+        self,
+        record: EveryCodeNotificationPolicyRecord,
+    ) -> object: ...
+
+
+class _PreviewPrFeedbackNotificationPolicyApplyStore(Protocol):
+    def write_preview_pr_feedback_notification_policy_record(
+        self,
+        record: PreviewPrFeedbackNotificationPolicyRecord,
     ) -> object: ...
 
 
@@ -1735,6 +1812,55 @@ def idempotency_scope(identity: LaunchplaneIdentity) -> str:
 def request_fingerprint(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _public_ingress_notification_policy_summary(
+    policy: PublicIngressNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "product": policy.product,
+        "context": policy.context,
+        "instance": policy.instance,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
+
+
+def _every_code_notification_policy_summary(
+    policy: EveryCodeNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "repository": policy.repository,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
+
+
+def _preview_pr_feedback_notification_policy_summary(
+    policy: PreviewPrFeedbackNotificationPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "policy_id": policy.policy_id,
+        "product": policy.product,
+        "context": policy.context,
+        "repository": policy.repository,
+        "status": policy.status,
+        "destination_count": len(policy.destinations),
+        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+        "source": policy.source,
+    }
 
 
 class LaunchplaneAuthzPolicyRuntime:
@@ -4727,6 +4853,316 @@ def create_launchplane_fastapi_app(
             original_trace_id=stored_record.response_trace_id,
         )
 
+    def require_notification_policy_database_store(
+        *, record_store: object, trace_id: str, label: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=f"{label} notification policy apply requires DB-backed Launchplane storage.",
+            )
+        return record_store
+
+    def require_local_operator_notification_policy_reason(
+        *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
+    ) -> None:
+        if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity) and not reason:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="reason_required",
+                message=message,
+            )
+
+    async def replay_notification_policy_idempotency(
+        *,
+        request: Request,
+        record_store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> tuple[str, str, AcceptedEvidenceResponse | None]:
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return (
+                    normalized_idempotency_key,
+                    payload_fingerprint,
+                    replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=stored_record,
+                    ),
+                )
+        return normalized_idempotency_key, payload_fingerprint, None
+
+    def store_notification_policy_idempotency(
+        *,
+        record_store: PostgresRecordStore,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        response: AcceptedEvidenceResponse,
+    ) -> None:
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is None or not idempotency_key:
+            return
+        idempotency_store.write_idempotency_record(
+            LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint_value,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+        )
+
+    async def apply_public_ingress_notification_policy(
+        request: Request,
+        policy_request: PublicIngressNotificationPolicyApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        require_local_operator_notification_policy_reason(
+            identity=identity,
+            reason=policy_request.reason,
+            trace_id=trace_id,
+            message="Local operator public ingress notification policy apply requires a reason.",
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="public_ingress_notification_policy.apply",
+            product=policy_request.policy.product or "launchplane",
+            context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply public ingress notification policy.",
+            )
+        database_store = require_notification_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            label="Public ingress",
+        )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_notification_policy_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        if policy_request.mode == "apply":
+            cast(
+                _PublicIngressNotificationPolicyApplyStore,
+                database_store,
+            ).write_public_ingress_notification_policy_record(policy_request.policy)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"public_ingress_notification_policy_id": policy_request.policy.policy_id},
+            result={
+                "mode": policy_request.mode,
+                "changed": policy_request.mode == "apply",
+                "policy": _public_ingress_notification_policy_summary(policy_request.policy),
+            },
+        )
+        store_notification_policy_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_every_code_notification_policy(
+        request: Request,
+        policy_request: EveryCodeNotificationPolicyApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        require_local_operator_notification_policy_reason(
+            identity=identity,
+            reason=policy_request.reason,
+            trace_id=trace_id,
+            message="Local operator Every Code notification policy apply requires a reason.",
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="every_code_notification_policy.apply",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply Every Code notification policy.",
+            )
+        database_store = require_notification_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            label="Every Code",
+        )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_notification_policy_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        if policy_request.mode == "apply":
+            cast(
+                _EveryCodeNotificationPolicyApplyStore,
+                database_store,
+            ).write_every_code_notification_policy_record(policy_request.policy)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"every_code_notification_policy_id": policy_request.policy.policy_id},
+            result={
+                "mode": policy_request.mode,
+                "changed": policy_request.mode == "apply",
+                "policy": _every_code_notification_policy_summary(policy_request.policy),
+            },
+        )
+        store_notification_policy_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_preview_pr_feedback_notification_policy(
+        request: Request,
+        policy_request: PreviewPrFeedbackNotificationPolicyApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        require_local_operator_notification_policy_reason(
+            identity=identity,
+            reason=policy_request.reason,
+            trace_id=trace_id,
+            message="Local operator preview PR feedback notification policy apply requires a reason.",
+        )
+        if not policy_request.policy.product or not policy_request.policy.context:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_policy_scope",
+                message=(
+                    "Preview PR feedback notification policy apply requires explicit product and context."
+                ),
+            )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="preview_pr_feedback_notification_policy.apply",
+            product=policy_request.policy.product,
+            context=policy_request.policy.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply preview PR feedback notification policy.",
+            )
+        database_store = require_notification_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            label="Preview PR feedback",
+        )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_notification_policy_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        if policy_request.mode == "apply":
+            cast(
+                _PreviewPrFeedbackNotificationPolicyApplyStore,
+                database_store,
+            ).write_preview_pr_feedback_notification_policy_record(policy_request.policy)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"preview_pr_feedback_notification_policy_id": policy_request.policy.policy_id},
+            result={
+                "mode": policy_request.mode,
+                "changed": policy_request.mode == "apply",
+                "policy": _preview_pr_feedback_notification_policy_summary(policy_request.policy),
+            },
+        )
+        store_notification_policy_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def run_public_ingress_monitor(
         request: Request,
         monitor_request: PublicIngressMonitorRunOnceRequest,
@@ -5525,6 +5961,60 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE,
+        apply_public_ingress_notification_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_public_ingress_notification_policy",
+        summary="Apply public ingress notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
+        apply_every_code_notification_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_every_code_notification_policy",
+        summary="Apply Every Code notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE,
+        apply_preview_pr_feedback_notification_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="apply_preview_pr_feedback_notification_policy",
+        summary="Apply preview PR feedback notification policy",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

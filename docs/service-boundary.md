@@ -149,6 +149,10 @@ VeriReel product paths:
   - `POST /v1/product-profiles/context-cutover/apply`
 - product legacy context cleanup route:
   - `POST /v1/product-profiles/legacy-context-cleanup/apply`
+- public ingress notification policy route:
+  - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
+    bearer-token callers, DB-backed storage, local-operator reason enforcement,
+    and optional `Idempotency-Key` replay/conflict handling)
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-actions/removals`
@@ -173,15 +177,22 @@ VeriReel product paths:
     bearer-token, human-session, and Every Code worker-token callers)
   - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
     bearer-token and human-session callers)
+  - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
+    bearer-token callers, DB-backed storage, local-operator reason enforcement,
+    and optional `Idempotency-Key` replay/conflict handling)
   - `POST /v1/every-code/github-webhook`
   - `POST /v1/every-code/work-requests/create`
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
-  - `POST /v1/every-code/notification-policies/apply`
   - `POST /v1/every-code/pr-feedback`
   - `POST /v1/every-code/pr-feedback/status`
   - `POST /v1/every-code/preview-gates`
+- preview PR feedback notification policy route:
+  - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
+    for bearer-token callers, DB-backed storage, explicit product/context scope,
+    local-operator reason enforcement, and optional `Idempotency-Key`
+    replay/conflict handling)
 - work graph chooser route:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
@@ -1023,7 +1034,8 @@ repos do not carry repo-local Launchplane lifecycle manifests.
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"` and a complete
-`PublicIngressNotificationPolicyRecord`. Apply requires
+`PublicIngressNotificationPolicyRecord`. The route is native FastAPI and its
+legacy WSGI fallback branch is deleted. Apply requires
 `public_ingress_notification_policy.apply`, DB-backed Launchplane storage, and
 an idempotency key when a caller wants retry-safe service semantics. Local
 operator calls must include a non-empty reason. Policies store routing intent and
@@ -1033,7 +1045,8 @@ operator destination values must not be encoded in text-file defaults or source.
 Every Code notification policy writes use
 `POST /v1/every-code/notification-policies/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"` and a complete
-`EveryCodeNotificationPolicyRecord`. Apply requires
+`EveryCodeNotificationPolicyRecord`. The route is native FastAPI and its legacy
+WSGI fallback branch is deleted. Apply requires
 `every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
 idempotency key when a caller wants retry-safe service semantics. Local operator
 calls must include a non-empty reason. Policies store repository-scoped routing
@@ -1047,7 +1060,8 @@ Code notifications and records delivered or failed attempts under
 Preview PR feedback notification policy writes use
 `POST /v1/previews/pr-feedback/notification-policies/apply`. The request
 carries `mode: "dry-run"` or `mode: "apply"` and a complete
-`PreviewPrFeedbackNotificationPolicyRecord`. Apply requires
+`PreviewPrFeedbackNotificationPolicyRecord`. The route is native FastAPI and its
+legacy WSGI fallback branch is deleted. Apply requires
 `preview_pr_feedback_notification_policy.apply`, DB-backed Launchplane storage,
 explicit product and context scope, and an idempotency key when a caller wants
 retry-safe service semantics. Local operator calls must include a non-empty
