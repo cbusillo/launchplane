@@ -3236,32 +3236,6 @@ def _sync_live_target_from_tracked_contract(
     return payload
 
 
-def _apply_live_target_runtime_environment(
-    *,
-    product_name: str,
-    context_name: str,
-    instance_name: str,
-    apply_changes: bool,
-    deploy: bool,
-    no_cache: bool,
-    deploy_timeout_seconds: int | None,
-) -> dict[str, object]:
-    try:
-        return control_plane_live_target_runtime.apply_live_target_runtime_environment(
-            control_plane_root=_control_plane_root(),
-            product_name=product_name,
-            context_name=context_name,
-            instance_name=instance_name,
-            apply_changes=apply_changes,
-            deploy=deploy,
-            no_cache=no_cache,
-            deploy_timeout_seconds=deploy_timeout_seconds,
-            deploy_trigger=_trigger_and_wait_for_dokploy_target_deploy,
-        )
-    except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-        raise click.ClickException(str(error)) from error
-
-
 def _sync_artifact_image_reference_for_target(
     *,
     context_name: str,
@@ -3801,7 +3775,6 @@ register_runtime_environment_commands(
     control_plane_root=_control_plane_root,
     build_live_target_runtime_contract_payload=_build_live_target_runtime_contract_payload,
     sync_live_target_from_tracked_contract=_sync_live_target_from_tracked_contract,
-    apply_live_target_runtime_environment=_apply_live_target_runtime_environment,
 )
 register_dokploy_target_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
