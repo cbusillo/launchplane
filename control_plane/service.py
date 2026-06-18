@@ -876,15 +876,6 @@ class _IngressCanaryRouteRecordStore(Protocol):
 
     def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
 
-    def list_ingress_canary_route_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[IngressCanaryRouteRecord, ...]: ...
-
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
 _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
@@ -4486,10 +4477,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "ingress_route.plan", {"ingress_route_audit_record_id": segments[4]}
     if len(segments) == 3 and segments == ["v1", "dokploy-targets", "inspect"]:
         return "dokploy_target.inspect", {}
-    if len(segments) == 4 and segments == ["v1", "ingress", "canary-routes", "records"]:
-        return "ingress_canary_route.read", {"ingress_canary_route_list": "true"}
-    if len(segments) == 5 and segments[:4] == ["v1", "ingress", "canary-routes", "records"]:
-        return "ingress_canary_route.read", {"ingress_canary_route_key": segments[4]}
     if path == _MERGE_TRAIN_ADMISSION_ROUTE:
         return "merge_train.admission", {}
     if path == _MERGE_TRAIN_CONTROLLER_STATUS_ROUTE:
@@ -6944,7 +6931,6 @@ def _ingress_canary_route_record_store(
     required_methods = (
         "write_ingress_canary_route_record",
         "read_ingress_canary_route_record",
-        "list_ingress_canary_route_records",
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_IngressCanaryRouteRecordStore, record_store)
@@ -10548,84 +10534,6 @@ def create_launchplane_service_app(
                             "status": "ok",
                             "trace_id": request_trace_id,
                             "inspect": inspect_result,
-                        },
-                    )
-                if action == "ingress_canary_route.read":
-                    canary_store = _ingress_canary_route_record_store(record_store)
-                    if "ingress_canary_route_key" in params:
-                        if not authz_policy.allows(
-                            identity=identity,
-                            action=action,
-                            product="launchplane",
-                            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read Launchplane ingress canary route records.",
-                                    },
-                                },
-                            )
-                        try:
-                            canary_record = canary_store.read_ingress_canary_route_record(
-                                params["ingress_canary_route_key"]
-                            )
-                        except FileNotFoundError:
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "record": canary_record.model_dump(mode="json"),
-                            },
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Launchplane ingress canary route records.",
-                                },
-                            },
-                        )
-                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
-                    canary_records = canary_store.list_ingress_canary_route_records(
-                        product=_query_string_value(query, "product"),
-                        context_name=_query_string_value(query, "context"),
-                        status=_query_string_value(query, "status"),
-                        limit=limit,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "limit": limit,
-                            "count": len(canary_records),
-                            "records": [
-                                record.model_dump(mode="json") for record in canary_records
-                            ],
                         },
                     )
                 if action == "every_code_work_request.read":

@@ -69,6 +69,12 @@ VeriReel product paths:
   - `GET /v1/private-health-endpoints/records/{endpoint_key}`, requiring
     `private_health_endpoint.read` for the requested product/context and
     returning 404 when the stored record is outside that query scope
+- native FastAPI ingress canary route record reads:
+  - `GET /v1/ingress/canary-routes/records`, requiring
+    `ingress_canary_route.read` for the Launchplane service context and
+    supporting `product`, `context`, `status`, and bounded `limit` filters
+  - `GET /v1/ingress/canary-routes/records/{canary_key}`, requiring
+    `ingress_canary_route.read` for the Launchplane service context
 - native FastAPI deployment, promotion, preview, inventory, operations, and
   managed-secret status reads:
   - `GET /v1/deployments/{record_id}`, requiring `deployment.read` for the
@@ -1325,6 +1331,10 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/private-health-endpoints/records` (native FastAPI for bearer-token
   and human-session callers)
 - `GET /v1/private-health-endpoints/records/{endpoint_key}` (native FastAPI for
+  bearer-token and human-session callers)
+- `GET /v1/ingress/canary-routes/records` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
   bearer-token and human-session callers)
 
 These operator reads use the same Launchplane authn/authz boundary as evidence

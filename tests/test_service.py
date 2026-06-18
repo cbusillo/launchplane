@@ -2638,11 +2638,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "conflicting_private_health_endpoint",
         )
 
-    def test_ingress_canary_route_record_apply_and_read_store_route_authority(
+    def test_ingress_canary_route_record_apply_stores_route_authority(
         self,
     ) -> None:
         policy = _local_operator_policy(
-            actions=("ingress_canary_route.apply", "ingress_canary_route.read"),
+            actions=("ingress_canary_route.apply",),
             products=("launchplane",),
             contexts=("launchplane",),
         )
@@ -2672,19 +2672,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     authorization="Bearer local-operator-token",
                     headers={"Idempotency-Key": "ingress-canary-record-apply"},
                 )
-                read_status_code, read_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/ingress/canary-routes/records/ingress-canary",
-                    authorization="Bearer local-operator-token",
-                )
+                stored_record = record_store.read_ingress_canary_route_record("ingress-canary")
 
         self.assertEqual(apply_status_code, 202)
         self.assertEqual(apply_payload["records"]["ingress_canary_route_key"], "ingress-canary")
         self.assertEqual(apply_payload["records"]["ingress_canary_route_status"], "applied")
-        self.assertEqual(read_status_code, 200)
-        self.assertEqual(read_payload["record"]["domain_name"], "ingress-canary.example.test")
-        self.assertEqual(read_payload["record"]["edge_endpoint_key"], "cm-prod-dokploy")
+        self.assertEqual(stored_record.domain_name, "ingress-canary.example.test")
+        self.assertEqual(stored_record.edge_endpoint_key, "cm-prod-dokploy")
 
     def test_ingress_canary_route_apply_resolves_profile_and_edge_endpoint(self) -> None:
         client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
@@ -13343,6 +13337,37 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 app,
                 method="GET",
                 path="/v1/private-health-endpoints/records/repairshopr-sync-prod-runtime",
+                authorization="",
+            )
+
+        self.assertEqual(list_status_code, 404)
+        self.assertEqual(read_status_code, 404)
+        self.assertEqual(list_payload["error"]["code"], "not_found")
+        self.assertEqual(read_payload["error"]["code"], "not_found")
+
+    def test_ingress_canary_route_read_routes_are_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            list_status_code, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/ingress/canary-routes/records",
+                authorization="",
+            )
+            read_status_code, read_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/ingress/canary-routes/records/ingress-canary",
                 authorization="",
             )
 

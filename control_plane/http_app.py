@@ -42,6 +42,7 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_idempotency_record_id,
 )
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
+from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.product_environment_read_model import (
     ProductActivityReadModel,
     ProductEnvironmentConfigStatus,
@@ -429,6 +430,24 @@ class PrivateHealthEndpointRecordsResponse(BaseModel):
     records: tuple[PrivateHealthEndpointRecord, ...]
 
 
+class IngressCanaryRouteRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: IngressCanaryRouteRecord
+
+
+class IngressCanaryRouteRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    limit: int
+    count: int
+    records: tuple[IngressCanaryRouteRecord, ...]
+
+
 class DeploymentRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -769,6 +788,19 @@ class _PrivateHealthEndpointReadStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
+
+
+class _IngressCanaryRouteReadStore(Protocol):
+    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
+
+    def list_ingress_canary_route_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[IngressCanaryRouteRecord, ...]: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -1136,6 +1168,27 @@ def require_private_health_endpoint_read_store(
             f"{missing_summary}"
         )
     return cast(_PrivateHealthEndpointReadStore, record_store)
+
+
+def require_ingress_canary_route_read_store(
+    record_store: object,
+) -> _IngressCanaryRouteReadStore:
+    required_methods = (
+        "read_ingress_canary_route_record",
+        "list_ingress_canary_route_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support ingress canary route reads: "
+            f"{missing_summary}"
+        )
+    return cast(_IngressCanaryRouteReadStore, record_store)
 
 
 def product_profile_context_cutover_allowed_contexts(
@@ -2406,6 +2459,98 @@ def create_launchplane_fastapi_app(
                 message=f"Record not found: {endpoint_key}",
             )
         return PrivateHealthEndpointRecordResponse(trace_id=trace_id, record=record)
+
+    def ensure_ingress_canary_route_read_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="ingress_canary_route.read",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read Launchplane ingress canary route records.",
+            )
+
+    def list_ingress_canary_route_records(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        limit: Annotated[str, Query()] = "25",
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+    ) -> IngressCanaryRouteRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_ingress_canary_route_read_allowed(identity=identity, trace_id=trace_id)
+        try:
+            normalized_limit = control_plane_service_status.query_int_value(
+                limit,
+                "limit",
+                default=25,
+                minimum=1,
+                maximum=100,
+            )
+            assert normalized_limit is not None
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        try:
+            canary_store = require_ingress_canary_route_read_store(record_store)
+            records = canary_store.list_ingress_canary_route_records(
+                product=product.strip(),
+                context_name=context.strip(),
+                status=status.strip(),
+                limit=normalized_limit,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return IngressCanaryRouteRecordsResponse(
+            trace_id=trace_id,
+            limit=normalized_limit,
+            count=len(records),
+            records=records,
+        )
+
+    def read_ingress_canary_route_record(
+        canary_key: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> IngressCanaryRouteRecordResponse:
+        trace_id = next_trace_id()
+        ensure_ingress_canary_route_read_allowed(identity=identity, trace_id=trace_id)
+        try:
+            canary_store = require_ingress_canary_route_read_store(record_store)
+            record = canary_store.read_ingress_canary_route_record(canary_key)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return IngressCanaryRouteRecordResponse(trace_id=trace_id, record=record)
 
     def read_deployment_record(
         record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -3834,6 +3979,36 @@ def create_launchplane_fastapi_app(
         summary="Read one private health endpoint record",
         responses={
             400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/ingress/canary-routes/records",
+        list_ingress_canary_route_records,
+        methods=["GET"],
+        response_model=IngressCanaryRouteRecordsResponse,
+        operation_id="list_ingress_canary_route_records",
+        summary="List ingress canary route records",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/ingress/canary-routes/records/{canary_key}",
+        read_ingress_canary_route_record,
+        methods=["GET"],
+        response_model=IngressCanaryRouteRecordResponse,
+        operation_id="read_ingress_canary_route_record",
+        summary="Read one ingress canary route record",
+        responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},

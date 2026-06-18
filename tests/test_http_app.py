@@ -82,6 +82,7 @@ from tests.test_service import (
     _generic_site_profile_payload,
     _edge_endpoint_record,
     _identity,
+    _ingress_canary_route_record,
     _private_health_endpoint_record,
     _product_profile_payload,
     _product_profile_payload_with_prod,
@@ -4122,6 +4123,226 @@ class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "repairshopr-sync-prod-runtime",
             )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ingress_canary_route_read_returns_record_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="ingress_canary_route.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_ingress_canary_route_record(app, "ingress-canary")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["record"]["canary_key"], "ingress-canary")
+        self.assertEqual(payload["record"]["domain_name"], "ingress-canary.example.test")
+        self.assertEqual(payload["record"]["edge_endpoint_key"], "cm-prod-dokploy")
+
+    async def test_ingress_canary_route_list_filters_records(self) -> None:
+        active_record = _ingress_canary_route_record()
+        disabled_record = active_record.model_copy(
+            update={
+                "canary_key": "disabled-canary",
+                "domain_name": "disabled-canary.example.test",
+                "expected_host_id": 79,
+                "status": "disabled",
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_canary_route_record(active_record)
+            store.write_ingress_canary_route_record(disabled_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="ingress_canary_route.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_ingress_canary_route_records(
+                app,
+                product="launchplane",
+                context="reon-prod",
+                status="active",
+                limit="1",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["limit"], 1)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["records"][0]["canary_key"], "ingress-canary")
+
+    async def test_ingress_canary_route_reads_require_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="ingress_canary_route.read",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_ingress_canary_route_records(app, authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_ingress_canary_route_reads_require_authz_action(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="driver.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_ingress_canary_route_record(app, "ingress-canary")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_ingress_canary_route_reads_require_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="ingress_canary_route.read",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_ingress_canary_route_records(app)
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_ingress_canary_route_read_returns_not_found_for_missing_record(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="ingress_canary_route.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_ingress_canary_route_record(app, "missing-canary")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_ingress_canary_route_list_validates_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="ingress_canary_route.read",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        low_response = await _get_ingress_canary_route_records(app, limit="0")
+        high_response = await _get_ingress_canary_route_records(app, limit="101")
+
+        self.assertEqual(low_response.status_code, 400)
+        self.assertEqual(high_response.status_code, 400)
+        self.assertEqual(low_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(high_response.json()["error"]["code"], "invalid_query")
+
+    async def test_openapi_includes_ingress_canary_route_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="ingress_canary_route.read",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        list_route = openapi["paths"]["/v1/ingress/canary-routes/records"]["get"]
+        read_route = openapi["paths"]["/v1/ingress/canary-routes/records/{canary_key}"]["get"]
+        self.assertEqual(list_route["operationId"], "list_ingress_canary_route_records")
+        self.assertEqual(read_route["operationId"], "read_ingress_canary_route_record")
+        self.assertEqual(
+            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/IngressCanaryRouteRecordsResponse",
+        )
+        self.assertEqual(
+            read_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/IngressCanaryRouteRecordResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(list_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(read_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["IngressCanaryRouteRecordResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["IngressCanaryRouteRecordsResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_ingress_canary_route_reads_precede_legacy_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="ingress_canary_route.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_ingress_canary_route_record(app, "ingress-canary")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
@@ -8987,6 +9208,53 @@ async def _get_private_health_endpoint_record(
     return await _asgi_get(
         app,
         f"/v1/private-health-endpoints/records/{endpoint_key}{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_ingress_canary_route_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+    status: str = "",
+    limit: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if product:
+        params["product"] = product
+    if context:
+        params["context"] = context
+    if status:
+        params["status"] = status
+    if limit:
+        params["limit"] = limit
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/ingress/canary-routes/records{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_ingress_canary_route_record(
+    app: FastAPI,
+    canary_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/ingress/canary-routes/records/{canary_key}",
         headers=request_headers,
     )
 
