@@ -1,7 +1,7 @@
 import hashlib
 import json
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
 from typing import Annotated, Literal, Protocol, cast
@@ -95,6 +95,7 @@ from control_plane.contracts.preview_readiness_read_model import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.work_graph_read_model import WorkGraphSnapshot
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
@@ -141,6 +142,12 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressMonitorStore,
+    PublicIngressNotificationDriverSet,
+    build_github_issue_notifier,
+    run_public_ingress_monitor_once,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_service import (
@@ -162,6 +169,7 @@ _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
+_PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -942,6 +950,22 @@ class _RunnerLaneRegistrationAuditEvidenceStore(Protocol):
     ) -> object: ...
 
 
+class PublicIngressMonitorRunOnceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str = "launchplane"
+    timeout_seconds: int = Field(default=10, ge=1, le=120)
+    notify: bool = True
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PublicIngressMonitorRunOnceRequest":
+        if self.product.strip() != "launchplane":
+            raise ValueError("public ingress monitor run requires product 'launchplane'")
+        self.product = "launchplane"
+        return self
+
+
 class _DeploymentReadStore(Protocol):
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
@@ -1446,6 +1470,87 @@ def require_secret_status_read_store(record_store: object) -> control_plane_secr
             f"Launchplane record store does not support secret status reads: {missing_summary}"
         )
     return cast(control_plane_secrets.SecretReadStore, record_store)
+
+
+def require_public_ingress_monitor_store(
+    record_store: object, *, notify: bool
+) -> PublicIngressMonitorStore:
+    required_methods = [
+        "list_product_profile_records",
+        "list_public_ingress_observation_records",
+        "write_public_ingress_observation_record",
+        "list_public_ingress_incident_records",
+        "write_public_ingress_incident_record",
+    ]
+    if notify:
+        required_methods.extend(
+            [
+                "list_public_ingress_notification_policy_records",
+                "list_public_ingress_notification_attempt_records",
+                "write_public_ingress_notification_attempt_record",
+            ]
+        )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support public ingress monitor runs: "
+            f"{missing_summary}"
+        )
+    return cast(PublicIngressMonitorStore, record_store)
+
+
+def secret_read_store(record_store: object) -> control_plane_secrets.SecretReadStore | None:
+    if callable(getattr(record_store, "read_secret_record", None)) and callable(
+        getattr(record_store, "read_secret_version", None)
+    ):
+        return cast(control_plane_secrets.SecretReadStore, record_store)
+    return None
+
+
+def public_ingress_managed_secret_resolver(
+    *,
+    record_store: control_plane_secrets.SecretReadStore,
+) -> Callable[[str, PublicIngressIncidentRecord], str]:
+    def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
+        normalized_secret_id = secret_id.strip()
+        if not normalized_secret_id:
+            return ""
+        try:
+            record = record_store.read_secret_record(normalized_secret_id)
+        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
+            return ""
+        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
+            return ""
+        if not control_plane_secrets._scope_matches_record(
+            record,
+            context_name=incident.context,
+            instance_name=incident.instance,
+        ):
+            return ""
+        try:
+            version = record_store.read_secret_version(record.current_version_id)
+            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
+        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
+            return ""
+
+    return resolve
+
+
+def public_ingress_notification_drivers(
+    *,
+    record_store: object,
+) -> PublicIngressNotificationDriverSet:
+    secret_store = secret_read_store(record_store)
+    if secret_store is None:
+        return PublicIngressNotificationDriverSet()
+    return PublicIngressNotificationDriverSet(
+        incident_secret_resolver=public_ingress_managed_secret_resolver(record_store=secret_store)
+    )
 
 
 def require_product_context_audit_store(
@@ -4673,6 +4778,100 @@ def create_launchplane_fastapi_app(
             original_trace_id=stored_record.response_trace_id,
         )
 
+    async def run_public_ingress_monitor(
+        request: Request,
+        monitor_request: PublicIngressMonitorRunOnceRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="public_ingress_monitor.run_once",
+            product=monitor_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run public ingress monitoring.",
+            )
+
+        idempotency_store = idempotency_capable_store(record_store)
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if idempotency_store is not None and normalized_idempotency_key:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=_PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return replay_idempotent_response(
+                    trace_id=trace_id,
+                    stored_record=stored_record,
+                )
+
+        try:
+            monitor_store = require_public_ingress_monitor_store(
+                record_store,
+                notify=monitor_request.notify,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        recorded_at = utc_now_timestamp()
+        monitor_result = run_public_ingress_monitor_once(
+            record_store=monitor_store,
+            checked_at=recorded_at,
+            timeout_seconds=monitor_request.timeout_seconds,
+            notify=monitor_request.notify,
+            notifier=build_github_issue_notifier() if monitor_request.notify else None,
+            notification_drivers=(
+                public_ingress_notification_drivers(record_store=record_store)
+                if monitor_request.notify
+                else None
+            ),
+        )
+        result = monitor_result.model_dump(mode="json")
+        response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
+        if idempotency_store is not None and normalized_idempotency_key:
+            idempotency_store.write_idempotency_record(
+                LaunchplaneIdempotencyRecord(
+                    record_id=build_launchplane_idempotency_record_id(
+                        response_trace_id=trace_id,
+                    ),
+                    scope=normalized_scope,
+                    route_path=_PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    recorded_at=recorded_at,
+                    response_payload=response.model_dump(mode="json", exclude_none=True),
+                )
+            )
+        return response
+
     async def write_deployment_evidence(
         request: Request,
         deployment_request: DeploymentEvidenceRequest,
@@ -6049,6 +6248,24 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,
+        run_public_ingress_monitor,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="run_public_ingress_monitor",
+        summary="Run public ingress monitoring once",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

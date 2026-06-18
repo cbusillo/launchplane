@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
+from control_plane import http_app as control_plane_http_app
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -54,6 +55,7 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -94,6 +96,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
+from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _generic_site_profile_payload,
@@ -7157,6 +7160,344 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_ingress_monitor_runs_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane", "notify": False},
+                    idempotency_key="public-ingress-monitor-test",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["result"]["target_count"], 1)
+        run_monitor.assert_called_once()
+        self.assertIsNone(run_monitor.call_args.kwargs["notification_drivers"])
+
+    async def test_public_ingress_monitor_wires_notification_drivers(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane", "notify": True},
+                    idempotency_key="public-ingress-monitor-notify-test",
+                )
+
+        self.assertEqual(response.status_code, 202)
+        run_monitor.assert_called_once()
+        self.assertIsNotNone(run_monitor.call_args.kwargs["notification_drivers"])
+
+    async def test_public_ingress_notification_drivers_resolve_lane_scoped_secrets(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                with patch.dict(
+                    "os.environ",
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
+                            "test-master-key"
+                        )
+                    },
+                    clear=True,
+                ):
+                    secret_result = control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope="context_instance",
+                        integration="public-ingress-notifications",
+                        name="discord webhook",
+                        plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                        binding_key="DISCORD_WEBHOOK",
+                        context_name="example-site",
+                        instance_name="prod",
+                        actor="test",
+                        source_label="test",
+                    )
+                    resolver = control_plane_http_app.public_ingress_managed_secret_resolver(
+                        record_store=store
+                    )
+                    incident = _public_ingress_incident(context="example-site", instance="prod")
+                    other_incident = _public_ingress_incident(
+                        context="example-site", instance="preview"
+                    )
+                    resolved_value = resolver(str(secret_result["secret_id"]), incident)
+                    unresolved_value = resolver(str(secret_result["secret_id"]), other_incident)
+            finally:
+                store.close()
+
+        self.assertEqual(resolved_value, "https://discord.com/api/webhooks/test/webhook")
+        self.assertEqual(unresolved_value, "")
+
+    async def test_public_ingress_monitor_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane"},
+                )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        run_monitor.assert_not_called()
+
+    async def test_public_ingress_monitor_rejects_invalid_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "other-product"},
+                )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        run_monitor.assert_not_called()
+
+    async def test_public_ingress_monitor_requires_monitor_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_public_ingress_monitor_identity()),
+            authz_policy=_public_ingress_monitor_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+            response = await _post_public_ingress_monitor(
+                app,
+                {"schema_version": 1, "product": "launchplane"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        run_monitor.assert_not_called()
+
+    async def test_public_ingress_monitor_replays_idempotent_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+                request_payload = {"schema_version": 1, "product": "launchplane"}
+
+                first_response = await _post_public_ingress_monitor(
+                    app,
+                    request_payload,
+                    idempotency_key="public-ingress-monitor-replay",
+                )
+                second_response = await _post_public_ingress_monitor(
+                    app,
+                    request_payload,
+                    idempotency_key="public-ingress-monitor-replay",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertNotEqual(second_payload["trace_id"], first_payload["trace_id"])
+        run_monitor.assert_called_once()
+
+    async def test_public_ingress_monitor_replays_before_requiring_monitor_store(
+        self,
+    ) -> None:
+        request_payload = {"schema_version": 1, "product": "launchplane"}
+        replay_store = _PublicIngressMonitorIdempotencyReplayStore(
+            payload=request_payload,
+            idempotency_key="public-ingress-monitor-replay-only",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_public_ingress_monitor_identity()),
+            authz_policy=_public_ingress_monitor_policy(),
+            record_store_factory=lambda: replay_store,
+        )
+        with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+            response = await _post_public_ingress_monitor(
+                app,
+                request_payload,
+                idempotency_key="public-ingress-monitor-replay-only",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertTrue(payload["replayed"])
+        self.assertEqual(payload["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(replay_store.read_idempotency_calls, 1)
+        run_monitor.assert_not_called()
+
+    async def test_public_ingress_monitor_rejects_idempotency_key_reuse(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+
+                first_response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane", "notify": False},
+                    idempotency_key="public-ingress-monitor-reuse",
+                )
+                second_response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane", "notify": True},
+                    idempotency_key="public-ingress-monitor-reuse",
+                )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        run_monitor.assert_called_once()
+
+    async def test_public_ingress_monitor_get_is_not_registered(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_public_ingress_monitor_identity()),
+            authz_policy=_public_ingress_monitor_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+            response = await _asgi_get(
+                app,
+                "/v1/products/public-ingress-monitor/run-once",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 405)
+        run_monitor.assert_not_called()
+
+    async def test_openapi_includes_public_ingress_monitor_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_public_ingress_monitor_identity()),
+            authz_policy=_public_ingress_monitor_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/products/public-ingress-monitor/run-once"]
+        self.assertEqual(set(route.keys()), {"post"})
+        self.assertEqual(route["post"]["operationId"], "run_public_ingress_monitor")
+        self.assertEqual(
+            route["post"]["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/PublicIngressMonitorRunOnceRequest",
+        )
+        self.assertEqual(
+            route["post"]["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["PublicIngressMonitorRunOnceRequest"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_public_ingress_monitor_native_route_precedes_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+            with patch("control_plane.http_app.run_public_ingress_monitor_once") as run_monitor:
+                run_monitor.return_value = PublicIngressMonitorResult(
+                    checked_at="2026-05-29T12:00:00Z",
+                    target_count=1,
+                    pass_count=1,
+                    records=(),
+                )
+
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {"schema_version": 1, "product": "launchplane", "notify": False},
+                )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "accepted")
+        run_monitor.assert_called_once()
+
+
 class FastApiPromotionEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_promotion_evidence_writes_record_and_inventory_for_authorized_workflow(
         self,
@@ -9210,6 +9551,51 @@ def _promotion_write_policy(*, context: str) -> LaunchplaneAuthzPolicy:
                 }
             ]
         }
+    )
+
+
+def _public_ingress_monitor_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref="cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main",
+        event_name="schedule",
+    )
+
+
+def _public_ingress_monitor_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
+                    ],
+                    "event_names": ["schedule"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["public_ingress_monitor.run_once"],
+                }
+            ]
+        }
+    )
+
+
+def _public_ingress_incident(
+    *, context: str = "launchplane", instance: str = "prod"
+) -> PublicIngressIncidentRecord:
+    return PublicIngressIncidentRecord(
+        incident_id=f"public-ingress-incident-{context}-{instance}",
+        product="launchplane",
+        context=context,
+        instance=instance,
+        status="open",
+        opened_at="2026-05-29T12:00:00Z",
+        opened_observation_id="public-ingress-observation-opened",
+        latest_observation_id="public-ingress-observation-latest",
+        latest_observed_at="2026-05-29T12:00:00Z",
+        failure_code="http_error",
+        summary="Public ingress failed.",
     )
 
 
@@ -11590,6 +11976,28 @@ async def _post_backup_gate_evidence(
     )
 
 
+async def _post_public_ingress_monitor(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/products/public-ingress-monitor/run-once",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _post_promotion_evidence(
     app: FastAPI,
     payload: dict[str, object],
@@ -11968,6 +12376,48 @@ class _IdempotencyOnlyBackupGateReplayStore:
 
     def _write_backup_gate_record(self, record: BackupGateRecord) -> None:
         self.write_backup_gate_calls += 1
+
+
+class _PublicIngressMonitorIdempotencyReplayStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if (
+            route_path != "/v1/products/public-ingress-monitor/run-once"
+            or idempotency_key != self._idempotency_key
+        ):
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {},
+                "result": {"target_count": 1},
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        raise AssertionError("idempotent replay must not write a new record")
 
 
 class _IdempotencyOnlyRunnerHostHygieneAuditReplayStore:
