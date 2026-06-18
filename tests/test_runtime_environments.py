@@ -285,6 +285,18 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such command 'apply-live-target'", result.output)
 
+    def test_environments_sync_live_target_command_is_retired(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "environments",
+                "sync-live-target",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("No such command 'sync-live-target'", result.output)
+
     def test_load_optional_runtime_definition_uses_structural_store_boundary(self) -> None:
         definition = control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
             record_store=_FakeRuntimeEnvironmentStore(

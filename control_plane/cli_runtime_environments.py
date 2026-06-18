@@ -31,13 +31,11 @@ def register_runtime_environment_commands(
     *,
     control_plane_root: Callable[[], Path],
     build_live_target_runtime_contract_payload: Callable[..., dict[str, object]],
-    sync_live_target_from_tracked_contract: Callable[..., dict[str, object]],
 ) -> None:
     global _RUNTIME_ENVIRONMENT_CALLBACKS
     _RUNTIME_ENVIRONMENT_CALLBACKS = _RuntimeEnvironmentCallbacks(
         control_plane_root=control_plane_root,
         build_live_target_runtime_contract_payload=build_live_target_runtime_contract_payload,
-        sync_live_target_from_tracked_contract=sync_live_target_from_tracked_contract,
     )
     main.add_command(environments)
 
@@ -434,18 +432,6 @@ def environments_logs(
     click.echo(json.dumps({"status": "ok", **payload}, indent=2, sort_keys=True))
 
 
-@environments.command("sync-live-target")
-@click.option("--context", "context_name", required=True)
-@click.option("--instance", "instance_name", required=True)
-def environments_sync_live_target(context_name: str, instance_name: str) -> None:
-    callbacks = _runtime_environment_callbacks()
-    payload = callbacks.sync_live_target_from_tracked_contract(
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
-
-
 def summarize_runtime_environment_record(
     record: RuntimeEnvironmentRecord,
 ) -> dict[str, object]:
@@ -794,11 +780,9 @@ class _RuntimeEnvironmentCallbacks:
         *,
         control_plane_root: Callable[[], Path],
         build_live_target_runtime_contract_payload: Callable[..., dict[str, object]],
-        sync_live_target_from_tracked_contract: Callable[..., dict[str, object]],
     ) -> None:
         self.control_plane_root = control_plane_root
         self.build_live_target_runtime_contract_payload = build_live_target_runtime_contract_payload
-        self.sync_live_target_from_tracked_contract = sync_live_target_from_tracked_contract
 
 
 _RUNTIME_ENVIRONMENT_CALLBACKS: _RuntimeEnvironmentCallbacks | None = None
