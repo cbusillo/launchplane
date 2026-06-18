@@ -112,6 +112,7 @@ from control_plane.workflows.public_ingress_monitor import (
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _generic_site_profile_payload,
+    _edge_endpoint_apply_payload,
     _edge_endpoint_record,
     _identity,
     _ingress_canary_route_record,
@@ -121,6 +122,7 @@ from tests.test_service import (
     _merge_train_service_identity,
     _merge_train_service_policy,
     _private_health_endpoint_record,
+    _private_health_endpoint_apply_payload,
     _product_profile_payload,
     _product_profile_payload_with_prod,
     _seed_merge_train_policy,
@@ -6359,6 +6361,497 @@ class FastApiPrivateHealthEndpointReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_edge_endpoint_apply_writes_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="edge_endpoint.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "edge-endpoint-apply-test",
+                },
+                payload=_edge_endpoint_apply_payload(mode="apply"),
+            )
+            stored_record = store.read_edge_endpoint_record("cm-prod-dokploy")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["edge_endpoint_key"], "cm-prod-dokploy")
+        self.assertEqual(payload["records"]["edge_endpoint_status"], "applied")
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["endpoint_status"], "applied")
+        self.assertEqual(stored_record.server_name, "docker-cm-prod")
+
+    async def test_edge_endpoint_dry_run_does_not_write_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="edge_endpoint.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_edge_endpoint_apply_payload(mode="dry-run"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"]["edge_endpoint_status"], "planned")
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        with self.assertRaises(FileNotFoundError):
+            store.read_edge_endpoint_record("cm-prod-dokploy")
+
+    async def test_edge_endpoint_apply_requires_idempotency_key_before_store_gate(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="edge_endpoint.apply",
+                product="launchplane",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/edge-endpoints/apply",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=_edge_endpoint_apply_payload(mode="apply"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_edge_endpoint_apply_replays_and_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="edge_endpoint.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            payload = _edge_endpoint_apply_payload(mode="apply")
+            conflicting_payload = _edge_endpoint_apply_payload(mode="apply")
+            endpoint = cast(dict[str, object], conflicting_payload["endpoint"])
+            endpoint["upstream_port"] = 8443
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "edge-endpoint-replay-test",
+                },
+                payload=payload,
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "edge-endpoint-replay-test",
+                },
+                payload=payload,
+            )
+            conflict_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "edge-endpoint-replay-test",
+                },
+                payload=conflicting_payload,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(replay_payload["records"], first_payload["records"])
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_private_health_endpoint_apply_writes_record_with_legacy_records_shape(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-endpoint-apply-test",
+                },
+                payload=_private_health_endpoint_apply_payload(mode="apply"),
+            )
+            stored_record = store.read_private_health_endpoint_record(
+                "repairshopr-sync-prod-runtime"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["result"]["endpoint_key"], "repairshopr-sync-prod-runtime")
+        self.assertEqual(payload["result"]["endpoint_status"], "applied")
+        self.assertEqual(stored_record.url, "http://10.0.0.5:8000/health")
+
+    async def test_private_health_endpoint_dry_run_does_not_write_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_private_health_endpoint_apply_payload(mode="dry-run"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {})
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["endpoint_status"], "planned")
+        with self.assertRaises(FileNotFoundError):
+            store.read_private_health_endpoint_record("repairshopr-sync-prod-runtime")
+
+    async def test_private_health_endpoint_apply_requires_idempotency_key_before_store_gate(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="private_health_endpoint.apply",
+                product="repairshopr-sync",
+                context="repairshopr-sync",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/private-health-endpoints/apply",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=_private_health_endpoint_apply_payload(mode="apply"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_private_health_endpoint_apply_rejects_public_url(self) -> None:
+        payload = _private_health_endpoint_apply_payload(mode="apply")
+        endpoint = cast(dict[str, object], payload["endpoint"])
+        endpoint["url"] = "https://repairshopr-sync.example.test/health"
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-public-url-test",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_private_health_endpoint_apply_rejects_cross_scope_overwrite(self) -> None:
+        existing_record = _private_health_endpoint_record().model_copy(
+            update={
+                "endpoint_key": "shared-runtime",
+                "product": "other-product",
+                "context": "other-product",
+            }
+        )
+        payload = _private_health_endpoint_apply_payload(mode="apply")
+        endpoint = cast(dict[str, object], payload["endpoint"])
+        endpoint["endpoint_key"] = "shared-runtime"
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_private_health_endpoint_record(existing_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-cross-scope-test",
+                },
+                payload=payload,
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "conflicting_private_health_endpoint")
+
+    async def test_private_health_endpoint_apply_replays_and_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+            payload = _private_health_endpoint_apply_payload(mode="apply")
+            conflicting_payload = _private_health_endpoint_apply_payload(mode="apply")
+            endpoint = cast(dict[str, object], conflicting_payload["endpoint"])
+            endpoint["url"] = "http://10.0.0.6:8000/health"
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-replay-test",
+                },
+                payload=payload,
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-replay-test",
+                },
+                payload=payload,
+            )
+            conflict_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-replay-test",
+                },
+                payload=conflicting_payload,
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(replay_payload["result"], first_payload["result"])
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_endpoint_apply_routes_require_exact_authz_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            edge_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="edge_endpoint.apply",
+                    product="repairshopr-sync",
+                    context="repairshopr-sync",
+                ),
+                record_store_factory=lambda: store,
+            )
+            private_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="private_health_endpoint.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            edge_response = await _asgi_request(
+                edge_app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "edge-authz-test",
+                },
+                payload=_edge_endpoint_apply_payload(mode="apply"),
+            )
+            private_response = await _asgi_request(
+                private_app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "private-health-authz-test",
+                },
+                payload=_private_health_endpoint_apply_payload(mode="apply"),
+            )
+
+        self.assertEqual(edge_response.status_code, 403)
+        self.assertEqual(private_response.status_code, 403)
+        self.assertEqual(edge_response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(private_response.json()["error"]["code"], "authorization_denied")
+
+    async def test_endpoint_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                                ],
+                                "event_names": ["pull_request"],
+                                "products": ["launchplane", "repairshopr-sync"],
+                                "contexts": ["launchplane", "repairshopr-sync"],
+                                "actions": [
+                                    "edge_endpoint.apply",
+                                    "private_health_endpoint.apply",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            edge_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/edge-endpoints/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_edge_endpoint_apply_payload(mode="dry-run"),
+            )
+            private_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/private-health-endpoints/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_private_health_endpoint_apply_payload(mode="dry-run"),
+            )
+
+        self.assertEqual(edge_response.status_code, 202)
+        self.assertEqual(private_response.status_code, 202)
+        self.assertEqual(edge_response.json()["result"]["mode"], "dry-run")
+        self.assertEqual(private_response.json()["result"]["mode"], "dry-run")
+
+    async def test_openapi_includes_endpoint_apply_routes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        edge_route = openapi["paths"]["/v1/edge-endpoints/apply"]["post"]
+        private_route = openapi["paths"]["/v1/private-health-endpoints/apply"]["post"]
+        self.assertEqual(edge_route["operationId"], "apply_edge_endpoint")
+        self.assertEqual(private_route["operationId"], "apply_private_health_endpoint")
+        self.assertEqual(
+            edge_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            private_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
 
 
 class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):

@@ -1074,6 +1074,27 @@ delivered or failed attempts under
 `launchplane_preview_pr_feedback_notification_attempts`; operators can read
 those attempts with `GET /v1/previews/pr-feedback/notification-attempts`.
 
+Edge endpoint writes use `POST /v1/edge-endpoints/apply`. The request carries
+`mode: "dry-run"` or `mode: "apply"`, a complete `EdgeEndpointRecord`, a reason,
+and exact confirmation text for apply mode. The route is native FastAPI and its
+legacy WSGI fallback branch is deleted. Apply authorizes with
+`edge_endpoint.apply` against product/context `launchplane`/`launchplane`,
+requires an `Idempotency-Key` header before mutation, and continues to support
+Launchplane record stores that implement the edge endpoint read/write methods.
+Dry-runs plan the accepted response without writing the record.
+
+Private health endpoint writes use `POST /v1/private-health-endpoints/apply`.
+The request carries `mode: "dry-run"` or `mode: "apply"`, a complete
+`PrivateHealthEndpointRecord`, a reason, and exact confirmation text for apply
+mode. The route is native FastAPI and its legacy WSGI fallback branch is
+deleted. Apply authorizes with `private_health_endpoint.apply` against the
+request endpoint's product/context, requires an `Idempotency-Key` header before
+mutation, rejects public URLs through the private endpoint contract validator,
+and rejects cross-product/context/instance overwrites for an existing endpoint
+key. The accepted response preserves the legacy private-health apply envelope:
+the endpoint key/status remain in `result`, while `records` stays empty for
+compatibility with existing replays.
+
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
@@ -1452,8 +1473,10 @@ against the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
-requested scope. Their legacy WSGI branches are deleted; direct fallback calls
-fail closed while the mounted fallback remains for retained non-native routes.
+requested scope. Endpoint apply routes use native FastAPI write handlers with
+the apply contracts above. Their legacy WSGI branches are deleted; direct
+fallback calls fail closed while the mounted fallback remains for retained
+non-native routes.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.

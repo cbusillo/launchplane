@@ -70,13 +70,15 @@ Keep a compatibility surface only when it is one of these:
   remains for retained non-native routes.
 - Edge endpoint record reads use native FastAPI `GET /v1/edge-endpoints/records`
   and `GET /v1/edge-endpoints/records/{endpoint_key}` routes. Their legacy WSGI
-  read branch is deleted; edge endpoint apply remains on the retained fallback
-  until that write path has its own native replacement.
+  read branch is deleted. Edge endpoint apply uses native FastAPI
+  `POST /v1/edge-endpoints/apply`; its legacy WSGI write branch is deleted, and
+  direct fallback calls fail closed.
 - Private health endpoint record reads use native FastAPI
   `GET /v1/private-health-endpoints/records` and
   `GET /v1/private-health-endpoints/records/{endpoint_key}` routes. Their
-  legacy WSGI read branch is deleted; private health endpoint apply remains on
-  the retained fallback until that write path has its own native replacement.
+  legacy WSGI read branch is deleted. Private health endpoint apply uses native
+  FastAPI `POST /v1/private-health-endpoints/apply`; its legacy WSGI write
+  branch is deleted, and direct fallback calls fail closed.
 - Ingress canary route record reads use native FastAPI
   `GET /v1/ingress/canary-routes/records` and
   `GET /v1/ingress/canary-routes/records/{canary_key}` routes. Their legacy

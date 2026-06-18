@@ -2386,228 +2386,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(records[0].trace_id, payload["trace_id"])
 
-    def test_edge_endpoint_apply_route_stores_db_backed_upstream(self) -> None:
-        policy = _local_operator_policy(
-            actions=("edge_endpoint.apply",),
-            products=("launchplane",),
-            contexts=("launchplane",),
-        )
-        endpoint_payload = _edge_endpoint_apply_payload(mode="apply")
+    def test_endpoint_apply_legacy_wsgi_fallback_is_removed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(root / "state")
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                apply_status_code, apply_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/edge-endpoints/apply",
-                    payload=endpoint_payload,
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "edge-endpoint-apply"},
-                )
-                stored_record = record_store.read_edge_endpoint_record("cm-prod-dokploy")
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
 
-        self.assertEqual(apply_status_code, 202)
-        self.assertEqual(apply_payload["records"]["edge_endpoint_key"], "cm-prod-dokploy")
-        self.assertEqual(apply_payload["records"]["edge_endpoint_status"], "applied")
-        self.assertEqual(stored_record.server_name, "docker-cm-prod")
-        self.assertEqual(stored_record.upstream_host, "100.73.170.113")
+            responses = tuple(
+                _invoke_app(app, method=method, path=path, payload={"schema_version": 1})
+                for method in ("GET", "POST")
+                for path in (
+                    "/v1/edge-endpoints/apply",
+                    "/v1/private-health-endpoints/apply",
+                )
+            )
 
-    def test_edge_endpoint_dry_run_does_not_store_upstream(self) -> None:
-        policy = _local_operator_policy(
-            actions=("edge_endpoint.apply",),
-            products=("launchplane",),
-            contexts=("launchplane",),
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(root / "state")
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/edge-endpoints/apply",
-                    payload=_edge_endpoint_apply_payload(mode="dry-run"),
-                    authorization="Bearer local-operator-token",
-                )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["records"]["edge_endpoint_status"], "planned")
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertEqual(payload["result"]["endpoint_key"], "cm-prod-dokploy")
-        with self.assertRaises(FileNotFoundError):
-            record_store.read_edge_endpoint_record("cm-prod-dokploy")
-
-    def test_private_health_endpoint_apply_route_stores_db_backed_url(
-        self,
-    ) -> None:
-        policy = _local_operator_policy(
-            actions=("private_health_endpoint.apply",),
-            products=("repairshopr-sync",),
-            contexts=("repairshopr-sync",),
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(root / "state")
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                apply_status_code, apply_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/private-health-endpoints/apply",
-                    payload=_private_health_endpoint_apply_payload(mode="apply"),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "private-health-endpoint-apply"},
-                )
-                stored_record = record_store.read_private_health_endpoint_record(
-                    "repairshopr-sync-prod-runtime"
-                )
-
-        self.assertEqual(apply_status_code, 202)
-        self.assertEqual(
-            apply_payload["result"]["endpoint_key"],
-            "repairshopr-sync-prod-runtime",
-        )
-        self.assertEqual(
-            apply_payload["result"]["endpoint_status"],
-            "applied",
-        )
-        self.assertEqual(stored_record.product, "repairshopr-sync")
-        self.assertEqual(stored_record.url, "http://10.0.0.5:8000/health")
-
-    def test_private_health_endpoint_apply_rejects_public_url(self) -> None:
-        policy = _local_operator_policy(
-            actions=("private_health_endpoint.apply",),
-            products=("repairshopr-sync",),
-            contexts=("repairshopr-sync",),
-        )
-        payload = _private_health_endpoint_apply_payload(mode="apply")
-        endpoint = cast(dict[str, object], payload["endpoint"])
-        endpoint["url"] = "https://repairshopr-sync.example.test/health"
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(root / "state")
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                status_code, response_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/private-health-endpoints/apply",
-                    payload=payload,
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "private-health-endpoint-apply"},
-                )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(response_payload["status"], "rejected")
-
-    def test_private_health_endpoint_apply_rejects_cross_product_overwrite(
-        self,
-    ) -> None:
-        policy = _local_operator_policy(
-            actions=("private_health_endpoint.apply",),
-            products=("repairshopr-sync",),
-            contexts=("repairshopr-sync",),
-        )
-        existing_record = _private_health_endpoint_record().model_copy(
-            update={
-                "endpoint_key": "shared-runtime",
-                "product": "other-product",
-                "context": "other-product",
-                "instance": "prod",
-            }
-        )
-        payload = _private_health_endpoint_apply_payload(mode="apply")
-        endpoint = cast(dict[str, object], payload["endpoint"])
-        endpoint["endpoint_key"] = "shared-runtime"
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            record_store = FilesystemRecordStore(root / "state")
-            record_store.write_private_health_endpoint_record(existing_record)
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    local_record_store_for_tests=record_store,
-                )
-                status_code, response_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/private-health-endpoints/apply",
-                    payload=payload,
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "private-health-endpoint-conflict"},
-                )
-
-        self.assertEqual(status_code, 409)
-        self.assertEqual(response_payload["status"], "rejected")
-        self.assertEqual(
-            response_payload["error"]["code"],
-            "conflicting_private_health_endpoint",
-        )
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_ingress_canary_route_record_apply_stores_route_authority(
         self,

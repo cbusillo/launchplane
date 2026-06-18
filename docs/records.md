@@ -212,8 +212,11 @@ an ORM column/table or remains only in the evidence payload.
   authority for a lane: `endpoint_key`, `product`, `context`, `instance`,
   `url`, `status`, `updated_at`, and payload-only provenance such as
   `source_label`. The service applies them through
-  `POST /v1/private-health-endpoints/apply` with product/context-scoped
-  `private_health_endpoint.apply` authorization, and reads them through
+  native FastAPI `POST /v1/private-health-endpoints/apply` with
+  product/context-scoped `private_health_endpoint.apply` authorization, exact
+  apply-mode confirmation, retry-safe idempotency for mutations, private URL
+  validation, and cross-scope endpoint-key conflict protection. The service
+  reads them through
   `GET /v1/private-health-endpoints/records` with
   `private_health_endpoint.read`. The stored URL must be private/internal;
   product profiles reference it by `private_endpoint_key` and do not own the
@@ -268,8 +271,11 @@ an ORM column/table or remains only in the evidence payload.
   `updated_at`. `endpoint_key` and `server_name` are human-facing operator
   identity. `upstream_host` is the provider data-plane value and must be an IP
   address for NPMplus-backed routes so a bad hostname cannot become a runtime
-  Nginx startup dependency. Product repositories must not own provider topology,
-  edge IPs, NPMplus host ids, or Dokploy server routing facts.
+  Nginx startup dependency. Native FastAPI `POST /v1/edge-endpoints/apply`
+  writes this Launchplane-owned authority with `edge_endpoint.apply`, exact
+  apply-mode confirmation, and retry-safe idempotency for mutations. Product
+  repositories must not own provider topology, edge IPs, NPMplus host ids, or
+  Dokploy server routing facts.
 - Ingress canary route: modeled fields are `canary_key`, `product`, `context`,
   `domain_name`, `expected_host_id`, `edge_endpoint_key`, `certificate_id`,
   `status`, and `updated_at`. The record is Launchplane-owned route authority
