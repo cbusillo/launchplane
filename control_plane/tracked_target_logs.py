@@ -83,7 +83,10 @@ def build_tracked_target_logs_payload(
             since=normalized_since,
             search=normalized_search,
         )
-    logs = tuple(logs[-normalized_line_count:])
+    logs = tuple(
+        control_plane_dokploy.redact_dokploy_log_line(line)
+        for line in logs[-normalized_line_count:]
+    )
     return {
         "context": normalized_context,
         "instance": normalized_instance,

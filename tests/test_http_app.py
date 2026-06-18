@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from unittest.mock import patch
 
 from a2wsgi import WSGIMiddleware
+from click import ClickException
 from fastapi import FastAPI
 from jwt import InvalidTokenError
 from starlette.types import ASGIApp
@@ -82,6 +83,7 @@ from tests.test_service import (
     _identity,
     _product_profile_payload,
     _product_profile_payload_with_prod,
+    _seed_tracked_target_records,
     _sqlite_database_url,
 )
 from tests.test_service import _StubVerifier
@@ -3123,6 +3125,555 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
             openapi["components"]["schemas"]["DriverContextViewResponse"]["additionalProperties"],
             False,
         )
+
+
+class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tracked_target_logs_returns_redacted_application_logs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("contact form submitted",),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "testing",
+                    lines="2",
+                    since="5m",
+                    search="contact",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            application_id="app-123",
+            line_count=2,
+            since="5m",
+            search="contact",
+        )
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["context"], "sellyouroutboard-testing")
+        self.assertEqual(payload["instance"], "testing")
+        self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
+        self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
+        self.assertEqual(payload["request"], {"line_count": 2, "since": "5m", "search": "contact"})
+        self.assertEqual(payload["logs"]["lines"], ["contact form submitted"])
+        self.assertTrue(payload["logs"]["redacted"])
+        self.assertNotIn("secret-token", json.dumps(payload))
+
+    async def test_tracked_target_logs_redacts_raw_secret_values_from_provider_logs(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("API_TOKEN=plain-secret-value",),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "testing",
+                    lines="2",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["logs"]["lines"], ["API_TOKEN=[redacted]"])
+        self.assertNotIn("plain-secret-value", json.dumps(payload))
+
+    async def test_tracked_target_logs_normalizes_uppercase_path_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("contact form submitted",),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="SELLYOUROUTBOARD-TESTING",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "SELLYOUROUTBOARD-TESTING",
+                    "TESTING",
+                    lines="2",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "sellyouroutboard-testing")
+        self.assertEqual(payload["instance"], "testing")
+
+    async def test_tracked_target_logs_returns_redacted_compose_logs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-123",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    return_value=("booting", "ODOO_ADMIN_PASSWORD=[redacted]"),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="cm_website",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "cm_website",
+                    "testing",
+                    lines="2",
+                    since="5m",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            compose_id="compose-123",
+            app_name="cm-website-testing-iul0ql",
+            server_id="server-1",
+            line_count=2,
+            since="5m",
+            search="",
+        )
+        payload = response.json()
+        self.assertEqual(payload["target"]["target_type"], "compose")
+        self.assertEqual(payload["target"]["target_name"], "cm-website-testing")
+        self.assertEqual(payload["target"]["app_name"], "cm-website-testing-iul0ql")
+        self.assertEqual(payload["logs"]["lines"], ["booting", "ODOO_ADMIN_PASSWORD=[redacted]"])
+        self.assertNotIn("secret-token", json.dumps(payload))
+
+    async def test_tracked_target_logs_delegates_compose_log_search_to_provider(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="cm_website",
+                instance="testing",
+                target_id="compose-123",
+                target_type="compose",
+                target_name="cm-website-testing",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
+                    return_value=("website_bootstrap_applied name=Cell Mechanic",),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="cm_website",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "cm_website",
+                    "testing",
+                    lines="2",
+                    since="2h",
+                    search="website_bootstrap_applied",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            compose_id="compose-123",
+            app_name="cm-website-testing-iul0ql",
+            server_id="server-1",
+            line_count=2,
+            since="2h",
+            search="website_bootstrap_applied",
+        )
+        payload = response.json()
+        self.assertEqual(
+            payload["request"],
+            {"line_count": 2, "since": "2h", "search": "website_bootstrap_applied"},
+        )
+        self.assertEqual(payload["logs"]["lines"], ["website_bootstrap_applied name=Cell Mechanic"])
+
+    async def test_tracked_target_logs_requires_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="target_logs.read",
+                context="sellyouroutboard-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            authorization="",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_tracked_target_logs_requires_authz_action(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="driver.read",
+                context="sellyouroutboard-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_tracked_target_logs_requires_db_backed_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="target_logs.read",
+                context="sellyouroutboard-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    async def test_tracked_target_logs_returns_invalid_request_for_missing_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            with patch(
+                "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config"
+            ) as read_config_mock:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "missing",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        read_config_mock.assert_not_called()
+
+    async def test_tracked_target_logs_reports_provider_unavailable(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with patch(
+                "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                side_effect=ClickException("Dokploy credentials unavailable."),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "testing",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "target_logs_unavailable")
+
+    async def test_tracked_target_logs_validates_query_values(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="target_logs.read",
+                context="sellyouroutboard-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        line_response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            lines="0",
+        )
+        since_response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            since="yesterday",
+        )
+        max_line_response = await _get_tracked_target_logs(
+            app,
+            "sellyouroutboard-testing",
+            "testing",
+            lines="1001",
+        )
+
+        self.assertEqual(line_response.status_code, 400)
+        self.assertEqual(since_response.status_code, 400)
+        self.assertEqual(max_line_response.status_code, 400)
+        self.assertEqual(line_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(since_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(max_line_response.json()["error"]["code"], "invalid_query")
+
+    async def test_openapi_includes_tracked_target_logs_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="target_logs.read",
+                context="sellyouroutboard-testing",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/contexts/{context}/instances/{instance}/logs"]["get"]
+        self.assertEqual(route["operationId"], "read_tracked_target_logs")
+        self.assertEqual(
+            route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/TrackedTargetLogsResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(route))
+        self.assertIn("400", route["responses"])
+        self.assertIn("401", route["responses"])
+        self.assertIn("403", route["responses"])
+        self.assertIn("503", route["responses"])
+        self.assertEqual(
+            openapi["components"]["schemas"]["TrackedTargetLogsResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_tracked_target_logs_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("contact form submitted",),
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="target_logs.read",
+                        context="sellyouroutboard-testing",
+                    ),
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                legacy_app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                    control_plane_root_path=root,
+                )
+                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+                response = await _get_tracked_target_logs(
+                    app,
+                    "sellyouroutboard-testing",
+                    "testing",
+                    lines="2",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
 
 
 class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
@@ -7833,6 +8384,35 @@ async def _get_driver_instance_view(
         app,
         f"/v1/contexts/{context}/instances/{instance}/driver-view",
         headers=headers,
+    )
+
+
+async def _get_tracked_target_logs(
+    app: FastAPI,
+    context: str,
+    instance: str,
+    *,
+    lines: str = "",
+    since: str = "",
+    search: str = "",
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if lines:
+        params["lines"] = lines
+    if since:
+        params["since"] = since
+    if search:
+        params["search"] = search
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/contexts/{context}/instances/{instance}/logs{suffix}",
+        headers=request_headers,
     )
 
 

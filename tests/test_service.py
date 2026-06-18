@@ -13288,6 +13288,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(runtime_payload["error"]["code"], "not_found")
         self.assertEqual(worker_payload["error"]["code"], "not_found")
 
+    def test_target_logs_route_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
+                authorization="",
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_service_serve_rejects_missing_database_url(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -14119,305 +14140,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 500)
         self.assertEqual(payload["error"]["code"], "driver_route_not_registered")
-
-    def test_tracked_target_logs_endpoint_returns_redacted_application_logs(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="sellyouroutboard-testing",
-                instance="testing",
-                target_id="app-123",
-                target_type="application",
-                target_name="syo-testing-app",
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["target_logs.read"],
-                        }
-                    ]
-                }
-            )
-            with (
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "secret-token"),
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
-                    return_value=("contact form submitted",),
-                ) as logs_mock,
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    database_url=database_url,
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
-                    query_string="lines=2&since=5m&search=contact",
-                )
-
-        self.assertEqual(status_code, 200)
-        logs_mock.assert_called_once_with(
-            host="https://dokploy.example.com",
-            token="secret-token",
-            application_id="app-123",
-            line_count=2,
-            since="5m",
-            search="contact",
-        )
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
-        self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
-        self.assertEqual(payload["request"], {"line_count": 2, "since": "5m", "search": "contact"})
-        self.assertEqual(payload["logs"]["lines"], ["contact form submitted"])
-        self.assertNotIn("secret-token", json.dumps(payload))
-
-    def test_tracked_target_logs_endpoint_returns_redacted_compose_logs(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="cm_website",
-                instance="testing",
-                target_id="compose-123",
-                target_type="compose",
-                target_name="cm-website-testing",
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["cm_website"],
-                            "actions": ["target_logs.read"],
-                        }
-                    ]
-                }
-            )
-            with (
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "secret-token"),
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
-                    return_value=("booting", "ODOO_ADMIN_PASSWORD=[redacted]"),
-                ) as logs_mock,
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    database_url=database_url,
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/contexts/cm_website/instances/testing/logs",
-                    query_string="lines=2&since=5m",
-                )
-
-        self.assertEqual(status_code, 200)
-        logs_mock.assert_called_once_with(
-            host="https://dokploy.example.com",
-            token="secret-token",
-            compose_id="compose-123",
-            app_name="cm-website-testing-iul0ql",
-            server_id="server-1",
-            line_count=2,
-            since="5m",
-            search="",
-        )
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["target"]["target_type"], "compose")
-        self.assertEqual(payload["target"]["target_name"], "cm-website-testing")
-        self.assertEqual(payload["target"]["app_name"], "cm-website-testing-iul0ql")
-        self.assertEqual(payload["logs"]["lines"], ["booting", "ODOO_ADMIN_PASSWORD=[redacted]"])
-        self.assertNotIn("secret-token", json.dumps(payload))
-
-    def test_tracked_target_logs_endpoint_delegates_compose_log_search_to_provider(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="cm_website",
-                instance="testing",
-                target_id="compose-123",
-                target_type="compose",
-                target_name="cm-website-testing",
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["cm_website"],
-                            "actions": ["target_logs.read"],
-                        }
-                    ]
-                }
-            )
-            with (
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
-                    return_value=("https://dokploy.example.com", "secret-token"),
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"appName": "cm-website-testing-iul0ql", "serverId": "server-1"},
-                ),
-                patch(
-                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_compose_logs",
-                    return_value=("website_bootstrap_applied name=Cell Mechanic",),
-                ) as logs_mock,
-            ):
-                app = create_launchplane_service_app(
-                    state_dir=root / "state",
-                    verifier=_StubVerifier(_identity()),
-                    authz_policy=policy,
-                    control_plane_root_path=root,
-                    database_url=database_url,
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/contexts/cm_website/instances/testing/logs",
-                    query_string="lines=2&since=2h&search=website_bootstrap_applied",
-                )
-
-        self.assertEqual(status_code, 200)
-        logs_mock.assert_called_once_with(
-            host="https://dokploy.example.com",
-            token="secret-token",
-            compose_id="compose-123",
-            app_name="cm-website-testing-iul0ql",
-            server_id="server-1",
-            line_count=2,
-            since="2h",
-            search="website_bootstrap_applied",
-        )
-        self.assertEqual(
-            payload["request"],
-            {"line_count": 2, "since": "2h", "search": "website_bootstrap_applied"},
-        )
-        self.assertEqual(payload["logs"]["lines"], ["website_bootstrap_applied name=Cell Mechanic"])
-
-    def test_tracked_target_logs_endpoint_requires_authz_action(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="sellyouroutboard-testing",
-                instance="testing",
-                target_id="app-123",
-                target_type="application",
-                target_name="syo-testing-app",
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["driver.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_tracked_target_logs_endpoint_requires_db_backed_storage(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["target_logs.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
-            )
-
-        self.assertEqual(status_code, 503)
-        self.assertEqual(payload["error"]["code"], "database_required")
 
     def test_product_profile_write_endpoint_persists_authorized_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -657,7 +657,7 @@ Current derived-state behavior:
   includes route/target/app/server metadata, accepts optional `--since` and
   `--search`, and redacts likely secret values from returned log lines.
 - `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
-  same tracked-target log reader through the authenticated service API using
+  same tracked-target log reader through a native FastAPI service route using
   action `target_logs.read`.
 - The manual Tracked Target Logs workflow calls that service route with GitHub
   OIDC and uploads the redacted JSON result, so operators can inspect compose
