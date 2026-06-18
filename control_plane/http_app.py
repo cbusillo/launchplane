@@ -14,6 +14,11 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy_target_inspect import (
+    DokployTargetInspectRequest,
+    DokployTargetInspectStore,
+    inspect_dokploy_target,
+)
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
@@ -364,6 +369,14 @@ class DriverContextViewResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     view: DriverContextView
+
+
+class DokployTargetInspectResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    inspect: dict[str, object]
 
 
 class TrackedTargetLogTargetResponse(BaseModel):
@@ -1318,6 +1331,22 @@ def require_tracked_target_logs_store(
             f"Tracked target logs require DB-backed Launchplane storage: {missing_summary}"
         )
     return cast(control_plane_tracked_target_logs.TrackedTargetLogsStore, record_store)
+
+
+def require_dokploy_target_inspect_store(record_store: object) -> DokployTargetInspectStore:
+    required_methods = (
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+        "read_provider_target_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods or not isinstance(record_store, PostgresRecordStore):
+        raise TypeError("Dokploy target inspect requires Launchplane database storage.")
+    return cast(DokployTargetInspectStore, record_store)
 
 
 def require_edge_endpoint_read_store(record_store: object) -> _EdgeEndpointReadStore:
@@ -2901,6 +2930,73 @@ def create_launchplane_fastapi_app(
             instance_name=instance,
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
+
+    def read_dokploy_target_inspect(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+        target_type: Annotated[str, Query()] = "",
+        target_id: Annotated[str, Query()] = "",
+    ) -> DokployTargetInspectResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="dokploy_target.inspect",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot inspect Launchplane Dokploy targets.",
+            )
+        try:
+            inspect_store = require_dokploy_target_inspect_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=str(error),
+            ) from error
+        try:
+            inspect_request = DokployTargetInspectRequest.model_validate(
+                {
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "context": context,
+                    "instance": instance,
+                    "target_type": target_type,
+                    "target_id": target_id,
+                }
+            )
+            host, token = control_plane_dokploy.read_dokploy_config(
+                control_plane_root=resolved_control_plane_root,
+                database_url=database_url,
+            )
+            inspect_result = inspect_dokploy_target(
+                record_store=inspect_store,
+                host=host,
+                token=token,
+                request=inspect_request,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_dokploy_target_inspect",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return DokployTargetInspectResponse(trace_id=trace_id, inspect=inspect_result)
 
     def read_tracked_target_logs(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -4823,6 +4919,22 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/dokploy-targets/inspect",
+        read_dokploy_target_inspect,
+        methods=["GET"],
+        response_model=DokployTargetInspectResponse,
+        operation_id="read_dokploy_target_inspect",
+        summary="Read redacted Dokploy target identity",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 
