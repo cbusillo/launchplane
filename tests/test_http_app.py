@@ -5641,6 +5641,132 @@ class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
+class FastApiDokployTargetSetupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_openapi_includes_dokploy_target_setup_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="dokploy_target.setup",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        setup_route = openapi["paths"]["/v1/dokploy-targets/setup"]["post"]
+        self.assertEqual(setup_route["operationId"], "setup_dokploy_target")
+        self.assertEqual(
+            setup_route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DokployTargetSetupEnvelope",
+        )
+        self.assertEqual(
+            setup_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(setup_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["DokployTargetSetupEnvelope"]["additionalProperties"],
+            False,
+        )
+
+    async def test_dokploy_target_setup_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="dokploy_target.setup",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/dokploy-targets/setup",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "operation": "create-compose",
+                    "product": "launchplane",
+                    "context": "cm_website",
+                    "instance": "testing",
+                    "target_name": "cm-website-testing",
+                    "project_name": "Odoo",
+                    "environment_name": "production",
+                    "server_id": "server-123",
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    async def test_fastapi_dokploy_target_setup_precedes_legacy_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            with patch(
+                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="dokploy_target.setup",
+                        context="launchplane",
+                    ),
+                    database_url=database_url,
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                legacy_app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                    control_plane_root_path=root,
+                )
+                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/dokploy-targets/setup",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "create-compose",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "target_name": "cm-website-testing",
+                        "project_name": "Odoo",
+                        "environment_name": "production",
+                        "server_id": "server-123",
+                        "domains": ["cm-website-testing.example.invalid"],
+                        "runtime_port": 8069,
+                        "deploy_timeout_seconds": 900,
+                    },
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+
+
 class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_tracked_target_logs_returns_redacted_application_logs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
