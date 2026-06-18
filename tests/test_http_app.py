@@ -25,7 +25,11 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.every_code_notifications import EveryCodeNotificationAttemptRecord
+from control_plane.contracts.every_code_notifications import (
+    EveryCodeNotificationAttemptRecord,
+    EveryCodeNotificationDestination,
+    EveryCodeNotificationPolicyRecord,
+)
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
@@ -52,9 +56,15 @@ from control_plane.contracts.preview_generation_record import (
 )
 from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationAttemptRecord,
+    PreviewPrFeedbackNotificationDestination,
+    PreviewPrFeedbackNotificationPolicyRecord,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressIncidentRecord,
+    PublicIngressNotificationDestination,
+    PublicIngressNotificationPolicyRecord,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -702,6 +712,986 @@ class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.read_idempotency_calls, 2)
         self.assertEqual(store.write_deployment_calls, 1)
         self.assertEqual(store.write_environment_inventory_calls, 1)
+
+
+class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_ingress_notification_policy_apply_writes_db_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                policy_record = _public_ingress_notification_policy_record()
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "public-ingress-notification-policy-test",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                )
+                records = store.list_public_ingress_notification_policy_records(
+                    product="launchplane", context_name="launchplane", status="enabled"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(
+            payload["records"],
+            {"public_ingress_notification_policy_id": policy_record.policy_id},
+        )
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertTrue(payload["result"]["changed"])
+        self.assertEqual(records, (policy_record,))
+
+    async def test_public_ingress_notification_policy_dry_run_does_not_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "policy": _public_ingress_notification_policy_record(
+                            policy_id="public-ingress-notification-launchplane-dry-run"
+                        ).model_dump(mode="json"),
+                    },
+                )
+                records = store.list_public_ingress_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertFalse(payload["result"]["changed"])
+        self.assertEqual(records, ())
+
+    async def test_public_ingress_notification_policy_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _public_ingress_notification_policy_record().model_dump(mode="json"),
+                }
+
+                first_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "public-ingress-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+                second_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "public-ingress-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    async def test_public_ingress_notification_policy_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                first_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _public_ingress_notification_policy_record().model_dump(mode="json"),
+                }
+                conflicting_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _public_ingress_notification_policy_record(
+                        policy_id="public-ingress-notification-launchplane-conflict"
+                    ).model_dump(mode="json"),
+                }
+
+                await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "public-ingress-notification-policy-conflict",
+                    },
+                    payload=first_payload,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "public-ingress-notification-policy-conflict",
+                    },
+                    payload=conflicting_payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_every_code_notification_policy_apply_writes_db_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="every_code_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                policy_record = _every_code_notification_policy_record()
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "every-code-notification-policy-test",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                )
+                records = store.list_every_code_notification_policy_records(
+                    repository="cbusillo/code", status="enabled"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(
+            payload["records"],
+            {"every_code_notification_policy_id": policy_record.policy_id},
+        )
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(records, (policy_record,))
+
+    async def test_every_code_notification_policy_dry_run_does_not_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="every_code_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "policy": _every_code_notification_policy_record(
+                            policy_id="every-code-notification-launchplane-dry-run"
+                        ).model_dump(mode="json"),
+                    },
+                )
+                records = store.list_every_code_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertFalse(payload["result"]["changed"])
+        self.assertEqual(records, ())
+
+    async def test_every_code_notification_policy_replays_idempotent_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="every_code_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _every_code_notification_policy_record().model_dump(mode="json"),
+                }
+
+                first_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "every-code-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+                second_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "every-code-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    async def test_every_code_notification_policy_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="every_code_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                first_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _every_code_notification_policy_record().model_dump(mode="json"),
+                }
+                conflicting_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _every_code_notification_policy_record(
+                        policy_id="every-code-notification-launchplane-conflict"
+                    ).model_dump(mode="json"),
+                }
+
+                await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "every-code-notification-policy-conflict",
+                    },
+                    payload=first_payload,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "every-code-notification-policy-conflict",
+                    },
+                    payload=conflicting_payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_public_ingress_notification_policy_rejects_mismatched_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product="other-product",
+                        context="other-context",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": _public_ingress_notification_policy_record().model_dump(
+                            mode="json"
+                        ),
+                    },
+                )
+                records = store.list_public_ingress_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_every_code_notification_policy_rejects_mismatched_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="every_code_notification_policy.apply",
+                        product="other-product",
+                        context="other-context",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/every-code/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": _every_code_notification_policy_record().model_dump(mode="json"),
+                    },
+                )
+                records = store.list_every_code_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(records, ())
+
+    async def test_preview_pr_feedback_notification_policy_apply_writes_db_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="sellyouroutboard",
+                        context="sellyouroutboard",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                policy_record = _preview_pr_feedback_notification_policy_record()
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-policy-test",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                )
+                records = store.list_preview_pr_feedback_notification_policy_records(
+                    product="sellyouroutboard",
+                    context_name="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                    status="enabled",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(
+            payload["records"],
+            {"preview_pr_feedback_notification_policy_id": policy_record.policy_id},
+        )
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(records, (policy_record,))
+
+    async def test_preview_pr_feedback_notification_policy_replays_idempotent_response(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="sellyouroutboard",
+                        context="sellyouroutboard",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _preview_pr_feedback_notification_policy_record().model_dump(
+                        mode="json"
+                    ),
+                }
+
+                first_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+                second_response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-policy-replay",
+                    },
+                    payload=payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertEqual(second_payload["result"], first_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    async def test_preview_pr_feedback_notification_policy_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="sellyouroutboard",
+                        context="sellyouroutboard",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                first_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _preview_pr_feedback_notification_policy_record().model_dump(
+                        mode="json"
+                    ),
+                }
+                conflicting_payload = {
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "policy": _preview_pr_feedback_notification_policy_record(
+                        policy_id="preview-pr-feedback-notification-syo-conflict"
+                    ).model_dump(mode="json"),
+                }
+
+                await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
+                    },
+                    payload=first_payload,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-policy-conflict",
+                    },
+                    payload=conflicting_payload,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_preview_pr_feedback_notification_policy_dry_run_does_not_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="sellyouroutboard",
+                        context="sellyouroutboard",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "policy": _preview_pr_feedback_notification_policy_record(
+                            policy_id="preview-pr-feedback-notification-syo-dry-run"
+                        ).model_dump(mode="json"),
+                    },
+                )
+                records = store.list_preview_pr_feedback_notification_policy_records(
+                    product="sellyouroutboard",
+                    context_name="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertFalse(payload["result"]["changed"])
+        self.assertEqual(records, ())
+
+    async def test_preview_pr_feedback_notification_policy_rejects_wildcard_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-global",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": _preview_pr_feedback_notification_policy_record(
+                            policy_id="preview-pr-feedback-notification-global",
+                            product="",
+                            context="",
+                            repository="",
+                        ).model_dump(mode="json"),
+                    },
+                )
+                records = store.list_preview_pr_feedback_notification_policy_records()
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_policy_scope")
+        self.assertEqual(records, ())
+
+    async def test_preview_pr_feedback_notification_policy_rejects_mismatched_scope(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="preview_pr_feedback_notification_policy.apply",
+                        product="launchplane",
+                        context="launchplane",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "preview-pr-feedback-notification-denied",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "policy": _preview_pr_feedback_notification_policy_record().model_dump(
+                            mode="json"
+                        ),
+                    },
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_notification_policy_apply_local_operator_requires_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_local_operator_policy(
+                        actions=(
+                            "public_ingress_notification_policy.apply",
+                            "every_code_notification_policy.apply",
+                            "preview_pr_feedback_notification_policy.apply",
+                        ),
+                        products=("launchplane", "sellyouroutboard"),
+                        contexts=("launchplane", "sellyouroutboard"),
+                        token_label="local-owner-read",
+                    ),
+                    record_store_factory=lambda: store,
+                    bearer_identity_config=_local_operator_bearer_config(),
+                )
+                cases = (
+                    (
+                        "/v1/public-ingress/notification-policies/apply",
+                        _public_ingress_notification_policy_record(),
+                    ),
+                    (
+                        "/v1/every-code/notification-policies/apply",
+                        _every_code_notification_policy_record(),
+                    ),
+                    (
+                        "/v1/previews/pr-feedback/notification-policies/apply",
+                        _preview_pr_feedback_notification_policy_record(),
+                    ),
+                )
+
+                responses = []
+                for path, policy_record in cases:
+                    responses.append(
+                        await _asgi_request(
+                            app,
+                            "POST",
+                            path,
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload={
+                                "schema_version": 1,
+                                "mode": "apply",
+                                "policy": policy_record.model_dump(mode="json"),
+                            },
+                        )
+                    )
+            finally:
+                store.close()
+
+        for response in responses:
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["error"]["code"], "reason_required")
+
+    async def test_notification_policy_apply_accepts_local_operator_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_local_operator_policy(
+                        actions=("public_ingress_notification_policy.apply",),
+                        products=("launchplane",),
+                        contexts=("launchplane",),
+                        token_label="local-owner-read",
+                    ),
+                    record_store_factory=lambda: store,
+                    bearer_identity_config=_local_operator_bearer_config(),
+                )
+                policy_record = _public_ingress_notification_policy_record(
+                    policy_id="public-ingress-notification-local-operator"
+                )
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "public-ingress-local-operator-apply",
+                    },
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "reason": "Enable local operator ingress notifications.",
+                        "policy": policy_record.model_dump(mode="json"),
+                    },
+                )
+                records = store.list_public_ingress_notification_policy_records(
+                    product="launchplane", context_name="launchplane", status="enabled"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(records, (policy_record,))
+
+    async def test_notification_policy_apply_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="public_ingress_notification_policy.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/public-ingress/notification-policies/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "policy": _public_ingress_notification_policy_record().model_dump(mode="json"),
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+
+    async def test_notification_policy_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                policy = _notification_policy_apply_policy(
+                    action="public_ingress_notification_policy.apply",
+                    product="launchplane",
+                    context="launchplane",
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                legacy_app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                    local_record_store_for_tests=store,
+                )
+                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={"Authorization": "Bearer valid-token"},
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "policy": _public_ingress_notification_policy_record().model_dump(
+                            mode="json"
+                        ),
+                    },
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "dry-run")
+
+    async def test_openapi_includes_notification_policy_apply_routes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        paths = response.json()["paths"]
+        self.assertIn("/v1/public-ingress/notification-policies/apply", paths)
+        self.assertIn("/v1/every-code/notification-policies/apply", paths)
+        self.assertIn("/v1/previews/pr-feedback/notification-policies/apply", paths)
 
 
 class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
@@ -10795,6 +11785,94 @@ def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
             "every_code_pr_feedback.read",
             "every_code_notification_attempt.read",
             "preview_pr_feedback_notification_attempt.read",
+        ),
+    )
+
+
+def _notification_policy_apply_policy(
+    *, action: str, product: str, context: str
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": [product],
+                    "contexts": [context],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
+def _public_ingress_notification_policy_record(
+    *, policy_id: str = "public-ingress-notification-launchplane"
+) -> PublicIngressNotificationPolicyRecord:
+    return PublicIngressNotificationPolicyRecord(
+        policy_id=policy_id,
+        product="launchplane",
+        context="launchplane",
+        status="enabled",
+        created_at="2026-05-29T12:00:00Z",
+        updated_at="2026-05-29T12:00:00Z",
+        source="test",
+        destinations=(
+            PublicIngressNotificationDestination(
+                destination_id="discord",
+                kind="discord",
+                discord_webhook_secret="secret-discord-webhook",
+            ),
+        ),
+    )
+
+
+def _every_code_notification_policy_record(
+    *, policy_id: str = "every-code-notification-launchplane"
+) -> EveryCodeNotificationPolicyRecord:
+    return EveryCodeNotificationPolicyRecord(
+        policy_id=policy_id,
+        repository="cbusillo/code",
+        status="enabled",
+        created_at="2026-06-14T18:00:00Z",
+        updated_at="2026-06-14T18:00:00Z",
+        source="test",
+        destinations=(
+            EveryCodeNotificationDestination(
+                destination_id="discord",
+                kind="discord",
+                discord_webhook_secret="secret-discord-webhook",
+            ),
+        ),
+    )
+
+
+def _preview_pr_feedback_notification_policy_record(
+    *,
+    policy_id: str = "preview-pr-feedback-notification-syo",
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard",
+    repository: str = "cbusillo/sellyouroutboard",
+) -> PreviewPrFeedbackNotificationPolicyRecord:
+    return PreviewPrFeedbackNotificationPolicyRecord(
+        policy_id=policy_id,
+        product=product,
+        context=context,
+        repository=repository,
+        status="enabled",
+        created_at="2026-06-15T17:10:00Z",
+        updated_at="2026-06-15T17:10:00Z",
+        source="test",
+        destinations=(
+            PreviewPrFeedbackNotificationDestination(
+                destination_id="discord",
+                kind="discord",
+                discord_webhook_secret="secret-discord-webhook",
+            ),
         ),
     )
 

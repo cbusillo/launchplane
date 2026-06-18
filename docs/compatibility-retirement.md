@@ -132,6 +132,12 @@ Keep a compatibility surface only when it is one of these:
   local checkout `public-ingress-monitor run-once` CLI mutation command are
   deleted; the route has no `GET` API, manual reruns go through the GitHub
   workflow, and direct WSGI fallback calls fail closed.
+- Public ingress, Every Code, and preview PR feedback notification policy apply
+  use native FastAPI routes for bearer-token callers and preserve DB-backed
+  storage enforcement, local operator reason requirements, explicit preview
+  scope validation, and optional `Idempotency-Key` replay/conflict behavior.
+  Their legacy WSGI write branches are deleted, and direct WSGI fallback calls
+  to these policy-apply paths fail closed.
 - Live target runtime apply uses `POST /v1/live-target-runtime/apply` and the
   `live-target-runtime.yml` workflow for shared and production live changes.
   The local checkout `environments apply-live-target` mutation command is

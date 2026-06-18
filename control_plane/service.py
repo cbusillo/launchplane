@@ -173,9 +173,6 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
     ReleaseStatus,
 )
-from control_plane.contracts.public_ingress_monitoring import (
-    PublicIngressNotificationPolicyRecord,
-)
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
@@ -823,52 +820,6 @@ _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    policy: PublicIngressNotificationPolicyRecord
-    reason: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
-        self.reason = self.reason.strip()
-        if self.policy.product and self.policy.product != "launchplane":
-            raise ValueError(
-                "public ingress notification policy apply requires product 'launchplane'"
-            )
-        return self
-
-
-class EveryCodeNotificationPolicyApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    policy: EveryCodeNotificationPolicyRecord
-    reason: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "EveryCodeNotificationPolicyApplyEnvelope":
-        self.reason = self.reason.strip()
-        return self
-
-
-class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    policy: PreviewPrFeedbackNotificationPolicyRecord
-    reason: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PreviewPrFeedbackNotificationPolicyApplyEnvelope":
-        self.reason = self.reason.strip()
-        return self
 
 
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
@@ -4485,9 +4436,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
         "/v1/service/odoo-workers/reconcile",
-        "/v1/public-ingress/notification-policies/apply",
-        "/v1/every-code/notification-policies/apply",
-        "/v1/previews/pr-feedback/notification-policies/apply",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -6611,9 +6559,6 @@ def _accepted_payload(
         "runner_host_hygiene_audit_record_key",
         "runner_lane_registration_audit_record_key",
         "generic_web_rollback_plan_id",
-        "public_ingress_notification_policy_id",
-        "every_code_notification_policy_id",
-        "preview_pr_feedback_notification_policy_id",
         "ingress_route_audit_record_id",
         "edge_endpoint_key",
         "ingress_canary_route_key",
@@ -7116,55 +7061,6 @@ def _local_operator_product_config_dry_run_exists(
     return stored_record.request_fingerprint == _request_fingerprint(
         _local_operator_product_config_continuity_payload(payload=request_payload)
     )
-
-
-def _public_ingress_notification_policy_summary(
-    policy: PublicIngressNotificationPolicyRecord,
-) -> dict[str, object]:
-    return {
-        "policy_id": policy.policy_id,
-        "product": policy.product,
-        "context": policy.context,
-        "instance": policy.instance,
-        "status": policy.status,
-        "destination_count": len(policy.destinations),
-        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
-        "created_at": policy.created_at,
-        "updated_at": policy.updated_at,
-        "source": policy.source,
-    }
-
-
-def _every_code_notification_policy_summary(
-    policy: EveryCodeNotificationPolicyRecord,
-) -> dict[str, object]:
-    return {
-        "policy_id": policy.policy_id,
-        "repository": policy.repository,
-        "status": policy.status,
-        "destination_count": len(policy.destinations),
-        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
-        "created_at": policy.created_at,
-        "updated_at": policy.updated_at,
-        "source": policy.source,
-    }
-
-
-def _preview_pr_feedback_notification_policy_summary(
-    policy: PreviewPrFeedbackNotificationPolicyRecord,
-) -> dict[str, object]:
-    return {
-        "policy_id": policy.policy_id,
-        "product": policy.product,
-        "context": policy.context,
-        "repository": policy.repository,
-        "status": policy.status,
-        "destination_count": len(policy.destinations),
-        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
-        "created_at": policy.created_at,
-        "updated_at": policy.updated_at,
-        "source": policy.source,
-    }
 
 
 def _deliver_preview_pr_feedback_notifications(
@@ -11300,278 +11196,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/public-ingress/notification-policies/apply":
-                policy_request = PublicIngressNotificationPolicyApplyEnvelope.model_validate(
-                    payload
-                )
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and not policy_request.reason
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "reason_required",
-                                "message": (
-                                    "Local operator public ingress notification policy apply"
-                                    " requires a reason."
-                                ),
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="public_ingress_notification_policy.apply",
-                    product=policy_request.policy.product or "launchplane",
-                    context=policy_request.policy.context or _LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot apply public ingress notification policy."
-                                ),
-                            },
-                        },
-                    )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Public ingress notification policy apply requires"
-                                    " DB-backed Launchplane storage."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if policy_request.mode == "apply":
-                    record_store.write_public_ingress_notification_policy_record(
-                        policy_request.policy
-                    )
-                summary = _public_ingress_notification_policy_summary(policy_request.policy)
-                result = {
-                    "public_ingress_notification_policy_id": policy_request.policy.policy_id,
-                }
-                driver_result = {
-                    "mode": policy_request.mode,
-                    "changed": policy_request.mode == "apply",
-                    "policy": summary,
-                }
-            elif path == "/v1/every-code/notification-policies/apply":
-                every_code_policy_request = EveryCodeNotificationPolicyApplyEnvelope.model_validate(
-                    payload
-                )
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and not every_code_policy_request.reason
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "reason_required",
-                                "message": (
-                                    "Local operator Every Code notification policy apply"
-                                    " requires a reason."
-                                ),
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_notification_policy.apply",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot apply Every Code notification policy."
-                                ),
-                            },
-                        },
-                    )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Every Code notification policy apply requires"
-                                    " DB-backed Launchplane storage."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if every_code_policy_request.mode == "apply":
-                    record_store.write_every_code_notification_policy_record(
-                        every_code_policy_request.policy
-                    )
-                summary = _every_code_notification_policy_summary(every_code_policy_request.policy)
-                result = {
-                    "every_code_notification_policy_id": every_code_policy_request.policy.policy_id,
-                }
-                driver_result = {
-                    "mode": every_code_policy_request.mode,
-                    "changed": every_code_policy_request.mode == "apply",
-                    "policy": summary,
-                }
-            elif path == "/v1/previews/pr-feedback/notification-policies/apply":
-                notification_policy_request = (
-                    PreviewPrFeedbackNotificationPolicyApplyEnvelope.model_validate(payload)
-                )
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and not notification_policy_request.reason
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "reason_required",
-                                "message": (
-                                    "Local operator preview PR feedback notification policy"
-                                    " apply requires a reason."
-                                ),
-                            },
-                        },
-                    )
-                if (
-                    not notification_policy_request.policy.product
-                    or not notification_policy_request.policy.context
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_policy_scope",
-                                "message": (
-                                    "Preview PR feedback notification policy apply requires"
-                                    " explicit product and context."
-                                ),
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_pr_feedback_notification_policy.apply",
-                    product=notification_policy_request.policy.product,
-                    context=notification_policy_request.policy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot apply preview PR feedback notification policy."
-                                ),
-                            },
-                        },
-                    )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Preview PR feedback notification policy apply requires"
-                                    " DB-backed Launchplane storage."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if notification_policy_request.mode == "apply":
-                    record_store.write_preview_pr_feedback_notification_policy_record(
-                        notification_policy_request.policy
-                    )
-                summary = _preview_pr_feedback_notification_policy_summary(
-                    notification_policy_request.policy
-                )
-                result = {
-                    "preview_pr_feedback_notification_policy_id": (
-                        notification_policy_request.policy.policy_id
-                    ),
-                }
-                driver_result = {
-                    "mode": notification_policy_request.mode,
-                    "changed": notification_policy_request.mode == "apply",
-                    "policy": summary,
-                }
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(
                     identity=identity,
