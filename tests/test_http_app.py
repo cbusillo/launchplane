@@ -137,6 +137,7 @@ from tests.test_service import (
     _seed_merge_train_policy,
     _seed_tracked_target_records,
     _sqlite_database_url,
+    _write_runtime_key_safety_policy,
 )
 from tests.test_service import _StubVerifier
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -1703,6 +1704,272 @@ class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/v1/public-ingress/notification-policies/apply", paths)
         self.assertIn("/v1/every-code/notification-policies/apply", paths)
         self.assertIn("/v1/previews/pr-feedback/notification-policies/apply", paths)
+
+
+class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_key_safety_policy_apply_reconciles_rules_and_replays(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                _write_runtime_key_safety_policy(database_url=database_url)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_runtime_key_safety_policy_apply_policy(
+                        action="runtime_key_safety.write"
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                payload = _runtime_key_safety_policy_apply_payload()
+
+                first_response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    payload,
+                    idempotency_key="runtime-key-safety-policy:test",
+                )
+                active_policy = store.list_runtime_key_safety_policy_records(
+                    status="active", limit=1
+                )[0]
+                replay_response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    payload,
+                    idempotency_key="runtime-key-safety-policy:test",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        first_payload = first_response.json()
+        self.assertEqual(first_payload["status"], "accepted")
+        self.assertEqual(
+            set(first_payload["records"]),
+            {"runtime_key_safety_policy_record_id"},
+        )
+        self.assertEqual(
+            first_payload["records"]["runtime_key_safety_policy_record_id"],
+            active_policy.record_id,
+        )
+        self.assertEqual(first_payload["result"]["changed"], True)
+        self.assertEqual(
+            first_payload["result"]["runtime_key_safety_policy"]["binding_keys"],
+            ["RESEND_API_KEY", "SMTP_PASSWORD"],
+        )
+        self.assertEqual(
+            [rule.binding_key for rule in active_policy.rules],
+            ["RESEND_API_KEY", "SMTP_PASSWORD"],
+        )
+        self.assertEqual(replay_response.status_code, 202)
+        replay_payload = replay_response.json()
+        self.assertEqual(replay_payload["records"], first_payload["records"])
+        self.assertEqual(replay_payload["result"], first_payload["result"])
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], first_payload["trace_id"])
+
+    async def test_runtime_key_safety_policy_apply_rejects_conflicting_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_runtime_key_safety_policy_apply_policy(
+                        action="runtime_key_safety.write"
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                first_payload = _runtime_key_safety_policy_apply_payload()
+                conflicting_payload = _runtime_key_safety_policy_apply_payload()
+                conflicting_rules = cast(list[dict[str, object]], conflicting_payload["rules"])
+                conflicting_rules[1] = {
+                    "binding_key": "MAILGUN_API_KEY",
+                    "secret_class": "prod_only",
+                    "allowed_contexts": ["sellyouroutboard"],
+                    "allowed_instances": ["prod"],
+                }
+
+                first_response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    first_payload,
+                    idempotency_key="runtime-key-safety-policy:conflict",
+                )
+                second_response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    conflicting_payload,
+                    idempotency_key="runtime-key-safety-policy:conflict",
+                )
+                active_policy = store.list_runtime_key_safety_policy_records(
+                    status="active", limit=1
+                )[0]
+            finally:
+                store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        payload = second_response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+        self.assertEqual(
+            [rule.binding_key for rule in active_policy.rules],
+            ["RESEND_API_KEY", "SMTP_PASSWORD"],
+        )
+
+    async def test_runtime_key_safety_policy_apply_rejects_without_permission(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_runtime_key_safety_policy_apply_policy(
+                        action="product_profile.read"
+                    ),
+                    record_store_factory=lambda: store,
+                )
+
+                response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    _runtime_key_safety_policy_apply_payload(),
+                    idempotency_key="runtime-key-safety-policy:unauthorized",
+                )
+                active_records = store.list_runtime_key_safety_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(active_records, ())
+
+    async def test_runtime_key_safety_policy_apply_rejects_human_session_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            oauth_config = _github_oauth_config()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=InMemoryHumanSessionStore(),
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            try:
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=_github_human_runtime_key_safety_policy_apply_policy(),
+                    record_store_factory=lambda: store,
+                    human_session_manager=session_manager,
+                )
+
+                response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    _runtime_key_safety_policy_apply_payload(),
+                    authorization="",
+                    headers={"Cookie": session_manager.session_cookie_header(human_session)},
+                )
+                active_records = store.list_runtime_key_safety_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(active_records, ())
+
+    async def test_runtime_key_safety_policy_apply_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_runtime_key_safety_policy_apply_policy(
+                    action="runtime_key_safety.write"
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_runtime_key_safety_policy_apply(
+                app,
+                _runtime_key_safety_policy_apply_payload(),
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    async def test_runtime_key_safety_policy_apply_native_route_precedes_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                policy = _runtime_key_safety_policy_apply_policy(action="runtime_key_safety.write")
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    record_store_factory=lambda: store,
+                )
+                legacy_app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                    local_record_store_for_tests=store,
+                )
+                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+                response = await _post_runtime_key_safety_policy_apply(
+                    app,
+                    _runtime_key_safety_policy_apply_payload(),
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["status"], "accepted")
+
+    async def test_openapi_includes_runtime_key_safety_policy_apply_route(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/runtime-key-safety/policies/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_runtime_key_safety_policy")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/RuntimeKeySafetyPolicyApplyEnvelope",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
 
 
 class FastApiBackupGateEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
@@ -13443,6 +13710,63 @@ def _notification_policy_apply_policy(
     )
 
 
+def _runtime_key_safety_policy_apply_policy(*, action: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_runtime_key_safety_policy_apply_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["runtime_key_safety.write"],
+                }
+            ]
+        }
+    )
+
+
+def _runtime_key_safety_policy_apply_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": "launchplane",
+        "source_label": "test:runtime-key-safety-policy",
+        "rules": [
+            {
+                "binding_key": "SMTP_PASSWORD",
+                "secret_class": "prod_only",
+                "allowed_contexts": ["sellyouroutboard"],
+                "allowed_instances": ["prod"],
+            },
+            {
+                "binding_key": "RESEND_API_KEY",
+                "secret_class": "prod_only",
+                "allowed_contexts": ["sellyouroutboard"],
+                "allowed_instances": ["prod"],
+            },
+        ],
+    }
+
+
 def _github_human_ingress_route_policy(
     *, action: str, product: str, context: str
 ) -> LaunchplaneAuthzPolicy:
@@ -14760,6 +15084,28 @@ async def _post_promotion_evidence(
         app,
         "POST",
         "/v1/evidence/promotions",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_runtime_key_safety_policy_apply(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/runtime-key-safety/policies/apply",
         headers=request_headers,
         payload=payload,
     )

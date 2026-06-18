@@ -1,22 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_key_safety_service as control_plane_runtime_key_safety_service
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
-from control_plane.runtime_key_safety_service import RuntimeKeySafetyPolicyStore
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LaunchplaneIdentity
-
-
-JsonResponse = Callable[..., list[bytes]]
-RecordSlugProvider = Callable[[str], str]
-StartResponse = Callable[[str, list[tuple[str, str]]], None]
-TimestampProvider = Callable[[], str]
-
-LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+from control_plane.runtime_key_safety_service import (
+    RecordSlugProvider,
+    RuntimeKeySafetyPolicyStore,
+    TimestampProvider,
+)
 
 
 class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
@@ -42,36 +36,6 @@ class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
 class RuntimeKeySafetyPolicyRouteResult:
     result: dict[str, object]
     driver_result: dict[str, object]
-
-
-def validate_runtime_key_safety_policy_request(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    payload: dict[str, object],
-    trace_id: str,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> tuple[RuntimeKeySafetyPolicyApplyEnvelope | None, list[bytes] | None]:
-    request = RuntimeKeySafetyPolicyApplyEnvelope.model_validate(payload)
-    if _runtime_key_safety_policy_authorized(
-        authz_policy=authz_policy,
-        identity=identity,
-        product=request.product,
-    ):
-        return request, None
-    return None, json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": "Workflow cannot write Launchplane runtime key-safety policy records.",
-            },
-        },
-    )
 
 
 def apply_runtime_key_safety_policy_route(
@@ -101,38 +65,4 @@ def apply_runtime_key_safety_policy_route(
             ),
             "changed": changed,
         },
-    )
-
-
-def runtime_key_safety_database_required_response(
-    *,
-    trace_id: str,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> list[bytes]:
-    return json_response(
-        start_response=start_response,
-        status_code=503,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "database_required",
-                "message": "Runtime key-safety policy writes require Launchplane database storage.",
-            },
-        },
-    )
-
-
-def _runtime_key_safety_policy_authorized(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    product: str,
-) -> bool:
-    return authz_policy.allows(
-        identity=identity,
-        action="runtime_key_safety.write",
-        product=product,
-        context=LAUNCHPLANE_SERVICE_CONTEXT,
     )
