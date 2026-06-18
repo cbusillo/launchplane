@@ -90,6 +90,12 @@ VeriReel product paths:
   - `POST /v1/ingress/canary-routes/apply`, requiring `ingress_route.apply` for
     the requested product/context, resolving the stored canary route and edge
     endpoint before provider apply, and requiring an `Idempotency-Key`
+- native FastAPI ingress route apply write:
+  - `POST /v1/drivers/ingress/route-apply`, requiring `ingress_route.plan` for
+    `dry-run` and `ingress_route.apply` for `apply`, resolving optional edge
+    endpoint records before provider execution, writing ingress route audit
+    records, using the bearer/OIDC write identity path, and requiring an
+    `Idempotency-Key` only for `apply`
 - native FastAPI Dokploy target inspect read:
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context and returning redacted provider identity
@@ -1481,10 +1487,10 @@ against the requested query product/context before storage access, require those
 scope query parameters for list and single-record reads, preserve optional
 `status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
 list filters, and return `404 not_found` when a record exists outside the
-requested scope. Endpoint apply routes use native FastAPI write handlers with
-the apply contracts above. Their legacy WSGI branches are deleted; direct
-fallback calls fail closed while the mounted fallback remains for retained
-non-native routes.
+requested scope. Endpoint apply and ingress route apply routes use native
+FastAPI write handlers with the apply contracts above. Their legacy WSGI
+branches are deleted; direct fallback calls fail closed while the mounted
+fallback remains for retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.

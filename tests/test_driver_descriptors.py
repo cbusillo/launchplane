@@ -375,7 +375,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
 
         self.assertTrue(descriptor_post_route_metadata)
         self.assertLessEqual(
-            set(descriptor_post_route_metadata), control_plane_service._build_write_routes()
+            set(descriptor_post_route_metadata)
+            - control_plane_service._descriptor_driver_dispatch_exempt_route_paths(),
+            control_plane_service._build_write_routes(),
         )
         self.assertEqual(
             set(descriptor_post_route_metadata)
@@ -689,13 +691,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_npmplus_ingress_apply_registered_in_descriptor_dispatch(self) -> None:
+    def test_npmplus_ingress_apply_is_native_fastapi_dispatch_exempt(self) -> None:
         dispatch_routes = control_plane_service._descriptor_driver_dispatch_routes()
 
+        route_path = "/v1/drivers/ingress/route-apply"
+        self.assertIn(route_path, control_plane_service._driver_route_metadata_from_descriptors())
         self.assertIn(
-            control_plane_service._NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
-            dispatch_routes,
+            route_path, control_plane_service._descriptor_driver_dispatch_exempt_route_paths()
         )
+        self.assertNotIn(route_path, dispatch_routes)
+        self.assertNotIn(route_path, control_plane_service._driver_write_routes_from_descriptors())
         control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_odoo_routes_registered_in_descriptor_dispatch(self) -> None:
@@ -1511,12 +1516,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be registered by the service"):
             control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
-    def test_npmplus_ingress_apply_descriptor_requires_dispatch_registration(self) -> None:
+    def test_npmplus_ingress_apply_descriptor_allows_native_fastapi_exemption(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
-        dispatch_routes.pop(control_plane_service._NPMPLUS_INGRESS_APPLY_ROUTE.route_path)
 
-        with self.assertRaisesRegex(ValueError, "must be registered by the service"):
-            control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
+        self.assertNotIn("/v1/drivers/ingress/route-apply", dispatch_routes)
+        control_plane_service._validate_descriptor_driver_dispatch_routes(dispatch_routes)
 
     def test_odoo_descriptor_requires_dispatch_registration(self) -> None:
         dispatch_routes = dict(control_plane_service._descriptor_driver_dispatch_routes())
@@ -2104,7 +2108,6 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 {
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-                    control_plane_service._NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
                     "/v1/agent/write-intents/evaluate",
                     "/v1/product-config/apply",
                     "/v1/authz-policies/github-actions/grants",

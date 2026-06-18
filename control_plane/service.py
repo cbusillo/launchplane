@@ -49,7 +49,6 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
@@ -80,11 +79,6 @@ from control_plane.contracts.every_code_pr_feedback_record import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
-from control_plane.contracts.ingress_route_audit_record import (
-    IngressRouteAuditOperation,
-    IngressRouteAuditRecord,
-    build_ingress_route_audit_record_id,
-)
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
 )
@@ -337,16 +331,6 @@ from control_plane.work_graph_http import (
     work_graph_issue_inbox_reconcile_denied_response,
     work_graph_rank_denied_response,
 )
-from control_plane.workflows.npmplus_ingress import (
-    NpmplusIngressApplyRequest,
-    NpmplusIngressClient,
-    NpmplusIngressApplyResult,
-)
-from control_plane.workflows.ingress_provider import (
-    IngressProvider,
-    NpmplusIngressProvider,
-    default_ingress_provider,
-)
 from control_plane.workflows.launchplane_self_deploy import (
     LaunchplaneSelfDeployRequest,
     execute_launchplane_self_deploy,
@@ -518,11 +502,11 @@ _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
-_NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
+_NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset({"/v1/drivers/ingress/route-apply"})
 
 
 class MergeTrainRunOnceEnvelope(BaseModel):
@@ -728,14 +712,6 @@ class _TestLaunchplaneServiceRecordStore(Protocol):
     def close(self) -> None: ...
 
 
-class _IngressProviderFactory(Protocol):
-    def __call__(self) -> IngressProvider: ...
-
-
-class _NpmplusIngressClientFactory(Protocol):
-    def __call__(self) -> NpmplusIngressClient: ...
-
-
 class _OdooStableBootstrapOperationStore(Protocol):
     def write_odoo_stable_bootstrap_operation_record(
         self, record: OdooStableBootstrapOperationRecord
@@ -785,10 +761,6 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
-
-
-class _EdgeEndpointRecordStore(Protocol):
-    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1095,28 +1067,6 @@ class PreviewPrFeedbackEnvelope(BaseModel):
         if not self.marker.strip():
             raise ValueError("preview PR feedback requires marker")
         return self
-
-
-class NpmplusIngressApplyEnvelope(_ProductRouteEnvelope):
-    schema_version: int = Field(default=1, ge=1)
-    context: str
-    ingress: NpmplusIngressApplyRequest
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "NpmplusIngressApplyEnvelope":
-        _validate_driver_envelope_product(self.product, label="NPMplus ingress apply")
-        if not self.context.strip():
-            raise ValueError("NPMplus ingress apply requires context.")
-        return self
-
-
-_NPMPLUS_INGRESS_APPLY_ROUTE = _DriverRouteExecutionMetadata(
-    route_path=_NPMPLUS_INGRESS_APPLY_ROUTE_PATH,
-    envelope_model=NpmplusIngressApplyEnvelope,
-    denial_message=(
-        "Workflow cannot plan or apply the ingress route for the requested product/context."
-    ),
-)
 
 
 class MergeTrainPolicyImportEnvelope(BaseModel):
@@ -1786,7 +1736,6 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/product-config/apply",
-        _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -2170,96 +2119,6 @@ def _resolve_and_authorize_descriptor_route(
         trace_id=trace_id,
     )
     return resolved_driver_context, authorization_response
-
-
-def _handle_npmplus_ingress_apply(
-    request: NpmplusIngressApplyEnvelope,
-    resolved_context: _ResolvedProductDriverContext,
-    record_store: object,
-    control_plane_root_path: Path,
-    state_dir: Path,
-    database_url: str | None,
-    identity: LaunchplaneIdentity,
-    request_scope: str,
-    request_idempotency_key: str,
-    request_fingerprint: str,
-    start_response: _StartResponse,
-    trace_id: str,
-    ingress_provider_factory: _IngressProviderFactory,
-    idempotency_route_path: str = _NPMPLUS_INGRESS_APPLY_ROUTE_PATH,
-) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-    del resolved_context, control_plane_root_path, state_dir, database_url, identity
-    if request.ingress.mode == "apply" and not request_idempotency_key:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "idempotency_key_required",
-                    "message": "NPMplus ingress apply requests require an Idempotency-Key header.",
-                },
-            },
-        )
-
-    ingress_provider = ingress_provider_factory()
-    try:
-        resolved_ingress_request = _resolve_ingress_edge_endpoint(
-            record_store=record_store,
-            request=request.ingress,
-        )
-    except click.ClickException as error:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "invalid_edge_endpoint",
-                    "message": str(error),
-                },
-            },
-        )
-    if request.ingress.mode == "apply":
-        idempotent_response = _check_idempotent_request(
-            record_store=record_store,
-            scope=request_scope,
-            route_path=idempotency_route_path,
-            idempotency_key=request_idempotency_key,
-            request_fingerprint=request_fingerprint,
-            start_response=start_response,
-            trace_id=trace_id,
-        )
-        if idempotent_response is not None:
-            return idempotent_response
-        _write_ingress_route_pending_audit_record(
-            record_store=record_store,
-            trace_id=trace_id,
-            product=request.product,
-            context=request.context,
-            provider=ingress_provider.provider_id,
-            request=resolved_ingress_request,
-            idempotency_key=request_idempotency_key,
-        )
-    ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
-    ingress_audit_record = _write_ingress_route_audit_record(
-        record_store=record_store,
-        trace_id=trace_id,
-        product=request.product,
-        context=request.context,
-        provider=ingress_provider.provider_id,
-        request=resolved_ingress_request,
-        result=ingress_result,
-        idempotency_key=request_idempotency_key,
-    )
-    return {
-        "ingress_provider": ingress_provider.provider_id,
-        "ingress_status": ingress_result.status,
-        "ingress_dry_run": ingress_result.dry_run,
-        "ingress_route_audit_record_id": ingress_audit_record.record_id,
-    }, ingress_result
 
 
 def _handle_odoo_artifact_publish(
@@ -3502,57 +3361,8 @@ def _handle_verireel_app_maintenance(
     )
 
 
-def _descriptor_driver_dispatch_routes(
-    *,
-    ingress_provider_factory: _IngressProviderFactory | None = None,
-) -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
-    resolved_ingress_provider_factory = ingress_provider_factory or default_ingress_provider
-
-    def dispatch_npmplus_ingress_apply(
-        request: NpmplusIngressApplyEnvelope,
-        resolved_context: _ResolvedProductDriverContext,
-        record_store: object,
-        control_plane_root_path: Path,
-        state_dir: Path,
-        database_url: str | None,
-        identity: LaunchplaneIdentity,
-        request_scope: str,
-        request_idempotency_key: str,
-        request_fingerprint: str,
-        start_response: _StartResponse,
-        trace_id: str,
-    ) -> tuple[dict[str, object], BaseModel | dict[str, object] | None] | list[bytes]:
-        return _handle_npmplus_ingress_apply(
-            request,
-            resolved_context,
-            record_store,
-            control_plane_root_path,
-            state_dir,
-            database_url,
-            identity,
-            request_scope,
-            request_idempotency_key,
-            request_fingerprint,
-            start_response,
-            trace_id,
-            resolved_ingress_provider_factory,
-        )
-
+def _descriptor_driver_dispatch_routes() -> dict[str, _DescriptorDriverDispatchRoute[Any]]:
     return {
-        _NPMPLUS_INGRESS_APPLY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
-            execution_metadata=_NPMPLUS_INGRESS_APPLY_ROUTE,
-            context_resolver=lambda request: _DescriptorDriverDispatchContext(
-                product=request.product,
-                context=request.context,
-                use_resolved_profile_product_for_authorization=False,
-            ),
-            authorization_action_resolver=lambda request: (
-                "ingress_route.apply" if request.ingress.mode == "apply" else "ingress_route.plan"
-            ),
-            custom_dispatch_handler=dispatch_npmplus_ingress_apply,
-            skip_pre_idempotency_check=True,
-            skip_driver_context_resolution=True,
-        ),
         _GENERIC_WEB_DEPLOY_ROUTE.route_path: _DescriptorDriverDispatchRoute(
             execution_metadata=_GENERIC_WEB_DEPLOY_ROUTE,
             context_resolver=lambda request: _DescriptorDriverDispatchContext(
@@ -3972,7 +3782,6 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
             _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
             _GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE.route_path,
-            _NPMPLUS_INGRESS_APPLY_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path,
             _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path,
             _ODOO_PROD_PROMOTION_INPUTS_ROUTE.route_path,
@@ -4006,7 +3815,7 @@ def _required_descriptor_driver_dispatch_route_paths() -> frozenset[str]:
 
 
 def _descriptor_driver_dispatch_exempt_route_paths() -> frozenset[str]:
-    return frozenset()
+    return _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
 
 
 def _dispatch_descriptor_driver_route(
@@ -4293,7 +4102,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
     return frozenset(
         route_path
         for route_path, route_metadata in _driver_route_metadata_from_descriptors().items()
-        if route_metadata.method == "POST"
+        if route_metadata.method == "POST" and route_path not in _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS
     )
 
 
@@ -6468,8 +6277,6 @@ def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
         return frozenset({"deployment_record_id", "release_tuple_id"})
     if route_path == _GENERIC_WEB_ROLLBACK_ROUTE.route_path:
         return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
-    if route_path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
-        return frozenset({"ingress_provider"})
     return frozenset()
 
 
@@ -6543,42 +6350,6 @@ def _odoo_stable_target_replacement_operation_store(
     raise click.ClickException(
         "Odoo stable target replacement operations require Launchplane operation-record storage."
     )
-
-
-def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStore:
-    required_methods = ("read_edge_endpoint_record",)
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_EdgeEndpointRecordStore, record_store)
-    raise click.ClickException("Edge endpoint operations require Launchplane record storage.")
-
-
-def _resolve_ingress_edge_endpoint(
-    *,
-    record_store: object,
-    request: NpmplusIngressApplyRequest,
-) -> NpmplusIngressApplyRequest:
-    endpoint_key = request.route.edge_endpoint_key.strip()
-    if not endpoint_key:
-        return request
-    endpoint_store = _edge_endpoint_record_store(record_store)
-    try:
-        endpoint = endpoint_store.read_edge_endpoint_record(endpoint_key)
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"Ingress edge endpoint {endpoint_key!r} was not found."
-        ) from exc
-    if endpoint.status != "active":
-        raise click.ClickException(
-            f"Ingress edge endpoint {endpoint_key!r} is {endpoint.status}, not active."
-        )
-    resolved_route = request.route.model_copy(
-        update={
-            "forward_scheme": endpoint.upstream_scheme,
-            "forward_host": endpoint.upstream_host,
-            "forward_port": endpoint.upstream_port,
-        }
-    )
-    return request.model_copy(update={"route": resolved_route})
 
 
 def _query_string_value(query: dict[str, list[str]], key: str) -> str:
@@ -7437,13 +7208,6 @@ def _should_store_idempotency_record(
 ) -> bool:
     if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
         return False
-    if path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
-        if isinstance(driver_result, BaseModel):
-            ingress_result = driver_result.model_dump(mode="json")
-        else:
-            ingress_result = driver_result or {}
-        if ingress_result.get("dry_run") is True:
-            return False
     if (
         path
         in {
@@ -7481,98 +7245,6 @@ def _should_store_idempotency_record(
     if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
         return not _driver_result_contains_status(driver_result, "pending")
     return True
-
-
-def _write_ingress_route_audit_record(
-    *,
-    record_store: object,
-    trace_id: str,
-    product: str,
-    context: str,
-    provider: str,
-    request: NpmplusIngressApplyRequest,
-    result: NpmplusIngressApplyResult,
-    idempotency_key: str,
-) -> IngressRouteAuditRecord:
-    write_record = getattr(record_store, "write_ingress_route_audit_record", None)
-    if not callable(write_record):
-        raise RuntimeError("Ingress route audit record storage is unavailable")
-    provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
-    record = IngressRouteAuditRecord(
-        record_id=build_ingress_route_audit_record_id(
-            trace_id=trace_id,
-            product=product,
-            context=context,
-            domains=request.route.domain_names,
-        ),
-        product=product,
-        context=context,
-        provider=provider,
-        mode=request.mode,
-        status=result.status,
-        dry_run=result.dry_run,
-        requested_domains=request.route.domain_names,
-        edge_endpoint_key=request.route.edge_endpoint_key,
-        expected_host_id=request.expected_host_id,
-        provider_host_id=provider_host_id,
-        operations=tuple(
-            IngressRouteAuditOperation.model_validate(operation.model_dump(mode="json"))
-            for operation in result.operations
-        ),
-        trace_id=trace_id,
-        idempotency_key=idempotency_key,
-        reason=request.reason,
-        recorded_at=_utc_now_timestamp(),
-    )
-    write_record(record)
-    return record
-
-
-def _write_ingress_route_pending_audit_record(
-    *,
-    record_store: object,
-    trace_id: str,
-    product: str,
-    context: str,
-    provider: str,
-    request: NpmplusIngressApplyRequest,
-    idempotency_key: str,
-) -> IngressRouteAuditRecord:
-    write_record = getattr(record_store, "write_ingress_route_audit_record", None)
-    if not callable(write_record):
-        raise RuntimeError("Ingress route audit record storage is unavailable")
-    record = IngressRouteAuditRecord(
-        record_id=build_ingress_route_audit_record_id(
-            trace_id=trace_id,
-            product=product,
-            context=context,
-            domains=request.route.domain_names,
-        ),
-        product=product,
-        context=context,
-        provider=provider,
-        mode=request.mode,
-        status="pending",
-        dry_run=request.mode == "dry-run",
-        requested_domains=request.route.domain_names,
-        edge_endpoint_key=request.route.edge_endpoint_key,
-        expected_host_id=request.expected_host_id,
-        provider_host_id=None,
-        operations=(
-            IngressRouteAuditOperation(
-                action="pending",
-                host_id=None,
-                domain_names=request.route.domain_names,
-                requires_apply=request.mode == "apply",
-            ),
-        ),
-        trace_id=trace_id,
-        idempotency_key=idempotency_key,
-        reason=request.reason,
-        recorded_at=_utc_now_timestamp(),
-    )
-    write_record(record)
-    return record
 
 
 def _driver_result_has_completed_deploy_with_post_deploy_failure(
@@ -8978,8 +8650,6 @@ def create_launchplane_service_app(
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
-    ingress_provider_factory: _IngressProviderFactory | None = None,
-    npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
@@ -9032,19 +8702,7 @@ def create_launchplane_service_app(
             else None
         )
     )
-    resolved_ingress_provider_factory = ingress_provider_factory
-    if resolved_ingress_provider_factory is None:
-        if npmplus_ingress_client_factory is not None:
-
-            def npmplus_ingress_provider_from_client_factory() -> IngressProvider:
-                return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
-
-            resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
-        else:
-            resolved_ingress_provider_factory = default_ingress_provider
-    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes(
-        ingress_provider_factory=resolved_ingress_provider_factory,
-    )
+    descriptor_driver_dispatch_routes = _descriptor_driver_dispatch_routes()
     _validate_descriptor_driver_dispatch_routes(descriptor_driver_dispatch_routes)
     write_routes = _build_write_routes()
 

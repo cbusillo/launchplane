@@ -194,6 +194,7 @@ _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
 )
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
+_INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
@@ -1034,6 +1035,29 @@ class PrivateHealthEndpointApplyEnvelope(BaseModel):
         return self
 
 
+class NpmplusIngressApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    ingress: NpmplusIngressApplyRequest
+
+    @field_validator("product", "context", mode="after")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("NPMplus ingress apply requires non-empty product/context")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "NpmplusIngressApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported NPMplus ingress apply schema version")
+        return self
+
+
 class IngressCanaryRouteRecordApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1171,12 +1195,20 @@ class _IngressCanaryRouteRecordApplyStore(Protocol):
     ) -> object: ...
 
 
-class _IngressCanaryRouteApplyStore(Protocol):
-    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
+class _IngressRouteApplyStore(Protocol):
+    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
 
+
+class _IngressEdgeEndpointReadStore(Protocol):
     def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
 
-    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
+
+class _IngressCanaryRouteApplyStore(
+    _IngressRouteApplyStore,
+    _IngressEdgeEndpointReadStore,
+    Protocol,
+):
+    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
 
 
 class PublicIngressMonitorRunOnceRequest(BaseModel):
@@ -1915,6 +1947,36 @@ def require_ingress_canary_route_apply_store(
             f"{missing_summary}"
         )
     return cast(_IngressCanaryRouteApplyStore, record_store)
+
+
+def require_ingress_route_apply_store(record_store: object) -> _IngressRouteApplyStore:
+    required_methods = ("write_ingress_route_audit_record",)
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support ingress route applies: {missing_summary}"
+        )
+    return cast(_IngressRouteApplyStore, record_store)
+
+
+def require_ingress_edge_endpoint_read_store(record_store: object) -> _IngressEdgeEndpointReadStore:
+    required_methods = ("read_edge_endpoint_record",)
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support ingress edge endpoint reads: {missing_summary}"
+        )
+    return cast(_IngressEdgeEndpointReadStore, record_store)
 
 
 def require_ingress_canary_route_read_store(
@@ -5260,7 +5322,7 @@ def create_launchplane_fastapi_app(
 
     def resolve_ingress_edge_endpoint(
         *,
-        canary_store: _IngressCanaryRouteApplyStore,
+        edge_endpoint_store: _IngressEdgeEndpointReadStore,
         request: NpmplusIngressApplyRequest,
         trace_id: str,
     ) -> NpmplusIngressApplyRequest:
@@ -5268,7 +5330,7 @@ def create_launchplane_fastapi_app(
         if not endpoint_key:
             return request
         try:
-            endpoint = canary_store.read_edge_endpoint_record(endpoint_key)
+            endpoint = edge_endpoint_store.read_edge_endpoint_record(endpoint_key)
         except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=400,
@@ -5353,7 +5415,7 @@ def create_launchplane_fastapi_app(
 
     def write_ingress_route_audit_record(
         *,
-        canary_store: _IngressCanaryRouteApplyStore,
+        ingress_store: _IngressRouteApplyStore,
         trace_id: str,
         product: str,
         context: str,
@@ -5389,12 +5451,12 @@ def create_launchplane_fastapi_app(
             reason=request.reason,
             recorded_at=utc_now_timestamp(),
         )
-        canary_store.write_ingress_route_audit_record(record)
+        ingress_store.write_ingress_route_audit_record(record)
         return record
 
     def write_ingress_route_pending_audit_record(
         *,
-        canary_store: _IngressCanaryRouteApplyStore,
+        ingress_store: _IngressRouteApplyStore,
         trace_id: str,
         product: str,
         context: str,
@@ -5432,7 +5494,7 @@ def create_launchplane_fastapi_app(
             reason=request.reason,
             recorded_at=utc_now_timestamp(),
         )
-        canary_store.write_ingress_route_audit_record(record)
+        ingress_store.write_ingress_route_audit_record(record)
         return record
 
     async def apply_edge_endpoint(
@@ -5692,6 +5754,122 @@ def create_launchplane_fastapi_app(
             )
         return response
 
+    async def apply_ingress_route(
+        request: Request,
+        route_request: NpmplusIngressApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        authz_action = (
+            "ingress_route.apply" if route_request.ingress.mode == "apply" else "ingress_route.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=authz_action,
+            product=route_request.product,
+            context=route_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan or apply the ingress route for the requested "
+                    "product/context."
+                ),
+            )
+        if route_request.ingress.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="NPMplus ingress apply requests require an Idempotency-Key header.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_INGRESS_ROUTE_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=route_request.ingress.mode == "apply",
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            ingress_store = require_ingress_route_apply_store(record_store)
+            resolved_ingress_request = route_request.ingress
+            if route_request.ingress.route.edge_endpoint_key.strip():
+                edge_endpoint_store = require_ingress_edge_endpoint_read_store(record_store)
+                resolved_ingress_request = resolve_ingress_edge_endpoint(
+                    edge_endpoint_store=edge_endpoint_store,
+                    request=route_request.ingress,
+                    trace_id=trace_id,
+                )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+        try:
+            ingress_provider = resolved_ingress_provider_factory()
+            if resolved_ingress_request.mode == "apply":
+                write_ingress_route_pending_audit_record(
+                    ingress_store=ingress_store,
+                    trace_id=trace_id,
+                    product=route_request.product,
+                    context=route_request.context,
+                    provider=ingress_provider.provider_id,
+                    request=resolved_ingress_request,
+                    idempotency_key=normalized_key,
+                )
+            ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        ingress_audit_record = write_ingress_route_audit_record(
+            ingress_store=ingress_store,
+            trace_id=trace_id,
+            product=route_request.product,
+            context=route_request.context,
+            provider=ingress_provider.provider_id,
+            request=resolved_ingress_request,
+            result=ingress_result,
+            idempotency_key=normalized_key,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "ingress_provider": ingress_provider.provider_id,
+                "ingress_route_audit_record_id": ingress_audit_record.record_id,
+            },
+            result=ingress_result.model_dump(mode="json"),
+        )
+        if resolved_ingress_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_INGRESS_ROUTE_APPLY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -5758,14 +5936,14 @@ def create_launchplane_fastapi_app(
             reason=canary_request.reason,
         )
         resolved_ingress_request = resolve_ingress_edge_endpoint(
-            canary_store=canary_store,
+            edge_endpoint_store=canary_store,
             request=ingress_request,
             trace_id=trace_id,
         )
         try:
             ingress_provider = resolved_ingress_provider_factory()
             write_ingress_route_pending_audit_record(
-                canary_store=canary_store,
+                ingress_store=canary_store,
                 trace_id=trace_id,
                 product=canary_record.product,
                 context=canary_record.context,
@@ -5782,7 +5960,7 @@ def create_launchplane_fastapi_app(
                 message="Request could not be completed.",
             ) from error
         ingress_audit_record = write_ingress_route_audit_record(
-            canary_store=canary_store,
+            ingress_store=canary_store,
             trace_id=trace_id,
             product=canary_record.product,
             context=canary_record.context,
@@ -7043,6 +7221,24 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="apply_private_health_endpoint",
         summary="Plan or apply one private health endpoint record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _INGRESS_ROUTE_APPLY_ROUTE,
+        apply_ingress_route,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="apply_ingress_route",
+        summary="Plan or apply an ingress route through the ingress provider",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
