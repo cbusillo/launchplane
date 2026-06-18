@@ -335,13 +335,9 @@ from control_plane.work_graph_issue_inbox import (
     reconcile_github_issue_inbox,
 )
 from control_plane.work_graph_service import (
-    WorkGraphIssueInboxProvider,
     WorkGraphIssueInboxReconcileProvider,
-    WorkGraphPlanningFactsProvider,
 )
 from control_plane.work_graph_http import (
-    handle_work_graph_issue_inbox_read,
-    handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
     reconcile_work_graph_issue_inbox,
     work_graph_issue_inbox_reconcile_denied_response,
@@ -4401,10 +4397,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
-        return "work_graph.rank", {}
-    if len(segments) == 4 and segments == ["v1", "work-graph", "github", "issues"]:
-        return "work_graph.issue_inbox", {}
     if len(segments) == 4 and segments == [
         "v1",
         "products",
@@ -9480,8 +9472,6 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
-    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     ingress_provider_factory: _IngressProviderFactory | None = None,
     npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
@@ -9973,27 +9963,6 @@ def create_launchplane_service_app(
                                 else {}
                             ),
                         },
-                    )
-                if action == "work_graph.rank":
-                    return handle_work_graph_snapshot_read(
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        trace_id=request_trace_id,
-                        product_store=record_store,
-                        work_request_store=_every_code_work_request_store(record_store),
-                        planning_facts_provider=work_graph_planning_facts_provider,
-                        utc_now=_utc_now_timestamp,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                if action == "work_graph.issue_inbox":
-                    return handle_work_graph_issue_inbox_read(
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        trace_id=request_trace_id,
-                        issue_inbox_provider=work_graph_issue_inbox_provider,
-                        json_response=_json_response,
-                        start_response=start_response,
                     )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(
@@ -14474,8 +14443,6 @@ def serve_launchplane_service(
         verifier=verifier,
         authz_policy=bootstrap_authz_policy,
         database_url=database_url,
-        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
-        work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         authz_policy_runtime=authz_policy_runtime,
         record_store_for_service=service_record_store,
@@ -14498,6 +14465,7 @@ def serve_launchplane_service(
         human_session_manager=human_session_manager,
         control_plane_root_path=control_plane_root(),
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
+        work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
     )
     fastapi_application.mount(
         "/",

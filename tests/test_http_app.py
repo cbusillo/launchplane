@@ -89,6 +89,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
@@ -1326,6 +1327,205 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sections["every_code_summary"]["status"], "available")
         self.assertEqual(sections["preview_readiness"]["status"], "available")
 
+    async def test_work_graph_snapshot_returns_launchplane_assembled_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_agent_context_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_work_graph_read_policy(),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _get_work_graph_snapshot(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(set(payload), {"status", "trace_id", "snapshot", "source"})
+        self.assertEqual(payload["source"]["product_count"], 1)
+        self.assertEqual(payload["source"]["work_request_count"], 2)
+        self.assertEqual(payload["source"]["planning_fact_count"], 0)
+        snapshot = payload["snapshot"]
+        self.assertEqual(snapshot["schema_version"], 1)
+        repos_by_name = {repo["repository"]: repo for repo in snapshot["repos"]}
+        self.assertEqual(repos_by_name["every/example-site"]["classification"], "managed_runtime")
+        self.assertEqual(repos_by_name["every/example-site"]["product"], "example-site")
+        self.assertEqual(repos_by_name["cbusillo/tooling"]["classification"], "active_awareness")
+        issues_by_key = {
+            (issue["repository"], issue["number"]): issue for issue in snapshot["issues"]
+        }
+        self.assertEqual(issues_by_key[("every/example-site", 190)]["focus"], "Next")
+
+    async def test_work_graph_snapshot_uses_compact_planning_facts_when_available(
+        self,
+    ) -> None:
+        def planning_facts() -> tuple[WorkGraphPlanningIssueFacts, ...]:
+            return (
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {
+                        "repository": "every/example-site",
+                        "number": 190,
+                        "focus": "Now",
+                        "manager": "Chris",
+                        "finish_line": "Project fields are visible in the cockpit.",
+                        "labels": ("plan", "plan:active"),
+                        "blocking": 1,
+                        "updated_at": "2026-05-06T03:54:00Z",
+                    }
+                ),
+            )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_agent_context_read_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_work_graph_read_policy(),
+                record_store_factory=lambda: app_store,
+                work_graph_planning_facts_provider=planning_facts,
+            )
+
+            response = await _get_work_graph_snapshot(app)
+            app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["source"]["planning_fact_count"], 1)
+        issues_by_key = {
+            (issue["repository"], issue["number"]): issue for issue in payload["snapshot"]["issues"]
+        }
+        issue = issues_by_key[("every/example-site", 190)]
+        self.assertEqual(issue["focus"], "Now")
+        self.assertEqual(issue["manager"], "Chris")
+        self.assertEqual(issue["finish_line"], "Project fields are visible in the cockpit.")
+        self.assertEqual(issue["labels"], ["every-code", "plan", "plan:active"])
+        self.assertEqual(issue["blocking"], 1)
+        self.assertEqual(issue["updated_at"], "2026-05-06T03:54:00Z")
+
+    async def test_work_graph_snapshot_rejects_unauthorized_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_work_graph_snapshot(app)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_work_graph_snapshot_requires_database_backed_store(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_work_graph_snapshot(app)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_work_graph_issue_inbox_returns_provider_payload(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(products=("launchplane",)),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
+                {
+                    "generated_at": "2026-05-21T12:00:00Z",
+                    "project_configured": True,
+                    "repository_count": 1,
+                    "issue_count": 2,
+                    "stale_project_item_count": 1,
+                    "repositories": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "issue_count": 2,
+                            "present_in_project_count": 1,
+                            "missing_from_project_count": 1,
+                            "issues": [
+                                {
+                                    "key": "cbusillo/launchplane#697",
+                                    "repository": "cbusillo/launchplane",
+                                    "number": 697,
+                                    "title": "Add read-only grouped GitHub issue inbox",
+                                    "url": "https://github.com/cbusillo/launchplane/issues/697",
+                                    "state": "OPEN",
+                                    "project_status": "missing",
+                                    "present_in_project": False,
+                                },
+                                {
+                                    "key": "cbusillo/launchplane#601",
+                                    "repository": "cbusillo/launchplane",
+                                    "number": 601,
+                                    "title": "Closed Project item",
+                                    "url": "https://github.com/cbusillo/launchplane/issues/601",
+                                    "state": "closed",
+                                    "project_status": "closed",
+                                    "present_in_project": True,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ),
+        )
+
+        response = await _get_work_graph_issue_inbox(app)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["configured"])
+        inbox = payload["inbox"]
+        self.assertEqual(inbox["repository_count"], 1)
+        self.assertEqual(inbox["stale_project_item_count"], 1)
+        self.assertEqual(inbox["repositories"][0]["issues"][0]["key"], "cbusillo/launchplane#697")
+        self.assertIs(inbox["repositories"][0]["issues"][0]["present_in_project"], False)
+        self.assertEqual(inbox["repositories"][0]["issues"][1]["project_status"], "closed")
+
+    async def test_work_graph_issue_inbox_returns_empty_payload_without_provider(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(products=("launchplane",)),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_work_graph_issue_inbox(app)
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["configured"])
+        self.assertEqual(payload["inbox"]["generated_at"], "")
+        self.assertFalse(payload["inbox"]["project_configured"])
+        self.assertEqual(payload["inbox"]["repository_count"], 0)
+        self.assertEqual(payload["inbox"]["issue_count"], 0)
+        self.assertEqual(payload["inbox"]["repositories"], [])
+
+    async def test_work_graph_issue_inbox_rejects_unauthorized_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel(
+                generated_at="2026-05-21T12:00:00Z",
+                repository_count=0,
+                issue_count=0,
+            ),
+        )
+
+        response = await _get_work_graph_issue_inbox(app)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_agent_context_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -1338,6 +1538,8 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         responses = [
             await _get_repo_product_mapping(app, authorization=""),
             await _get_agent_context(app, authorization=""),
+            await _get_work_graph_snapshot(app, authorization=""),
+            await _get_work_graph_issue_inbox(app, authorization=""),
         ]
 
         for response in responses:
@@ -1455,6 +1657,14 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 "RepoProductMappingResponse",
             ),
             "/v1/agent/context": ("read_agent_context", "AgentContextResponse"),
+            "/v1/work-graph/snapshot": (
+                "read_work_graph_snapshot",
+                "WorkGraphSnapshotResponse",
+            ),
+            "/v1/work-graph/github/issues": (
+                "read_work_graph_issue_inbox",
+                "WorkGraphIssueInboxResponse",
+            ),
         }
         for path, (operation_id, response_model_name) in expected_routes.items():
             route = openapi["paths"][path]["get"]
@@ -1477,10 +1687,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
             _seed_agent_context_read_records(database_url)
             app_store = PostgresRecordStore(database_url=database_url)
-            policy = _product_environment_read_policy(
-                contexts=("launchplane", "example-site"),
-                products=("launchplane", "example-site"),
-            )
+            policy = _work_graph_read_policy()
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1496,10 +1703,14 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
 
             mapping_response = await _get_repo_product_mapping(app)
             context_response = await _get_agent_context(app, repository="every/example-site")
+            snapshot_response = await _get_work_graph_snapshot(app)
+            issue_inbox_response = await _get_work_graph_issue_inbox(app)
             app_store.close()
 
         self.assertEqual(mapping_response.status_code, 200)
         self.assertEqual(context_response.status_code, 200)
+        self.assertEqual(snapshot_response.status_code, 200)
+        self.assertEqual(issue_inbox_response.status_code, 200)
 
     async def test_list_products_returns_db_backed_overviews(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -8629,6 +8840,29 @@ def _product_environment_read_policy(
     )
 
 
+def _work_graph_read_policy(
+    *,
+    products: tuple[str, ...] = ("launchplane", "example-site"),
+    contexts: tuple[str, ...] = ("launchplane", "example-site"),
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": list(products),
+                    "contexts": list(contexts),
+                    "actions": ["work_graph.rank", "product_environment.read"],
+                }
+            ]
+        }
+    )
+
+
 def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -10231,6 +10465,24 @@ async def _get_agent_context(
     headers = {"Authorization": authorization} if authorization else {}
     suffix = f"?{urlencode({'repository': repository})}" if repository else ""
     return await _asgi_get(app, f"/v1/agent/context{suffix}", headers=headers)
+
+
+async def _get_work_graph_snapshot(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, "/v1/work-graph/snapshot", headers=headers)
+
+
+async def _get_work_graph_issue_inbox(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(app, "/v1/work-graph/github/issues", headers=headers)
 
 
 async def _get_every_code_summary(

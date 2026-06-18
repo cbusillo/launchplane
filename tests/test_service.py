@@ -124,8 +124,6 @@ from control_plane.contracts.runner_lane_registration import (
     plan_runner_lane_registration,
 )
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
-from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReconcileResult
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
@@ -11987,276 +11985,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["queue"]["items"][0]["number"], 190)
 
-    def test_work_graph_snapshot_returns_launchplane_assembled_snapshot(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane", "example-site"],
-                        "contexts": ["launchplane", "example-site"],
-                        "actions": [
-                            "work_graph.rank",
-                            "product_environment.read",
-                            "every_code_work_request.write",
-                        ],
-                    }
-                ]
-            }
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            status_code, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "every/example-site",
-                    "issue_number": 190,
-                    "issue_url": "https://github.com/every/example-site/issues/190",
-                    "issue_title": "Build operator chooser",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-06T02:00:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-create-example-site-190"},
-            )
-            self.assertEqual(status_code, 202)
-            self.assertEqual(create_payload["result"]["request"]["state"], "queued")
-
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/work-graph/snapshot",
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["source"]["product_count"], 1)
-        self.assertEqual(payload["source"]["work_request_count"], 1)
-        snapshot = payload["snapshot"]
-        self.assertEqual(snapshot["schema_version"], 1)
-        self.assertEqual(snapshot["repos"][0]["classification"], "managed_runtime")
-        self.assertEqual(snapshot["repos"][0]["product"], "example-site")
-        self.assertEqual(snapshot["issues"][0]["repository"], "every/example-site")
-        self.assertEqual(snapshot["issues"][0]["focus"], "Next")
-        self.assertEqual(payload["source"]["planning_fact_count"], 0)
-
-    def test_work_graph_snapshot_uses_compact_planning_facts_when_available(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane", "example-site"],
-                        "contexts": ["launchplane", "example-site"],
-                        "actions": [
-                            "work_graph.rank",
-                            "product_environment.read",
-                            "every_code_work_request.write",
-                        ],
-                    }
-                ]
-            }
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                work_graph_planning_facts_provider=lambda: (
-                    WorkGraphPlanningIssueFacts.model_validate(
-                        {
-                            "repository": "every/example-site",
-                            "number": 190,
-                            "focus": "Now",
-                            "manager": "Chris",
-                            "finish_line": "Project fields are visible in the cockpit.",
-                            "labels": ("plan", "plan:active"),
-                            "blocking": 1,
-                            "updated_at": "2026-05-06T03:54:00Z",
-                        }
-                    ),
-                ),
-            )
-            create_status, _ = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "every/example-site",
-                    "issue_number": 190,
-                    "issue_url": "https://github.com/every/example-site/issues/190",
-                    "issue_title": "Build operator chooser",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-06T02:00:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-create-example-site-190"},
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/work-graph/snapshot",
-            )
-
-        self.assertEqual(create_status, 202)
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["source"]["planning_fact_count"], 1)
-        issue = payload["snapshot"]["issues"][0]
-        self.assertEqual(issue["focus"], "Now")
-        self.assertEqual(issue["manager"], "Chris")
-        self.assertEqual(issue["finish_line"], "Project fields are visible in the cockpit.")
-        self.assertEqual(issue["labels"], ["every-code", "plan", "plan:active"])
-        self.assertEqual(issue["blocking"], 1)
-        self.assertEqual(issue["updated_at"], "2026-05-06T03:54:00Z")
-
-    def test_work_graph_snapshot_rejects_unauthorized_identity(self) -> None:
+    def test_work_graph_reads_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/work-graph/snapshot",
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_work_graph_issue_inbox_returns_provider_payload(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
                     {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["work_graph.rank"],
-                    }
-                ]
-            }
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-                work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "project_configured": True,
-                        "repository_count": 1,
-                        "issue_count": 2,
-                        "stale_project_item_count": 1,
-                        "repositories": [
+                        "github_actions": [
                             {
                                 "repository": "cbusillo/launchplane",
-                                "issue_count": 2,
-                                "present_in_project_count": 1,
-                                "missing_from_project_count": 1,
-                                "issues": [
-                                    {
-                                        "key": "cbusillo/launchplane#697",
-                                        "repository": "cbusillo/launchplane",
-                                        "number": 697,
-                                        "title": "Add read-only grouped GitHub issue inbox",
-                                        "url": "https://github.com/cbusillo/launchplane/issues/697",
-                                        "state": "OPEN",
-                                        "project_status": "missing",
-                                        "present_in_project": False,
-                                    },
-                                    {
-                                        "key": "cbusillo/launchplane#601",
-                                        "repository": "cbusillo/launchplane",
-                                        "number": 601,
-                                        "title": "Closed Project item",
-                                        "url": "https://github.com/cbusillo/launchplane/issues/601",
-                                        "state": "closed",
-                                        "project_status": "closed",
-                                        "present_in_project": True,
-                                    },
-                                ],
+                                "workflow_refs": ["*"],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["launchplane", "example-site"],
+                                "contexts": ["launchplane", "example-site"],
+                                "actions": ["work_graph.rank", "product_environment.read"],
                             }
-                        ],
+                        ]
                     }
                 ),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/work-graph/github/issues",
-            )
-
-        self.assertEqual(status_code, 200)
-        self.assertTrue(payload["configured"])
-        inbox = payload["inbox"]
-        self.assertEqual(inbox["repository_count"], 1)
-        self.assertEqual(inbox["stale_project_item_count"], 1)
-        self.assertEqual(inbox["repositories"][0]["issues"][0]["key"], "cbusillo/launchplane#697")
-        self.assertIs(inbox["repositories"][0]["issues"][0]["present_in_project"], False)
-        self.assertEqual(inbox["repositories"][0]["issues"][1]["project_status"], "closed")
-
-    def test_work_graph_issue_inbox_rejects_unauthorized_identity(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
-                work_graph_issue_inbox_provider=lambda: GitHubIssueInboxReadModel.model_validate(
-                    {
-                        "generated_at": "2026-05-21T12:00:00Z",
-                        "repository_count": 0,
-                        "issue_count": 0,
-                    }
-                ),
             )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/work-graph/github/issues",
-            )
+            responses = [
+                _invoke_app(app, method="GET", path="/v1/work-graph/snapshot"),
+                _invoke_app(app, method="GET", path="/v1/work-graph/github/issues"),
+            ]
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_work_graph_issue_inbox_reconcile_dry_run_returns_missing_items(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
