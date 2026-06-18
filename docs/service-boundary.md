@@ -143,22 +143,30 @@ VeriReel product paths:
   - `POST /v1/authz-policies/local-operators/grants`
   - `POST /v1/authz-policies/local-admins/grants`
 - Every Code local automation work-request routes:
+  - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/every-code/work-requests/{request_id}` (native FastAPI for
+    bearer-token, human-session, and Every Code worker-token callers)
+  - `GET /v1/every-code/pr-feedback` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/every-code/preview-gates` (native FastAPI for bearer-token,
+    human-session, and Every Code worker-token callers)
+  - `GET /v1/every-code/notification-attempts` (native FastAPI for
+    bearer-token, human-session, and Every Code worker-token callers)
+  - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
+    bearer-token and human-session callers)
   - `POST /v1/every-code/github-webhook`
-  - `GET /v1/every-code/summary`
-  - `GET /v1/previews/readiness`
-  - `GET /v1/every-code/work-requests`
-  - `GET /v1/every-code/work-requests/{request_id}`
-  - `GET /v1/every-code/notification-attempts`
-  - `GET /v1/previews/pr-feedback/notification-attempts`
   - `POST /v1/every-code/work-requests/create`
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
   - `POST /v1/every-code/notification-policies/apply`
-  - `GET /v1/every-code/pr-feedback`
   - `POST /v1/every-code/pr-feedback`
   - `POST /v1/every-code/pr-feedback/status`
-  - `GET /v1/every-code/preview-gates`
   - `POST /v1/every-code/preview-gates`
 - work graph chooser route:
   - `GET /v1/agent/context`
@@ -361,6 +369,16 @@ agent-facing states such as waiting on checks, ready, needs attention, or
 cancelled, include source links and freshness/provenance, and avoid provider-only
 internals, local paths, or secrets. Detail fields and check summaries are bounded
 and redacted before they leave the read-model projection.
+
+The direct Every Code record reads are also native FastAPI routes. Work-request
+reads use `every_code_work_request.read`; PR-feedback reads use
+`every_code_pr_feedback.read`; preview-gate reads use
+`every_code_preview_gate.read`; Every Code notification-attempt reads use
+`every_code_notification_attempt.read`; preview PR-feedback notification-attempt
+reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
+Code worker token is accepted only for the worker-facing Every Code read routes,
+not for the preview PR-feedback notification-attempt route. The legacy WSGI
+fallback no longer owns these read paths.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
@@ -1335,6 +1353,22 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/ingress/canary-routes/records` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
+  bearer-token and human-session callers)
+- `GET /v1/every-code/summary` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/previews/readiness` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/every-code/work-requests/{request_id}` (native FastAPI for
+  bearer-token, human-session, and Every Code worker-token callers)
+- `GET /v1/every-code/pr-feedback` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/every-code/preview-gates` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/every-code/notification-attempts` (native FastAPI for bearer-token,
+  human-session, and Every Code worker-token callers)
+- `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
   bearer-token and human-session callers)
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
