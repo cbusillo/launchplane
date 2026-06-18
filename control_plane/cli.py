@@ -3133,7 +3133,6 @@ def _sync_live_target_from_tracked_contract(
     *,
     context_name: str,
     instance_name: str,
-    apply_changes: bool,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
@@ -3195,41 +3194,12 @@ def _sync_live_target_from_tracked_contract(
         if live_value != tracked_value:
             env_changes[env_key] = {"live": live_value, "tracked": tracked_value}
 
-    if apply_changes:
-        if source_changes:
-            control_plane_dokploy.update_dokploy_target_source(
-                host=host,
-                token=token,
-                target_definition=target_definition,
-                target_payload=target_payload,
-            )
-        if env_changes:
-            refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
-                host=host,
-                token=token,
-                target_type=target_definition.target_type,
-                target_id=target_definition.target_id,
-            )
-            refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
-                str(refreshed_payload.get("env") or "")
-            )
-            for env_key, env_value in target_definition.env.items():
-                refreshed_env_map[env_key] = env_value
-            control_plane_dokploy.update_dokploy_target_env(
-                host=host,
-                token=token,
-                target_type=target_definition.target_type,
-                target_id=target_definition.target_id,
-                target_payload=refreshed_payload,
-                env_text=control_plane_dokploy.serialize_dokploy_env_text(refreshed_env_map),
-            )
-
     payload = _build_live_target_runtime_contract_payload(
         context_name=context_name,
         instance_name=instance_name,
     )
     payload["sync_preview"] = {
-        "apply_changes": apply_changes,
+        "apply_changes": False,
         "source_changes": source_changes,
         "env_changes": env_changes,
     }

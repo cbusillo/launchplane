@@ -1231,7 +1231,7 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
             payload["artifact_runtime_contract"]["mutable_addon_refs"],
         )
 
-    def test_environments_sync_live_target_applies_tracked_source_and_env_contract(self) -> None:
+    def test_environments_sync_live_target_reports_tracked_source_and_env_drift(self) -> None:
         runner = CliRunner()
         source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
             {
@@ -1273,8 +1273,8 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                 "name": "opw-testing",
                 "appName": "compose-opw-testing",
                 "sourceType": "git",
-                "customGitUrl": "git@github.com:cbusillo/odoo-devkit.git",
-                "customGitBranch": "main",
+                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                "customGitBranch": "opw-testing",
                 "customGitSSHKeyId": "ssh-key-123",
                 "composePath": "./docker-compose.yml",
                 "environmentId": "env-123",
@@ -1283,23 +1283,7 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                 "watchPaths": [],
                 "env": "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main\n",
             },
-            {
-                "name": "opw-testing",
-                "appName": "compose-opw-testing",
-                "sourceType": "git",
-                "customGitUrl": "git@github.com:cbusillo/odoo-devkit.git",
-                "customGitBranch": "main",
-                "customGitSSHKeyId": "ssh-key-123",
-                "composePath": "./docker-compose.yml",
-                "environmentId": "env-123",
-                "triggerType": "push",
-                "enableSubmodules": False,
-                "watchPaths": [],
-                "env": "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d\n",
-            },
         ]
-        captured_source_updates: list[dict[str, object]] = []
-        captured_env_updates: list[dict[str, object]] = []
 
         with (
             patch(
@@ -1314,14 +1298,8 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                 "control_plane.dokploy.fetch_dokploy_target_payload",
                 side_effect=fetch_payloads,
             ),
-            patch(
-                "control_plane.dokploy.update_dokploy_target_source",
-                side_effect=lambda **kwargs: captured_source_updates.append(kwargs),
-            ),
-            patch(
-                "control_plane.dokploy.update_dokploy_target_env",
-                side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
-            ),
+            patch("control_plane.dokploy.update_dokploy_target_source") as update_target_source,
+            patch("control_plane.dokploy.update_dokploy_target_env") as update_target_env,
         ):
             result = runner.invoke(
                 main,
@@ -1332,25 +1310,43 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
                     "opw",
                     "--instance",
                     "testing",
-                    "--apply",
                 ],
             )
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(len(captured_source_updates), 1)
-        self.assertEqual(len(captured_env_updates), 1)
-        self.assertIn(
-            "411f6b8e85cac72dc7aa2e2dc5540001043c327d", str(captured_env_updates[0]["env_text"])
-        )
+        update_target_source.assert_not_called()
+        update_target_env.assert_not_called()
         payload = json.loads(result.output)
-        self.assertTrue(payload["artifact_runtime_contract"]["artifact_ready"])
+        self.assertFalse(payload["artifact_runtime_contract"]["artifact_ready"])
         self.assertEqual(
-            payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-devkit.git"
+            payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-ai.git"
         )
+        self.assertFalse(payload["sync_preview"]["apply_changes"])
         self.assertEqual(
             payload["sync_preview"]["source_changes"]["custom_git_url"]["tracked"],
             "git@github.com:cbusillo/odoo-devkit.git",
         )
+        self.assertEqual(
+            payload["sync_preview"]["env_changes"]["ODOO_ADDON_REPOSITORIES"]["tracked"],
+            "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d",
+        )
+
+    def test_environments_sync_live_target_apply_option_is_retired(self) -> None:
+        result = CliRunner().invoke(
+            main,
+            [
+                "environments",
+                "sync-live-target",
+                "--context",
+                "opw",
+                "--instance",
+                "testing",
+                "--apply",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("No such option '--apply'", result.output)
 
     def test_read_control_plane_dokploy_source_of_truth_prefers_postgres_target_ids_without_file_fallback(
         self,
