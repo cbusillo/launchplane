@@ -90,7 +90,6 @@ def _manifest_payload() -> dict[str, object]:
                         {
                             "name": "public-ingress",
                             "kind": "public_http",
-                            "alert_issue_url": "https://github.com/cbusillo/launchplane/issues/929",
                         }
                     ]
                 },
@@ -1865,10 +1864,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertTrue(health_check.enabled)
         self.assertFalse(health_check.require_runtime_identity)
         self.assertEqual(
-            health_check.alert_issue_url,
-            "https://github.com/cbusillo/launchplane/issues/929",
-        )
-        self.assertEqual(
             profile.lanes[0].odoo_stable_bootstrap.approval_issue_url,
             "https://github.com/cbusillo/launchplane/issues/573",
         )
@@ -2451,7 +2446,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                             {
                                 "name": "public-ingress",
                                 "kind": "public_http",
-                                "alert_issue_url": "https://github.com/example/ops/issues/123",
                             }
                         ]
                     },
@@ -2491,10 +2485,25 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "https://repairshopr-sync.example.test/health",
         )
         self.assertTrue(profile.lanes[0].health_monitoring.checks[0].enabled)
-        self.assertEqual(
-            profile.lanes[0].health_monitoring.checks[0].alert_issue_url,
-            "https://github.com/example/ops/issues/123",
-        )
+
+    def test_product_onboarding_manifest_rejects_health_check_alert_issue_url(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        lanes = payload["lanes"]
+        assert isinstance(lanes, list)
+        first_lane = lanes[0]
+        assert isinstance(first_lane, dict)
+        health_monitoring = first_lane["health_monitoring"]
+        assert isinstance(health_monitoring, dict)
+        checks = health_monitoring["checks"]
+        assert isinstance(checks, list)
+        first_check = checks[0]
+        assert isinstance(first_check, dict)
+        first_check["alert_issue_url"] = "https://github.com/example/ops/issues/123"
+
+        with self.assertRaisesRegex(ValueError, "alert_issue_url"):
+            ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_manifest_rejects_image_less_health_monitoring_without_url(
         self,
@@ -2800,7 +2809,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                     "enabled": True,
                     "url": "",
                     "require_runtime_identity": False,
-                    "alert_issue_url": "",
                     "provider": "",
                     "provider_check": "",
                 }
@@ -2856,7 +2864,6 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             {
                 "enabled": True,
                 "require_runtime_identity": True,
-                "alert_issue_url": "https://github.example.test/org/repo/issues/1",
             },
         )
         self.assertEqual(lanes[1]["public_ingress_monitoring"], {"enabled": False})

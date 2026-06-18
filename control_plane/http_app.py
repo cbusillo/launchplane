@@ -1,7 +1,7 @@
 import hashlib
 import json
 import secrets
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path as FilePath
 from typing import Annotated, Literal, Protocol, cast
@@ -95,7 +95,6 @@ from control_plane.contracts.preview_readiness_read_model import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressIncidentRecord
 from control_plane.contracts.work_graph_read_model import WorkGraphSnapshot
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
@@ -144,8 +143,7 @@ from control_plane.workflows.evidence_ingestion import (
 )
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorStore,
-    PublicIngressNotificationDriverSet,
-    build_github_issue_notifier,
+    public_ingress_notification_drivers,
     run_public_ingress_monitor_once,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -1502,55 +1500,6 @@ def require_public_ingress_monitor_store(
             f"{missing_summary}"
         )
     return cast(PublicIngressMonitorStore, record_store)
-
-
-def secret_read_store(record_store: object) -> control_plane_secrets.SecretReadStore | None:
-    if callable(getattr(record_store, "read_secret_record", None)) and callable(
-        getattr(record_store, "read_secret_version", None)
-    ):
-        return cast(control_plane_secrets.SecretReadStore, record_store)
-    return None
-
-
-def public_ingress_managed_secret_resolver(
-    *,
-    record_store: control_plane_secrets.SecretReadStore,
-) -> Callable[[str, PublicIngressIncidentRecord], str]:
-    def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
-        normalized_secret_id = secret_id.strip()
-        if not normalized_secret_id:
-            return ""
-        try:
-            record = record_store.read_secret_record(normalized_secret_id)
-        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
-            return ""
-        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
-            return ""
-        if not control_plane_secrets._scope_matches_record(
-            record,
-            context_name=incident.context,
-            instance_name=incident.instance,
-        ):
-            return ""
-        try:
-            version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
-        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
-            return ""
-
-    return resolve
-
-
-def public_ingress_notification_drivers(
-    *,
-    record_store: object,
-) -> PublicIngressNotificationDriverSet:
-    secret_store = secret_read_store(record_store)
-    if secret_store is None:
-        return PublicIngressNotificationDriverSet()
-    return PublicIngressNotificationDriverSet(
-        incident_secret_resolver=public_ingress_managed_secret_resolver(record_store=secret_store)
-    )
 
 
 def require_product_context_audit_store(
@@ -4845,7 +4794,6 @@ def create_launchplane_fastapi_app(
             checked_at=recorded_at,
             timeout_seconds=monitor_request.timeout_seconds,
             notify=monitor_request.notify,
-            notifier=build_github_issue_notifier() if monitor_request.notify else None,
             notification_drivers=(
                 public_ingress_notification_drivers(record_store=record_store)
                 if monitor_request.notify

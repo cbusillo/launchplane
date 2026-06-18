@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from email.message import EmailMessage
 from http.client import HTTPMessage
-from typing import IO, Protocol
+from typing import IO, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener, urlopen
@@ -16,6 +16,7 @@ import ssl
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -143,7 +144,6 @@ class PublicIngressMonitorTarget:
     check_kind: ProductLaneHealthCheckKind
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
-    alert_issue_url: str
     provider: str = ""
     provider_check: str = ""
     private_endpoint_key: str = ""
@@ -188,7 +188,6 @@ class PublicIngressMonitorResult(BaseModel):
     pass_count: int = Field(default=0, ge=0)
     fail_count: int = Field(default=0, ge=0)
     skipped_count: int = Field(default=0, ge=0)
-    notification_count: int = Field(default=0, ge=0)
     open_incident_count: int = Field(default=0, ge=0)
     resolved_incident_count: int = Field(default=0, ge=0)
     delivery_attempt_count: int = Field(default=0, ge=0)
@@ -198,7 +197,6 @@ class PublicIngressMonitorResult(BaseModel):
 
 
 HttpGet = Callable[[str, int], HttpObservation]
-Notifier = Callable[[PublicIngressObservationRecord, PublicIngressObservationRecord | None], bool]
 
 
 class _RedirectTrackingHandler(HTTPRedirectHandler):
@@ -295,7 +293,6 @@ def _health_check_monitor_target(
             lane=lane,
         ),
         require_runtime_identity=check.require_runtime_identity,
-        alert_issue_url=check.alert_issue_url,
         provider=check.provider,
         provider_check=check.provider_check,
         private_endpoint_key=check.private_endpoint_key,
@@ -358,7 +355,6 @@ def run_public_ingress_monitor_once(
     timeout_seconds: int = 10,
     notify: bool = True,
     http_get: HttpGet | None = None,
-    notifier: Notifier | None = None,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
 ) -> PublicIngressMonitorResult:
     observed_at = checked_at.strip() or utc_now_timestamp()
@@ -368,7 +364,6 @@ def run_public_ingress_monitor_once(
     delivery_attempts: list[PublicIngressNotificationAttemptRecord] = []
     open_incident_count = 0
     resolved_incident_count = 0
-    notification_count = 0
     for target in discover_public_ingress_monitor_targets(record_store):
         previous_record = _latest_observation(record_store=record_store, target=target)
         record = check_public_ingress_target(
@@ -377,11 +372,6 @@ def run_public_ingress_monitor_once(
             timeout_seconds=timeout_seconds,
             http_get=get,
         )
-        if notify and notifier is not None and _should_notify(record, previous_record):
-            notification_sent = notifier(record, previous_record)
-            record = record.model_copy(update={"notification_sent": notification_sent})
-            if notification_sent:
-                notification_count += 1
         record_store.write_public_ingress_observation_record(record)
         records.append(record)
         incident_records = reconcile_public_ingress_incident(
@@ -411,7 +401,6 @@ def run_public_ingress_monitor_once(
         pass_count=sum(1 for record in records if record.status == "pass"),
         fail_count=sum(1 for record in records if record.status == "fail"),
         skipped_count=sum(1 for record in records if record.status == "skipped"),
-        notification_count=notification_count,
         open_incident_count=open_incident_count,
         resolved_incident_count=resolved_incident_count,
         delivery_attempt_count=len(delivery_attempts),
@@ -634,7 +623,6 @@ def check_public_ingress_target(
         health_url=target.health_url,
         expected_runtime_identity=target.expected_runtime_identity,
         targets=tuple(target_observations),
-        notification_key=_notification_key(target),
         summary=summary,
     )
 
@@ -876,17 +864,6 @@ def _open_incidents(
     )
 
 
-def _should_notify(
-    record: PublicIngressObservationRecord, previous: PublicIngressObservationRecord | None
-) -> bool:
-    if not record.notification_key:
-        return False
-    previous_status = previous.status if previous is not None else "missing"
-    if record.status == "fail" and previous_status != "fail":
-        return True
-    return record.status == "pass" and previous_status == "fail"
-
-
 def _target_urls(
     target: PublicIngressMonitorTarget,
 ) -> tuple[tuple[PublicIngressTargetKind, str], ...]:
@@ -1033,21 +1010,15 @@ def _normalized_url(url: str) -> str:
     )
 
 
-def _notification_key(target: PublicIngressMonitorTarget) -> str:
-    return target.alert_issue_url or ""
-
-
 def public_http_health_check(
     *,
     name: str = "public-ingress",
     require_runtime_identity: bool = False,
-    alert_issue_url: str = "",
 ) -> ProductLaneHealthCheck:
     return ProductLaneHealthCheck(
         name=name,
         kind="public_http",
         require_runtime_identity=require_runtime_identity,
-        alert_issue_url=alert_issue_url,
     )
 
 
@@ -1121,6 +1092,57 @@ class PublicIngressNotificationDriverSet:
         if self.incident_secret_resolver is not None:
             return self.incident_secret_resolver(secret_name, incident)
         return self.secret_resolver(secret_name)
+
+
+def public_ingress_secret_read_store(
+    record_store: object,
+) -> control_plane_secrets.SecretReadStore | None:
+    if callable(getattr(record_store, "read_secret_record", None)) and callable(
+        getattr(record_store, "read_secret_version", None)
+    ):
+        return cast(control_plane_secrets.SecretReadStore, record_store)
+    return None
+
+
+def public_ingress_managed_secret_resolver(
+    *,
+    record_store: control_plane_secrets.SecretReadStore,
+) -> Callable[[str, PublicIngressIncidentRecord], str]:
+    def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
+        normalized_secret_id = secret_id.strip()
+        if not normalized_secret_id:
+            return ""
+        try:
+            record = record_store.read_secret_record(normalized_secret_id)
+        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
+            return ""
+        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
+            return ""
+        if not control_plane_secrets._scope_matches_record(
+            record,
+            context_name=incident.context,
+            instance_name=incident.instance,
+        ):
+            return ""
+        try:
+            version = record_store.read_secret_version(record.current_version_id)
+            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
+        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
+            return ""
+
+    return resolve
+
+
+def public_ingress_notification_drivers(
+    *,
+    record_store: object,
+) -> PublicIngressNotificationDriverSet:
+    secret_store = public_ingress_secret_read_store(record_store)
+    if secret_store is None:
+        return PublicIngressNotificationDriverSet()
+    return PublicIngressNotificationDriverSet(
+        incident_secret_resolver=public_ingress_managed_secret_resolver(record_store=secret_store)
+    )
 
 
 def _deliver_github_issue_notification(
@@ -1444,57 +1466,3 @@ def _send_email_message(
 
 def _post_discord_webhook(webhook_url: str, payload: dict[str, object]) -> None:
     post_discord_webhook(webhook_url, payload)
-
-
-def public_ingress_alert_body(
-    record: PublicIngressObservationRecord,
-    previous: PublicIngressObservationRecord | None,
-) -> str:
-    state = "RECOVERED" if record.status == "pass" else "FAILED"
-    previous_status = previous.status if previous is not None else "missing"
-    lines = [
-        f"Launchplane public ingress {state}: {record.product}/{record.instance}",
-        "",
-        f"- status: {record.status}",
-        f"- previous_status: {previous_status}",
-        f"- observed_at: {record.observed_at}",
-        f"- context: {record.context}",
-    ]
-    if record.failure_code:
-        lines.append(f"- failure_code: {record.failure_code}")
-    for target in record.targets:
-        lines.append(f"- {target.target}: {target.status} {target.summary}")
-    return "\n".join(lines)
-
-
-def build_github_issue_notifier(
-    *,
-    github_client: Callable[[str, dict[str, object]], dict[str, object]] | None = None,
-    token: str | None = None,
-) -> Notifier:
-    client = github_client or (
-        lambda action, payload: _gh_issue_client(action, payload, token=token)
-    )
-
-    def notify(
-        record: PublicIngressObservationRecord,
-        previous: PublicIngressObservationRecord | None,
-    ) -> bool:
-        issue_url = record.notification_key.strip()
-        if not issue_url:
-            return False
-        try:
-            repository, issue_number = _github_issue_url_reference(issue_url)
-            client(
-                "comment",
-                {
-                    "repository": repository,
-                    "issue_number": issue_number,
-                    "body": public_ingress_alert_body(record, previous),
-                },
-            )
-        except (RuntimeError, ValueError):
-            return False
-        return True
-
-    return notify
