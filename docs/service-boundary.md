@@ -1354,6 +1354,10 @@ only after a passing plan and a matching stored preview record are present.
   human-session callers)
 - `GET /v1/ingress/canary-routes/records/{canary_key}` (native FastAPI for
   bearer-token and human-session callers)
+- `GET /v1/ingress/route-audits/records` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
+  bearer-token and human-session callers)
 - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
 - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
@@ -1403,9 +1407,13 @@ profile envelope. Product context cutover audit reads load the product profile
 from DB-backed records, check `product_profile.read` against the stored profile
 product and Launchplane service context, and require the requested source,
 target, and optional preview contexts to belong to that profile before returning
-the typed audit envelope. Their legacy WSGI branches are deleted; direct
-fallback calls fail closed while the mounted fallback remains for retained
-non-native routes.
+the typed audit envelope. Ingress route audit reads check `ingress_route.plan`
+against the requested query product/context before storage access, require those
+scope query parameters for list and single-record reads, preserve optional
+`status`, `mode`, `provider_host_id`, `trace_id`, `idempotency_key`, and `limit`
+list filters, and return `404 not_found` when a record exists outside the
+requested scope. Their legacy WSGI branches are deleted; direct fallback calls
+fail closed while the mounted fallback remains for retained non-native routes.
 
 Product/site reads use action `product_environment.read`. They are native
 FastAPI routes backed by DB-owned product environment read-model composition.

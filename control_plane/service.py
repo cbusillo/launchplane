@@ -835,20 +835,6 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
     ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]: ...
 
 
-class _IngressRouteAuditRecordStore(Protocol):
-    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
-
-    def read_ingress_route_audit_record(self, record_id: str) -> IngressRouteAuditRecord: ...
-
-    def list_ingress_route_audit_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        limit: int | None = None,
-    ) -> tuple[IngressRouteAuditRecord, ...]: ...
-
-
 class _EdgeEndpointRecordStore(Protocol):
     def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> object: ...
 
@@ -4444,10 +4430,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if len(segments) == 4 and segments == ["v1", "ingress", "route-audits", "records"]:
-        return "ingress_route.plan", {"ingress_route_audit_list": "true"}
-    if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
-        return "ingress_route.plan", {"ingress_route_audit_record_id": segments[4]}
     if len(segments) == 3 and segments == ["v1", "dokploy-targets", "inspect"]:
         return "dokploy_target.inspect", {}
     if path == _MERGE_TRAIN_ADMISSION_ROUTE:
@@ -6839,19 +6821,6 @@ def _odoo_stable_target_replacement_operation_store(
     )
 
 
-def _ingress_route_audit_record_store(record_store: object) -> _IngressRouteAuditRecordStore:
-    required_methods = (
-        "write_ingress_route_audit_record",
-        "read_ingress_route_audit_record",
-        "list_ingress_route_audit_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_IngressRouteAuditRecordStore, record_store)
-    raise click.ClickException(
-        "Ingress route audit reads require Launchplane ingress-audit record storage."
-    )
-
-
 def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStore:
     required_methods = (
         "write_edge_endpoint_record",
@@ -6994,35 +6963,6 @@ def _query_int_value(
     if maximum is not None and value > maximum:
         raise ValueError(f"Query parameter {key} must be at most {maximum}")
     return value
-
-
-def _filter_ingress_route_audit_records(
-    records: tuple[IngressRouteAuditRecord, ...],
-    *,
-    status: str = "",
-    mode: str = "",
-    provider_host_id: int | None = None,
-    trace_id: str = "",
-    idempotency_key: str = "",
-) -> tuple[IngressRouteAuditRecord, ...]:
-    filtered_records = records
-    if status:
-        filtered_records = tuple(record for record in filtered_records if record.status == status)
-    if mode:
-        filtered_records = tuple(record for record in filtered_records if record.mode == mode)
-    if provider_host_id is not None:
-        filtered_records = tuple(
-            record for record in filtered_records if record.provider_host_id == provider_host_id
-        )
-    if trace_id:
-        filtered_records = tuple(
-            record for record in filtered_records if record.trace_id == trace_id
-        )
-    if idempotency_key:
-        filtered_records = tuple(
-            record for record in filtered_records if record.idempotency_key == idempotency_key
-        )
-    return filtered_records
 
 
 def _find_odoo_stable_bootstrap_operation_by_idempotency_key(
@@ -10069,131 +10009,6 @@ def create_launchplane_service_app(
                                 if replacement_operation.result is not None
                                 else {}
                             ),
-                        },
-                    )
-                if action == "ingress_route.plan":
-                    audit_store = _ingress_route_audit_record_store(record_store)
-                    if "ingress_route_audit_record_id" in params:
-                        product = _query_string_value(query, "product")
-                        context_name = _query_string_value(query, "context")
-                        if not product or not context_name:
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=400,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "invalid_query",
-                                        "message": "Ingress route audit record reads require product and context query parameters.",
-                                    },
-                                },
-                            )
-                        if not authz_policy.allows(
-                            identity=identity,
-                            action=action,
-                            product=product,
-                            context=context_name,
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read ingress route audit records for the requested product/context.",
-                                    },
-                                },
-                            )
-                        try:
-                            audit_record = audit_store.read_ingress_route_audit_record(
-                                params["ingress_route_audit_record_id"]
-                            )
-                        except FileNotFoundError:
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        if audit_record.product != product or audit_record.context != context_name:
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "record": audit_record.model_dump(mode="json"),
-                            },
-                        )
-                    product = _query_string_value(query, "product")
-                    context_name = _query_string_value(query, "context")
-                    if not product or not context_name:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=400,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "invalid_query",
-                                    "message": "Ingress route audit list requires product and context query parameters.",
-                                },
-                            },
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product=product,
-                        context=context_name,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read ingress route audit records for the requested product/context.",
-                                },
-                            },
-                        )
-                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
-                    provider_host_id = _query_int_value(query, "provider_host_id", minimum=1)
-                    listed_records = audit_store.list_ingress_route_audit_records(
-                        product=product,
-                        context_name=context_name,
-                        limit=None,
-                    )
-                    listed_records = _filter_ingress_route_audit_records(
-                        listed_records,
-                        status=_query_string_value(query, "status"),
-                        mode=_query_string_value(query, "mode"),
-                        provider_host_id=provider_host_id,
-                        trace_id=_query_string_value(query, "trace_id"),
-                        idempotency_key=_query_string_value(query, "idempotency_key"),
-                    )
-                    limited_records = listed_records[:limit]
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "product": product,
-                            "context": context_name,
-                            "limit": limit,
-                            "count": len(limited_records),
-                            "records": [
-                                record.model_dump(mode="json") for record in limited_records
-                            ],
                         },
                     )
                 if action == "dokploy_target.inspect":
