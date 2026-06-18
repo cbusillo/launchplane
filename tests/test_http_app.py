@@ -41,6 +41,9 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
@@ -412,6 +415,230 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiOdooOperationStatusReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stable_bootstrap_operation_status_returns_native_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _running_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(action="odoo_stable_bootstrap.execute"),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["operation"]["operation_id"], "operation-cm-testing")
+        self.assertEqual(payload["operation"]["status"], "running")
+        self.assertEqual(
+            payload["operation"]["poll_url"],
+            "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+        )
+        self.assertNotIn("result", payload)
+
+    async def test_target_replacement_operation_status_returns_native_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_target_replacement_operation_record(
+                _running_odoo_target_replacement_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_target_replacement_apply.execute"
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(payload["operation"]["operation_id"], "operation-cm-testing")
+        self.assertEqual(payload["operation"]["status"], "running")
+        self.assertEqual(
+            payload["operation"]["poll_url"],
+            "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
+        )
+        self.assertNotIn("result", payload)
+
+    async def test_operation_status_routes_require_authentication(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_odoo_operation_status_identity()),
+            authz_policy=_odoo_operation_status_policy(action="odoo_stable_bootstrap.execute"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_operation_status_authorizes_against_stored_operation_context(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _running_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    contexts=("prod",),
+                ),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_operation_status_missing_record_returns_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(action="odoo_stable_bootstrap.execute"),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/stable-bootstrap/operations/missing-operation",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_operation_status_requires_only_read_operation_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_odoo_operation_status_identity()),
+            authz_policy=_odoo_operation_status_policy(action="odoo_stable_bootstrap.execute"),
+            record_store_factory=lambda: _EmptyStore(),
+        )
+
+        response = await _asgi_get(
+            app,
+            "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+            headers={"Authorization": "Bearer valid-token"},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("read_odoo_stable_bootstrap_operation_record", payload["error"]["message"])
+
+    async def test_openapi_includes_odoo_operation_status_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_odoo_operation_status_identity()),
+            authz_policy=_odoo_operation_status_policy(action="odoo_stable_bootstrap.execute"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        bootstrap_route = openapi["paths"][
+            "/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}"
+        ]["get"]
+        replacement_route = openapi["paths"][
+            "/v1/drivers/odoo/target-replacement/operations/{operation_id}"
+        ]["get"]
+        self.assertEqual(
+            bootstrap_route["operationId"],
+            "read_odoo_stable_bootstrap_operation_status",
+        )
+        self.assertEqual(
+            replacement_route["operationId"],
+            "read_odoo_target_replacement_operation_status",
+        )
+        self.assertEqual(
+            bootstrap_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/OdooStableBootstrapOperationStatusResponse",
+        )
+        self.assertEqual(
+            replacement_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/OdooStableTargetReplacementOperationStatusResponse",
+        )
+        self.assertTrue(set(bootstrap_route["responses"]) >= {"200", "401", "403", "404", "503"})
+        self.assertTrue(set(replacement_route["responses"]) >= {"200", "401", "403", "404", "503"})
+
+    async def test_fastapi_operation_status_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            record_store = FilesystemRecordStore(state_dir=state_dir)
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _running_odoo_stable_bootstrap_record()
+            )
+            record_store.write_odoo_stable_target_replacement_operation_record(
+                _running_odoo_target_replacement_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_stable_bootstrap.execute",
+                    actions=(
+                        "odoo_stable_bootstrap.execute",
+                        "odoo_target_replacement_apply.execute",
+                    ),
+                ),
+                record_store_factory=lambda: record_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=record_store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            bootstrap_response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/stable-bootstrap/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            replacement_response = await _asgi_get(
+                app,
+                "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(bootstrap_response.status_code, 200)
+        self.assertEqual(replacement_response.status_code, 200)
+        self.assertEqual(bootstrap_response.json()["status"], "ok")
+        self.assertEqual(replacement_response.json()["status"], "ok")
 
 
 class FastApiDeploymentEvidenceStoreGateTests(unittest.IsolatedAsyncioTestCase):
@@ -10316,6 +10543,92 @@ def _pending_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecor
             "phase": "created",
             "created_at": "2026-05-17T00:00:00Z",
             "updated_at": "2026-05-17T00:00:00Z",
+        }
+    )
+
+
+def _running_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecord:
+    return OdooStableBootstrapOperationRecord.model_validate(
+        {
+            "operation_id": "operation-cm-testing",
+            "product": "odoo-tenant-cm",
+            "context": "cm",
+            "instance": "testing",
+            "idempotency_key": "bootstrap-cm-testing",
+            "request_fingerprint": "fingerprint-123",
+            "request": {
+                "schema_version": 1,
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "confirmation": "bootstrap cm testing",
+            },
+            "status": "running",
+            "phase": "running",
+            "created_at": "2026-05-17T00:00:00Z",
+            "updated_at": "2026-05-17T00:01:00Z",
+            "started_at": "2026-05-17T00:01:00Z",
+        }
+    )
+
+
+def _running_odoo_target_replacement_record() -> OdooStableTargetReplacementOperationRecord:
+    return OdooStableTargetReplacementOperationRecord.model_validate(
+        {
+            "operation_id": "operation-cm-testing",
+            "product": "odoo-tenant-cm",
+            "context": "cm",
+            "instance": "testing",
+            "idempotency_key": "apply-cm-testing",
+            "request_fingerprint": "fingerprint-123",
+            "request": {
+                "schema_version": 1,
+                "product": "odoo-tenant-cm",
+                "instance": "testing",
+                "strategy": "recreate-in-place",
+                "allow_empty_data": False,
+            },
+            "status": "running",
+            "phase": "running",
+            "created_at": "2026-05-17T00:00:00Z",
+            "updated_at": "2026-05-17T00:01:00Z",
+            "started_at": "2026-05-17T00:01:00Z",
+        }
+    )
+
+
+def _odoo_operation_status_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref=(
+            "cbusillo/launchplane/.github/workflows/odoo-operation-status.yml@refs/heads/main"
+        ),
+        event_name="workflow_dispatch",
+    )
+
+
+def _odoo_operation_status_policy(
+    *,
+    action: str = "",
+    actions: tuple[str, ...] = (),
+    products: tuple[str, ...] = ("odoo-tenant-cm",),
+    contexts: tuple[str, ...] = ("cm",),
+) -> LaunchplaneAuthzPolicy:
+    resolved_actions = actions or (action,)
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/odoo-operation-status.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": list(products),
+                    "contexts": list(contexts),
+                    "actions": list(resolved_actions),
+                }
+            ]
         }
     )
 

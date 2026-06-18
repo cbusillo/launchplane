@@ -4385,18 +4385,6 @@ def _not_found_response(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
-    if (
-        len(segments) == 6
-        and segments[:4] == ["v1", "drivers", "odoo", "stable-bootstrap"]
-        and segments[4] == "operations"
-    ):
-        return "odoo_stable_bootstrap.execute", {"operation_id": segments[5]}
-    if (
-        len(segments) == 6
-        and segments[:4] == ["v1", "drivers", "odoo", "target-replacement"]
-        and segments[4] == "operations"
-    ):
-        return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
     if len(segments) == 4 and segments == [
         "v1",
         "products",
@@ -9867,103 +9855,6 @@ def create_launchplane_service_app(
                         },
                     },
                 )
-            if method == "GET":
-                assert read_route is not None
-                action, params = read_route
-                if action == "odoo_stable_bootstrap.execute":
-                    operation_id = params["operation_id"]
-                    operation_store = _odoo_stable_bootstrap_operation_store(record_store)
-                    try:
-                        operation = operation_store.read_odoo_stable_bootstrap_operation_record(
-                            operation_id
-                        )
-                    except FileNotFoundError:
-                        return _not_found_response(
-                            start_response=start_response,
-                            trace_id=request_trace_id,
-                            path=path,
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product=operation.product,
-                        context=operation.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Odoo stable bootstrap operation status for the requested product/context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "operation": _operation_payload(operation),
-                            **(
-                                {"result": operation.result.model_dump(mode="json")}
-                                if operation.result is not None
-                                else {}
-                            ),
-                        },
-                    )
-                if action == "odoo_target_replacement_apply.execute":
-                    replacement_operation_id = params["operation_id"]
-                    replacement_operation_store = _odoo_stable_target_replacement_operation_store(
-                        record_store
-                    )
-                    try:
-                        replacement_operation = replacement_operation_store.read_odoo_stable_target_replacement_operation_record(
-                            replacement_operation_id
-                        )
-                    except FileNotFoundError:
-                        return _not_found_response(
-                            start_response=start_response,
-                            trace_id=request_trace_id,
-                            path=path,
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product=replacement_operation.product,
-                        context=replacement_operation.context,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Odoo target replacement operation status for the requested product/context.",
-                                },
-                            },
-                        )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "operation": _target_replacement_operation_payload(
-                                replacement_operation
-                            ),
-                            **(
-                                {"result": replacement_operation.result.model_dump(mode="json")}
-                                if replacement_operation.result is not None
-                                else {}
-                            ),
-                        },
-                    )
             if path == "/v1/service/odoo-workers/reconcile":
                 if not authz_policy.allows(
                     identity=identity,

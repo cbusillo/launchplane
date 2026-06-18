@@ -47,6 +47,13 @@ VeriReel product paths:
   - `GET /v1/service/odoo-workers/status`, requiring
     `launchplane_service.read` for the Launchplane service context and returning
     Odoo operation worker queue counters without request payloads
+- native FastAPI Odoo operation status reads:
+  - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`,
+    requiring `odoo_stable_bootstrap.execute` for the stored operation product
+    and context
+  - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`,
+    requiring `odoo_target_replacement_apply.execute` for the stored operation
+    product and context
 - native FastAPI protected artifact inventory route:
   - `GET /v1/artifacts/protected`, requiring `artifact_protection.read` for
     the requested product and either the requested context or whole-product
@@ -199,6 +206,10 @@ VeriReel product paths:
   - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
+  - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`
+    (native FastAPI)
+  - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}`
+    (native FastAPI)
   - `POST /v1/drivers/odoo/target-replacement-apply`
   - `POST /v1/drivers/odoo/post-deploy`
   - `POST /v1/drivers/odoo/config-parameter-override`
@@ -1348,6 +1359,10 @@ only after a passing plan and a matching stored preview record are present.
   callers)
 - `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
   human-session callers)
+- `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` (native
+  FastAPI for bearer-token and human-session callers)
+- `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` (native
+  FastAPI for bearer-token and human-session callers)
 - `GET /v1/edge-endpoints/records` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/edge-endpoints/records/{endpoint_key}` (native FastAPI for

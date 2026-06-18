@@ -60,6 +60,10 @@ Keep a compatibility surface only when it is one of these:
   routes for bearer-token and human-session callers. Their legacy WSGI branch is
   deleted; direct fallback calls fail closed while the mounted fallback remains
   for retained non-native routes.
+- Odoo stable-bootstrap and target-replacement operation status reads use native
+  FastAPI routes for bearer-token and human-session callers. Their legacy WSGI
+  read branches are deleted; the POST enqueue routes still return the same poll
+  URLs while those write paths remain on the retained fallback.
 - Tracked target logs use the native FastAPI
   `GET /v1/contexts/{context}/instances/{instance}/logs` route. The legacy WSGI
   branch is deleted; direct fallback calls fail closed while the mounted fallback
