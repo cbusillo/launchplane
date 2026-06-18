@@ -83,6 +83,10 @@ Keep a compatibility surface only when it is one of these:
   `GET /v1/ingress/route-audits/records/{record_id}` routes. Their legacy WSGI
   read branch is deleted; ingress route apply remains on the retained fallback
   until that write path has its own native replacement.
+- Dokploy target inspect uses the native FastAPI
+  `GET /v1/dokploy-targets/inspect` route. Its legacy WSGI read branch is
+  deleted; Dokploy target setup remains on the retained fallback until that
+  write path has its own native replacement.
 - Protected artifact inventory and product environment config-status reads use
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a

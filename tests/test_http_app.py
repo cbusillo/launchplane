@@ -3445,6 +3445,257 @@ class FastApiDriverContextViewTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiDokployTargetInspectReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dokploy_target_inspect_reads_redacted_provider_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ) as read_dokploy_config,
+                patch(
+                    "control_plane.dokploy_target_inspect.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "id": "compose-cm-prod",
+                        "name": "cm-prod",
+                        "serverId": "server-123",
+                        "environment": {
+                            "id": "env-prod",
+                            "name": "prod",
+                            "project": {"id": "project-odoo", "name": "odoo"},
+                        },
+                        "env": "ODOO_DB_PASSWORD=secret\nDISABLE_ODOO_ONLINE=true\n",
+                    },
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="dokploy_target.inspect",
+                        context="launchplane",
+                    ),
+                    database_url=database_url,
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+
+                response = await _get_dokploy_target_inspect(
+                    app,
+                    context="cm_website",
+                    instance="prod",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["inspect"]["target_id"], "compose-cm-prod")
+        self.assertEqual(payload["inspect"]["tracked_target"]["target_name"], "cm-prod")
+        self.assertEqual(payload["inspect"]["provider"]["environment"]["id"], "env-prod")
+        self.assertEqual(
+            payload["inspect"]["provider"]["env"]["keys"],
+            ["DISABLE_ODOO_ONLINE", "ODOO_DB_PASSWORD"],
+        )
+        self.assertTrue(payload["inspect"]["provider_payload_redacted"])
+        self.assertNotIn("secret", str(payload))
+        self.assertNotIn("provider_evidence", str(payload))
+        read_dokploy_config.assert_called_once_with(
+            control_plane_root=root,
+            database_url=database_url,
+        )
+
+    async def test_dokploy_target_inspect_rejects_without_authz(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                database_url=database_url,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _get_dokploy_target_inspect(
+                app,
+                target_type="compose",
+                target_id="compose-123",
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_dokploy_target_inspect_requires_database_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="dokploy_target.inspect",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_dokploy_target_inspect(
+            app,
+            target_type="compose",
+            target_id="compose-123",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    async def test_dokploy_target_inspect_rejects_invalid_query_mode(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="dokploy_target.inspect",
+                    context="launchplane",
+                ),
+                database_url=database_url,
+                record_store_factory=lambda: store,
+                control_plane_root_path=root,
+            )
+
+            response = await _get_dokploy_target_inspect(
+                app,
+                context="cm_website",
+                instance="prod",
+                target_type="compose",
+                target_id="compose-123",
+            )
+            store.close()
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_inspect")
+
+    async def test_dokploy_target_inspect_returns_not_found_for_unknown_route(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch(
+                "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.invalid", "token"),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="dokploy_target.inspect",
+                        context="launchplane",
+                    ),
+                    database_url=database_url,
+                    record_store_factory=lambda: store,
+                    control_plane_root_path=root,
+                )
+
+                response = await _get_dokploy_target_inspect(
+                    app,
+                    context="missing",
+                    instance="prod",
+                )
+                store.close()
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_openapi_includes_dokploy_target_inspect_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(
+                action="dokploy_target.inspect",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        inspect_route = openapi["paths"]["/v1/dokploy-targets/inspect"]["get"]
+        self.assertEqual(inspect_route["operationId"], "read_dokploy_target_inspect")
+        self.assertEqual(
+            inspect_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DokployTargetInspectResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(inspect_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["DokployTargetInspectResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_dokploy_target_inspect_precedes_legacy_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            with (
+                patch(
+                    "control_plane.http_app.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.invalid", "token"),
+                ),
+                patch(
+                    "control_plane.dokploy_target_inspect.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"id": "compose-cm-prod", "name": "cm-prod"},
+                ),
+            ):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_record_read_policy(
+                        action="dokploy_target.inspect",
+                        context="launchplane",
+                    ),
+                    database_url=database_url,
+                    record_store_factory=lambda: app_store,
+                    control_plane_root_path=root,
+                )
+                legacy_app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                    control_plane_root_path=root,
+                )
+                app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+                response = await _get_dokploy_target_inspect(
+                    app,
+                    context="cm_website",
+                    instance="prod",
+                )
+                app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
 class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_tracked_target_logs_returns_redacted_application_logs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9233,6 +9484,48 @@ def _seed_product_environment_read_records(database_url: str) -> None:
         store.close()
 
 
+def _seed_dokploy_target_inspect_records(database_url: str) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context="cm_website",
+                instance="prod",
+                target_type="compose",
+                target_name="cm-prod",
+                project_name="odoo",
+                updated_at="2026-06-14T00:00:00Z",
+                source_label="test",
+            )
+        )
+        store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm_website",
+                instance="prod",
+                target_id="compose-cm-prod",
+                updated_at="2026-06-14T00:00:00Z",
+                source_label="test",
+            )
+        )
+        store.write_provider_target_record(
+            ProviderTargetRecord(
+                context="cm_website",
+                instance="prod",
+                provider_id="dokploy",
+                target_category="compose",
+                target_id="compose-cm-prod",
+                display_name="cm-prod",
+                provider_target_type="compose",
+                provider_evidence={"project_name": "odoo"},
+                updated_at="2026-06-14T00:00:00Z",
+                source_label="test",
+            )
+        )
+    finally:
+        store.close()
+
+
 def _seed_empty_agent_context_read_store(database_url: str) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -9882,6 +10175,29 @@ async def _get_preview_pr_feedback_notification_attempts(
 
 def _query_params(**values: str) -> dict[str, str]:
     return {key: value for key, value in values.items() if value != ""}
+
+
+async def _get_dokploy_target_inspect(
+    app: FastAPI,
+    *,
+    context: str = "",
+    instance: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers.setdefault("Authorization", authorization)
+    params = _query_params(
+        context=context,
+        instance=instance,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/dokploy-targets/inspect{suffix}", headers=request_headers)
 
 
 async def _get_products(
