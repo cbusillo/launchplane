@@ -30,6 +30,10 @@ from control_plane.contracts.every_code_preview_gate_record import EveryCodePrev
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -4659,6 +4663,269 @@ class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["status"], "ok")
 
 
+class FastApiIngressRouteAuditReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ingress_route_audit_reads_return_native_payloads(self) -> None:
+        planned_record = _ingress_route_audit_record()
+        newer_applied_record = _ingress_route_audit_record(
+            record_id="ingress-route-audit-applied",
+            mode="apply",
+            status="applied",
+            dry_run=False,
+            provider_host_id=79,
+            trace_id="trace-audit-2",
+            idempotency_key="audit-key-2",
+            recorded_at="2026-06-02T00:00:00Z",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_route_audit_record(planned_record)
+            store.write_ingress_route_audit_record(newer_applied_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+                record_store_factory=lambda: store,
+            )
+
+            list_response = await _get_ingress_route_audit_records(
+                app,
+                product="launchplane",
+                context="reon-prod",
+                status="planned",
+                mode="dry-run",
+                provider_host_id="78",
+                trace_id="trace-audit-1",
+                idempotency_key="audit-key-1",
+                limit="1",
+            )
+            read_response = await _get_ingress_route_audit_record(
+                app,
+                planned_record.record_id,
+                product="launchplane",
+                context="reon-prod",
+            )
+
+        self.assertEqual(list_response.status_code, 200)
+        list_payload = list_response.json()
+        self.assertEqual(list_payload["status"], "ok")
+        self.assertEqual(list_payload["product"], "launchplane")
+        self.assertEqual(list_payload["context"], "reon-prod")
+        self.assertEqual(list_payload["limit"], 1)
+        self.assertEqual(list_payload["count"], 1)
+        self.assertEqual(list_payload["records"][0]["record_id"], planned_record.record_id)
+        self.assertEqual(read_response.status_code, 200)
+        read_payload = read_response.json()
+        self.assertEqual(read_payload["status"], "ok")
+        self.assertEqual(read_payload["record"]["record_id"], planned_record.record_id)
+        self.assertEqual(read_payload["record"]["provider_host_id"], 78)
+
+    async def test_ingress_route_audit_read_hides_record_outside_requested_scope(
+        self,
+    ) -> None:
+        record = _ingress_route_audit_record()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_route_audit_record(record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_ingress_route_audit_read_policy(contexts=("reon-prod", "cm-prod")),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_ingress_route_audit_record(
+                app,
+                record.record_id,
+                product="launchplane",
+                context="cm-prod",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_ingress_route_audit_reads_require_scoped_query(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        list_response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+        )
+        read_response = await _get_ingress_route_audit_record(
+            app,
+            "ingress-route-audit-test",
+        )
+
+        self.assertEqual(list_response.status_code, 400)
+        self.assertEqual(read_response.status_code, 400)
+        self.assertEqual(list_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(read_response.json()["error"]["code"], "invalid_query")
+
+    async def test_ingress_route_audit_reads_reject_unauthorized_context(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+            context="cm-prod",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_ingress_route_audit_reads_require_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+            context="reon-prod",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_ingress_route_audit_read_returns_not_found_for_missing_record(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_ingress_route_audit_record(
+                app,
+                "missing-audit-record",
+                product="launchplane",
+                context="reon-prod",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_ingress_route_audit_reads_reject_invalid_query_values(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        low_limit_response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+            context="reon-prod",
+            limit="0",
+        )
+        high_limit_response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+            context="reon-prod",
+            limit="101",
+        )
+        provider_host_response = await _get_ingress_route_audit_records(
+            app,
+            product="launchplane",
+            context="reon-prod",
+            provider_host_id="0",
+        )
+
+        self.assertEqual(low_limit_response.status_code, 400)
+        self.assertEqual(high_limit_response.status_code, 400)
+        self.assertEqual(provider_host_response.status_code, 400)
+        self.assertEqual(low_limit_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(high_limit_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(provider_host_response.json()["error"]["code"], "invalid_query")
+
+    async def test_openapi_includes_ingress_route_audit_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        list_route = openapi["paths"]["/v1/ingress/route-audits/records"]["get"]
+        read_route = openapi["paths"]["/v1/ingress/route-audits/records/{record_id}"]["get"]
+        self.assertEqual(list_route["operationId"], "list_ingress_route_audit_records")
+        self.assertEqual(read_route["operationId"], "read_ingress_route_audit_record")
+        self.assertEqual(
+            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/IngressRouteAuditRecordsResponse",
+        )
+        self.assertEqual(
+            read_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/IngressRouteAuditRecordResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(list_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(read_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["IngressRouteAuditRecordResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["IngressRouteAuditRecordsResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
+
+    async def test_fastapi_ingress_route_audit_reads_precede_legacy_wsgi_fallback(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            record = _ingress_route_audit_record()
+            store.write_ingress_route_audit_record(record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(action="ingress_route.plan", context="reon-prod"),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_ingress_route_audit_record(
+                app,
+                record.record_id,
+                product="launchplane",
+                context="reon-prod",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
 class FastApiDeploymentPromotionReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_deployment_read_returns_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9158,6 +9425,65 @@ def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _ingress_route_audit_record(
+    *,
+    record_id: str = "ingress-route-audit-test",
+    product: str = "launchplane",
+    context: str = "reon-prod",
+    mode: Literal["dry-run", "apply"] = "dry-run",
+    status: Literal["pending", "planned", "applied", "unchanged"] = "planned",
+    dry_run: bool = True,
+    provider_host_id: int | None = 78,
+    trace_id: str = "trace-audit-1",
+    idempotency_key: str = "audit-key-1",
+    recorded_at: str = "2026-06-01T00:00:00Z",
+) -> IngressRouteAuditRecord:
+    return IngressRouteAuditRecord(
+        record_id=record_id,
+        product=product,
+        context=context,
+        mode=mode,
+        status=status,
+        dry_run=dry_run,
+        requested_domains=("app.example.com",),
+        edge_endpoint_key="edge-app",
+        expected_host_id=None,
+        provider_host_id=provider_host_id,
+        operations=(
+            IngressRouteAuditOperation(
+                action="create",
+                host_id=provider_host_id,
+                domain_names=("app.example.com",),
+                requires_apply=mode == "dry-run",
+                change_categories=("create",),
+            ),
+        ),
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        reason="test",
+        recorded_at=recorded_at,
+    )
+
+
+def _ingress_route_audit_read_policy(*, contexts: tuple[str, ...]) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": list(contexts),
+                    "actions": ["ingress_route.plan"],
+                }
+            ]
+        }
+    )
+
+
 def _product_profile_read_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -9871,6 +10197,62 @@ async def _get_ingress_canary_route_record(
     return await _asgi_get(
         app,
         f"/v1/ingress/canary-routes/records/{canary_key}",
+        headers=request_headers,
+    )
+
+
+async def _get_ingress_route_audit_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+    status: str = "",
+    mode: str = "",
+    provider_host_id: str = "",
+    trace_id: str = "",
+    idempotency_key: str = "",
+    limit: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = _query_params(
+        product=product,
+        context=context,
+        status=status,
+        mode=mode,
+        provider_host_id=provider_host_id,
+        trace_id=trace_id,
+        idempotency_key=idempotency_key,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/ingress/route-audits/records{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_ingress_route_audit_record(
+    app: FastAPI,
+    record_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    product: str = "",
+    context: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = _query_params(product=product, context=context)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/ingress/route-audits/records/{record_id}{suffix}",
         headers=request_headers,
     )
 
