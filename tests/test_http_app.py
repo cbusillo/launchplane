@@ -34,6 +34,10 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
 )
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    parse_merge_train_policy_toml,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -92,13 +96,20 @@ from tests.test_service import (
     _edge_endpoint_record,
     _identity,
     _ingress_canary_route_record,
+    _local_operator_policy,
+    _merge_train_policy_table,
+    _merge_train_run_record,
+    _merge_train_service_identity,
+    _merge_train_service_policy,
     _private_health_endpoint_record,
     _product_profile_payload,
     _product_profile_payload_with_prod,
+    _seed_merge_train_policy,
     _seed_tracked_target_records,
     _sqlite_database_url,
 )
 from tests.test_service import _StubVerifier
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from tests.test_protected_artifacts import _seed_store as seed_protected_artifact_store
 
 
@@ -1843,6 +1854,229 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity_response.status_code, 200)
         self.assertEqual(environments_response.status_code, 200)
         self.assertEqual(config_status_response.status_code, 200)
+
+
+class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_admission_reads_store_decision(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/admission?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["admission"]["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(payload["admission"]["base_branch"], "main")
+        self.assertEqual(payload["admission"]["status"], "admitted")
+        self.assertEqual(payload["admission"]["reason_code"], "no_prior_run")
+
+    async def test_controller_status_reads_stored_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            run_record = _merge_train_run_record(recorded_at="2026-05-20T12:00:00Z")
+            store.write_merge_train_run_record(run_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/controller/status?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        controller_status = response.json()["controller_status"]
+        self.assertEqual(controller_status["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(controller_status["base_branch"], "main")
+        self.assertEqual(controller_status["latest_run"]["run_id"], run_record.run_id)
+        self.assertEqual(controller_status["latest_dry_run"]["queue_count"], 1)
+        self.assertEqual(controller_status["latest_dry_run"]["selected_pr_number"], 1)
+
+    async def test_policy_targets_lists_authorized_policy_targets(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            policy_record = _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-targets-fastapi-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=parse_merge_train_policy_toml(
+                        "\n\n".join(
+                            (
+                                "schema_version = 1",
+                                _merge_train_policy_table("cbusillo/sellyouroutboard", "release"),
+                                _merge_train_policy_table(
+                                    "cbusillo/codex-skills",
+                                    "main",
+                                    scheduler_enabled=True,
+                                    scheduler_runner_mode="level1",
+                                    scheduler_mutate=True,
+                                ),
+                            )
+                        )
+                    ),
+                ),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/policy-targets",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["policy"]["record_id"], policy_record.record_id)
+        self.assertEqual(payload["policy"]["policy_sha256"], policy_record.policy_sha256)
+        self.assertEqual(
+            [(target["repository"], target["base_branch"]) for target in payload["targets"]],
+            [("cbusillo/codex-skills", "main"), ("cbusillo/sellyouroutboard", "release")],
+        )
+        self.assertEqual(payload["targets"][0]["scheduler"]["runner_mode"], "level1")
+
+    async def test_policy_targets_allows_local_operator_visibility(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-targets-local-operator-fastapi-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_policy(
+                    actions=("merge_train.policy_targets",),
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                ),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="local-owner-agent",
+                    local_operator_token_label="local-owner-write",
+                ),
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/policy-targets",
+                headers={"Authorization": "Bearer local-operator-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [
+                (target["repository"], target["base_branch"])
+                for target in response.json()["targets"]
+            ],
+            [("cbusillo/codex-skills", "main"), ("cbusillo/sellyouroutboard", "main")],
+        )
+
+    async def test_admission_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/admission?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_openapi_includes_merge_train_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        expected_routes = {
+            "/v1/work-graph/merge-train/admission": "MergeTrainAdmissionResponse",
+            "/v1/work-graph/merge-train/controller/status": "MergeTrainControllerStatusResponse",
+            "/v1/work-graph/merge-train/policy-targets": "MergeTrainPolicyTargetsResponse",
+        }
+        for path, response_model_name in expected_routes.items():
+            route = openapi["paths"][path]["get"]
+            success_schema = route["responses"]["200"]["content"]["application/json"]["schema"]
+            self.assertEqual(success_schema["$ref"], f"#/components/schemas/{response_model_name}")
+            self.assertTrue(set(route["responses"]) >= {"200", "401", "403", "503"})
+            self.assertEqual(
+                openapi["components"]["schemas"][response_model_name]["additionalProperties"],
+                False,
+            )
+
+    async def test_fastapi_merge_train_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _asgi_get(
+                app,
+                "/v1/work-graph/merge-train/admission?repository=cbusillo/sellyouroutboard&base_branch=main",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["admission"]["status"], "admitted")
 
 
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
