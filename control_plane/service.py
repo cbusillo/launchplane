@@ -322,7 +322,6 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.ui_static_http import serve_ui_route
 from control_plane.product_config_http import (
     ProductConfigRouteResult,
@@ -4499,13 +4498,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[4] == "operations"
     ):
         return "odoo_target_replacement_apply.execute", {"operation_id": segments[5]}
-    if (
-        len(segments) == 6
-        and segments[:2] == ["v1", "contexts"]
-        and segments[3] == "instances"
-        and segments[5] == "logs"
-    ):
-        return "target_logs.read", {"context": segments[2], "instance": segments[4]}
     if len(segments) == 4 and segments == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
@@ -10840,68 +10832,6 @@ def create_launchplane_service_app(
                             "records": [
                                 record.model_dump(mode="json") for record in canary_records
                             ],
-                        },
-                    )
-                if action == "target_logs.read":
-                    context_name = params["context"]
-                    instance_name = params["instance"]
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=context_name,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read tracked target logs for the requested context.",
-                                },
-                            },
-                        )
-                    line_count = int(
-                        str(
-                            (
-                                query.get("lines")
-                                or [str(control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT)]
-                            )[0]
-                        )
-                    )
-                    since = str((query.get("since") or ["all"])[0])
-                    search = str((query.get("search") or [""])[0])
-                    if not isinstance(record_store, PostgresRecordStore):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=503,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "database_required",
-                                    "message": "Tracked target logs require DB-backed Launchplane storage.",
-                                },
-                            },
-                        )
-                    log_payload = build_tracked_target_logs_payload(
-                        record_store=record_store,
-                        control_plane_root=resolved_root,
-                        context_name=context_name,
-                        instance_name=instance_name,
-                        line_count=line_count,
-                        since=since,
-                        search=search,
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            **log_payload,
                         },
                     )
                 if action == "every_code_work_request.read":

@@ -13,10 +13,12 @@ from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane import dokploy as control_plane_dokploy
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
+from control_plane import tracked_target_logs as control_plane_tracked_target_logs
 from control_plane.agent_context_service import (
     AgentContextPayload,
     agent_context_action_allowed,
@@ -345,6 +347,45 @@ class DriverContextViewResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     view: DriverContextView
+
+
+class TrackedTargetLogTargetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_id: str
+    target_type: str
+    target_name: str
+    app_name: str
+    server_id: str
+    source_label: str
+
+
+class TrackedTargetLogRequestResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_count: int
+    since: str
+    search: str
+
+
+class TrackedTargetLogLinesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_count: int
+    lines: tuple[str, ...]
+    redacted: bool
+
+
+class TrackedTargetLogsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    context: str
+    instance: str
+    target: TrackedTargetLogTargetResponse
+    request: TrackedTargetLogRequestResponse
+    logs: TrackedTargetLogLinesResponse
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -967,6 +1008,26 @@ def require_product_context_audit_store(
             f"{missing_summary}"
         )
     return cast(control_plane_product_context_audit.ProductContextAuditStore, record_store)
+
+
+def require_tracked_target_logs_store(
+    record_store: object,
+) -> control_plane_tracked_target_logs.TrackedTargetLogsStore:
+    required_methods = (
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods or not isinstance(record_store, PostgresRecordStore):
+        missing_summary = ", ".join(missing_methods) or "postgres_storage"
+        raise TypeError(
+            f"Tracked target logs require DB-backed Launchplane storage: {missing_summary}"
+        )
+    return cast(control_plane_tracked_target_logs.TrackedTargetLogsStore, record_store)
 
 
 def product_profile_context_cutover_allowed_contexts(
@@ -1913,6 +1974,90 @@ def create_launchplane_fastapi_app(
             instance_name=instance,
         )
         return DriverContextViewResponse(trace_id=trace_id, view=view)
+
+    def read_tracked_target_logs(
+        context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        lines: Annotated[str, Query()] = str(control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT),
+        since: Annotated[str, Query()] = "all",
+        search: Annotated[str, Query()] = "",
+    ) -> TrackedTargetLogsResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="target_logs.read",
+            product="launchplane",
+            context=context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot read tracked target logs for the requested context.",
+            )
+        try:
+            line_count = control_plane_service_status.query_int_value(
+                lines,
+                "lines",
+                default=control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+                minimum=1,
+                maximum=control_plane_dokploy.MAX_DOKPLOY_LOG_LINE_COUNT,
+            )
+            assert line_count is not None
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        try:
+            normalized_since = control_plane_dokploy.normalize_dokploy_log_since(since)
+            normalized_search = control_plane_dokploy.normalize_dokploy_log_search(search)
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        try:
+            target_logs_store = require_tracked_target_logs_store(record_store)
+            logs_payload = control_plane_tracked_target_logs.build_tracked_target_logs_payload(
+                record_store=target_logs_store,
+                control_plane_root=resolved_control_plane_root,
+                context_name=context,
+                instance_name=instance,
+                line_count=line_count,
+                since=normalized_since,
+                search=normalized_search,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error),
+            ) from error
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="target_logs_unavailable",
+                message=str(error),
+            ) from error
+        return TrackedTargetLogsResponse.model_validate(
+            {"status": "ok", "trace_id": trace_id, **logs_payload}
+        )
 
     def read_deployment_record(
         record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -3269,6 +3414,21 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/contexts/{context}/instances/{instance}/logs",
+        read_tracked_target_logs,
+        methods=["GET"],
+        response_model=TrackedTargetLogsResponse,
+        operation_id="read_tracked_target_logs",
+        summary="Read tracked target logs",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
         },
     )
 
