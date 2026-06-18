@@ -281,7 +281,12 @@ an ORM column/table or remains only in the evidence payload.
   `status`, and `updated_at`. The record is Launchplane-owned route authority
   for canary applies; workflows pass the canary key and the service resolves the
   stored domain, provider guard, certificate, and edge endpoint values before
-  calling the ingress provider.
+  calling the ingress provider. Native FastAPI
+  `POST /v1/ingress/canary-routes/records/apply` writes this authority for
+  apply mode and plans it for dry-run mode. Native FastAPI
+  `POST /v1/ingress/canary-routes/apply` consumes the stored record, records an
+  ingress route audit, and preserves the existing idempotency replay/conflict
+  contract.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
