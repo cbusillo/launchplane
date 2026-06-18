@@ -870,16 +870,6 @@ class _PrivateHealthEndpointRecordStore(Protocol):
         self, endpoint_key: str
     ) -> PrivateHealthEndpointRecord: ...
 
-    def list_private_health_endpoint_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        instance_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
-
 
 class _IngressCanaryRouteRecordStore(Protocol):
     def write_ingress_canary_route_record(self, record: IngressCanaryRouteRecord) -> object: ...
@@ -4494,10 +4484,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "ingress_route.plan", {"ingress_route_audit_list": "true"}
     if len(segments) == 5 and segments[:4] == ["v1", "ingress", "route-audits", "records"]:
         return "ingress_route.plan", {"ingress_route_audit_record_id": segments[4]}
-    if len(segments) == 3 and segments == ["v1", "private-health-endpoints", "records"]:
-        return "private_health_endpoint.read", {"private_health_endpoint_list": "true"}
-    if len(segments) == 4 and segments[:3] == ["v1", "private-health-endpoints", "records"]:
-        return "private_health_endpoint.read", {"private_health_endpoint_key": segments[3]}
     if len(segments) == 3 and segments == ["v1", "dokploy-targets", "inspect"]:
         return "dokploy_target.inspect", {}
     if len(segments) == 4 and segments == ["v1", "ingress", "canary-routes", "records"]:
@@ -6944,7 +6930,6 @@ def _private_health_endpoint_record_store(
     required_methods = (
         "write_private_health_endpoint_record",
         "read_private_health_endpoint_record",
-        "list_private_health_endpoint_records",
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_PrivateHealthEndpointRecordStore, record_store)
@@ -10481,107 +10466,6 @@ def create_launchplane_service_app(
                             "count": len(limited_records),
                             "records": [
                                 record.model_dump(mode="json") for record in limited_records
-                            ],
-                        },
-                    )
-                if action == "private_health_endpoint.read":
-                    private_endpoint_store = _private_health_endpoint_record_store(record_store)
-                    product = _query_string_value(query, "product")
-                    context_name = _query_string_value(query, "context")
-                    instance_name = _query_string_value(query, "instance")
-                    if not product or not context_name:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=400,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "invalid_query",
-                                    "message": (
-                                        "Private health endpoint reads require product and "
-                                        "context query parameters."
-                                    ),
-                                },
-                            },
-                        )
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product=product,
-                        context=context_name,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": (
-                                        "Workflow cannot read private health endpoints "
-                                        "for the requested product/context."
-                                    ),
-                                },
-                            },
-                        )
-                    if "private_health_endpoint_key" in params:
-                        try:
-                            private_endpoint_record = (
-                                private_endpoint_store.read_private_health_endpoint_record(
-                                    params["private_health_endpoint_key"]
-                                )
-                            )
-                        except FileNotFoundError:
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        if (
-                            private_endpoint_record.product != product
-                            or private_endpoint_record.context != context_name
-                            or (instance_name and private_endpoint_record.instance != instance_name)
-                        ):
-                            return _not_found_response(
-                                start_response=start_response,
-                                trace_id=request_trace_id,
-                                path=path,
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "record": private_endpoint_record.model_dump(mode="json"),
-                            },
-                        )
-                    limit = _query_int_value(query, "limit", default=25, minimum=1, maximum=100)
-                    private_endpoint_records = (
-                        private_endpoint_store.list_private_health_endpoint_records(
-                            product=product,
-                            context_name=context_name,
-                            instance_name=instance_name,
-                            status=_query_string_value(query, "status"),
-                            limit=limit,
-                        )
-                    )
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "product": product,
-                            "context": context_name,
-                            "instance": instance_name,
-                            "limit": limit,
-                            "count": len(private_endpoint_records),
-                            "records": [
-                                record.model_dump(mode="json")
-                                for record in private_endpoint_records
                             ],
                         },
                     )

@@ -64,6 +64,7 @@ from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactSet,
     build_protected_artifact_set,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.runner_host_hygiene import RunnerHostHygieneApplyAuditRecord
 from control_plane.contracts.runner_host_hygiene_evidence import (
     RunnerHostHygieneAuditEvidenceEnvelope,
@@ -407,6 +408,27 @@ class EdgeEndpointRecordsResponse(BaseModel):
     records: tuple[EdgeEndpointRecord, ...]
 
 
+class PrivateHealthEndpointRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    record: PrivateHealthEndpointRecord
+
+
+class PrivateHealthEndpointRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    product: str
+    context: str
+    instance: str
+    limit: int
+    count: int
+    records: tuple[PrivateHealthEndpointRecord, ...]
+
+
 class DeploymentRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -731,6 +753,22 @@ class _EdgeEndpointReadStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[EdgeEndpointRecord, ...]: ...
+
+
+class _PrivateHealthEndpointReadStore(Protocol):
+    def read_private_health_endpoint_record(
+        self, endpoint_key: str
+    ) -> PrivateHealthEndpointRecord: ...
+
+    def list_private_health_endpoint_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[PrivateHealthEndpointRecord, ...]: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -1077,6 +1115,27 @@ def require_edge_endpoint_read_store(record_store: object) -> _EdgeEndpointReadS
             f"Launchplane record store does not support edge endpoint reads: {missing_summary}"
         )
     return cast(_EdgeEndpointReadStore, record_store)
+
+
+def require_private_health_endpoint_read_store(
+    record_store: object,
+) -> _PrivateHealthEndpointReadStore:
+    required_methods = (
+        "read_private_health_endpoint_record",
+        "list_private_health_endpoint_records",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support private health endpoint reads: "
+            f"{missing_summary}"
+        )
+    return cast(_PrivateHealthEndpointReadStore, record_store)
 
 
 def product_profile_context_cutover_allowed_contexts(
@@ -2197,6 +2256,156 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         return EdgeEndpointRecordResponse(trace_id=trace_id, record=record)
+
+    def ensure_private_health_endpoint_read_allowed(
+        *,
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        product: str,
+        context_name: str,
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="private_health_endpoint.read",
+            product=product,
+            context=context_name,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot read private health endpoints for the requested "
+                    "product/context."
+                ),
+            )
+
+    def list_private_health_endpoint_records(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "25",
+    ) -> PrivateHealthEndpointRecordsResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=(
+                    "Private health endpoint reads require product and context query parameters."
+                ),
+            )
+        ensure_private_health_endpoint_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            product=normalized_product,
+            context_name=context_name,
+        )
+        try:
+            normalized_limit = control_plane_service_status.query_int_value(
+                limit,
+                "limit",
+                default=25,
+                minimum=1,
+                maximum=100,
+            )
+            assert normalized_limit is not None
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        try:
+            private_endpoint_store = require_private_health_endpoint_read_store(record_store)
+            records = private_endpoint_store.list_private_health_endpoint_records(
+                product=normalized_product,
+                context_name=context_name,
+                instance_name=instance_name,
+                status=status.strip(),
+                limit=normalized_limit,
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        return PrivateHealthEndpointRecordsResponse(
+            trace_id=trace_id,
+            product=normalized_product,
+            context=context_name,
+            instance=instance_name,
+            limit=normalized_limit,
+            count=len(records),
+            records=records,
+        )
+
+    def read_private_health_endpoint_record(
+        endpoint_key: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        product: Annotated[str, Query()] = "",
+        context: Annotated[str, Query()] = "",
+        instance: Annotated[str, Query()] = "",
+    ) -> PrivateHealthEndpointRecordResponse:
+        trace_id = next_trace_id()
+        normalized_product = product.strip()
+        context_name = context.strip()
+        instance_name = instance.strip()
+        if not normalized_product or not context_name:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=(
+                    "Private health endpoint reads require product and context query parameters."
+                ),
+            )
+        ensure_private_health_endpoint_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            product=normalized_product,
+            context_name=context_name,
+        )
+        try:
+            private_endpoint_store = require_private_health_endpoint_read_store(record_store)
+            record = private_endpoint_store.read_private_health_endpoint_record(endpoint_key)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if (
+            record.product != normalized_product
+            or record.context != context_name
+            or (instance_name and record.instance != instance_name)
+        ):
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"Record not found: {endpoint_key}",
+            )
+        return PrivateHealthEndpointRecordResponse(trace_id=trace_id, record=record)
 
     def read_deployment_record(
         record_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -3594,6 +3803,37 @@ def create_launchplane_fastapi_app(
         operation_id="read_edge_endpoint_record",
         summary="Read one edge endpoint record",
         responses={
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/private-health-endpoints/records",
+        list_private_health_endpoint_records,
+        methods=["GET"],
+        response_model=PrivateHealthEndpointRecordsResponse,
+        operation_id="list_private_health_endpoint_records",
+        summary="List private health endpoint records",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/private-health-endpoints/records/{endpoint_key}",
+        read_private_health_endpoint_record,
+        methods=["GET"],
+        response_model=PrivateHealthEndpointRecordResponse,
+        operation_id="read_private_health_endpoint_record",
+        summary="Read one private health endpoint record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
