@@ -111,11 +111,13 @@ from control_plane.workflows.public_ingress_monitor import (
 )
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
+    _FakeNpmplusIngressClient,
     _generic_site_profile_payload,
     _edge_endpoint_apply_payload,
     _edge_endpoint_record,
     _identity,
     _ingress_canary_route_record,
+    _ingress_canary_route_record_apply_payload,
     _local_operator_policy,
     _merge_train_policy_table,
     _merge_train_run_record,
@@ -125,6 +127,7 @@ from tests.test_service import (
     _private_health_endpoint_apply_payload,
     _product_profile_payload,
     _product_profile_payload_with_prod,
+    _npmplus_proxy_host,
     _seed_merge_train_policy,
     _seed_tracked_target_records,
     _sqlite_database_url,
@@ -6854,6 +6857,582 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class FastApiIngressCanaryRouteApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ingress_canary_route_record_apply_writes_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_canary_route.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-record-apply",
+                },
+                payload=_ingress_canary_route_record_apply_payload(mode="apply"),
+            )
+            stored_record = store.read_ingress_canary_route_record("ingress-canary")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"]["ingress_canary_route_key"], "ingress-canary")
+        self.assertEqual(payload["records"]["ingress_canary_route_status"], "applied")
+        self.assertEqual(payload["result"]["route_status"], "applied")
+        self.assertNotIn("replayed", payload)
+        self.assertNotIn("original_trace_id", payload)
+        self.assertEqual(stored_record.domain_name, "ingress-canary.example.test")
+        self.assertEqual(stored_record.edge_endpoint_key, "cm-prod-dokploy")
+
+    async def test_ingress_canary_route_record_apply_replays_without_rewriting_record(
+        self,
+    ) -> None:
+        request_payload = _ingress_canary_route_record_apply_payload(mode="apply")
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_canary_route.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-record-replay",
+                },
+                payload=request_payload,
+            )
+            store.write_ingress_canary_route_record(
+                _ingress_canary_route_record().model_copy(
+                    update={
+                        "domain_name": "changed-canary.example.test",
+                        "updated_at": "2026-06-11T01:00:00Z",
+                    }
+                )
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-record-replay",
+                },
+                payload=request_payload,
+            )
+            stored_record = store.read_ingress_canary_route_record("ingress-canary")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(replay_payload["records"], first_payload["records"])
+        self.assertEqual(stored_record.domain_name, "changed-canary.example.test")
+
+    async def test_ingress_canary_route_record_dry_run_does_not_write_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_canary_route.apply",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_ingress_canary_route_record_apply_payload(mode="dry-run"),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"]["ingress_canary_route_status"], "planned")
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        with self.assertRaises(FileNotFoundError):
+            store.read_ingress_canary_route_record("ingress-canary")
+
+    async def test_ingress_canary_route_record_apply_requires_idempotency_key_before_store_gate(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="ingress_canary_route.apply",
+                product="launchplane",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/ingress/canary-routes/records/apply",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=_ingress_canary_route_record_apply_payload(mode="apply"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_ingress_canary_route_apply_resolves_edge_endpoint_and_writes_audit(
+        self,
+    ) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-apply",
+                },
+                payload=_ingress_canary_route_apply_payload(),
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"]["ingress_canary_route_key"], "ingress-canary")
+        self.assertEqual(payload["records"]["ingress_route_audit_record_id"], records[-1].record_id)
+        self.assertEqual(payload["records"]["ingress_provider"], "npmplus")
+        self.assertEqual(payload["result"]["status"], "applied")
+        self.assertFalse(payload["result"]["dry_run"])
+        self.assertEqual(client.calls, ["list", "update:78"])
+        self.assertEqual(records[-1].requested_domains, ("ingress-canary.example.test",))
+        self.assertEqual(records[-1].edge_endpoint_key, "cm-prod-dokploy")
+        self.assertEqual(records[-1].expected_host_id, 78)
+
+    async def test_ingress_canary_route_apply_replays_before_record_changes(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
+        request_payload = _ingress_canary_route_apply_payload()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            first_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-replay",
+                },
+                payload=request_payload,
+            )
+            store.write_ingress_canary_route_record(
+                _ingress_canary_route_record().model_copy(
+                    update={
+                        "domain_name": "changed-canary.example.test",
+                        "expected_host_id": 99,
+                        "status": "disabled",
+                        "updated_at": "2026-06-11T01:00:00Z",
+                    }
+                )
+            )
+            replay_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-replay",
+                },
+                payload=request_payload,
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        first_payload = first_response.json()
+        replay_payload = replay_response.json()
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(replay_payload["original_trace_id"], first_payload["trace_id"])
+        self.assertEqual(
+            replay_payload["records"]["ingress_route_audit_record_id"],
+            first_payload["records"]["ingress_route_audit_record_id"],
+        )
+        self.assertEqual(client.calls, ["list", "update:78"])
+        self.assertEqual(len(records), 1)
+
+    async def test_ingress_canary_route_apply_rejects_missing_record(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-missing",
+                },
+                payload=_ingress_canary_route_apply_payload(),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_ingress_canary_route")
+        self.assertEqual(client.calls, [])
+
+    async def test_ingress_canary_route_apply_rejects_disabled_record(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_canary_route_record(_ingress_canary_route_record(status="disabled"))
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-disabled",
+                },
+                payload=_ingress_canary_route_apply_payload(reason="test disabled canary apply"),
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_ingress_canary_route")
+        self.assertIn("not active", response.json()["error"]["message"])
+        self.assertEqual(client.calls, [])
+
+    async def test_ingress_canary_route_apply_rejects_missing_edge_endpoint(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-missing-edge",
+                },
+                payload=_ingress_canary_route_apply_payload(reason="test missing edge endpoint"),
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_edge_endpoint")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(records, ())
+
+    async def test_ingress_canary_route_apply_rejects_disabled_edge_endpoint(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record(status="disabled"))
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-disabled-edge",
+                },
+                payload=_ingress_canary_route_apply_payload(reason="test disabled edge endpoint"),
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_edge_endpoint")
+        self.assertIn("not active", response.json()["error"]["message"])
+        self.assertEqual(client.calls, [])
+        self.assertEqual(records, ())
+
+    async def test_ingress_canary_route_apply_maps_provider_guard_to_invalid_request(
+        self,
+    ) -> None:
+        class RejectingIngressProvider:
+            provider_id = "npmplus"
+            delegated_executor = "test"
+
+            def apply_route(self, *, request: Any) -> Any:
+                raise ClickException("Provider guard rejected canary route apply.")
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_notification_policy_apply_policy(
+                    action="ingress_route.apply",
+                    product="launchplane",
+                    context="reon-prod",
+                ),
+                record_store_factory=lambda: store,
+                ingress_provider_factory=RejectingIngressProvider,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-provider-reject",
+                },
+                payload=_ingress_canary_route_apply_payload(reason="test provider rejection"),
+            )
+            records = store.list_ingress_route_audit_records(
+                product="launchplane", context_name="reon-prod"
+            )
+            idempotency_record = store.read_idempotency_record(
+                scope="github-actions:every/verireel",
+                route_path="/v1/ingress/canary-routes/apply",
+                idempotency_key="ingress-canary-provider-reject",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(response.json()["error"]["message"], "Request could not be completed.")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "pending")
+        self.assertIsNone(idempotency_record)
+
+    async def test_ingress_canary_route_apply_authorizes_before_record_lookup(self) -> None:
+        client = _FakeNpmplusIngressClient()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            npmplus_ingress_client_factory=lambda: client,
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/ingress/canary-routes/apply",
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "ingress-canary-unauthorized",
+            },
+            payload=_ingress_canary_route_apply_payload(canary_key="missing-canary"),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(client.calls, [])
+
+    async def test_ingress_canary_route_apply_requires_idempotency_before_store_gate(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_notification_policy_apply_policy(
+                action="ingress_route.apply",
+                product="launchplane",
+                context="reon-prod",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/ingress/canary-routes/apply",
+            headers={"Authorization": "Bearer valid-token"},
+            payload=_ingress_canary_route_apply_payload(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "idempotency_key_required")
+
+    async def test_ingress_canary_apply_routes_precede_legacy_wsgi_fallback(self) -> None:
+        client = _FakeNpmplusIngressClient((_npmplus_proxy_host(id=78),))
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            store.write_ingress_canary_route_record(_ingress_canary_route_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                                ],
+                                "event_names": ["pull_request"],
+                                "products": ["launchplane"],
+                                "contexts": ["launchplane", "reon-prod"],
+                                "actions": [
+                                    "ingress_canary_route.apply",
+                                    "ingress_route.apply",
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                record_store_factory=lambda: store,
+                npmplus_ingress_client_factory=lambda: client,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=store,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            record_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/records/apply",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=_ingress_canary_route_record_apply_payload(mode="dry-run"),
+            )
+            apply_response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/ingress/canary-routes/apply",
+                headers={
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "ingress-canary-mounted-fallback-test",
+                },
+                payload=_ingress_canary_route_apply_payload(),
+            )
+
+        self.assertEqual(record_response.status_code, 202)
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(record_response.json()["result"]["mode"], "dry-run")
+        self.assertEqual(
+            apply_response.json()["records"]["ingress_canary_route_key"], "ingress-canary"
+        )
+
+    async def test_openapi_includes_ingress_canary_apply_routes(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        record_route = openapi["paths"]["/v1/ingress/canary-routes/records/apply"]["post"]
+        apply_route = openapi["paths"]["/v1/ingress/canary-routes/apply"]["post"]
+        self.assertEqual(record_route["operationId"], "apply_ingress_canary_route_record")
+        self.assertEqual(apply_route["operationId"], "apply_ingress_canary_route")
+        self.assertEqual(
+            record_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            apply_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+
+
 class FastApiIngressCanaryRouteReadTests(unittest.IsolatedAsyncioTestCase):
     async def test_ingress_canary_route_read_returns_record_for_authorized_workflow(
         self,
@@ -13271,6 +13850,22 @@ async def _get_ingress_canary_route_record(
         f"/v1/ingress/canary-routes/records/{canary_key}",
         headers=request_headers,
     )
+
+
+def _ingress_canary_route_apply_payload(
+    *,
+    product: str = "launchplane",
+    context: str = "reon-prod",
+    canary_key: str = "ingress-canary",
+    reason: str = "test canary apply",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": product,
+        "context": context,
+        "canary_key": canary_key,
+        "reason": reason,
+    }
 
 
 async def _get_ingress_route_audit_records(

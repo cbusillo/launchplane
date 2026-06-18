@@ -82,6 +82,14 @@ VeriReel product paths:
     supporting `product`, `context`, `status`, and bounded `limit` filters
   - `GET /v1/ingress/canary-routes/records/{canary_key}`, requiring
     `ingress_canary_route.read` for the Launchplane service context
+- native FastAPI ingress canary route apply writes:
+  - `POST /v1/ingress/canary-routes/records/apply`, requiring
+    `ingress_canary_route.apply` for the Launchplane service context and
+    accepting `dry-run` without an `Idempotency-Key`; `apply` requires an
+    `Idempotency-Key`
+  - `POST /v1/ingress/canary-routes/apply`, requiring `ingress_route.apply` for
+    the requested product/context, resolving the stored canary route and edge
+    endpoint before provider apply, and requiring an `Idempotency-Key`
 - native FastAPI Dokploy target inspect read:
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context and returning redacted provider identity

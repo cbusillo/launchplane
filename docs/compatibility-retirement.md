@@ -82,8 +82,11 @@ Keep a compatibility surface only when it is one of these:
 - Ingress canary route record reads use native FastAPI
   `GET /v1/ingress/canary-routes/records` and
   `GET /v1/ingress/canary-routes/records/{canary_key}` routes. Their legacy
-  WSGI read branch is deleted; ingress canary route apply remains on the
-  retained fallback until that write path has its own native replacement.
+  WSGI read branch is deleted. Ingress canary route record apply uses native
+  FastAPI `POST /v1/ingress/canary-routes/records/apply`, and ingress canary
+  route apply uses native FastAPI `POST /v1/ingress/canary-routes/apply` with
+  the existing idempotency replay/conflict contract. Their legacy WSGI write
+  branches are deleted, and direct fallback calls fail closed.
 - Ingress route audit record reads use native FastAPI
   `GET /v1/ingress/route-audits/records` and
   `GET /v1/ingress/route-audits/records/{record_id}` routes. Their legacy WSGI

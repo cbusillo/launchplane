@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Reques
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
@@ -57,7 +57,11 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
-from control_plane.contracts.ingress_route_audit_record import IngressRouteAuditRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    IngressRouteAuditOperation,
+    IngressRouteAuditRecord,
+    build_ingress_route_audit_record_id,
+)
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -151,6 +155,16 @@ from control_plane.workflows.public_ingress_monitor import (
     public_ingress_notification_drivers,
     run_public_ingress_monitor_once,
 )
+from control_plane.workflows.ingress_provider import (
+    IngressProvider,
+    NpmplusIngressProvider,
+    default_ingress_provider,
+)
+from control_plane.workflows.npmplus_ingress import (
+    NpmplusIngressApplyRequest,
+    NpmplusIngressApplyResult,
+    NpmplusIngressClient,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_service import (
@@ -180,6 +194,8 @@ _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
 )
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
+_INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
+_INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -1018,8 +1034,65 @@ class PrivateHealthEndpointApplyEnvelope(BaseModel):
         return self
 
 
+class IngressCanaryRouteRecordApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    route: IngressCanaryRouteRecord
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "IngressCanaryRouteRecordApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported ingress canary route apply schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Ingress canary route record apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE INGRESS CANARY ROUTE RECORD":
+                raise ValueError(
+                    "Ingress canary route record apply requires exact confirmation text"
+                )
+        return self
+
+
+class IngressCanaryRouteApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    canary_key: str
+    reason: str
+
+    @field_validator("product", "context", "canary_key", "reason", mode="after")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("Ingress canary route apply requires non-empty text fields")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "IngressCanaryRouteApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported ingress canary route apply schema version")
+        return self
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
+
+
+class _IngressProviderFactory(Protocol):
+    def __call__(self) -> IngressProvider: ...
+
+
+class _NpmplusIngressClientFactory(Protocol):
+    def __call__(self) -> NpmplusIngressClient: ...
 
 
 class _IdempotencyCapableStore(Protocol):
@@ -1089,6 +1162,21 @@ class _PrivateHealthEndpointApplyStore(Protocol):
         self,
         endpoint_key: str,
     ) -> PrivateHealthEndpointRecord: ...
+
+
+class _IngressCanaryRouteRecordApplyStore(Protocol):
+    def write_ingress_canary_route_record(
+        self,
+        record: IngressCanaryRouteRecord,
+    ) -> object: ...
+
+
+class _IngressCanaryRouteApplyStore(Protocol):
+    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
+
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
+
+    def write_ingress_route_audit_record(self, record: IngressRouteAuditRecord) -> object: ...
 
 
 class PublicIngressMonitorRunOnceRequest(BaseModel):
@@ -1789,6 +1877,46 @@ def require_private_health_endpoint_apply_store(
     return cast(_PrivateHealthEndpointApplyStore, record_store)
 
 
+def require_ingress_canary_route_record_apply_store(
+    record_store: object,
+) -> _IngressCanaryRouteRecordApplyStore:
+    required_methods = ("write_ingress_canary_route_record",)
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support ingress canary route record "
+            f"applies: {missing_summary}"
+        )
+    return cast(_IngressCanaryRouteRecordApplyStore, record_store)
+
+
+def require_ingress_canary_route_apply_store(
+    record_store: object,
+) -> _IngressCanaryRouteApplyStore:
+    required_methods = (
+        "read_ingress_canary_route_record",
+        "read_edge_endpoint_record",
+        "write_ingress_route_audit_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support ingress canary route applies: "
+            f"{missing_summary}"
+        )
+    return cast(_IngressCanaryRouteApplyStore, record_store)
+
+
 def require_ingress_canary_route_read_store(
     record_store: object,
 ) -> _IngressCanaryRouteReadStore:
@@ -2066,6 +2194,8 @@ def create_launchplane_fastapi_app(
     authz_policy_runtime: LaunchplaneAuthzPolicyRuntime | None = None,
     database_url: str | None = None,
     record_store_factory: _RecordStoreFactory | None = None,
+    ingress_provider_factory: _IngressProviderFactory | None = None,
+    npmplus_ingress_client_factory: _NpmplusIngressClientFactory | None = None,
     bearer_identity_config: BearerIdentityConfig | None = None,
     human_session_manager: HumanSessionManager | None = None,
     control_plane_root_path: FilePath | None = None,
@@ -2083,6 +2213,16 @@ def create_launchplane_fastapi_app(
         if record_store_factory is not None
         else build_shared_record_store(database_url=database_url)
     )
+    resolved_ingress_provider_factory = ingress_provider_factory
+    if resolved_ingress_provider_factory is None:
+        if npmplus_ingress_client_factory is not None:
+
+            def npmplus_ingress_provider_from_client_factory() -> IngressProvider:
+                return NpmplusIngressProvider(client=npmplus_ingress_client_factory())
+
+            resolved_ingress_provider_factory = npmplus_ingress_provider_from_client_factory
+        else:
+            resolved_ingress_provider_factory = default_ingress_provider
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -5049,7 +5189,7 @@ def create_launchplane_fastapi_app(
             )
         )
 
-    async def replay_endpoint_apply_idempotency(
+    async def replay_apply_idempotency(
         *,
         request: Request,
         record_store: object,
@@ -5091,7 +5231,7 @@ def create_launchplane_fastapi_app(
                 )
         return normalized_idempotency_key, payload_fingerprint, None
 
-    def store_endpoint_apply_idempotency(
+    def store_apply_idempotency(
         *,
         record_store: object,
         identity: LaunchplaneIdentity,
@@ -5117,6 +5257,183 @@ def create_launchplane_fastapi_app(
                 response_payload=response.model_dump(mode="json", exclude_none=True),
             )
         )
+
+    def resolve_ingress_edge_endpoint(
+        *,
+        canary_store: _IngressCanaryRouteApplyStore,
+        request: NpmplusIngressApplyRequest,
+        trace_id: str,
+    ) -> NpmplusIngressApplyRequest:
+        endpoint_key = request.route.edge_endpoint_key.strip()
+        if not endpoint_key:
+            return request
+        try:
+            endpoint = canary_store.read_edge_endpoint_record(endpoint_key)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_edge_endpoint",
+                message=f"Ingress edge endpoint {endpoint_key!r} was not found.",
+            ) from error
+        if endpoint.status != "active":
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_edge_endpoint",
+                message=f"Ingress edge endpoint {endpoint_key!r} is {endpoint.status}, not active.",
+            )
+        resolved_route = request.route.model_copy(
+            update={
+                "forward_scheme": endpoint.upstream_scheme,
+                "forward_host": endpoint.upstream_host,
+                "forward_port": endpoint.upstream_port,
+            }
+        )
+        return request.model_copy(update={"route": resolved_route})
+
+    def active_ingress_canary_route_record(
+        *,
+        canary_store: _IngressCanaryRouteApplyStore,
+        canary_key: str,
+        product: str,
+        context: str,
+        trace_id: str,
+    ) -> IngressCanaryRouteRecord:
+        try:
+            record = canary_store.read_ingress_canary_route_record(canary_key)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_ingress_canary_route",
+                message=f"Ingress canary route {canary_key!r} was not found.",
+            ) from error
+        if record.product != product or record.context != context:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_ingress_canary_route",
+                message=f"Ingress canary route {canary_key!r} is not scoped to {product}/{context}.",
+            )
+        if record.status != "active":
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_ingress_canary_route",
+                message=f"Ingress canary route {canary_key!r} is {record.status}, not active.",
+            )
+        return record
+
+    def ingress_request_from_canary_route_record(
+        *,
+        record: IngressCanaryRouteRecord,
+        reason: str,
+    ) -> NpmplusIngressApplyRequest:
+        return NpmplusIngressApplyRequest.model_validate(
+            {
+                "schema_version": 1,
+                "mode": "apply",
+                "expected_host_id": record.expected_host_id,
+                "require_exact_expected_host_domains": True,
+                "reason": reason,
+                "route": {
+                    "domain_names": [record.domain_name],
+                    "edge_endpoint_key": record.edge_endpoint_key,
+                    "certificate_id": record.certificate_id,
+                    "enabled": True,
+                    "ssl_forced": True,
+                    "http2_support": True,
+                    "npmplus_http3_support": True,
+                    "npmplus_noindex": True,
+                    "access_list_id": 0,
+                },
+            }
+        )
+
+    def write_ingress_route_audit_record(
+        *,
+        canary_store: _IngressCanaryRouteApplyStore,
+        trace_id: str,
+        product: str,
+        context: str,
+        provider: str,
+        request: NpmplusIngressApplyRequest,
+        result: NpmplusIngressApplyResult,
+        idempotency_key: str,
+    ) -> IngressRouteAuditRecord:
+        provider_host_id = result.proxy_host.id if result.proxy_host is not None else None
+        record = IngressRouteAuditRecord(
+            record_id=build_ingress_route_audit_record_id(
+                trace_id=trace_id,
+                product=product,
+                context=context,
+                domains=request.route.domain_names,
+            ),
+            product=product,
+            context=context,
+            provider=provider,
+            mode=request.mode,
+            status=result.status,
+            dry_run=result.dry_run,
+            requested_domains=request.route.domain_names,
+            edge_endpoint_key=request.route.edge_endpoint_key,
+            expected_host_id=request.expected_host_id,
+            provider_host_id=provider_host_id,
+            operations=tuple(
+                IngressRouteAuditOperation.model_validate(operation.model_dump(mode="json"))
+                for operation in result.operations
+            ),
+            trace_id=trace_id,
+            idempotency_key=idempotency_key,
+            reason=request.reason,
+            recorded_at=utc_now_timestamp(),
+        )
+        canary_store.write_ingress_route_audit_record(record)
+        return record
+
+    def write_ingress_route_pending_audit_record(
+        *,
+        canary_store: _IngressCanaryRouteApplyStore,
+        trace_id: str,
+        product: str,
+        context: str,
+        provider: str,
+        request: NpmplusIngressApplyRequest,
+        idempotency_key: str,
+    ) -> IngressRouteAuditRecord:
+        record = IngressRouteAuditRecord(
+            record_id=build_ingress_route_audit_record_id(
+                trace_id=trace_id,
+                product=product,
+                context=context,
+                domains=request.route.domain_names,
+            ),
+            product=product,
+            context=context,
+            provider=provider,
+            mode=request.mode,
+            status="pending",
+            dry_run=request.mode == "dry-run",
+            requested_domains=request.route.domain_names,
+            edge_endpoint_key=request.route.edge_endpoint_key,
+            expected_host_id=request.expected_host_id,
+            provider_host_id=None,
+            operations=(
+                IngressRouteAuditOperation(
+                    action="pending",
+                    host_id=None,
+                    domain_names=request.route.domain_names,
+                    requires_apply=request.mode == "apply",
+                ),
+            ),
+            trace_id=trace_id,
+            idempotency_key=idempotency_key,
+            reason=request.reason,
+            recorded_at=utc_now_timestamp(),
+        )
+        canary_store.write_ingress_route_audit_record(record)
+        return record
 
     async def apply_edge_endpoint(
         request: Request,
@@ -5149,7 +5466,7 @@ def create_launchplane_fastapi_app(
             normalized_key,
             payload_fingerprint,
             replayed_response,
-        ) = await replay_endpoint_apply_idempotency(
+        ) = await replay_apply_idempotency(
             request=request,
             record_store=record_store,
             identity=identity,
@@ -5185,7 +5502,7 @@ def create_launchplane_fastapi_app(
                 "record": endpoint_request.endpoint.model_dump(mode="json"),
             },
         )
-        store_endpoint_apply_idempotency(
+        store_apply_idempotency(
             record_store=record_store,
             identity=identity,
             route_path=_EDGE_ENDPOINT_APPLY_ROUTE,
@@ -5230,7 +5547,7 @@ def create_launchplane_fastapi_app(
             normalized_key,
             payload_fingerprint,
             replayed_response,
-        ) = await replay_endpoint_apply_idempotency(
+        ) = await replay_apply_idempotency(
             request=request,
             record_store=record_store,
             identity=identity,
@@ -5283,10 +5600,210 @@ def create_launchplane_fastapi_app(
                 "record": endpoint_request.endpoint.model_dump(mode="json"),
             },
         )
-        store_endpoint_apply_idempotency(
+        store_apply_idempotency(
             record_store=record_store,
             identity=identity,
             route_path=_PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_ingress_canary_route_record(
+        request: Request,
+        canary_request: IngressCanaryRouteRecordApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="ingress_canary_route.apply",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply Launchplane ingress canary route records.",
+            )
+        if canary_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message=(
+                    "Ingress canary route record apply requests require an Idempotency-Key header."
+                ),
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=canary_request.mode == "apply",
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            canary_store = require_ingress_canary_route_record_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        route_status = "applied" if canary_request.mode == "apply" else "planned"
+        if canary_request.mode == "apply":
+            canary_store.write_ingress_canary_route_record(canary_request.route)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "ingress_canary_route_key": canary_request.route.canary_key,
+                "ingress_canary_route_status": route_status,
+            },
+            result={
+                "mode": canary_request.mode,
+                "canary_key": canary_request.route.canary_key,
+                "route_status": route_status,
+                "record": canary_request.route.model_dump(mode="json"),
+            },
+        )
+        if canary_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def apply_ingress_canary_route(
+        request: Request,
+        canary_request: IngressCanaryRouteApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="ingress_route.apply",
+            product=canary_request.product,
+            context=canary_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot apply the ingress canary route for the requested "
+                    "product/context."
+                ),
+            )
+        if not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Ingress canary route apply requests require an Idempotency-Key header.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_INGRESS_CANARY_ROUTE_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            canary_store = require_ingress_canary_route_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        canary_record = active_ingress_canary_route_record(
+            canary_store=canary_store,
+            canary_key=canary_request.canary_key,
+            product=canary_request.product,
+            context=canary_request.context,
+            trace_id=trace_id,
+        )
+        ingress_request = ingress_request_from_canary_route_record(
+            record=canary_record,
+            reason=canary_request.reason,
+        )
+        resolved_ingress_request = resolve_ingress_edge_endpoint(
+            canary_store=canary_store,
+            request=ingress_request,
+            trace_id=trace_id,
+        )
+        try:
+            ingress_provider = resolved_ingress_provider_factory()
+            write_ingress_route_pending_audit_record(
+                canary_store=canary_store,
+                trace_id=trace_id,
+                product=canary_record.product,
+                context=canary_record.context,
+                provider=ingress_provider.provider_id,
+                request=resolved_ingress_request,
+                idempotency_key=normalized_key,
+            )
+            ingress_result = ingress_provider.apply_route(request=resolved_ingress_request)
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        ingress_audit_record = write_ingress_route_audit_record(
+            canary_store=canary_store,
+            trace_id=trace_id,
+            product=canary_record.product,
+            context=canary_record.context,
+            provider=ingress_provider.provider_id,
+            request=resolved_ingress_request,
+            result=ingress_result,
+            idempotency_key=normalized_key,
+        )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "ingress_provider": ingress_provider.provider_id,
+                "ingress_route_audit_record_id": ingress_audit_record.record_id,
+                "ingress_canary_route_key": canary_record.canary_key,
+            },
+            result=ingress_result.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_INGRESS_CANARY_ROUTE_APPLY_ROUTE,
             idempotency_key=normalized_key,
             request_fingerprint_value=payload_fingerprint,
             trace_id=trace_id,
@@ -6526,6 +7043,42 @@ def create_launchplane_fastapi_app(
         status_code=202,
         operation_id="apply_private_health_endpoint",
         summary="Plan or apply one private health endpoint record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE,
+        apply_ingress_canary_route_record,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="apply_ingress_canary_route_record",
+        summary="Plan or apply one Launchplane ingress canary route record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
+        apply_ingress_canary_route,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        status_code=202,
+        operation_id="apply_ingress_canary_route",
+        summary="Apply an active ingress canary route through the ingress provider",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

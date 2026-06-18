@@ -88,7 +88,6 @@ from control_plane.contracts.ingress_route_audit_record import (
 from control_plane.contracts.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
 )
-from control_plane.contracts.ingress_canary_route_record import IngressCanaryRouteRecord
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
@@ -520,8 +519,6 @@ _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
 _NPMPLUS_INGRESS_APPLY_ROUTE_PATH = "/v1/drivers/ingress/route-apply"
-_INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
-_INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/controller/run-once"
 _MERGE_TRAIN_PR_FEEDBACK_ROUTE = "/v1/work-graph/merge-train/pr-feedback"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
@@ -792,12 +789,6 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
 
 class _EdgeEndpointRecordStore(Protocol):
     def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
-
-
-class _IngressCanaryRouteRecordStore(Protocol):
-    def write_ingress_canary_route_record(self, record: IngressCanaryRouteRecord) -> object: ...
-
-    def read_ingress_canary_route_record(self, canary_key: str) -> IngressCanaryRouteRecord: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1126,55 +1117,6 @@ _NPMPLUS_INGRESS_APPLY_ROUTE = _DriverRouteExecutionMetadata(
         "Workflow cannot plan or apply the ingress route for the requested product/context."
     ),
 )
-
-
-class IngressCanaryRouteRecordApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    route: IngressCanaryRouteRecord
-    reason: str = ""
-    confirmation: str = ""
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "IngressCanaryRouteRecordApplyEnvelope":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported ingress canary route apply schema version")
-        self.reason = self.reason.strip()
-        self.confirmation = self.confirmation.strip()
-        if self.mode == "apply":
-            if not self.reason:
-                raise ValueError("Ingress canary route record apply requires a reason")
-            if self.confirmation != "APPLY LAUNCHPLANE INGRESS CANARY ROUTE RECORD":
-                raise ValueError(
-                    "Ingress canary route record apply requires exact confirmation text"
-                )
-        return self
-
-
-class IngressCanaryRouteApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str
-    canary_key: str
-    reason: str
-
-    @field_validator("product", "context", "canary_key", "reason", mode="after")
-    @classmethod
-    def _validate_required_text(cls, value: str) -> str:
-        normalized_value = value.strip()
-        if not normalized_value:
-            raise ValueError("Ingress canary route apply requires non-empty text fields")
-        return normalized_value
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "IngressCanaryRouteApplyEnvelope":
-        if self.schema_version != 1:
-            raise ValueError("Unsupported ingress canary route apply schema version")
-        return self
 
 
 class MergeTrainPolicyImportEnvelope(BaseModel):
@@ -4387,8 +4329,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/product-onboarding/apply",
         "/v1/dokploy-targets/setup",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
-        _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE,
-        _INGRESS_CANARY_ROUTE_APPLY_ROUTE,
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
         "/v1/product-profiles/legacy-context-cleanup/apply",
@@ -6530,10 +6470,6 @@ def _accepted_payload_extra_record_keys(*, route_path: str) -> frozenset[str]:
         return frozenset({"rollback_status", "deploy_status", "post_deploy_status"})
     if route_path == _NPMPLUS_INGRESS_APPLY_ROUTE.route_path:
         return frozenset({"ingress_provider"})
-    if route_path == _INGRESS_CANARY_ROUTE_APPLY_ROUTE:
-        return frozenset({"ingress_provider"})
-    if route_path == _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE:
-        return frozenset({"ingress_canary_route_status"})
     return frozenset()
 
 
@@ -6616,20 +6552,6 @@ def _edge_endpoint_record_store(record_store: object) -> _EdgeEndpointRecordStor
     raise click.ClickException("Edge endpoint operations require Launchplane record storage.")
 
 
-def _ingress_canary_route_record_store(
-    record_store: object,
-) -> _IngressCanaryRouteRecordStore:
-    required_methods = (
-        "write_ingress_canary_route_record",
-        "read_ingress_canary_route_record",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_IngressCanaryRouteRecordStore, record_store)
-    raise click.ClickException(
-        "Ingress canary route operations require Launchplane canary-route record storage."
-    )
-
-
 def _resolve_ingress_edge_endpoint(
     *,
     record_store: object,
@@ -6657,57 +6579,6 @@ def _resolve_ingress_edge_endpoint(
         }
     )
     return request.model_copy(update={"route": resolved_route})
-
-
-def _active_ingress_canary_route_record(
-    *,
-    record_store: object,
-    canary_key: str,
-    product: str,
-    context: str,
-) -> IngressCanaryRouteRecord:
-    canary_store = _ingress_canary_route_record_store(record_store)
-    try:
-        record = canary_store.read_ingress_canary_route_record(canary_key)
-    except FileNotFoundError as exc:
-        raise click.ClickException(f"Ingress canary route {canary_key!r} was not found.") from exc
-    if record.product != product or record.context != context:
-        raise click.ClickException(
-            f"Ingress canary route {canary_key!r} is not scoped to {product}/{context}."
-        )
-    if record.status != "active":
-        raise click.ClickException(
-            f"Ingress canary route {canary_key!r} is {record.status}, not active."
-        )
-    return record
-
-
-def _ingress_request_from_canary_route_record(
-    *,
-    record: IngressCanaryRouteRecord,
-    mode: Literal["dry-run", "apply"],
-    reason: str,
-) -> NpmplusIngressApplyRequest:
-    return NpmplusIngressApplyRequest.model_validate(
-        {
-            "schema_version": 1,
-            "mode": mode,
-            "expected_host_id": record.expected_host_id,
-            "require_exact_expected_host_domains": True,
-            "reason": reason,
-            "route": {
-                "domain_names": [record.domain_name],
-                "edge_endpoint_key": record.edge_endpoint_key,
-                "certificate_id": record.certificate_id,
-                "enabled": True,
-                "ssl_forced": True,
-                "http2_support": True,
-                "npmplus_http3_support": True,
-                "npmplus_noindex": True,
-                "access_list_id": 0,
-            },
-        }
-    )
 
 
 def _query_string_value(query: dict[str, list[str]], key: str) -> str:
@@ -7594,12 +7465,6 @@ def _should_store_idempotency_record(
     ):
         return False
     if (
-        path == _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE
-        and isinstance(driver_result, dict)
-        and driver_result.get("mode") == "dry-run"
-    ):
-        return False
-    if (
         path == PROVIDER_TARGET_OPERATIONS_ROUTE
         and isinstance(driver_result, dict)
         and driver_result.get("mode") != "backfill-apply"
@@ -7661,30 +7526,6 @@ def _write_ingress_route_audit_record(
     )
     write_record(record)
     return record
-
-
-def _ingress_canary_route_record_apply_result(
-    *,
-    record_store: object,
-    request: IngressCanaryRouteRecordApplyEnvelope,
-) -> tuple[dict[str, object], dict[str, object]]:
-    canary_store = _ingress_canary_route_record_store(record_store)
-    if request.mode == "apply":
-        canary_store.write_ingress_canary_route_record(request.route)
-        status = "applied"
-    else:
-        status = "planned"
-    return {
-        "ingress_canary_route_key": request.route.canary_key,
-        "ingress_canary_route_status": status,
-        "mode": request.mode,
-        "reason": request.reason,
-    }, {
-        "mode": request.mode,
-        "canary_key": request.route.canary_key,
-        "route_status": status,
-        "record": request.route.model_dump(mode="json"),
-    }
 
 
 def _write_ingress_route_pending_audit_record(
@@ -12435,153 +12276,6 @@ def create_launchplane_service_app(
                 assert isinstance(provider_target_result, ProviderTargetOperationRouteResult)
                 result = provider_target_result.result
                 driver_result = provider_target_result.driver_result
-            elif path == _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE:
-                canary_record_request = IngressCanaryRouteRecordApplyEnvelope.model_validate(
-                    payload
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="ingress_canary_route.apply",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot apply Launchplane ingress canary route records.",
-                            },
-                        },
-                    )
-                if canary_record_request.mode == "apply":
-                    if not request_idempotency_key:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=400,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "idempotency_key_required",
-                                    "message": "Ingress canary route record apply requests require an Idempotency-Key header.",
-                                },
-                            },
-                        )
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                result, driver_result = _ingress_canary_route_record_apply_result(
-                    record_store=record_store,
-                    request=canary_record_request,
-                )
-            elif path == _INGRESS_CANARY_ROUTE_APPLY_ROUTE:
-                canary_apply_request = IngressCanaryRouteApplyEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="ingress_route.apply",
-                    product=canary_apply_request.product,
-                    context=canary_apply_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot apply the ingress canary route for the requested product/context.",
-                            },
-                        },
-                    )
-                if not request_idempotency_key:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "idempotency_key_required",
-                                "message": "Ingress canary route apply requests require an Idempotency-Key header.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                try:
-                    canary_record = _active_ingress_canary_route_record(
-                        record_store=record_store,
-                        canary_key=canary_apply_request.canary_key,
-                        product=canary_apply_request.product,
-                        context=canary_apply_request.context,
-                    )
-                except click.ClickException as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_ingress_canary_route",
-                                "message": str(error),
-                            },
-                        },
-                    )
-                ingress_request = _ingress_request_from_canary_route_record(
-                    record=canary_record,
-                    mode="apply",
-                    reason=canary_apply_request.reason,
-                )
-                ingress_result = _handle_npmplus_ingress_apply(
-                    NpmplusIngressApplyEnvelope(
-                        product=canary_record.product,
-                        context=canary_record.context,
-                        ingress=ingress_request,
-                    ),
-                    _ResolvedProductDriverContext(profile=None),
-                    record_store,
-                    resolved_root,
-                    state_dir,
-                    database_url,
-                    identity,
-                    request_scope,
-                    request_idempotency_key,
-                    request_fingerprint,
-                    start_response,
-                    request_trace_id,
-                    resolved_ingress_provider_factory,
-                    idempotency_route_path=path,
-                )
-                if isinstance(ingress_result, list):
-                    return ingress_result
-                ingress_records, driver_result = ingress_result
-                result = {
-                    **ingress_records,
-                    "ingress_canary_route_key": canary_record.canary_key,
-                }
             elif path in descriptor_driver_dispatch_routes:
                 try:
                     dispatch_response = _dispatch_descriptor_driver_route(
