@@ -89,6 +89,14 @@ Keep a compatibility surface only when it is one of these:
   product-profile collection also preserves the dedicated Every Code worker
   token. Their legacy WSGI branches are deleted; direct fallback calls fail
   closed while the mounted fallback remains for retained non-native routes.
+- Every Code work-request, summary, PR-feedback, preview-gate,
+  notification-attempt, and preview-readiness reads use native FastAPI routes.
+  The worker-facing read routes preserve the dedicated Every Code worker token;
+  preview PR-feedback notification-attempt reads stay bearer/human authorized.
+  The legacy WSGI read map, read payload helper, and worker-token GET bypass are
+  deleted; Every Code write, claim, status, rerun, webhook, notification-policy,
+  PR-feedback write/status, and preview-gate write routes remain on the mounted
+  WSGI fallback until their native write replacements land.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the

@@ -27,7 +27,6 @@ from control_plane import secrets as control_plane_secrets
 from control_plane import service as control_plane_service
 from control_plane.notifications import public_discord_url_error, public_url_error
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
     EveryCodeNotificationDestination,
@@ -4053,6 +4052,28 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "apply")
 
+    def test_notification_policy_apply_routes_reject_legacy_get_requests(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            responses = tuple(
+                _invoke_app(app, method="GET", path=path)
+                for path in (
+                    "/v1/public-ingress/notification-policies/apply",
+                    "/v1/every-code/notification-policies/apply",
+                    "/v1/previews/pr-feedback/notification-policies/apply",
+                )
+            )
+
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 405)
+            self.assertEqual(payload["error"]["code"], "method_not_allowed")
+
     def test_every_code_notification_policy_apply_writes_db_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -4594,12 +4615,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "every-code-blocked-notify-status"},
             )
-            attempts_status, attempts_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/notification-attempts",
-                query_string=f"request_id={request_id}&event=work_request_blocked",
-            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_every_code_notification_attempt_records(
+                    request_id=request_id,
+                    event="work_request_blocked",
+                )
+            finally:
+                store.close()
 
         self.assertEqual(create_status, 202)
         self.assertEqual(claim_status, 202)
@@ -4610,8 +4633,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(webhook_url, "https://discord.com/api/webhooks/test/webhook")
         self.assertIn("embeds", discord_payload)
         self.assertEqual(payload["result"]["notifications"][0]["delivery_status"], "delivered")
-        self.assertEqual(attempts_status, 200)
-        self.assertEqual(attempts_payload["attempts"][0]["delivery_status"], "delivered")
+        self.assertEqual(attempts[0].delivery_status, "delivered")
 
     def test_every_code_blocked_status_records_discord_failure(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -4711,12 +4733,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "every-code-blocked-notify-failed-status"},
             )
-            attempts_status, attempts_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/notification-attempts",
-                query_string=f"request_id={request_id}&event=work_request_blocked",
-            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                attempts = store.list_every_code_notification_attempt_records(
+                    request_id=request_id,
+                    event="work_request_blocked",
+                )
+            finally:
+                store.close()
 
         self.assertEqual(create_status, 202)
         self.assertEqual(claim_status, 202)
@@ -4725,9 +4749,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["request"]["state"], "blocked")
         self.assertEqual(payload["result"]["notifications"][0]["delivery_status"], "failed")
         self.assertIn("discord unavailable", payload["result"]["notifications"][0]["error_message"])
-        self.assertEqual(attempts_status, 200)
-        self.assertEqual(attempts_payload["attempts"][0]["delivery_status"], "failed")
-        self.assertIn("discord unavailable", attempts_payload["attempts"][0]["error_message"])
+        self.assertEqual(attempts[0].delivery_status, "failed")
+        self.assertIn("discord unavailable", attempts[0].error_message)
 
     def test_every_code_discord_delivery_keeps_pending_marker_on_attempt_write_failure(
         self,
@@ -9446,8 +9469,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -9464,26 +9488,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
                 },
             )
-            list_status, list_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/work-requests",
-                query_string="state=queued",
+            work_requests = FilesystemRecordStore(state_dir).list_every_code_work_request_records(
+                state="queued"
             )
 
         self.assertEqual(webhook_status, 202)
         self.assertFalse(webhook_response["deduped"])
         self.assertEqual(webhook_response["records"]["state"], "queued")
         self.assertEqual(webhook_response["github_delivery_id"], "delivery-1")
-        self.assertEqual(list_status, 200)
-        self.assertEqual(len(list_payload["requests"]), 1)
-        request = list_payload["requests"][0]
-        self.assertEqual(request["source"], "github_issue_label")
-        self.assertEqual(request["repository"], "cbusillo/code")
-        self.assertEqual(request["issue_number"], 123)
-        self.assertEqual(request["trigger_label"], "every-code")
-        self.assertEqual(request["trigger_actor"], "cbusillo")
-        self.assertEqual(request["github_delivery_id"], "delivery-1")
+        self.assertEqual(len(work_requests), 1)
+        request = work_requests[0]
+        self.assertEqual(request.source, "github_issue_label")
+        self.assertEqual(request.repository, "cbusillo/code")
+        self.assertEqual(request.issue_number, 123)
+        self.assertEqual(request.trigger_label, "every-code")
+        self.assertEqual(request.trigger_actor, "cbusillo")
+        self.assertEqual(request.github_delivery_id, "delivery-1")
 
     def test_every_code_github_webhook_dedupes_existing_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -9522,8 +9542,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -9560,10 +9581,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
                 },
             )
-            show_status, show_payload = _invoke_app(
-                app,
-                method="GET",
-                path=f"/v1/every-code/work-requests/{request_id}",
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
             )
 
         self.assertEqual(first_status, 202)
@@ -9571,53 +9590,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_status, 202)
         self.assertTrue(second_payload["deduped"])
         self.assertEqual(second_payload["records"]["state"], "claimed")
-        self.assertEqual(show_status, 200)
-        self.assertEqual(show_payload["request"]["state"], "claimed")
-        self.assertEqual(show_payload["request"]["github_delivery_id"], "delivery-1")
+        self.assertEqual(stored_request.state, "claimed")
+        self.assertEqual(stored_request.github_delivery_id, "delivery-1")
 
-    def test_every_code_summary_returns_agent_safe_projection(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["every_code_work_request.read"],
-                    }
-                ]
-            }
-        )
-        issue_payload = _every_code_github_issue_labeled_payload()
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
-            ),
-        ):
+    def test_every_code_summary_read_route_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
-                ),
-                authz_policy=policy,
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
-            )
-            webhook_status, _ = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=issue_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-1",
-                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
-                },
             )
             summary_status, summary_payload = _invoke_app(
                 app,
@@ -9626,81 +9608,44 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 query_string="repository=cbusillo/code&issue_number=123&state=queued",
             )
 
-        self.assertEqual(webhook_status, 202)
-        self.assertEqual(summary_status, 200)
-        summary = summary_payload["summary"]
-        self.assertEqual(summary["repository"], "cbusillo/code")
-        self.assertEqual(summary["issue_number"], 123)
-        self.assertEqual(summary["state_filter"], "queued")
-        self.assertEqual(len(summary["summaries"]), 1)
-        request_summary = summary["summaries"][0]
-        self.assertEqual(request_summary["repository"], "cbusillo/code")
-        self.assertEqual(request_summary["issue_number"], 123)
-        self.assertEqual(request_summary["summary_status"], "active")
-        self.assertFalse(request_summary["safe_to_rerun"])
-        self.assertNotIn("github_delivery_id", request_summary)
+        self.assertEqual(summary_status, 404)
+        self.assertEqual(summary_payload["error"]["code"], "not_found")
 
-    def test_every_code_summary_rejects_unauthorized_identity(self) -> None:
+    def test_every_code_work_request_read_routes_are_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            status_code, payload = _invoke_app(
+            list_status, list_payload = _invoke_app(
                 app,
                 method="GET",
-                path="/v1/every-code/summary",
+                path="/v1/every-code/work-requests",
+            )
+            read_status, read_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests/every-code-cbusillo-code-123-test",
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(list_status, 404)
+        self.assertEqual(read_status, 404)
+        self.assertEqual(list_payload["error"]["code"], "not_found")
+        self.assertEqual(read_payload["error"]["code"], "not_found")
 
-    def test_preview_readiness_returns_agent_safe_projection(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["every_code_preview_gate.read"],
-                    }
-                ]
-            }
-        )
+    def test_preview_readiness_read_route_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_every_code_preview_gate_record(
-                EveryCodePreviewGateRecord(
-                    gate_id="every-code-preview-gate-cbusillo-code-26-abcdef",
-                    request_id="every-code-cbusillo-code-26-test",
-                    repository="cbusillo/code",
-                    issue_number=26,
-                    issue_url="https://github.com/cbusillo/code/issues/26",
-                    pr_number=31,
-                    pr_url="https://github.com/cbusillo/code/pull/31",
-                    head_sha="abcdef1234567890",
-                    status="blocked",
-                    created_at="2026-05-08T18:00:00Z",
-                    updated_at="2026-05-08T18:01:00Z",
-                    blocked_at="2026-05-08T18:01:00Z",
-                    last_checked_at="2026-05-08T18:01:00Z",
-                    blocked_reason="static_checks failed.",
-                    check_summary="static_checks=failure",
-                )
-            )
             app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(
-                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                state_dir=root / "state",
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(
+                    extra_actions=("every_code_preview_gate.read",)
                 ),
-                authz_policy=policy,
                 control_plane_root_path=root,
             )
             status_code, payload = _invoke_app(
@@ -9710,34 +9655,40 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 query_string="repository=cbusillo/code&pr_number=31&status=blocked",
             )
 
-        self.assertEqual(status_code, 200)
-        readiness = payload["readiness"]
-        self.assertEqual(readiness["repository"], "cbusillo/code")
-        self.assertEqual(readiness["pr_number"], 31)
-        self.assertEqual(readiness["status_filter"], "blocked")
-        self.assertEqual(len(readiness["items"]), 1)
-        item = readiness["items"][0]
-        self.assertEqual(item["readiness_status"], "needs_attention")
-        self.assertEqual(item["freshness_status"], "verified")
-        self.assertEqual(item["source_of_truth_url"], "https://github.com/cbusillo/code/pull/31")
-        self.assertTrue(item["needs_operator_attention"])
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
-    def test_preview_readiness_rejects_unauthorized_identity(self) -> None:
+    def test_every_code_auxiliary_read_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                verifier=_StubVerifier(_every_code_worker_identity()),
+                authz_policy=_every_code_worker_policy(
+                    extra_actions=(
+                        "every_code_preview_gate.read",
+                        "every_code_notification_attempt.read",
+                        "preview_pr_feedback_notification_attempt.read",
+                    )
+                ),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            status_code, payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/previews/readiness",
-            )
+            responses = {
+                path: _invoke_app(app, method="GET", path=path)
+                for path in (
+                    "/v1/every-code/pr-feedback",
+                    "/v1/every-code/preview-gates",
+                    "/v1/every-code/notification-attempts",
+                    "/v1/previews/pr-feedback/notification-attempts",
+                )
+            }
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(responses["/v1/every-code/pr-feedback"][0], 405)
+        self.assertEqual(responses["/v1/every-code/preview-gates"][0], 405)
+        self.assertEqual(responses["/v1/every-code/notification-attempts"][0], 404)
+        self.assertEqual(
+            responses["/v1/previews/pr-feedback/notification-attempts"][0],
+            404,
+        )
 
     def test_every_code_github_webhook_dedupes_finished_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -9777,8 +9728,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -9882,8 +9834,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -9984,8 +9937,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -10273,8 +10227,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -10306,12 +10261,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(pr_payload, secret),
                 },
             )
-            list_status, list_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/work-requests",
-                authorization="Bearer dev-worker-token",
-            )
+            persisted_requests = FilesystemRecordStore(
+                state_dir
+            ).list_every_code_work_request_records()
 
         self.assertEqual(close_status, 202)
         self.assertEqual(close_payload["result"]["closed_count"], 2)
@@ -10324,9 +10276,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 for request in closed_requests
             )
         )
-        self.assertEqual(list_status, 200)
         self.assertEqual(
-            {request["state"] for request in list_payload["requests"]},
+            {request.state for request in persisted_requests},
             {"done"},
         )
 
@@ -10569,8 +10520,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -10792,8 +10744,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 return_value={"id": 987},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -10872,8 +10825,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -11276,9 +11230,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             _write_github_planning_config(Path(home_directory_name), repo_managers={})
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -11308,20 +11263,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
                 },
             )
-            list_status, list_response = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/pr-feedback",
-                query_string=f"request_id={request_id}",
-                authorization="Bearer dev-worker-token",
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
             )
 
         self.assertEqual(issue_status, 202)
         self.assertEqual(feedback_status, 202, feedback_response)
-        self.assertEqual(list_status, 200, list_response)
         self.assertTrue(feedback_response["skipped"])
         self.assertEqual(feedback_response["reason"], "untrusted_actor")
-        self.assertEqual(list_response["feedback"], [])
+        self.assertEqual(feedback_records, ())
 
     def test_every_code_pr_comment_webhook_ignores_bot_feedback(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -11343,8 +11293,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -11394,21 +11345,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
                 },
             )
-
-            list_status, list_response = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/pr-feedback",
-                query_string=f"request_id={request_id}",
-                authorization="Bearer dev-worker-token",
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
             )
 
         self.assertEqual(issue_status, 202)
         self.assertEqual(feedback_status, 202, feedback_response)
-        self.assertEqual(list_status, 200, list_response)
         self.assertTrue(feedback_response["skipped"])
         self.assertEqual(feedback_response["reason"], "automation_actor")
-        self.assertEqual(list_response["feedback"], [])
+        self.assertEqual(feedback_records, ())
 
     def test_every_code_pr_comment_webhook_dedupes_feedback(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -11512,8 +11457,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -11564,15 +11510,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
                 },
             )
-            list_status, list_response = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/pr-feedback",
-                query_string=f"request_id={request_id}&status=pending",
-                authorization="Bearer dev-worker-token",
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id,
+                status="pending",
             )
-            self.assertEqual(list_status, 200, list_response)
-            feedback_id = list_response["feedback"][0]["feedback_id"]
+            feedback_id = feedback_records[0].feedback_id
             status_status, status_response = _invoke_app(
                 app,
                 method="POST",
@@ -11596,8 +11538,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authorization="Bearer dev-worker-token",
             )
 
-        self.assertEqual(list_status, 200)
-        self.assertEqual(len(list_response["feedback"]), 1)
+        self.assertEqual(len(feedback_records), 1)
         self.assertEqual(status_status, 202)
         self.assertEqual(status_response["result"]["feedback"]["status"], "applied")
         self.assertEqual(second_status, 409)
@@ -11628,8 +11569,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
             )
@@ -11640,12 +11582,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload=feedback_record.model_dump(mode="json"),
                 authorization="Bearer dev-worker-token",
             )
-            list_status, list_response = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/pr-feedback",
-                query_string=f"request_id={feedback_record.request_id}&status=pending",
-                authorization="Bearer dev-worker-token",
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=feedback_record.request_id,
+                status="pending",
             )
 
         self.assertEqual(write_status, 202, write_response)
@@ -11653,9 +11592,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id
         )
-        self.assertEqual(list_status, 200, list_response)
-        self.assertEqual(len(list_response["feedback"]), 1)
-        self.assertEqual(list_response["feedback"][0]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(len(feedback_records), 1)
+        self.assertEqual(feedback_records[0].feedback_id, feedback_record.feedback_id)
 
     def test_every_code_worker_token_reruns_terminal_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -11965,8 +11903,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             event_name="workflow_dispatch",
         )
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -11988,11 +11927,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={"Idempotency-Key": "every-code-create-code-123"},
             )
             request_id = str(create_payload["records"]["request_id"])
-            list_status, list_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/work-requests",
-                query_string="state=queued",
+            queued_requests = FilesystemRecordStore(state_dir).list_every_code_work_request_records(
+                state="queued"
             )
             claim_status, claim_payload = _invoke_app(
                 app,
@@ -12021,30 +11957,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "every-code-status-code-123-done"},
             )
-            show_status, show_payload = _invoke_app(
-                app,
-                method="GET",
-                path=f"/v1/every-code/work-requests/{request_id}",
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
             )
 
         self.assertEqual(create_status, 202)
         self.assertEqual(create_payload["records"]["state"], "queued")
-        self.assertEqual(list_status, 200)
-        self.assertEqual(len(list_payload["requests"]), 1)
+        self.assertEqual(len(queued_requests), 1)
         self.assertEqual(claim_status, 202)
         self.assertEqual(claim_payload["records"]["state"], "claimed")
         self.assertEqual(second_claim_status, 409)
         self.assertEqual(second_claim_payload["error"]["code"], "work_request_already_claimed")
         self.assertEqual(status_status, 202)
         self.assertEqual(status_payload["records"]["state"], "done")
-        self.assertEqual(show_status, 200)
-        self.assertEqual(show_payload["request"]["state"], "done")
+        self.assertEqual(stored_request.state, "done")
         self.assertEqual(
-            show_payload["request"]["result_pr_url"],
+            stored_request.result_pr_url,
             "https://github.com/cbusillo/code/pull/26",
         )
 
-    def test_every_code_worker_token_can_read_claim_and_update_requests(self) -> None:
+    def test_every_code_worker_token_can_claim_and_update_requests(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
@@ -12076,8 +12008,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -12098,12 +12031,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            list_status, list_payload = _invoke_app(
-                app,
-                method="GET",
-                path="/v1/every-code/work-requests",
-                query_string="state=queued",
-                authorization="Bearer worker-token",
+            queued_requests = FilesystemRecordStore(state_dir).list_every_code_work_request_records(
+                state="queued"
             )
             claim_status, claim_payload = _invoke_app(
                 app,
@@ -12127,8 +12056,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(create_status, 202)
-        self.assertEqual(list_status, 200)
-        self.assertEqual(list_payload["requests"][0]["request_id"], request_id)
+        self.assertEqual(queued_requests[0].request_id, request_id)
         self.assertEqual(claim_status, 202)
         self.assertEqual(claim_payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
         self.assertEqual(status_status, 202)
@@ -12537,7 +12465,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(stale_status, 409)
         self.assertEqual(stale_payload["error"]["code"], "agent_write_intent_stale")
 
-    def test_every_code_worker_token_is_required_for_unauthenticated_request(self) -> None:
+    def test_every_code_worker_read_route_is_retired_before_authentication(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -12558,10 +12486,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authorization="",
             )
 
-        self.assertEqual(status_code, 401)
-        self.assertEqual(payload["error"]["code"], "authentication_required")
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
-    def test_every_code_worker_reads_reject_negative_offsets(self) -> None:
+    def test_every_code_worker_read_routes_are_removed_from_legacy_worker_token_bypass(
+        self,
+    ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -12590,12 +12520,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authorization="Bearer worker-token",
             )
 
-        self.assertEqual(work_status, 400)
-        self.assertEqual(work_payload["error"]["code"], "invalid_payload")
-        self.assertIn("offset must be non-negative", work_payload["error"]["message"])
-        self.assertEqual(feedback_status, 400)
-        self.assertEqual(feedback_payload["error"]["code"], "invalid_payload")
-        self.assertIn("offset must be non-negative", feedback_payload["error"]["message"])
+        self.assertEqual(work_status, 404)
+        self.assertEqual(work_payload["error"]["code"], "not_found")
+        self.assertEqual(feedback_status, 405)
+        self.assertEqual(feedback_payload["error"]["code"], "method_not_allowed")
 
     def test_every_code_work_request_create_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -28943,7 +28871,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(attempts[0].delivery_status, "delivered")
         self.assertEqual(attempts[0].action, "posted_discord")
 
-    def test_preview_pr_feedback_notification_attempts_can_be_read(self) -> None:
+    def test_preview_pr_feedback_notification_attempt_read_route_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -28980,12 +28910,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 query_string="feedback_id=feedback-1&event=delivery_skipped",
             )
 
-        self.assertEqual(status_code, 200)
-        self.assertEqual(payload["feedback_id"], "feedback-1")
-        self.assertEqual(payload["event_filter"], "delivery_skipped")
-        self.assertEqual(payload["attempts"], [attempt_record.model_dump(mode="json")])
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
-    def test_preview_pr_feedback_notification_attempt_read_requires_authz(self) -> None:
+    def test_preview_pr_feedback_notification_attempt_read_authz_moved_to_fastapi(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
@@ -29003,8 +28933,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path="/v1/previews/pr-feedback/notification-attempts",
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_preview_pr_feedback_notification_not_duplicated_on_idempotent_retry(
         self,

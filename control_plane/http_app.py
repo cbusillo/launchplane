@@ -36,6 +36,12 @@ from control_plane.contracts.driver_descriptor import DriverContextView, DriverD
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.every_code_notifications import EveryCodeNotificationAttemptRecord
+from control_plane.contracts.every_code_summary_read_model import (
+    EveryCodeSummaryReadModel,
+    build_every_code_summary_read_model,
+)
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -58,6 +64,13 @@ from control_plane.contracts.preview_evidence import (
     PreviewGenerationEvidenceEnvelope,
 )
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
+)
+from control_plane.contracts.preview_readiness_read_model import (
+    PreviewReadinessReadModel,
+    build_preview_readiness_read_model,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.protected_artifacts import (
@@ -448,6 +461,84 @@ class IngressCanaryRouteRecordsResponse(BaseModel):
     records: tuple[IngressCanaryRouteRecord, ...]
 
 
+class EveryCodeWorkRequestRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    state: str
+    repository: str
+    requests: tuple[EveryCodeWorkRequestRecord, ...]
+
+
+class EveryCodeWorkRequestRecordResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    request: EveryCodeWorkRequestRecord
+
+
+class EveryCodeSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    summary: EveryCodeSummaryReadModel
+
+
+class PreviewReadinessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    readiness: PreviewReadinessReadModel
+
+
+class EveryCodePrFeedbackRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    request_id: str
+    repository: str
+    status_filter: str
+    feedback: tuple[EveryCodePrFeedbackRecord, ...]
+
+
+class EveryCodePreviewGateRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    request_id: str
+    repository: str
+    status_filter: str
+    gates: tuple[EveryCodePreviewGateRecord, ...]
+
+
+class EveryCodeNotificationAttemptRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    request_id: str
+    event_filter: str
+    destination_kind_filter: str
+    attempts: tuple[EveryCodeNotificationAttemptRecord, ...]
+
+
+class PreviewPrFeedbackNotificationAttemptRecordsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    feedback_id: str
+    event_filter: str
+    destination_kind_filter: str
+    attempts: tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]
+
+
 class DeploymentRecordResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -801,6 +892,71 @@ class _IngressCanaryRouteReadStore(Protocol):
         status: str = "",
         limit: int | None = None,
     ) -> tuple[IngressCanaryRouteRecord, ...]: ...
+
+
+class _EveryCodeWorkRequestListStore(Protocol):
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+
+class _EveryCodeWorkRequestRecordStore(Protocol):
+    def read_every_code_work_request_record(
+        self, request_id: str
+    ) -> EveryCodeWorkRequestRecord: ...
+
+
+class _EveryCodePrFeedbackReadStore(Protocol):
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
+
+
+class _EveryCodePreviewGateReadStore(Protocol):
+    def list_every_code_preview_gate_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
+
+
+class _EveryCodeNotificationAttemptReadStore(Protocol):
+    def list_every_code_notification_attempt_records(
+        self,
+        *,
+        request_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
+
+
+class _PreviewPrFeedbackNotificationAttemptReadStore(Protocol):
+    def list_preview_pr_feedback_notification_attempt_records(
+        self,
+        *,
+        feedback_id: str = "",
+        event: str = "",
+        destination_kind: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
 
 
 def require_protected_artifact_store(record_store: object) -> ProtectedArtifactStore:
@@ -1476,6 +1632,21 @@ def create_launchplane_fastapi_app(
             cookie=cookie,
         )
 
+    def read_every_code_worker_read_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity | None:
+        if every_code_worker_token_authorized(authorization):
+            return None
+        return read_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+        )
+
     def read_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
     ) -> LaunchplaneIdentity:
@@ -1811,6 +1982,173 @@ def create_launchplane_fastapi_app(
         )
         return cast(AgentContextReadStore, record_store)
 
+    def require_every_code_read_methods(
+        record_store: object,
+        *,
+        required_methods: tuple[str, ...],
+        capability: str,
+    ) -> None:
+        missing_methods = [
+            method_name
+            for method_name in required_methods
+            if not callable(getattr(record_store, method_name, None))
+        ]
+        if missing_methods:
+            missing_summary = ", ".join(missing_methods)
+            raise TypeError(f"record store does not support {capability}: {missing_summary}")
+
+    def require_every_code_work_request_list_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestListStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("list_every_code_work_request_records",),
+            capability="Every Code work request list reads",
+        )
+        return cast(_EveryCodeWorkRequestListStore, record_store)
+
+    def require_every_code_work_request_record_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestRecordStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("read_every_code_work_request_record",),
+            capability="Every Code work request record reads",
+        )
+        return cast(_EveryCodeWorkRequestRecordStore, record_store)
+
+    def require_every_code_pr_feedback_read_store(
+        record_store: object,
+    ) -> _EveryCodePrFeedbackReadStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("list_every_code_pr_feedback_records",),
+            capability="Every Code PR feedback reads",
+        )
+        return cast(_EveryCodePrFeedbackReadStore, record_store)
+
+    def require_every_code_preview_gate_read_store(
+        record_store: object,
+    ) -> _EveryCodePreviewGateReadStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("list_every_code_preview_gate_records",),
+            capability="Every Code preview gate reads",
+        )
+        return cast(_EveryCodePreviewGateReadStore, record_store)
+
+    def require_every_code_notification_attempt_read_store(
+        record_store: object,
+    ) -> _EveryCodeNotificationAttemptReadStore:
+        list_records = getattr(record_store, "list_every_code_notification_attempt_records", None)
+        if not callable(list_records):
+            raise TypeError("record store does not support Every Code notification attempt reads")
+        return cast(_EveryCodeNotificationAttemptReadStore, record_store)
+
+    def require_preview_pr_feedback_notification_attempt_read_store(
+        record_store: object,
+    ) -> _PreviewPrFeedbackNotificationAttemptReadStore:
+        list_records = getattr(
+            record_store,
+            "list_preview_pr_feedback_notification_attempt_records",
+            None,
+        )
+        if not callable(list_records):
+            raise TypeError(
+                "record store does not support preview PR feedback notification attempt reads"
+            )
+        return cast(_PreviewPrFeedbackNotificationAttemptReadStore, record_store)
+
+    def ensure_every_code_read_allowed(
+        *,
+        identity: LaunchplaneIdentity | None,
+        trace_id: str,
+        action: str,
+        message: str,
+    ) -> None:
+        if identity is None:
+            return
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=message,
+            )
+
+    def every_code_pagination_value(
+        raw_value: str,
+        key: str,
+        *,
+        default: int,
+        trace_id: str,
+    ) -> int:
+        try:
+            value = int(raw_value.strip() or str(default))
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=f"Every Code pagination {key} must be an integer",
+            ) from error
+        if value < 0:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=f"Every Code pagination {key} must be non-negative",
+            )
+        return value
+
+    def every_code_optional_int(raw_value: str, key: str, *, trace_id: str) -> int | None:
+        normalized_value = raw_value.strip()
+        if not normalized_value:
+            return None
+        try:
+            return int(normalized_value)
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=f"Query parameter {key} must be an integer",
+            ) from error
+
+    def every_code_read_store_or_503(
+        record_store: object, *, trace_id: str, capability: str
+    ) -> object:
+        try:
+            if capability == "work_request_list":
+                return require_every_code_work_request_list_store(record_store)
+            if capability == "work_request_record":
+                return require_every_code_work_request_record_store(record_store)
+            if capability == "pr_feedback":
+                return require_every_code_pr_feedback_read_store(record_store)
+            if capability == "preview_gate":
+                return require_every_code_preview_gate_read_store(record_store)
+            raise TypeError(f"unknown Every Code read capability: {capability}")
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+
+    def every_code_invalid_payload_error(*, trace_id: str, error: ValueError) -> HTTPException:
+        return _launchplane_http_error(
+            status_code=400,
+            trace_id=trace_id,
+            code="invalid_payload",
+            message=str(error),
+        )
+
     def read_repo_product_mapping(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -1861,6 +2199,351 @@ def create_launchplane_fastapi_app(
             planning_facts_provider=work_graph_planning_facts_provider,
         )
         return AgentContextResponse(trace_id=trace_id, context=context)
+
+    def read_every_code_summary(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        repository: Annotated[str, Query()] = "",
+        issue_number: Annotated[str, Query()] = "",
+        state: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+        offset: Annotated[str, Query()] = "0",
+    ) -> EveryCodeSummaryResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_work_request.read",
+            message="Workflow cannot read Every Code work requests.",
+        )
+        every_code_store = cast(
+            _EveryCodeWorkRequestListStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="work_request_list",
+            ),
+        )
+        try:
+            summary = build_every_code_summary_read_model(
+                generated_at=utc_now_timestamp(),
+                record_store=every_code_store,
+                repository=repository.strip(),
+                issue_number=every_code_optional_int(
+                    issue_number,
+                    "issue_number",
+                    trace_id=trace_id,
+                ),
+                state=state.strip(),
+                limit=every_code_pagination_value(
+                    limit,
+                    "limit",
+                    default=50,
+                    trace_id=trace_id,
+                ),
+                offset=every_code_pagination_value(
+                    offset,
+                    "offset",
+                    default=0,
+                    trace_id=trace_id,
+                ),
+            )
+        except ValueError as error:
+            raise every_code_invalid_payload_error(trace_id=trace_id, error=error) from error
+        return EveryCodeSummaryResponse(trace_id=trace_id, summary=summary)
+
+    def read_preview_readiness(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        repository: Annotated[str, Query()] = "",
+        pr_number: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+        offset: Annotated[str, Query()] = "0",
+    ) -> PreviewReadinessResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_preview_gate.read",
+            message="Workflow cannot read Every Code preview readiness.",
+        )
+        every_code_store = cast(
+            _EveryCodePreviewGateReadStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="preview_gate",
+            ),
+        )
+        try:
+            readiness = build_preview_readiness_read_model(
+                generated_at=utc_now_timestamp(),
+                record_store=every_code_store,
+                repository=repository.strip(),
+                pr_number=every_code_optional_int(
+                    pr_number,
+                    "pr_number",
+                    trace_id=trace_id,
+                ),
+                status=status.strip(),
+                limit=every_code_pagination_value(
+                    limit,
+                    "limit",
+                    default=50,
+                    trace_id=trace_id,
+                ),
+                offset=every_code_pagination_value(
+                    offset,
+                    "offset",
+                    default=0,
+                    trace_id=trace_id,
+                ),
+            )
+        except ValueError as error:
+            raise every_code_invalid_payload_error(trace_id=trace_id, error=error) from error
+        return PreviewReadinessResponse(trace_id=trace_id, readiness=readiness)
+
+    def list_every_code_work_requests(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        state: Annotated[str, Query()] = "",
+        repository: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+        offset: Annotated[str, Query()] = "0",
+    ) -> EveryCodeWorkRequestRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_work_request.read",
+            message="Workflow cannot read Every Code work requests.",
+        )
+        every_code_store = cast(
+            _EveryCodeWorkRequestListStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="work_request_list",
+            ),
+        )
+        records = every_code_store.list_every_code_work_request_records(
+            state=state.strip(),
+            repository=repository.strip(),
+            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
+            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
+        )
+        return EveryCodeWorkRequestRecordsResponse(
+            trace_id=trace_id,
+            state=state.strip(),
+            repository=repository.strip(),
+            requests=records,
+        )
+
+    def read_every_code_work_request(
+        request_id: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> EveryCodeWorkRequestRecordResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_work_request.read",
+            message="Workflow cannot read Every Code work requests.",
+        )
+        every_code_store = cast(
+            _EveryCodeWorkRequestRecordStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="work_request_record",
+            ),
+        )
+        try:
+            record = every_code_store.read_every_code_work_request_record(request_id)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        return EveryCodeWorkRequestRecordResponse(trace_id=trace_id, request=record)
+
+    def list_every_code_pr_feedback(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        request_id: Annotated[str, Query()] = "",
+        repository: Annotated[str, Query()] = "",
+        pr_number: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+        offset: Annotated[str, Query()] = "0",
+    ) -> EveryCodePrFeedbackRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_pr_feedback.read",
+            message="Workflow cannot read Every Code PR feedback.",
+        )
+        every_code_store = cast(
+            _EveryCodePrFeedbackReadStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="pr_feedback",
+            ),
+        )
+        records = every_code_store.list_every_code_pr_feedback_records(
+            request_id=request_id.strip(),
+            repository=repository.strip(),
+            pr_number=every_code_optional_int(pr_number, "pr_number", trace_id=trace_id),
+            status=status.strip(),
+            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
+            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
+        )
+        return EveryCodePrFeedbackRecordsResponse(
+            trace_id=trace_id,
+            request_id=request_id.strip(),
+            repository=repository.strip(),
+            status_filter=status.strip(),
+            feedback=records,
+        )
+
+    def list_every_code_preview_gates(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        request_id: Annotated[str, Query()] = "",
+        repository: Annotated[str, Query()] = "",
+        pr_number: Annotated[str, Query()] = "",
+        status: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+        offset: Annotated[str, Query()] = "0",
+    ) -> EveryCodePreviewGateRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_preview_gate.read",
+            message="Workflow cannot read Every Code preview readiness.",
+        )
+        every_code_store = cast(
+            _EveryCodePreviewGateReadStore,
+            every_code_read_store_or_503(
+                record_store,
+                trace_id=trace_id,
+                capability="preview_gate",
+            ),
+        )
+        records = every_code_store.list_every_code_preview_gate_records(
+            request_id=request_id.strip(),
+            repository=repository.strip(),
+            pr_number=every_code_optional_int(pr_number, "pr_number", trace_id=trace_id),
+            status=status.strip(),
+            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
+            offset=every_code_pagination_value(offset, "offset", default=0, trace_id=trace_id),
+        )
+        return EveryCodePreviewGateRecordsResponse(
+            trace_id=trace_id,
+            request_id=request_id.strip(),
+            repository=repository.strip(),
+            status_filter=status.strip(),
+            gates=records,
+        )
+
+    def list_every_code_notification_attempts(
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        request_id: Annotated[str, Query()] = "",
+        event: Annotated[str, Query()] = "",
+        destination_kind: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+    ) -> EveryCodeNotificationAttemptRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="every_code_notification_attempt.read",
+            message="Workflow cannot read Every Code notification attempts.",
+        )
+        try:
+            notification_store = require_every_code_notification_attempt_read_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        records = notification_store.list_every_code_notification_attempt_records(
+            request_id=request_id.strip(),
+            event=event.strip(),
+            destination_kind=destination_kind.strip(),
+            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
+        )
+        return EveryCodeNotificationAttemptRecordsResponse(
+            trace_id=trace_id,
+            request_id=request_id.strip(),
+            event_filter=event.strip(),
+            destination_kind_filter=destination_kind.strip(),
+            attempts=records,
+        )
+
+    def list_preview_pr_feedback_notification_attempts(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        feedback_id: Annotated[str, Query()] = "",
+        event: Annotated[str, Query()] = "",
+        destination_kind: Annotated[str, Query()] = "",
+        limit: Annotated[str, Query()] = "50",
+    ) -> PreviewPrFeedbackNotificationAttemptRecordsResponse:
+        trace_id = next_trace_id()
+        ensure_every_code_read_allowed(
+            identity=identity,
+            trace_id=trace_id,
+            action="preview_pr_feedback_notification_attempt.read",
+            message="Workflow cannot read preview PR feedback notification attempts.",
+        )
+        try:
+            notification_store = require_preview_pr_feedback_notification_attempt_read_store(
+                record_store
+            )
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        records = notification_store.list_preview_pr_feedback_notification_attempt_records(
+            feedback_id=feedback_id.strip(),
+            event=event.strip(),
+            destination_kind=destination_kind.strip(),
+            limit=every_code_pagination_value(limit, "limit", default=50, trace_id=trace_id),
+        )
+        return PreviewPrFeedbackNotificationAttemptRecordsResponse(
+            trace_id=trace_id,
+            feedback_id=feedback_id.strip(),
+            event_filter=event.strip(),
+            destination_kind_filter=destination_kind.strip(),
+            attempts=records,
+        )
 
     def list_product_environment_overviews(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -4048,6 +4731,24 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    every_code_read_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        404: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
+
+    app.add_api_route(
+        "/v1/previews/readiness",
+        read_preview_readiness,
+        methods=["GET"],
+        response_model=PreviewReadinessResponse,
+        operation_id="read_preview_readiness",
+        summary="Read preview readiness",
+        responses=every_code_read_error_responses,
+    )
+
     app.add_api_route(
         "/v1/previews/{preview_id}",
         read_preview_record,
@@ -4143,6 +4844,76 @@ def create_launchplane_fastapi_app(
         operation_id="read_agent_context",
         summary="Read Launchplane agent context",
         responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/summary",
+        read_every_code_summary,
+        methods=["GET"],
+        response_model=EveryCodeSummaryResponse,
+        operation_id="read_every_code_summary",
+        summary="Read Every Code work request summary",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/work-requests",
+        list_every_code_work_requests,
+        methods=["GET"],
+        response_model=EveryCodeWorkRequestRecordsResponse,
+        operation_id="list_every_code_work_requests",
+        summary="List Every Code work requests",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/work-requests/{request_id}",
+        read_every_code_work_request,
+        methods=["GET"],
+        response_model=EveryCodeWorkRequestRecordResponse,
+        operation_id="read_every_code_work_request",
+        summary="Read one Every Code work request",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/pr-feedback",
+        list_every_code_pr_feedback,
+        methods=["GET"],
+        response_model=EveryCodePrFeedbackRecordsResponse,
+        operation_id="list_every_code_pr_feedback",
+        summary="List Every Code PR feedback records",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/preview-gates",
+        list_every_code_preview_gates,
+        methods=["GET"],
+        response_model=EveryCodePreviewGateRecordsResponse,
+        operation_id="list_every_code_preview_gates",
+        summary="List Every Code preview gates",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/notification-attempts",
+        list_every_code_notification_attempts,
+        methods=["GET"],
+        response_model=EveryCodeNotificationAttemptRecordsResponse,
+        operation_id="list_every_code_notification_attempts",
+        summary="List Every Code notification attempts",
+        responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/previews/pr-feedback/notification-attempts",
+        list_preview_pr_feedback_notification_attempts,
+        methods=["GET"],
+        response_model=PreviewPrFeedbackNotificationAttemptRecordsResponse,
+        operation_id="list_preview_pr_feedback_notification_attempts",
+        summary="List preview PR feedback notification attempts",
+        responses=every_code_read_error_responses,
     )
 
     app.add_api_route(

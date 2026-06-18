@@ -25,7 +25,9 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_notifications import EveryCodeNotificationAttemptRecord
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
@@ -36,6 +38,9 @@ from control_plane.contracts.preview_generation_record import (
     PreviewGenerationState,
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
+)
+from control_plane.contracts.preview_pr_feedback_notifications import (
+    PreviewPrFeedbackNotificationAttemptRecord,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import (
@@ -1834,6 +1839,312 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity_response.status_code, 200)
         self.assertEqual(environments_response.status_code, 200)
         self.assertEqual(config_status_response.status_code, 200)
+
+
+class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_code_read_routes_return_native_payloads(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_read_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_read_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            summary_response = await _get_every_code_summary(
+                app,
+                repository="cbusillo/code",
+                issue_number="123",
+                state="queued",
+                limit="1",
+                offset="0",
+            )
+            readiness_response = await _get_preview_readiness(
+                app,
+                repository="cbusillo/code",
+                pr_number="31",
+                status="blocked",
+            )
+            list_response = await _get_every_code_work_requests(
+                app,
+                state="queued",
+                repository="cbusillo/code",
+            )
+            read_response = await _get_every_code_work_request(
+                app,
+                seeded["request_id"],
+            )
+            feedback_response = await _get_every_code_pr_feedback(
+                app,
+                request_id=seeded["request_id"],
+                repository="cbusillo/code",
+                pr_number="31",
+                status="pending",
+            )
+            gates_response = await _get_every_code_preview_gates(
+                app,
+                request_id=seeded["request_id"],
+                repository="cbusillo/code",
+                pr_number="31",
+                status="blocked",
+            )
+            notification_response = await _get_every_code_notification_attempts(
+                app,
+                request_id=seeded["request_id"],
+                event="work_request_blocked",
+                destination_kind="discord",
+            )
+            preview_notification_response = await _get_preview_pr_feedback_notification_attempts(
+                app,
+                feedback_id=seeded["preview_feedback_id"],
+                event="delivery_skipped",
+                destination_kind="discord",
+            )
+
+        for response in (
+            summary_response,
+            readiness_response,
+            list_response,
+            read_response,
+            feedback_response,
+            gates_response,
+            notification_response,
+            preview_notification_response,
+        ):
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "ok")
+            self.assertIn("trace_id", response.json())
+
+        summary = summary_response.json()["summary"]
+        self.assertEqual(summary["repository"], "cbusillo/code")
+        self.assertEqual(summary["issue_number"], 123)
+        self.assertEqual(summary["state_filter"], "queued")
+        self.assertEqual(summary["summaries"][0]["request_id"], seeded["request_id"])
+        self.assertEqual(summary["summaries"][0]["summary_status"], "active")
+
+        readiness = readiness_response.json()["readiness"]
+        self.assertEqual(readiness["repository"], "cbusillo/code")
+        self.assertEqual(readiness["pr_number"], 31)
+        self.assertEqual(readiness["status_filter"], "blocked")
+        self.assertEqual(readiness["items"][0]["gate_id"], seeded["gate_id"])
+        self.assertEqual(readiness["items"][0]["readiness_status"], "needs_attention")
+
+        self.assertEqual(list_response.json()["requests"][0]["request_id"], seeded["request_id"])
+        self.assertEqual(read_response.json()["request"]["request_id"], seeded["request_id"])
+        self.assertEqual(
+            feedback_response.json()["feedback"][0]["feedback_id"], seeded["feedback_id"]
+        )
+        self.assertEqual(gates_response.json()["gates"][0]["gate_id"], seeded["gate_id"])
+        self.assertEqual(
+            notification_response.json()["attempts"][0]["attempt_id"],
+            seeded["notification_attempt_id"],
+        )
+        self.assertEqual(
+            preview_notification_response.json()["attempts"][0]["attempt_id"],
+            seeded["preview_notification_attempt_id"],
+        )
+
+    async def test_every_code_worker_token_reads_without_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_read_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            responses = (
+                await _get_every_code_summary(
+                    app,
+                    repository="cbusillo/code",
+                    authorization="Bearer worker-token",
+                ),
+                await _get_preview_readiness(
+                    app,
+                    repository="cbusillo/code",
+                    authorization="Bearer worker-token",
+                ),
+                await _get_every_code_work_request(
+                    app,
+                    seeded["request_id"],
+                    authorization="Bearer worker-token",
+                ),
+                await _get_every_code_pr_feedback(
+                    app,
+                    request_id=seeded["request_id"],
+                    authorization="Bearer worker-token",
+                ),
+            )
+
+        for response in responses:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["status"], "ok")
+
+    async def test_every_code_reads_reject_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _seed_every_code_read_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+
+            responses = (
+                await _get_every_code_work_requests(app),
+                await _get_preview_readiness(app),
+                await _get_every_code_notification_attempts(app),
+                await _get_preview_pr_feedback_notification_attempts(app),
+            )
+
+        for response in responses:
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_every_code_reads_require_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        responses = (
+            await _get_every_code_work_requests(app),
+            await _get_every_code_notification_attempts(app),
+            await _get_preview_pr_feedback_notification_attempts(app),
+        )
+
+        for response in responses:
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_every_code_reads_reject_invalid_query_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _seed_every_code_read_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            offset_response = await _get_every_code_work_requests(
+                app,
+                offset="-1",
+                authorization="Bearer worker-token",
+            )
+            pr_number_response = await _get_every_code_pr_feedback(
+                app,
+                pr_number="not-a-number",
+                authorization="Bearer worker-token",
+            )
+            status_response = await _get_preview_readiness(
+                app,
+                status="unknown",
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(offset_response.status_code, 400)
+        self.assertEqual(offset_response.json()["error"]["code"], "invalid_payload")
+        self.assertIn("offset must be non-negative", offset_response.json()["error"]["message"])
+        self.assertEqual(pr_number_response.status_code, 400)
+        self.assertEqual(pr_number_response.json()["error"]["code"], "invalid_payload")
+        self.assertEqual(status_response.status_code, 400)
+        self.assertEqual(status_response.json()["error"]["code"], "invalid_payload")
+
+    async def test_openapi_includes_every_code_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        expected_routes = {
+            "/v1/every-code/summary": (
+                "read_every_code_summary",
+                "EveryCodeSummaryResponse",
+            ),
+            "/v1/previews/readiness": (
+                "read_preview_readiness",
+                "PreviewReadinessResponse",
+            ),
+            "/v1/every-code/work-requests": (
+                "list_every_code_work_requests",
+                "EveryCodeWorkRequestRecordsResponse",
+            ),
+            "/v1/every-code/work-requests/{request_id}": (
+                "read_every_code_work_request",
+                "EveryCodeWorkRequestRecordResponse",
+            ),
+            "/v1/every-code/pr-feedback": (
+                "list_every_code_pr_feedback",
+                "EveryCodePrFeedbackRecordsResponse",
+            ),
+            "/v1/every-code/preview-gates": (
+                "list_every_code_preview_gates",
+                "EveryCodePreviewGateRecordsResponse",
+            ),
+            "/v1/every-code/notification-attempts": (
+                "list_every_code_notification_attempts",
+                "EveryCodeNotificationAttemptRecordsResponse",
+            ),
+            "/v1/previews/pr-feedback/notification-attempts": (
+                "list_preview_pr_feedback_notification_attempts",
+                "PreviewPrFeedbackNotificationAttemptRecordsResponse",
+            ),
+        }
+        for path, (operation_id, response_model_name) in expected_routes.items():
+            route = openapi["paths"][path]["get"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+                f"#/components/schemas/{response_model_name}",
+            )
+            self.assertFalse(
+                openapi["components"]["schemas"][response_model_name]["additionalProperties"]
+            )
+            for status_code in ("400", "401", "403", "404", "503"):
+                self.assertIn(
+                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
+                )
+
+    async def test_fastapi_every_code_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            seeded = _seed_every_code_read_records(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_read_policy(),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "legacy-state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            work_request_response = await _get_every_code_work_request(
+                app,
+                seeded["request_id"],
+            )
+            notification_response = await _get_preview_pr_feedback_notification_attempts(
+                app,
+                feedback_id=seeded["preview_feedback_id"],
+            )
+
+        self.assertEqual(work_request_response.status_code, 200)
+        self.assertEqual(notification_response.status_code, 200)
 
 
 class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
@@ -8720,6 +9031,133 @@ def _seed_agent_context_read_records(database_url: str) -> None:
         store.close()
 
 
+def _seed_every_code_read_records(store: Any) -> dict[str, str]:
+    request_id = "every-code-cbusillo-code-123-test"
+    gate_id = "every-code-preview-gate-cbusillo-code-31-test"
+    feedback_id = "every-code-pr-feedback-cbusillo-code-31-review-1"
+    preview_feedback_id = "preview-feedback-cbusillo-code-31-skipped"
+    notification_attempt_id = "every-code-notification-cbusillo-code-123-test"
+    preview_notification_attempt_id = "preview-pr-feedback-notification-cbusillo-code-31-skipped"
+    store.write_every_code_work_request_record(
+        EveryCodeWorkRequestRecord(
+            request_id=request_id,
+            source="manual",
+            state="queued",
+            repository="cbusillo/code",
+            issue_number=123,
+            issue_url="https://github.com/cbusillo/code/issues/123",
+            issue_title="Finish v2 Every Code read cutover",
+            trigger_label="every-code",
+            trigger_actor="cbusillo",
+            queued_at="2026-06-18T12:00:00Z",
+            updated_at="2026-06-18T12:00:00Z",
+        )
+    )
+    store.write_every_code_work_request_record(
+        EveryCodeWorkRequestRecord(
+            request_id="every-code-cbusillo-other-456-test",
+            source="manual",
+            state="done",
+            repository="cbusillo/other",
+            issue_number=456,
+            issue_url="https://github.com/cbusillo/other/issues/456",
+            issue_title="Unrelated completed request",
+            trigger_label="every-code",
+            trigger_actor="cbusillo",
+            queued_at="2026-06-17T12:00:00Z",
+            claimed_at="2026-06-17T12:01:00Z",
+            claimed_by_host="test-host",
+            started_at="2026-06-17T12:02:00Z",
+            finished_at="2026-06-17T12:03:00Z",
+            updated_at="2026-06-17T12:03:00Z",
+            result_pr_url="https://github.com/cbusillo/other/pull/4",
+        )
+    )
+    store.write_every_code_preview_gate_record(
+        EveryCodePreviewGateRecord(
+            gate_id=gate_id,
+            request_id=request_id,
+            repository="cbusillo/code",
+            issue_number=123,
+            issue_url="https://github.com/cbusillo/code/issues/123",
+            pr_number=31,
+            pr_url="https://github.com/cbusillo/code/pull/31",
+            head_sha="abcdef1234567890",
+            status="blocked",
+            created_at="2026-06-18T12:05:00Z",
+            updated_at="2026-06-18T12:06:00Z",
+            blocked_at="2026-06-18T12:06:00Z",
+            last_checked_at="2026-06-18T12:06:00Z",
+            blocked_reason="Required preview checks failed.",
+        )
+    )
+    store.write_every_code_pr_feedback_record(
+        EveryCodePrFeedbackRecord(
+            feedback_id=feedback_id,
+            request_id=request_id,
+            repository="cbusillo/code",
+            pr_number=31,
+            pr_url="https://github.com/cbusillo/code/pull/31",
+            feedback_kind="pull_request_review_comment",
+            github_delivery_id="delivery-feedback-1",
+            github_node_id="PRRC_kwDOTest123",
+            actor="reviewer",
+            author_association="MEMBER",
+            body="Please tighten the FastAPI read route coverage.",
+            html_url="https://github.com/cbusillo/code/pull/31#discussion_r1",
+            received_at="2026-06-18T12:07:00Z",
+            status="pending",
+        )
+    )
+    store.write_every_code_notification_attempt_record(
+        EveryCodeNotificationAttemptRecord(
+            attempt_id=notification_attempt_id,
+            request_id=request_id,
+            event="work_request_blocked",
+            policy_id="every-code-notification-discord",
+            destination_id="discord",
+            destination_kind="discord",
+            delivery_status="delivered",
+            attempted_at="2026-06-18T12:08:00Z",
+            action="posted_discord",
+        )
+    )
+    store.write_preview_pr_feedback_notification_attempt_record(
+        PreviewPrFeedbackNotificationAttemptRecord(
+            attempt_id=preview_notification_attempt_id,
+            feedback_id=preview_feedback_id,
+            event="delivery_skipped",
+            policy_id="preview-pr-feedback-notification-discord",
+            destination_id="discord",
+            destination_kind="discord",
+            delivery_status="delivered",
+            attempted_at="2026-06-18T12:09:00Z",
+            action="posted_discord",
+        )
+    )
+    return {
+        "request_id": request_id,
+        "gate_id": gate_id,
+        "feedback_id": feedback_id,
+        "preview_feedback_id": preview_feedback_id,
+        "notification_attempt_id": notification_attempt_id,
+        "preview_notification_attempt_id": preview_notification_attempt_id,
+    }
+
+
+def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
+    return _record_read_policy(
+        action="every_code_work_request.read",
+        context="launchplane",
+        extra_actions=(
+            "every_code_preview_gate.read",
+            "every_code_pr_feedback.read",
+            "every_code_notification_attempt.read",
+            "preview_pr_feedback_notification_attempt.read",
+        ),
+    )
+
+
 def _product_profile_read_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -8940,6 +9378,184 @@ async def _get_agent_context(
     headers = {"Authorization": authorization} if authorization else {}
     suffix = f"?{urlencode({'repository': repository})}" if repository else ""
     return await _asgi_get(app, f"/v1/agent/context{suffix}", headers=headers)
+
+
+async def _get_every_code_summary(
+    app: FastAPI,
+    *,
+    repository: str = "",
+    issue_number: str = "",
+    state: str = "",
+    limit: str = "",
+    offset: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        repository=repository,
+        issue_number=issue_number,
+        state=state,
+        limit=limit,
+        offset=offset,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/every-code/summary{suffix}", headers=headers)
+
+
+async def _get_preview_readiness(
+    app: FastAPI,
+    *,
+    repository: str = "",
+    pr_number: str = "",
+    status: str = "",
+    limit: str = "",
+    offset: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        repository=repository,
+        pr_number=pr_number,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/previews/readiness{suffix}", headers=headers)
+
+
+async def _get_every_code_work_requests(
+    app: FastAPI,
+    *,
+    state: str = "",
+    repository: str = "",
+    limit: str = "",
+    offset: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        state=state,
+        repository=repository,
+        limit=limit,
+        offset=offset,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/every-code/work-requests{suffix}", headers=headers)
+
+
+async def _get_every_code_work_request(
+    app: FastAPI,
+    request_id: str,
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_get(
+        app,
+        f"/v1/every-code/work-requests/{request_id}",
+        headers=headers,
+    )
+
+
+async def _get_every_code_pr_feedback(
+    app: FastAPI,
+    *,
+    request_id: str = "",
+    repository: str = "",
+    pr_number: str = "",
+    status: str = "",
+    limit: str = "",
+    offset: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        request_id=request_id,
+        repository=repository,
+        pr_number=pr_number,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/every-code/pr-feedback{suffix}", headers=headers)
+
+
+async def _get_every_code_preview_gates(
+    app: FastAPI,
+    *,
+    request_id: str = "",
+    repository: str = "",
+    pr_number: str = "",
+    status: str = "",
+    limit: str = "",
+    offset: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        request_id=request_id,
+        repository=repository,
+        pr_number=pr_number,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(app, f"/v1/every-code/preview-gates{suffix}", headers=headers)
+
+
+async def _get_every_code_notification_attempts(
+    app: FastAPI,
+    *,
+    request_id: str = "",
+    event: str = "",
+    destination_kind: str = "",
+    limit: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        request_id=request_id,
+        event=event,
+        destination_kind=destination_kind,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/every-code/notification-attempts{suffix}",
+        headers=headers,
+    )
+
+
+async def _get_preview_pr_feedback_notification_attempts(
+    app: FastAPI,
+    *,
+    feedback_id: str = "",
+    event: str = "",
+    destination_kind: str = "",
+    limit: str = "",
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    params = _query_params(
+        feedback_id=feedback_id,
+        event=event,
+        destination_kind=destination_kind,
+        limit=limit,
+    )
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/previews/pr-feedback/notification-attempts{suffix}",
+        headers=headers,
+    )
+
+
+def _query_params(**values: str) -> dict[str, str]:
+    return {key: value for key, value in values.items() if value != ""}
 
 
 async def _get_products(

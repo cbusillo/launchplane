@@ -83,9 +83,6 @@ from control_plane.contracts.every_code_pr_feedback_record import (
     apply_every_code_pr_feedback_status,
     build_every_code_pr_feedback_id,
 )
-from control_plane.contracts.every_code_summary_read_model import (
-    build_every_code_summary_read_model,
-)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.ingress_route_audit_record import (
@@ -171,9 +168,6 @@ from control_plane.contracts.preview_pr_feedback_notifications import (
     PreviewPrFeedbackNotificationPolicyRecord,
     build_preview_pr_feedback_notification_attempt_id,
     preview_pr_feedback_notification_event,
-)
-from control_plane.contracts.preview_readiness_read_model import (
-    build_preview_readiness_read_model,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -4438,27 +4432,6 @@ def _not_found_response(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
-    if len(segments) == 3 and segments == ["v1", "previews", "readiness"]:
-        return "every_code_preview_gate.read", {"readiness": "true"}
-    if len(segments) == 3 and segments == ["v1", "every-code", "summary"]:
-        return "every_code_work_request.read", {"summary": "true"}
-    if len(segments) == 3 and segments == ["v1", "every-code", "work-requests"]:
-        return "every_code_work_request.read", {}
-    if len(segments) == 3 and segments == ["v1", "every-code", "pr-feedback"]:
-        return "every_code_pr_feedback.read", {}
-    if len(segments) == 3 and segments == ["v1", "every-code", "preview-gates"]:
-        return "every_code_preview_gate.read", {}
-    if len(segments) == 3 and segments == ["v1", "every-code", "notification-attempts"]:
-        return "every_code_notification_attempt.read", {}
-    if len(segments) == 4 and segments == [
-        "v1",
-        "previews",
-        "pr-feedback",
-        "notification-attempts",
-    ]:
-        return "preview_pr_feedback_notification_attempt.read", {}
-    if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
-        return "every_code_work_request.read", {"request_id": segments[3]}
     if (
         len(segments) == 6
         and segments[:4] == ["v1", "drivers", "odoo", "stable-bootstrap"]
@@ -4494,28 +4467,6 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         "run-once",
     ]:
         return "public_ingress_monitor.run_once", {}
-    if len(segments) == 4 and segments == [
-        "v1",
-        "public-ingress",
-        "notification-policies",
-        "apply",
-    ]:
-        return "public_ingress_notification_policy.apply", {}
-    if len(segments) == 4 and segments == [
-        "v1",
-        "every-code",
-        "notification-policies",
-        "apply",
-    ]:
-        return "every_code_notification_policy.apply", {}
-    if len(segments) == 5 and segments == [
-        "v1",
-        "previews",
-        "pr-feedback",
-        "notification-policies",
-        "apply",
-    ]:
-        return "preview_pr_feedback_notification_policy.apply", {}
     return None
 
 
@@ -8335,20 +8286,6 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
-    if method == "GET" and path == "/v1/previews/readiness":
-        return True
-    if method == "GET" and path == "/v1/every-code/summary":
-        return True
-    if method == "GET" and path == "/v1/every-code/work-requests":
-        return True
-    if method == "GET" and path == "/v1/every-code/pr-feedback":
-        return True
-    if method == "GET" and path == "/v1/every-code/preview-gates":
-        return True
-    if method == "GET" and path.startswith("/v1/every-code/work-requests/"):
-        return True
-    if method == "GET" and path == "/v1/every-code/notification-attempts":
-        return True
     return method == "POST" and path in {
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
@@ -8372,180 +8309,6 @@ def _every_code_worker_token_authorized(
     except PermissionError:
         return False
     return secrets.compare_digest(provided_token, expected_token)
-
-
-def _every_code_pagination_value(query: dict[str, list[str]], *, key: str, default: int) -> int:
-    value = int(str((query.get(key) or [str(default)])[0] or str(default)))
-    if value < 0:
-        raise ValueError(f"Every Code pagination {key} must be non-negative")
-    return value
-
-
-def _every_code_read_payload(
-    *,
-    record_store: object,
-    path: str,
-    query: dict[str, list[str]],
-) -> dict[str, object]:
-    segments = [segment for segment in path.split("/") if segment]
-    every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/previews/readiness":
-        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
-        pr_number_filter = int(pr_number_value) if pr_number_value else None
-        status_filter = str((query.get("status") or [""])[0] or "").strip()
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        offset = _every_code_pagination_value(query, key="offset", default=0)
-        readiness = build_preview_readiness_read_model(
-            generated_at=_utc_now_timestamp(),
-            record_store=every_code_store,
-            repository=repository_filter,
-            pr_number=pr_number_filter,
-            status=status_filter,
-            limit=limit,
-            offset=offset,
-        )
-        return {"readiness": readiness.model_dump(mode="json")}
-    if path == "/v1/every-code/summary":
-        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-        issue_number_value = str((query.get("issue_number") or [""])[0] or "").strip()
-        issue_number_filter = int(issue_number_value) if issue_number_value else None
-        state_filter = str((query.get("state") or [""])[0] or "").strip()
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        offset = _every_code_pagination_value(query, key="offset", default=0)
-        summary = build_every_code_summary_read_model(
-            generated_at=_utc_now_timestamp(),
-            record_store=every_code_store,
-            repository=repository_filter,
-            issue_number=issue_number_filter,
-            state=state_filter,
-            limit=limit,
-            offset=offset,
-        )
-        return {"summary": summary.model_dump(mode="json")}
-    if path == "/v1/every-code/pr-feedback":
-        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
-        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-        status_filter = str((query.get("status") or [""])[0] or "").strip()
-        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
-        pr_number_filter = int(pr_number_value) if pr_number_value else None
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        offset = _every_code_pagination_value(query, key="offset", default=0)
-        feedback_records = every_code_store.list_every_code_pr_feedback_records(
-            request_id=request_id_filter,
-            repository=repository_filter,
-            pr_number=pr_number_filter,
-            status=status_filter,
-            limit=limit,
-            offset=offset,
-        )
-        return {
-            "request_id": request_id_filter,
-            "repository": repository_filter,
-            "status_filter": status_filter,
-            "feedback": [record.model_dump(mode="json") for record in feedback_records],
-        }
-    if path == "/v1/every-code/preview-gates":
-        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
-        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-        status_filter = str((query.get("status") or [""])[0] or "").strip()
-        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
-        pr_number_filter = int(pr_number_value) if pr_number_value else None
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        offset = _every_code_pagination_value(query, key="offset", default=0)
-        gate_records = every_code_store.list_every_code_preview_gate_records(
-            request_id=request_id_filter,
-            repository=repository_filter,
-            pr_number=pr_number_filter,
-            status=status_filter,
-            limit=limit,
-            offset=offset,
-        )
-        return {
-            "request_id": request_id_filter,
-            "repository": repository_filter,
-            "status_filter": status_filter,
-            "gates": [record.model_dump(mode="json") for record in gate_records],
-        }
-    if path == "/v1/every-code/notification-attempts":
-        notification_store = _every_code_notification_store(record_store)
-        if notification_store is None:
-            raise ValueError("record store does not support Every Code notifications")
-        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
-        event_filter = str((query.get("event") or [""])[0] or "").strip()
-        destination_kind_filter = str((query.get("destination_kind") or [""])[0] or "").strip()
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        attempts = notification_store.list_every_code_notification_attempt_records(
-            request_id=request_id_filter,
-            event=event_filter,
-            destination_kind=destination_kind_filter,
-            limit=limit,
-        )
-        return {
-            "request_id": request_id_filter,
-            "event_filter": event_filter,
-            "destination_kind_filter": destination_kind_filter,
-            "attempts": [record.model_dump(mode="json") for record in attempts],
-        }
-    if path == "/v1/previews/pr-feedback/notification-attempts":
-        preview_notification_store = _preview_pr_feedback_notification_store(record_store)
-        if preview_notification_store is None:
-            raise ValueError("record store does not support preview PR feedback notifications")
-        feedback_id_filter = str((query.get("feedback_id") or [""])[0] or "").strip()
-        event_filter = str((query.get("event") or [""])[0] or "").strip()
-        destination_kind_filter = str((query.get("destination_kind") or [""])[0] or "").strip()
-        limit = _every_code_pagination_value(query, key="limit", default=50)
-        preview_attempts = (
-            preview_notification_store.list_preview_pr_feedback_notification_attempt_records(
-                feedback_id=feedback_id_filter,
-                event=event_filter,
-                destination_kind=destination_kind_filter,
-                limit=limit,
-            )
-        )
-        return {
-            "feedback_id": feedback_id_filter,
-            "event_filter": event_filter,
-            "destination_kind_filter": destination_kind_filter,
-            "attempts": [record.model_dump(mode="json") for record in preview_attempts],
-        }
-    if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
-        record = every_code_store.read_every_code_work_request_record(segments[3])
-        return {"request": record.model_dump(mode="json")}
-    state_filter = str((query.get("state") or [""])[0] or "").strip()
-    repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-    limit = _every_code_pagination_value(query, key="limit", default=50)
-    offset = _every_code_pagination_value(query, key="offset", default=0)
-    work_request_records = every_code_store.list_every_code_work_request_records(
-        state=state_filter,
-        repository=repository_filter,
-        limit=limit,
-        offset=offset,
-    )
-    return {
-        "state": state_filter,
-        "repository": repository_filter,
-        "requests": [record.model_dump(mode="json") for record in work_request_records],
-    }
-
-
-def _handle_every_code_work_request_read(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    record_store: object,
-    path: str,
-    query: dict[str, list[str]],
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=200,
-        payload={
-            "status": "ok",
-            "trace_id": trace_id,
-            **_every_code_read_payload(record_store=record_store, path=path, query=query),
-        },
-    )
 
 
 def _handle_every_code_worker_write(
@@ -10136,28 +9899,6 @@ def create_launchplane_service_app(
                     },
                 )
         if _every_code_worker_token_authorized(environ=environ, method=method, path=path):
-            if method == "GET":
-                try:
-                    return _handle_every_code_work_request_read(
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        record_store=record_store,
-                        path=path,
-                        query=query,
-                    )
-                except (ValueError, click.ClickException) as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_payload",
-                                "message": str(error),
-                            },
-                        },
-                    )
             payload = _read_json_request(environ)
             try:
                 return _handle_every_code_worker_write(
@@ -10535,115 +10276,6 @@ def create_launchplane_service_app(
                             "trace_id": request_trace_id,
                             "inspect": inspect_result,
                         },
-                    )
-                if action == "every_code_work_request.read":
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Every Code work requests.",
-                                },
-                            },
-                        )
-                    return _handle_every_code_work_request_read(
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        record_store=record_store,
-                        path=path,
-                        query=query,
-                    )
-                if action == "every_code_preview_gate.read":
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read Every Code preview readiness.",
-                                },
-                            },
-                        )
-                    return _handle_every_code_work_request_read(
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        record_store=record_store,
-                        path=path,
-                        query=query,
-                    )
-                if action == "every_code_notification_attempt.read":
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": (
-                                        "Workflow cannot read Every Code notification attempts."
-                                    ),
-                                },
-                            },
-                        )
-                    return _handle_every_code_work_request_read(
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        record_store=record_store,
-                        path=path,
-                        query=query,
-                    )
-                if action == "preview_pr_feedback_notification_attempt.read":
-                    if not authz_policy.allows(
-                        identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": (
-                                        "Workflow cannot read preview PR feedback"
-                                        " notification attempts."
-                                    ),
-                                },
-                            },
-                        )
-                    return _handle_every_code_work_request_read(
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                        record_store=record_store,
-                        path=path,
-                        query=query,
                     )
                 if action == "work_graph.rank":
                     return handle_work_graph_snapshot_read(
