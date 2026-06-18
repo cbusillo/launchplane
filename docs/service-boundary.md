@@ -175,7 +175,8 @@ VeriReel product paths:
 - work graph chooser route:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
-  - `GET /v1/work-graph/snapshot`
+  - `GET /v1/work-graph/snapshot` (native FastAPI)
+  - `GET /v1/work-graph/github/issues` (native FastAPI)
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
@@ -498,9 +499,10 @@ Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 
-`GET /v1/work-graph/snapshot` returns the current Launchplane-assembled work
-graph snapshot for the same authorization boundary. It composes product
-overviews and Every Code work-request records into the typed snapshot contract.
+`GET /v1/work-graph/snapshot` is a native FastAPI route that returns the
+current Launchplane-assembled work graph snapshot for the same authorization
+boundary. It composes product overviews and Every Code work-request records into
+the typed snapshot contract.
 When a caller-owned planning ingestion provider is configured, the route can
 overlay compact GitHub/Code Plans facts. The first provider is opt-in via
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and

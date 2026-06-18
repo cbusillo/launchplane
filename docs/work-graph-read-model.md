@@ -87,8 +87,9 @@ Authenticated callers can also read the current Launchplane-assembled snapshot:
 GET /v1/work-graph/snapshot
 ```
 
-The snapshot route uses the same `work_graph.rank` authorization. It composes
-current product overviews with durable Every Code work-request records,
+The native FastAPI snapshot route uses the same `work_graph.rank`
+authorization. It composes current product overviews with durable Every Code
+work-request records,
 classifies product repositories as `managed_runtime`, classifies other request
 repositories as `active_awareness`, and returns source counts with the snapshot.
 The route can also apply compact planning facts from a caller-owned ingestion
@@ -155,8 +156,8 @@ repository inventory:
 GET /v1/work-graph/github/issues
 ```
 
-The route uses the same `work_graph.rank` authorization as the snapshot route
-and never writes GitHub or Launchplane state. Enable it with
+The native FastAPI route uses the same `work_graph.rank` authorization as the
+snapshot route and never writes GitHub or Launchplane state. Enable it with
 `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_REPOSITORIES`, a comma or newline separated
 list of `owner/repo` values. `LAUNCHPLANE_WORK_GRAPH_ISSUE_INBOX_LIMIT` bounds
 the open issue reads per repository and defaults to `100`. The provider shells

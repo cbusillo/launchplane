@@ -65,6 +65,7 @@ from control_plane.merge_train_policy_source import (
     resolve_merge_train_policy_record,
 )
 from control_plane.contracts.product_environment_read_model import (
+    ActionAllowed,
     ProductActivityReadModel,
     ProductEnvironmentConfigStatus,
     ProductEnvironmentDetail,
@@ -88,6 +89,7 @@ from control_plane.contracts.preview_readiness_read_model import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.work_graph_read_model import WorkGraphSnapshot
 from control_plane.contracts.protected_artifacts import (
     ProtectedArtifactStore,
     ProtectedArtifactSet,
@@ -134,9 +136,13 @@ from control_plane.workflows.evidence_ingestion import (
     apply_promotion_evidence,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_service import (
+    WorkGraphIssueInboxProvider,
     WorkGraphPlanningFactsProvider,
+    WorkGraphWorkRequestStore,
     build_repo_product_mapping_service_payload,
+    build_work_graph_snapshot_service_payload,
 )
 
 
@@ -190,6 +196,10 @@ class AgentContextReadStore(ProductReadModelStore, Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
+
+
+class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStore, Protocol):
+    pass
 
 
 class LaunchplaneErrorDetail(BaseModel):
@@ -354,6 +364,24 @@ class AgentContextResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     context: AgentContextPayload
+
+
+class WorkGraphSnapshotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    snapshot: WorkGraphSnapshot
+    source: dict[str, object]
+
+
+class WorkGraphIssueInboxResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    configured: bool
+    inbox: GitHubIssueInboxReadModel
 
 
 class DriverDescriptorsResponse(BaseModel):
@@ -1673,6 +1701,7 @@ def create_launchplane_fastapi_app(
     human_session_manager: HumanSessionManager | None = None,
     control_plane_root_path: FilePath | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
+    work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
 ) -> FastAPI:
     resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
         authz_policy
@@ -2093,6 +2122,23 @@ def create_launchplane_fastapi_app(
             message=message,
         )
 
+    def require_work_graph_rank_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str, message: str
+    ) -> None:
+        if resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="work_graph.rank",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            return
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message=message,
+        )
+
     def require_read_store_methods(
         record_store: object,
         *,
@@ -2146,6 +2192,20 @@ def create_launchplane_fastapi_app(
             message="Agent context reads require a database-backed record store.",
         )
         return cast(AgentContextReadStore, record_store)
+
+    def require_work_graph_snapshot_read_store(
+        record_store: object, *, trace_id: str
+    ) -> WorkGraphSnapshotReadStore:
+        require_read_store_methods(
+            record_store,
+            trace_id=trace_id,
+            method_names=(
+                "list_product_profile_records",
+                "list_every_code_work_request_records",
+            ),
+            message="Work graph snapshot reads require a database-backed record store.",
+        )
+        return cast(WorkGraphSnapshotReadStore, record_store)
 
     def require_every_code_read_methods(
         record_store: object,
@@ -2364,6 +2424,73 @@ def create_launchplane_fastapi_app(
             planning_facts_provider=work_graph_planning_facts_provider,
         )
         return AgentContextResponse(trace_id=trace_id, context=context)
+
+    def work_graph_product_action_allowed(*, identity: LaunchplaneIdentity) -> ActionAllowed:
+        def action_allowed(
+            requested_action: str,
+            requested_product: str,
+            requested_context: str,
+        ) -> bool:
+            return resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=requested_action,
+                product=requested_product,
+                context=requested_context,
+            )
+
+        return action_allowed
+
+    def read_work_graph_snapshot(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> WorkGraphSnapshotResponse:
+        trace_id = next_trace_id()
+        require_work_graph_rank_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            message="Workflow cannot read the Launchplane work graph snapshot.",
+        )
+        snapshot_store = require_work_graph_snapshot_read_store(
+            record_store,
+            trace_id=trace_id,
+        )
+        payload = build_work_graph_snapshot_service_payload(
+            generated_at=utc_now_timestamp(),
+            product_store=snapshot_store,
+            work_request_store=snapshot_store,
+            action_allowed=work_graph_product_action_allowed(identity=identity),
+            planning_facts_provider=work_graph_planning_facts_provider,
+        )
+        return WorkGraphSnapshotResponse(
+            trace_id=trace_id,
+            snapshot=WorkGraphSnapshot.model_validate(payload["snapshot"]),
+            source=cast(dict[str, object], payload["source"]),
+        )
+
+    def read_work_graph_issue_inbox(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+    ) -> WorkGraphIssueInboxResponse:
+        trace_id = next_trace_id()
+        require_work_graph_rank_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            message="Workflow cannot read the Launchplane GitHub issue inbox.",
+        )
+        if work_graph_issue_inbox_provider is None:
+            return WorkGraphIssueInboxResponse(
+                trace_id=trace_id,
+                configured=False,
+                inbox=GitHubIssueInboxReadModel(
+                    generated_at="",
+                    repository_count=0,
+                    issue_count=0,
+                ),
+            )
+        return WorkGraphIssueInboxResponse(
+            trace_id=trace_id,
+            configured=True,
+            inbox=work_graph_issue_inbox_provider(),
+        )
 
     def merge_train_policy_not_configured_error(
         *, trace_id: str, error: MergeTrainPolicyStoreMissingError
@@ -5443,6 +5570,26 @@ def create_launchplane_fastapi_app(
         response_model=AgentContextResponse,
         operation_id="read_agent_context",
         summary="Read Launchplane agent context",
+        responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/work-graph/snapshot",
+        read_work_graph_snapshot,
+        methods=["GET"],
+        response_model=WorkGraphSnapshotResponse,
+        operation_id="read_work_graph_snapshot",
+        summary="Read Launchplane work graph snapshot",
+        responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/work-graph/github/issues",
+        read_work_graph_issue_inbox,
+        methods=["GET"],
+        response_model=WorkGraphIssueInboxResponse,
+        operation_id="read_work_graph_issue_inbox",
+        summary="Read Launchplane GitHub issue inbox",
         responses=agent_context_error_responses,
     )
 
