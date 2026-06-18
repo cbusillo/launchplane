@@ -2415,9 +2415,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(records[0].trace_id, payload["trace_id"])
 
-    def test_edge_endpoint_apply_and_read_routes_store_db_backed_upstream(self) -> None:
+    def test_edge_endpoint_apply_route_stores_db_backed_upstream(self) -> None:
         policy = _local_operator_policy(
-            actions=("edge_endpoint.apply", "edge_endpoint.read"),
+            actions=("edge_endpoint.apply",),
             products=("launchplane",),
             contexts=("launchplane",),
         )
@@ -2448,23 +2448,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     authorization="Bearer local-operator-token",
                     headers={"Idempotency-Key": "edge-endpoint-apply"},
                 )
-                read_status_code, read_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/edge-endpoints/records/cm-prod-dokploy",
-                    authorization="Bearer local-operator-token",
-                )
+                stored_record = record_store.read_edge_endpoint_record("cm-prod-dokploy")
 
         self.assertEqual(apply_status_code, 202)
         self.assertEqual(apply_payload["records"]["edge_endpoint_key"], "cm-prod-dokploy")
         self.assertEqual(apply_payload["records"]["edge_endpoint_status"], "applied")
-        self.assertEqual(read_status_code, 200)
-        self.assertEqual(read_payload["record"]["server_name"], "docker-cm-prod")
-        self.assertEqual(read_payload["record"]["upstream_host"], "100.73.170.113")
+        self.assertEqual(stored_record.server_name, "docker-cm-prod")
+        self.assertEqual(stored_record.upstream_host, "100.73.170.113")
 
     def test_edge_endpoint_dry_run_does_not_store_upstream(self) -> None:
         policy = _local_operator_policy(
-            actions=("edge_endpoint.apply", "edge_endpoint.read"),
+            actions=("edge_endpoint.apply",),
             products=("launchplane",),
             contexts=("launchplane",),
         )
@@ -2493,20 +2487,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     payload=_edge_endpoint_apply_payload(mode="dry-run"),
                     authorization="Bearer local-operator-token",
                 )
-                read_status_code, read_payload = _invoke_app(
-                    app,
-                    method="GET",
-                    path="/v1/edge-endpoints/records/cm-prod-dokploy",
-                    authorization="Bearer local-operator-token",
-                )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["records"]["edge_endpoint_status"], "planned")
         self.assertEqual(payload["result"]["mode"], "dry-run")
         self.assertEqual(payload["result"]["endpoint_key"], "cm-prod-dokploy")
-        self.assertEqual(read_status_code, 404)
-        self.assertEqual(read_payload["status"], "rejected")
-        self.assertEqual(read_payload["error"]["code"], "not_found")
+        with self.assertRaises(FileNotFoundError):
+            record_store.read_edge_endpoint_record("cm-prod-dokploy")
 
     def test_private_health_endpoint_apply_and_read_routes_store_db_backed_url(
         self,
@@ -13308,6 +13295,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_edge_endpoint_read_routes_are_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+                local_record_store_for_tests=FilesystemRecordStore(state_dir=state_dir),
+            )
+
+            list_status_code, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/edge-endpoints/records",
+                authorization="",
+            )
+            read_status_code, read_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/edge-endpoints/records/cm-prod-dokploy",
+                authorization="",
+            )
+
+        self.assertEqual(list_status_code, 404)
+        self.assertEqual(read_status_code, 404)
+        self.assertEqual(list_payload["error"]["code"], "not_found")
+        self.assertEqual(read_payload["error"]["code"], "not_found")
 
     def test_service_serve_rejects_missing_database_url(self) -> None:
         runner = CliRunner()

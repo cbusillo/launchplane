@@ -80,6 +80,7 @@ from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_RE
 from tests.test_service import create_launchplane_service_app
 from tests.test_service import (
     _generic_site_profile_payload,
+    _edge_endpoint_record,
     _identity,
     _product_profile_payload,
     _product_profile_payload_with_prod,
@@ -3671,6 +3672,203 @@ class FastApiTrackedTargetLogsReadTests(unittest.IsolatedAsyncioTestCase):
                     lines="2",
                 )
                 app_store.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "ok")
+
+
+class FastApiEdgeEndpointReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_edge_endpoint_read_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="edge_endpoint.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_edge_endpoint_record(app, "cm-prod-dokploy")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["record"]["endpoint_key"], "cm-prod-dokploy")
+        self.assertEqual(payload["record"]["server_name"], "docker-cm-prod")
+        self.assertEqual(payload["record"]["upstream_host"], "100.73.170.113")
+
+    async def test_edge_endpoint_list_filters_records(self) -> None:
+        active_record = _edge_endpoint_record()
+        disabled_record = active_record.model_copy(
+            update={
+                "endpoint_key": "disabled-edge",
+                "server_name": "docker-disabled",
+                "upstream_host": "100.73.170.114",
+                "status": "disabled",
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_edge_endpoint_record(active_record)
+            store.write_edge_endpoint_record(disabled_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="edge_endpoint.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_edge_endpoint_records(
+                app,
+                provider="dokploy",
+                status="active",
+                limit="1",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["limit"], 1)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["records"][0]["endpoint_key"], "cm-prod-dokploy")
+
+    async def test_edge_endpoint_reads_require_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="edge_endpoint.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_edge_endpoint_records(app, authorization="")
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_edge_endpoint_reads_require_authz_action(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="driver.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_edge_endpoint_record(app, "cm-prod-dokploy")
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_edge_endpoint_reads_require_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="edge_endpoint.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _get_edge_endpoint_records(app)
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+
+    async def test_edge_endpoint_read_returns_not_found_for_missing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="edge_endpoint.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _get_edge_endpoint_record(app, "missing-edge")
+
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    async def test_edge_endpoint_list_validates_limit(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="edge_endpoint.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        low_response = await _get_edge_endpoint_records(app, limit="0")
+        high_response = await _get_edge_endpoint_records(app, limit="101")
+
+        self.assertEqual(low_response.status_code, 400)
+        self.assertEqual(high_response.status_code, 400)
+        self.assertEqual(low_response.json()["error"]["code"], "invalid_query")
+        self.assertEqual(high_response.json()["error"]["code"], "invalid_query")
+
+    async def test_openapi_includes_edge_endpoint_read_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_record_read_policy(action="edge_endpoint.read", context="launchplane"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        list_route = openapi["paths"]["/v1/edge-endpoints/records"]["get"]
+        read_route = openapi["paths"]["/v1/edge-endpoints/records/{endpoint_key}"]["get"]
+        self.assertEqual(list_route["operationId"], "list_edge_endpoint_records")
+        self.assertEqual(read_route["operationId"], "read_edge_endpoint_record")
+        self.assertEqual(
+            list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/EdgeEndpointRecordsResponse",
+        )
+        self.assertEqual(
+            read_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/EdgeEndpointRecordResponse",
+        )
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(list_route))
+        self.assertIn("LaunchplaneErrorResponse", json.dumps(read_route))
+        self.assertEqual(
+            openapi["components"]["schemas"]["EdgeEndpointRecordResponse"]["additionalProperties"],
+            False,
+        )
+        self.assertEqual(
+            openapi["components"]["schemas"]["EdgeEndpointRecordsResponse"]["additionalProperties"],
+            False,
+        )
+
+    async def test_fastapi_edge_endpoint_reads_precede_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_edge_endpoint_record(_edge_endpoint_record())
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_record_read_policy(
+                    action="edge_endpoint.read",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _get_edge_endpoint_record(app, "cm-prod-dokploy")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
@@ -8412,6 +8610,50 @@ async def _get_tracked_target_logs(
     return await _asgi_get(
         app,
         f"/v1/contexts/{context}/instances/{instance}/logs{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_edge_endpoint_records(
+    app: FastAPI,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+    limit: str = "",
+    provider: str = "",
+    status: str = "",
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    params = {}
+    if limit:
+        params["limit"] = limit
+    if provider:
+        params["provider"] = provider
+    if status:
+        params["status"] = status
+    suffix = f"?{urlencode(params)}" if params else ""
+    return await _asgi_get(
+        app,
+        f"/v1/edge-endpoints/records{suffix}",
+        headers=request_headers,
+    )
+
+
+async def _get_edge_endpoint_record(
+    app: FastAPI,
+    endpoint_key: str,
+    *,
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_get(
+        app,
+        f"/v1/edge-endpoints/records/{endpoint_key}",
         headers=request_headers,
     )
 
