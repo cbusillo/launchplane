@@ -94,7 +94,6 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PublicIngressIncidentRecord,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
 )
@@ -201,7 +200,6 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewRefreshResult,
 )
 from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
-from control_plane.workflows.public_ingress_monitor import PublicIngressMonitorResult
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
 from control_plane.workflows.ingress_provider import NpmplusIngressProvider
 from control_plane.workflows.npmplus_ingress import (
@@ -1363,24 +1361,6 @@ def _generic_site_profile_payload(product: str = "example-site") -> dict[str, ob
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
-
-
-def _public_ingress_incident(
-    *, context: str = "launchplane", instance: str = "prod"
-) -> PublicIngressIncidentRecord:
-    return PublicIngressIncidentRecord(
-        incident_id=f"public-ingress-incident-{context}-{instance}",
-        product="launchplane",
-        context=context,
-        instance=instance,
-        status="open",
-        opened_at="2026-05-29T12:00:00Z",
-        opened_observation_id="public-ingress-observation-opened",
-        latest_observation_id="public-ingress-observation-latest",
-        latest_observed_at="2026-05-29T12:00:00Z",
-        failure_code="http_error",
-        summary="Public ingress failed.",
-    )
 
 
 def create_launchplane_service_app(
@@ -3458,165 +3438,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "authorization_denied")
         self.assertEqual(client.calls, [])
 
-    def test_public_ingress_monitor_run_once_service_writes_observation(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
-                        ],
-                        "event_names": ["schedule"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["public_ingress_monitor.run_once"],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main",
-            event_name="schedule",
-        )
-
+    def test_public_ingress_monitor_run_once_legacy_wsgi_fallback_is_removed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
             app = create_launchplane_service_app(
-                state_dir=state_dir,
-                local_record_store_for_tests=store,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            with patch("control_plane.service.run_public_ingress_monitor_once") as run_monitor:
-                run_monitor.return_value = PublicIngressMonitorResult(
-                    checked_at="2026-05-29T12:00:00Z",
-                    target_count=1,
-                    pass_count=1,
-                    records=(),
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/products/public-ingress-monitor/run-once",
-                    payload={"schema_version": 1, "product": "launchplane", "notify": False},
-                    headers={"Idempotency-Key": "public-ingress-monitor-test"},
-                )
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["status"], "accepted")
-        run_monitor.assert_called_once()
-        self.assertIsNone(run_monitor.call_args.kwargs["notification_drivers"])
-
-    def test_public_ingress_monitor_run_once_service_wires_notification_drivers(
-        self,
-    ) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main"
-                        ],
-                        "event_names": ["schedule"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["public_ingress_monitor.run_once"],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/public-ingress-monitor.yml@refs/heads/main",
-            event_name="schedule",
-        )
-
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
-            )
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                local_record_store_for_tests=store,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            with patch("control_plane.service.run_public_ingress_monitor_once") as run_monitor:
-                run_monitor.return_value = PublicIngressMonitorResult(
-                    checked_at="2026-05-29T12:00:00Z",
-                    target_count=1,
-                    pass_count=1,
-                    records=(),
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/products/public-ingress-monitor/run-once",
-                    payload={"schema_version": 1, "product": "launchplane", "notify": True},
-                    headers={"Idempotency-Key": "public-ingress-monitor-notify-test"},
-                )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["status"], "accepted")
-        run_monitor.assert_called_once()
-        self.assertIsNotNone(run_monitor.call_args.kwargs["notification_drivers"])
-
-    def test_public_ingress_notification_drivers_resolve_lane_scoped_secrets(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(
-                Path(temporary_directory_name) / "launchplane.sqlite3"
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                with patch.dict(
-                    os.environ,
-                    {
-                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
-                            "test-master-key"
-                        )
-                    },
-                    clear=True,
-                ):
-                    secret_result = control_plane_secrets.write_secret_value(
-                        record_store=store,
-                        scope="context_instance",
-                        integration="public-ingress-notifications",
-                        name="discord webhook",
-                        plaintext_value="https://discord.com/api/webhooks/test/webhook",
-                        binding_key="DISCORD_WEBHOOK",
-                        context_name="example-site",
-                        instance_name="prod",
-                        actor="test",
-                        source_label="test",
+            for method in ("GET", "POST"):
+                with self.subTest(method=method):
+                    status_code, payload = _invoke_app(
+                        app,
+                        method=method,
+                        path="/v1/products/public-ingress-monitor/run-once",
+                        payload={"schema_version": 1, "product": "launchplane"},
                     )
-                    resolver = control_plane_service._public_ingress_managed_secret_resolver(
-                        record_store=store
-                    )
-                    incident = _public_ingress_incident(context="example-site", instance="prod")
-                    other_incident = _public_ingress_incident(
-                        context="example-site", instance="preview"
-                    )
-                    resolved_value = resolver(str(secret_result["secret_id"]), incident)
-                    unresolved_value = resolver(str(secret_result["secret_id"]), other_incident)
-            finally:
-                store.close()
 
-        self.assertEqual(resolved_value, "https://discord.com/api/webhooks/test/webhook")
-        self.assertEqual(unresolved_value, "")
+                    self.assertEqual(status_code, 404)
+                    self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_public_ingress_notification_policy_apply_writes_db_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -125,6 +125,12 @@ Keep a compatibility surface only when it is one of these:
   branches are deleted; the mounted fallback remains only for retained
   non-native routes, and direct WSGI calls to these evidence-ingress paths fail
   closed.
+- Public ingress monitor run-once uses native FastAPI
+  `POST /v1/products/public-ingress-monitor/run-once` for bearer-token callers
+  and preserves the existing optional `Idempotency-Key` replay/conflict
+  contract. The stale legacy WSGI write branch and old read-route matcher are
+  deleted; the route has no `GET` API, and direct WSGI fallback calls fail
+  closed.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;

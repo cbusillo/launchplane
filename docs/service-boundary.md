@@ -110,6 +110,9 @@ VeriReel product paths:
     `product_profile.read` for the stored product profile in the Launchplane
     service context and returning redacted current-authority metadata only
 - authenticated evidence routes:
+  - `POST /v1/products/public-ingress-monitor/run-once` (native FastAPI for
+    bearer-token callers, with Pydantic/OpenAPI contract coverage,
+    idempotency replay preservation, and no legacy `GET` route)
   - `POST /v1/evidence/backup-gates` (native FastAPI for bearer-token callers,
     with Pydantic/OpenAPI contract coverage and idempotency replay preservation)
   - `POST /v1/evidence/deployments` (native FastAPI for bearer-token callers,

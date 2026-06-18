@@ -174,7 +174,6 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PublicIngressIncidentRecord,
     PublicIngressNotificationPolicyRecord,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
@@ -406,11 +405,6 @@ from control_plane.workflows.dokploy_target_adoption import (
     create_dokploy_compose_target,
 )
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
-from control_plane.workflows.public_ingress_monitor import (
-    PublicIngressNotificationDriverSet,
-    build_github_issue_notifier,
-    run_public_ingress_monitor_once,
-)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -829,22 +823,6 @@ _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class PublicIngressMonitorRunOnceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str = "launchplane"
-    timeout_seconds: int = Field(default=10, ge=1, le=120)
-    notify: bool = True
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PublicIngressMonitorRunOnceEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError("public ingress monitor run requires product 'launchplane'")
-        self.product = "launchplane"
-        return self
 
 
 class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
@@ -4383,18 +4361,6 @@ def _not_found_response(
     )
 
 
-def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
-    segments = [segment for segment in path.split("/") if segment]
-    if len(segments) == 4 and segments == [
-        "v1",
-        "products",
-        "public-ingress-monitor",
-        "run-once",
-    ]:
-        return "public_ingress_monitor.run_once", {}
-    return None
-
-
 def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]:
     route_metadata: dict[str, _DriverRouteMetadata] = {}
     for descriptor in list_driver_descriptors():
@@ -4518,7 +4484,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/preview-gates",
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
-        "/v1/products/public-ingress-monitor/run-once",
         "/v1/service/odoo-workers/reconcile",
         "/v1/public-ingress/notification-policies/apply",
         "/v1/every-code/notification-policies/apply",
@@ -7448,35 +7413,6 @@ def _preview_pr_feedback_discord_payload(
     }
 
 
-def _public_ingress_managed_secret_resolver(
-    *,
-    record_store: control_plane_secrets.SecretReadStore,
-) -> Callable[[str, PublicIngressIncidentRecord], str]:
-    def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
-        normalized_secret_id = secret_id.strip()
-        if not normalized_secret_id:
-            return ""
-        try:
-            record = record_store.read_secret_record(normalized_secret_id)
-        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
-            return ""
-        if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
-            return ""
-        if not control_plane_secrets._scope_matches_record(
-            record,
-            context_name=incident.context,
-            instance_name=incident.instance,
-        ):
-            return ""
-        try:
-            version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext)
-        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
-            return ""
-
-    return resolve
-
-
 def _launchplane_managed_secret_resolver(
     *,
     record_store: control_plane_secrets.SecretReadStore,
@@ -7506,18 +7442,6 @@ def _launchplane_managed_secret_resolver(
             return ""
 
     return resolve
-
-
-def _public_ingress_notification_drivers(
-    *,
-    record_store: object,
-) -> PublicIngressNotificationDriverSet:
-    secret_store = _secret_capable_store(record_store)
-    if secret_store is None:
-        return PublicIngressNotificationDriverSet()
-    return PublicIngressNotificationDriverSet(
-        incident_secret_resolver=_public_ingress_managed_secret_resolver(record_store=secret_store)
-    )
 
 
 def _deliver_every_code_blocked_notifications(
@@ -9711,8 +9635,7 @@ def create_launchplane_service_app(
                 json_response=_json_response,
                 http_status_text=_http_status_text,
             )
-        read_route = _match_read_route(path)
-        if path not in write_routes and read_route is None:
+        if path not in write_routes:
             return _not_found_response(
                 start_response=start_response,
                 trace_id=request_trace_id,
@@ -9731,7 +9654,7 @@ def create_launchplane_service_app(
                     },
                 },
             )
-        if method == "GET" and read_route is None:
+        if method == "GET":
             return _json_response(
                 start_response=start_response,
                 status_code=405,
@@ -9741,19 +9664,6 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "method_not_allowed",
                         "message": "Only POST is allowed for this Launchplane route.",
-                    },
-                },
-            )
-        if method == "POST" and path not in write_routes:
-            return _json_response(
-                start_response=start_response,
-                status_code=405,
-                payload={
-                    "status": "rejected",
-                    "trace_id": request_trace_id,
-                    "error": {
-                        "code": "method_not_allowed",
-                        "message": "Only GET is allowed for this Launchplane route.",
                     },
                 },
             )
@@ -11389,53 +11299,6 @@ def create_launchplane_service_app(
                         "recorded_at": intent_record.recorded_at,
                     },
                 }
-                driver_result = result
-            elif path == "/v1/products/public-ingress-monitor/run-once":
-                monitor_request = PublicIngressMonitorRunOnceEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="public_ingress_monitor.run_once",
-                    product=monitor_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot run public ingress monitoring.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                recorded_at = _utc_now_timestamp()
-                notifier = build_github_issue_notifier() if monitor_request.notify else None
-                monitor_result = run_public_ingress_monitor_once(
-                    record_store=record_store,
-                    checked_at=recorded_at,
-                    timeout_seconds=monitor_request.timeout_seconds,
-                    notify=monitor_request.notify,
-                    notifier=notifier,
-                    notification_drivers=(
-                        _public_ingress_notification_drivers(record_store=record_store)
-                        if monitor_request.notify
-                        else None
-                    ),
-                )
-                result = monitor_result.model_dump(mode="json")
                 driver_result = result
             elif path == "/v1/public-ingress/notification-policies/apply":
                 policy_request = PublicIngressNotificationPolicyApplyEnvelope.model_validate(
