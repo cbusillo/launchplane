@@ -90,8 +90,11 @@ Keep a compatibility surface only when it is one of these:
 - Ingress route audit record reads use native FastAPI
   `GET /v1/ingress/route-audits/records` and
   `GET /v1/ingress/route-audits/records/{record_id}` routes. Their legacy WSGI
-  read branch is deleted; ingress route apply remains on the retained fallback
-  until that write path has its own native replacement.
+  read branch is deleted. Ingress route apply uses native FastAPI
+  `POST /v1/drivers/ingress/route-apply` with mode-sensitive
+  `ingress_route.plan`/`ingress_route.apply` authorization and apply-mode
+  idempotency replay/conflict behavior. Its legacy WSGI write branch is deleted,
+  and direct fallback calls fail closed.
 - Dokploy target inspect uses the native FastAPI
   `GET /v1/dokploy-targets/inspect` route. Its legacy WSGI read branch is
   deleted; Dokploy target setup remains on the retained fallback until that
