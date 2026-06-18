@@ -6,10 +6,9 @@ from typing import Literal
 from unittest.mock import patch
 from urllib.request import Request
 
-import click
 from click.testing import CliRunner
 
-from control_plane.cli_public_ingress_monitor import register_public_ingress_monitor_commands
+from control_plane.cli import main as launchplane_cli
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_health_monitoring_migration import (
@@ -35,7 +34,6 @@ from control_plane.contracts.public_ingress_monitoring import build_public_ingre
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
-    PublicIngressMonitorResult,
     PublicIngressNotificationDriverSet,
     discover_public_ingress_monitor_targets,
     run_public_ingress_monitor_once,
@@ -308,39 +306,11 @@ def _add_private_endpoint(
 
 
 class PublicIngressMonitorCliTests(unittest.TestCase):
-    def test_run_once_wires_policy_backed_notification_drivers(self) -> None:
-        command_group = click.Group()
-        record_store = object()
-        notification_drivers = object()
-        register_public_ingress_monitor_commands(
-            command_group,
-            store_factory=lambda _state_dir, database_url="": record_store,
-        )
+    def test_public_ingress_monitor_command_is_retired(self) -> None:
+        result = CliRunner().invoke(launchplane_cli, ["public-ingress-monitor", "run-once"])
 
-        with patch(
-            "control_plane.cli_public_ingress_monitor.public_ingress_notification_drivers",
-            return_value=notification_drivers,
-        ) as build_drivers:
-            with patch(
-                "control_plane.cli_public_ingress_monitor.run_public_ingress_monitor_once"
-            ) as run_monitor:
-                run_monitor.return_value = PublicIngressMonitorResult(
-                    checked_at="2026-06-18T11:00:00Z",
-                    target_count=0,
-                    records=(),
-                )
-
-                result = CliRunner().invoke(
-                    command_group,
-                    ["public-ingress-monitor", "run-once", "--database-url", "sqlite:///test.db"],
-                )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        build_drivers.assert_called_once_with(record_store=record_store)
-        run_monitor.assert_called_once()
-        self.assertIs(run_monitor.call_args.kwargs["record_store"], record_store)
-        self.assertTrue(run_monitor.call_args.kwargs["notify"])
-        self.assertIs(run_monitor.call_args.kwargs["notification_drivers"], notification_drivers)
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("No such command 'public-ingress-monitor'", result.output)
 
 
 class PublicIngressMonitorTests(unittest.TestCase):

@@ -128,9 +128,10 @@ Keep a compatibility surface only when it is one of these:
 - Public ingress monitor run-once uses native FastAPI
   `POST /v1/products/public-ingress-monitor/run-once` for bearer-token callers
   and preserves the existing optional `Idempotency-Key` replay/conflict
-  contract. The stale legacy WSGI write branch and old read-route matcher are
-  deleted; the route has no `GET` API, and direct WSGI fallback calls fail
-  closed.
+  contract. The stale legacy WSGI write branch, old read-route matcher, and
+  local checkout `public-ingress-monitor run-once` CLI mutation command are
+  deleted; the route has no `GET` API, manual reruns go through the GitHub
+  workflow, and direct WSGI fallback calls fail closed.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;
