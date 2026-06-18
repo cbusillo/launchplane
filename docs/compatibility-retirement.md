@@ -95,10 +95,11 @@ Keep a compatibility surface only when it is one of these:
   `ingress_route.plan`/`ingress_route.apply` authorization and apply-mode
   idempotency replay/conflict behavior. Its legacy WSGI write branch is deleted,
   and direct fallback calls fail closed.
-- Dokploy target inspect uses the native FastAPI
-  `GET /v1/dokploy-targets/inspect` route. Its legacy WSGI read branch is
-  deleted; Dokploy target setup remains on the retained fallback until that
-  write path has its own native replacement.
+- Dokploy target inspect and setup use native FastAPI routes:
+  `GET /v1/dokploy-targets/inspect` and `POST /v1/dokploy-targets/setup`.
+  Their legacy WSGI branches are deleted, and direct fallback calls fail
+  closed. Setup keeps the apply-only idempotency replay/conflict contract while
+  dry-runs remain repeatable.
 - Merge-train admission, controller-status, and policy-target reads use native
   FastAPI routes. Their legacy WSGI read branches are deleted; merge-train
   worker, controller mutation, feedback, and phase runner routes remain on the

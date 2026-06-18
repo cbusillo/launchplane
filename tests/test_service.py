@@ -125,6 +125,7 @@ from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
 )
+from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -1373,6 +1374,28 @@ def create_launchplane_service_app(
     )
 
 
+def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
+    state_dir = kwargs.pop("state_dir", None)
+    local_record_store = kwargs.pop("local_record_store_for_tests", None)
+    database_url = kwargs.get("database_url")
+    if isinstance(database_url, str) and database_url.startswith("sqlite"):
+        store = PostgresRecordStore(database_url=database_url)
+        store.ensure_schema()
+        store.close()
+    if "record_store_factory" not in kwargs and not isinstance(database_url, str):
+        if local_record_store is None:
+            if not isinstance(state_dir, Path):
+                raise AssertionError("service tests must pass a pathlib state_dir")
+            local_record_store = FilesystemRecordStore(state_dir=state_dir)
+
+        def record_store_factory() -> object:
+            return local_record_store
+
+        kwargs["record_store_factory"] = record_store_factory
+    factory = cast(Any, create_launchplane_fastapi_app)
+    return factory(**kwargs)
+
+
 def _write_runtime_key_safety_policy(
     *,
     database_url: str,
@@ -2036,6 +2059,32 @@ async def _asgi_request_for_service_test(
         headers=response_headers,
         body=body,
     )
+
+
+def _invoke_dokploy_target_setup_app(
+    app: Any,
+    *,
+    method: str = "POST",
+    path: str = "/v1/dokploy-targets/setup",
+    payload: Mapping[str, object],
+    authorization: str = "Bearer valid-token",
+    headers: Mapping[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if method != "POST" or path != "/v1/dokploy-targets/setup":
+        raise AssertionError("Dokploy target setup tests must call the setup route")
+    response = asyncio.run(
+        _asgi_request_for_service_test(
+            app,
+            method=method,
+            path=path,
+            payload=payload,
+            authorization=authorization,
+            headers=headers,
+        )
+    )
+    response_payload = response.json()
+    assert isinstance(response_payload, dict)
+    return response.status_code, cast(dict[str, Any], response_payload)
 
 
 class GitHubHumanAuthTests(unittest.TestCase):
@@ -11911,7 +11960,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -11927,10 +11976,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             with patch(
-                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -11965,6 +12014,75 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(target_records, ())
 
+    def test_dokploy_target_setup_endpoint_maps_click_exception_to_bad_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.ensure_schema()
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["dokploy_target.setup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_dokploy_target_setup_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/dokploy-target-setup.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch(
+                "control_plane.http_app.execute_dokploy_target_setup",
+                side_effect=ClickException("Dokploy config missing."),
+            ):
+                status_code, payload = _invoke_dokploy_target_setup_app(
+                    app,
+                    method="POST",
+                    path="/v1/dokploy-targets/setup",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "operation": "create-compose",
+                        "product": "launchplane",
+                        "context": "cm_website",
+                        "instance": "testing",
+                        "target_name": "cm-website-testing",
+                        "project_name": "Odoo",
+                        "environment_name": "production",
+                        "server_id": "server-123",
+                    },
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
+        self.assertIn("Dokploy config missing.", payload["error"]["message"])
+
     def test_dokploy_target_inspect_read_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -11981,6 +12099,36 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="GET",
                 path="/v1/dokploy-targets/inspect",
                 query_string="context=cm_website&instance=prod",
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_dokploy_target_setup_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                local_record_store_for_tests=FilesystemRecordStore(root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/dokploy-targets/setup",
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "operation": "create-compose",
+                    "product": "launchplane",
+                    "context": "cm_website",
+                    "instance": "testing",
+                    "target_name": "cm-website-testing",
+                    "server_id": "server-123",
+                },
             )
 
         self.assertEqual(status_code, 404)
@@ -12011,7 +12159,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12066,23 +12214,23 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._mutate_dokploy_payload_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
                     side_effect=_mutate_provider,
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
                     side_effect=_fetch_target,
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route",
                     side_effect=_ensure_domain,
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12175,7 +12323,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12192,11 +12340,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
                     return_value={
                         "name": "odoo-tenant-cm-website-prod",
                         "sourceType": "raw",
@@ -12205,7 +12353,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12280,7 +12428,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12312,15 +12460,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route",
                     side_effect=_ensure_domain,
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12416,7 +12564,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12434,14 +12582,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service.control_plane_dokploy.ensure_compose_web_domain_route"
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.ensure_compose_web_domain_route"
                 ) as ensure_domain,
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12501,7 +12649,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12519,11 +12667,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_compose_domains_for_target_setup",
                     return_value=(
                         {
                             "host": "cm-prod.shinycomputers.com",
@@ -12546,10 +12694,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.service._delete_dokploy_domain_for_target_setup"
+                    "control_plane.dokploy_target_setup_http.delete_dokploy_domain_for_target_setup"
                 ) as delete_domain,
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12613,7 +12761,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12636,11 +12784,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_compose_domains_for_target_setup",
                     return_value=(
                         {
                             "host": "cm-prod.shinycomputers.com",
@@ -12663,11 +12811,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.service._delete_dokploy_domain_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.delete_dokploy_domain_for_target_setup",
                     side_effect=_delete_domain,
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12741,7 +12889,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12759,11 +12907,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_compose_domains_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_compose_domains_for_target_setup",
                     return_value=(
                         {
                             "host": "cm-website-prod.shinycomputers.com",
@@ -12786,10 +12934,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ),
                 ),
                 patch(
-                    "control_plane.service._delete_dokploy_domain_for_target_setup"
+                    "control_plane.dokploy_target_setup_http.delete_dokploy_domain_for_target_setup"
                 ) as delete_domain,
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12837,7 +12985,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12854,10 +13002,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12907,7 +13055,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12924,10 +13072,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                 return_value=("https://dokploy.example.invalid", "token"),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -12972,7 +13120,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12990,11 +13138,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
                     return_value={
                         "name": "existing-compose",
                         "sourceType": "raw",
@@ -13003,7 +13151,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -13066,7 +13214,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -13093,22 +13241,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with (
                 patch(
-                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    "control_plane.dokploy_target_setup_http.control_plane_dokploy.read_dokploy_config",
                     return_value=("https://dokploy.example.invalid", "token"),
                 ),
                 patch(
-                    "control_plane.service._mutate_dokploy_payload_for_target_setup",
+                    "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
                     side_effect=_mutate_provider,
                 ),
                 patch(
-                    "control_plane.service._fetch_dokploy_target_payload_for_setup",
+                    "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
                     return_value={
                         "name": "discord-blue-prod",
                         "environment": {"project": {"name": "Discord Blue"}},
                     },
                 ),
             ):
-                status_code, payload = _invoke_app(
+                status_code, payload = _invoke_dokploy_target_setup_app(
                     app,
                     method="POST",
                     path="/v1/dokploy-targets/setup",
@@ -13144,7 +13292,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(provider_target.provider_target_type, "application")
 
     def test_dokploy_target_setup_rejects_runtime_port_for_adopt(self) -> None:
-        app = create_launchplane_service_app(
+        app = create_launchplane_dokploy_target_setup_app(
             state_dir=Path("/tmp") / "launchplane-test-state",
             verifier=_StubVerifier(
                 _identity(
@@ -13159,7 +13307,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             control_plane_root_path=Path("/tmp"),
         )
 
-        status_code, payload = _invoke_app(
+        status_code, payload = _invoke_dokploy_target_setup_app(
             app,
             method="POST",
             path="/v1/dokploy-targets/setup",
@@ -13181,7 +13329,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_dokploy_target_setup_rejects_runtime_port_without_domains(self) -> None:
-        app = create_launchplane_service_app(
+        app = create_launchplane_dokploy_target_setup_app(
             state_dir=Path("/tmp") / "launchplane-test-state",
             verifier=_StubVerifier(
                 _identity(
@@ -13196,7 +13344,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             control_plane_root_path=Path("/tmp"),
         )
 
-        status_code, payload = _invoke_app(
+        status_code, payload = _invoke_dokploy_target_setup_app(
             app,
             method="POST",
             path="/v1/dokploy-targets/setup",
@@ -13225,7 +13373,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 store.ensure_schema()
             finally:
                 store.close()
-            app = create_launchplane_service_app(
+            app = create_launchplane_dokploy_target_setup_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -13241,7 +13389,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
 
-            status_code, payload = _invoke_app(
+            status_code, payload = _invoke_dokploy_target_setup_app(
                 app,
                 method="POST",
                 path="/v1/dokploy-targets/setup",

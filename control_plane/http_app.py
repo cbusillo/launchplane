@@ -19,6 +19,10 @@ from control_plane.dokploy_target_inspect import (
     DokployTargetInspectStore,
     inspect_dokploy_target,
 )
+from control_plane.dokploy_target_setup_http import (
+    DokployTargetSetupEnvelope,
+    execute_dokploy_target_setup,
+)
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
@@ -190,6 +194,7 @@ _PREVIEW_GENERATION_EVIDENCE_ROUTE = "/v1/evidence/previews/generations"
 _PREVIEW_DESTROYED_EVIDENCE_ROUTE = "/v1/evidence/previews/destroyed"
 _RUNNER_HOST_HYGIENE_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-host-hygiene/audits"
 _RUNNER_LANE_REGISTRATION_AUDIT_EVIDENCE_ROUTE = "/v1/evidence/runner-lane-registration/audits"
+_DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
 _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-policies/apply"
@@ -5189,6 +5194,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_dokploy_target_setup_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Dokploy target setup requires Launchplane database storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -6209,6 +6226,97 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             response=response,
         )
+        return response
+
+    async def setup_dokploy_target(
+        request: Request,
+        setup_request: DokployTargetSetupEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        database_store = require_dokploy_target_setup_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="dokploy_target.setup",
+            product=setup_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run Launchplane Dokploy target setup.",
+            )
+        if setup_request.mode == "apply":
+            if setup_request.confirmation != "APPLY DOKPLOY TARGET SETUP":
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="confirmation_required",
+                    message="Dokploy target setup apply requires exact confirmation text.",
+                )
+            if not setup_request.reason:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="reason_required",
+                    message="Dokploy target setup apply requires a reason.",
+                )
+            if not idempotency_key.strip():
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message="Dokploy target setup apply requires an Idempotency-Key header.",
+                )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=setup_request.mode == "apply",
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            result = execute_dokploy_target_setup(
+                control_plane_root_path=resolved_control_plane_root,
+                record_store=database_store,
+                request=setup_request,
+            )
+        except (ValueError, click.ClickException) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_dokploy_target_setup",
+                message=str(error),
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result={**result, "reason": setup_request.reason},
+        )
+        if setup_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                idempotency_key=normalized_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
         return response
 
     async def apply_preview_pr_feedback_notification_policy(
@@ -7277,6 +7385,24 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _DOKPLOY_TARGET_SETUP_ROUTE,
+        setup_dokploy_target,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="setup_dokploy_target",
+        summary="Plan or apply Dokploy target setup",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
