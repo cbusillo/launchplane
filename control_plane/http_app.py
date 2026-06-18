@@ -178,6 +178,8 @@ _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-polic
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
+_EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
+_PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -970,6 +972,52 @@ class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
         return self
 
 
+class EdgeEndpointApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    endpoint: EdgeEndpointRecord
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "EdgeEndpointApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported edge endpoint apply schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Edge endpoint apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE EDGE ENDPOINT":
+                raise ValueError("Edge endpoint apply requires exact confirmation text")
+        return self
+
+
+class PrivateHealthEndpointApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: Literal["dry-run", "apply"] = "dry-run"
+    endpoint: PrivateHealthEndpointRecord
+    reason: str = ""
+    confirmation: str = ""
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "PrivateHealthEndpointApplyEnvelope":
+        if self.schema_version != 1:
+            raise ValueError("Unsupported private health endpoint apply schema version")
+        self.reason = self.reason.strip()
+        self.confirmation = self.confirmation.strip()
+        if self.mode == "apply":
+            if not self.reason:
+                raise ValueError("Private health endpoint apply requires a reason")
+            if self.confirmation != "APPLY LAUNCHPLANE PRIVATE HEALTH ENDPOINT":
+                raise ValueError("Private health endpoint apply requires exact confirmation text")
+        return self
+
+
 class _RecordStoreFactory(Protocol):
     def __call__(self) -> object: ...
 
@@ -1023,6 +1071,24 @@ class _PreviewPrFeedbackNotificationPolicyApplyStore(Protocol):
         self,
         record: PreviewPrFeedbackNotificationPolicyRecord,
     ) -> object: ...
+
+
+class _EdgeEndpointApplyStore(Protocol):
+    def write_edge_endpoint_record(self, record: EdgeEndpointRecord) -> object: ...
+
+    def read_edge_endpoint_record(self, endpoint_key: str) -> EdgeEndpointRecord: ...
+
+
+class _PrivateHealthEndpointApplyStore(Protocol):
+    def write_private_health_endpoint_record(
+        self,
+        record: PrivateHealthEndpointRecord,
+    ) -> object: ...
+
+    def read_private_health_endpoint_record(
+        self,
+        endpoint_key: str,
+    ) -> PrivateHealthEndpointRecord: ...
 
 
 class PublicIngressMonitorRunOnceRequest(BaseModel):
@@ -1682,6 +1748,45 @@ def require_private_health_endpoint_read_store(
             f"{missing_summary}"
         )
     return cast(_PrivateHealthEndpointReadStore, record_store)
+
+
+def require_edge_endpoint_apply_store(record_store: object) -> _EdgeEndpointApplyStore:
+    required_methods = (
+        "write_edge_endpoint_record",
+        "read_edge_endpoint_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            f"Launchplane record store does not support edge endpoint applies: {missing_summary}"
+        )
+    return cast(_EdgeEndpointApplyStore, record_store)
+
+
+def require_private_health_endpoint_apply_store(
+    record_store: object,
+) -> _PrivateHealthEndpointApplyStore:
+    required_methods = (
+        "write_private_health_endpoint_record",
+        "read_private_health_endpoint_record",
+    )
+    missing_methods = [
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    ]
+    if missing_methods:
+        missing_summary = ", ".join(missing_methods)
+        raise TypeError(
+            "Launchplane record store does not support private health endpoint applies: "
+            f"{missing_summary}"
+        )
+    return cast(_PrivateHealthEndpointApplyStore, record_store)
 
 
 def require_ingress_canary_route_read_store(
@@ -4944,6 +5049,251 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    async def replay_endpoint_apply_idempotency(
+        *,
+        request: Request,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        trace_id: str,
+        check_replay: bool,
+    ) -> tuple[str, str, AcceptedEvidenceResponse | None]:
+        normalized_idempotency_key = idempotency_key.strip()
+        normalized_scope = idempotency_scope(identity)
+        raw_payload = await request.json()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is not None and normalized_idempotency_key and check_replay:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=normalized_scope,
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+            )
+            if stored_record is not None:
+                if stored_record.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message=(
+                            "Idempotency-Key was already used for a different "
+                            "Launchplane request payload on this route."
+                        ),
+                    )
+                return (
+                    normalized_idempotency_key,
+                    payload_fingerprint,
+                    replay_idempotent_response(
+                        trace_id=trace_id,
+                        stored_record=stored_record,
+                    ),
+                )
+        return normalized_idempotency_key, payload_fingerprint, None
+
+    def store_endpoint_apply_idempotency(
+        *,
+        record_store: object,
+        identity: LaunchplaneIdentity,
+        route_path: str,
+        idempotency_key: str,
+        request_fingerprint_value: str,
+        trace_id: str,
+        response: AcceptedEvidenceResponse,
+    ) -> None:
+        idempotency_store = idempotency_capable_store(record_store)
+        if idempotency_store is None or not idempotency_key:
+            return
+        idempotency_store.write_idempotency_record(
+            LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(response_trace_id=trace_id),
+                scope=idempotency_scope(identity),
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+                request_fingerprint=request_fingerprint_value,
+                response_status_code=202,
+                response_trace_id=trace_id,
+                recorded_at=utc_now_timestamp(),
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+        )
+
+    async def apply_edge_endpoint(
+        request: Request,
+        endpoint_request: EdgeEndpointApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="edge_endpoint.apply",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply Launchplane edge endpoint records.",
+            )
+        if endpoint_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Edge endpoint apply requests require an Idempotency-Key header.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_endpoint_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_EDGE_ENDPOINT_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=endpoint_request.mode == "apply",
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            endpoint_store = require_edge_endpoint_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        endpoint_status = "applied" if endpoint_request.mode == "apply" else "planned"
+        if endpoint_request.mode == "apply":
+            endpoint_store.write_edge_endpoint_record(endpoint_request.endpoint)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "edge_endpoint_key": endpoint_request.endpoint.endpoint_key,
+                "edge_endpoint_status": endpoint_status,
+            },
+            result={
+                "mode": endpoint_request.mode,
+                "endpoint_key": endpoint_request.endpoint.endpoint_key,
+                "endpoint_status": endpoint_status,
+                "record": endpoint_request.endpoint.model_dump(mode="json"),
+            },
+        )
+        store_endpoint_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_EDGE_ENDPOINT_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_private_health_endpoint(
+        request: Request,
+        endpoint_request: PrivateHealthEndpointApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="private_health_endpoint.apply",
+            product=endpoint_request.endpoint.product,
+            context=endpoint_request.endpoint.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot apply private health endpoint records "
+                    "for the requested product/context."
+                ),
+            )
+        if endpoint_request.mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Private health endpoint apply requests require an Idempotency-Key header.",
+            )
+        (
+            normalized_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_endpoint_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=endpoint_request.mode == "apply",
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            endpoint_store = require_private_health_endpoint_apply_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            existing_endpoint = endpoint_store.read_private_health_endpoint_record(
+                endpoint_request.endpoint.endpoint_key
+            )
+        except FileNotFoundError:
+            existing_endpoint = None
+        if existing_endpoint is not None and (
+            existing_endpoint.product != endpoint_request.endpoint.product
+            or existing_endpoint.context != endpoint_request.endpoint.context
+            or existing_endpoint.instance != endpoint_request.endpoint.instance
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="conflicting_private_health_endpoint",
+                message=(
+                    "Private health endpoint key already belongs to another "
+                    "product/context/instance."
+                ),
+            )
+        endpoint_status = "applied" if endpoint_request.mode == "apply" else "planned"
+        if endpoint_request.mode == "apply":
+            endpoint_store.write_private_health_endpoint_record(endpoint_request.endpoint)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result={
+                "mode": endpoint_request.mode,
+                "endpoint_key": endpoint_request.endpoint.endpoint_key,
+                "endpoint_status": endpoint_status,
+                "record": endpoint_request.endpoint.model_dump(mode="json"),
+            },
+        )
+        store_endpoint_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE,
+            idempotency_key=normalized_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     async def apply_public_ingress_notification_policy(
         request: Request,
         policy_request: PublicIngressNotificationPolicyApplyEnvelope,
@@ -6147,6 +6497,40 @@ def create_launchplane_fastapi_app(
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _EDGE_ENDPOINT_APPLY_ROUTE,
+        apply_edge_endpoint,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        status_code=202,
+        operation_id="apply_edge_endpoint",
+        summary="Plan or apply one Launchplane edge endpoint record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE,
+        apply_private_health_endpoint,
+        methods=["POST"],
+        response_model=AcceptedEvidenceResponse,
+        status_code=202,
+        operation_id="apply_private_health_endpoint",
+        summary="Plan or apply one private health endpoint record",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
