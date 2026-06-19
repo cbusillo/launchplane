@@ -310,13 +310,6 @@ from control_plane.work_graph_issue_inbox import (
     load_github_issue_inbox_config_from_env,
     reconcile_github_issue_inbox,
 )
-from control_plane.work_graph_service import (
-    WorkGraphIssueInboxReconcileProvider,
-)
-from control_plane.work_graph_http import (
-    reconcile_work_graph_issue_inbox,
-    work_graph_issue_inbox_reconcile_denied_response,
-)
 from control_plane.workflows.launchplane_self_deploy import (
     LaunchplaneSelfDeployRequest,
     execute_launchplane_self_deploy,
@@ -3580,7 +3573,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
         "/v1/every-code/preview-gates",
-        "/v1/work-graph/github/issues/reconcile",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -8074,7 +8066,6 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
@@ -10010,21 +10001,6 @@ def create_launchplane_service_app(
                     idempotency_key=request_idempotency_key,
                     every_code_discord_sender=every_code_discord_sender,
                 )
-            elif path == "/v1/work-graph/github/issues/reconcile":
-                reconcile_result = reconcile_work_graph_issue_inbox(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    payload=payload,
-                    issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
-                )
-                if reconcile_result is None:
-                    return work_graph_issue_inbox_reconcile_denied_response(
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                result = reconcile_result.model_dump(mode="json")
-                driver_result = {"reconcile": result}
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(
@@ -11875,7 +11851,6 @@ def serve_launchplane_service(
         verifier=verifier,
         authz_policy=bootstrap_authz_policy,
         database_url=database_url,
-        work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
         authz_policy_runtime=authz_policy_runtime,
         record_store_for_service=service_record_store,
     )
@@ -11898,6 +11873,7 @@ def serve_launchplane_service(
         control_plane_root_path=control_plane_root(),
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
+        work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
     )
     fastapi_application.mount(
         "/",

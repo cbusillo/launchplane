@@ -179,9 +179,13 @@ from control_plane.workflows.odoo_stable_operation_worker import (
     reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
+from control_plane.work_graph_issue_inbox import (
+    GitHubIssueInboxReadModel,
+    GitHubIssueInboxReconcileRequest,
+)
 from control_plane.work_graph_service import (
     WorkGraphIssueInboxProvider,
+    WorkGraphIssueInboxReconcileProvider,
     WorkGraphPlanningFactsProvider,
     WorkGraphRankEnvelope,
     WorkGraphWorkRequestStore,
@@ -2313,6 +2317,7 @@ def create_launchplane_fastapi_app(
     control_plane_root_path: FilePath | None = None,
     work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
+    work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
 ) -> FastAPI:
     resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
         authz_policy
@@ -2956,6 +2961,23 @@ def create_launchplane_fastapi_app(
             message=message,
         )
 
+    def require_work_graph_issue_inbox_reconcile_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str, action: str
+    ) -> None:
+        if resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            return
+        raise _launchplane_http_error(
+            status_code=403,
+            trace_id=trace_id,
+            code="authorization_denied",
+            message="Workflow cannot reconcile the Launchplane GitHub issue inbox.",
+        )
+
     def require_read_store_methods(
         record_store: object,
         *,
@@ -3327,6 +3349,41 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             configured=True,
             inbox=work_graph_issue_inbox_provider(),
+        )
+
+    def reconcile_work_graph_issue_inbox(
+        payload: GitHubIssueInboxReconcileRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        required_action = (
+            "work_graph.rank" if payload.mode == "dry_run" else "work_graph.issue_inbox.reconcile"
+        )
+        require_work_graph_issue_inbox_reconcile_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            action=required_action,
+        )
+        if work_graph_issue_inbox_reconcile_provider is None:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="GitHub issue inbox reconciliation is not configured.",
+            )
+        try:
+            reconcile_result = work_graph_issue_inbox_reconcile_provider(payload)
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error) or "Request could not be completed.",
+            ) from error
+        return AcceptedEvidenceResponse(
+            trace_id=trace_id,
+            records={},
+            result={"reconcile": reconcile_result.model_dump(mode="json")},
         )
 
     def merge_train_policy_not_configured_error(
@@ -8323,6 +8380,22 @@ def create_launchplane_fastapi_app(
         operation_id="read_work_graph_issue_inbox",
         summary="Read Launchplane GitHub issue inbox",
         responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/work-graph/github/issues/reconcile",
+        reconcile_work_graph_issue_inbox,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="reconcile_work_graph_issue_inbox",
+        summary="Reconcile Launchplane GitHub issue inbox",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     merge_train_read_error_responses: dict[int | str, dict[str, object]] = {
