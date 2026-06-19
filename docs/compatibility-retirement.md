@@ -119,6 +119,10 @@ Keep a compatibility surface only when it is one of these:
   product-profile collection also preserves the dedicated Every Code worker
   token. Their legacy WSGI branches are deleted; direct fallback calls fail
   closed while the mounted fallback remains for retained non-native routes.
+- Product profile writes use native FastAPI `POST /v1/product-profiles` for
+  bearer-token callers and preserve product-profile write-contract validation,
+  record storage, and optional `Idempotency-Key` replay/conflict behavior. The
+  legacy WSGI write branch is deleted; direct WSGI fallback calls fail closed.
 - Every Code work-request, summary, PR-feedback, preview-gate,
   notification-attempt, and preview-readiness reads use native FastAPI routes.
   The worker-facing read routes preserve the dedicated Every Code worker token;

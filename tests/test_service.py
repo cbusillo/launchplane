@@ -9598,7 +9598,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_status, 202)
         self.assertEqual(status_payload["result"]["request"]["state"], "done")
 
-    def test_product_profile_reads_are_retired_from_legacy_wsgi_app(self) -> None:
+    def test_product_profile_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -9629,11 +9629,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path="/v1/product-profiles/sellyouroutboard",
                 authorization="Bearer worker-token",
             )
+            write_status, write_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles",
+                payload=_product_profile_payload(),
+            )
 
-        self.assertEqual(list_status, 405)
-        self.assertEqual(list_payload["error"]["code"], "method_not_allowed")
+        self.assertEqual(list_status, 404)
+        self.assertEqual(list_payload["error"]["code"], "not_found")
         self.assertEqual(show_status, 404)
         self.assertEqual(show_payload["error"]["code"], "not_found")
+        self.assertEqual(write_status, 404)
+        self.assertEqual(write_payload["error"]["code"], "not_found")
 
     def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -11430,101 +11438,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 500)
         self.assertEqual(payload["error"]["code"], "driver_route_not_registered")
-
-    def test_product_profile_write_endpoint_persists_authorized_record(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "sellyouroutboard"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_profile.write", "product_profile.read"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            write_status_code, write_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-profiles",
-                payload=_product_profile_payload(),
-                headers={"Idempotency-Key": "profile-sellyouroutboard"},
-            )
-            stored_profile = FilesystemRecordStore(
-                state_dir=root / "state"
-            ).read_product_profile_record("sellyouroutboard")
-
-        self.assertEqual(write_status_code, 202)
-        self.assertEqual(write_payload["records"], {"product_profile": "sellyouroutboard"})
-        self.assertEqual(stored_profile.driver_id, "generic-web")
-        self.assertEqual(stored_profile.preview.slug_template, "pr-{number}")
-
-    def test_product_profile_endpoint_rejects_inert_health_monitoring(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane", "sellyouroutboard"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_profile.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-            profile_payload = _product_profile_payload()
-            profile_payload["lanes"] = (
-                {
-                    "instance": "testing",
-                    "context": "sellyouroutboard-testing",
-                    "health_monitoring": {
-                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
-                    },
-                },
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-profiles",
-                payload=profile_payload,
-                headers={"Idempotency-Key": "profile-sellyouroutboard"},
-            )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        self.assertEqual(
-            payload["error"]["message"],
-            "public HTTP health check requires base_url or explicit health_url",
-        )
 
     def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14384,42 +14297,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             intent["secret_evidence"]["findings"][0]["code"],
             "secret_class_not_allowed",
         )
-
-    def test_product_profile_write_rejects_unauthorized_product(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["verireel"],
-                            "contexts": ["launchplane"],
-                            "actions": ["product_profile.write"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-profiles",
-                payload=_product_profile_payload(),
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_product_config_api_dry_run_returns_redacted_plan_without_writes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Reques
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
@@ -207,6 +207,7 @@ _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
 _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
+_PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -247,6 +248,10 @@ class AgentContextReadStore(ProductReadModelStore, Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
+
+
+class ProductProfileWriteStore(Protocol):
+    def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
 
 
 class WorkGraphSnapshotReadStore(ProductReadModelStore, WorkGraphWorkRequestStore, Protocol):
@@ -1719,6 +1724,16 @@ def require_product_profile_read_store(record_store: object) -> ProductReadModel
             "read_product_profile_record"
         )
     return cast(ProductReadModelStore, record_store)
+
+
+def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
+    write_record = getattr(record_store, "write_product_profile_record", None)
+    if not callable(write_record):
+        raise TypeError(
+            "Launchplane record store does not support product profile writes: "
+            "write_product_profile_record"
+        )
+    return cast(ProductProfileWriteStore, record_store)
 
 
 def require_secret_status_read_store(record_store: object) -> control_plane_secrets.SecretReadStore:
@@ -4950,6 +4965,100 @@ def create_launchplane_fastapi_app(
             )
         return ProductProfileResponse(trace_id=trace_id, profile=profile)
 
+    async def write_product_profile(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            )
+        try:
+            profile = LaunchplaneProductProfileRecord.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=profile.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write the requested product profile.",
+            )
+        try:
+            profile.validate_write_contract()
+        except ValueError as error:
+            message = str(error).strip() or "Product profile request failed validation."
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=message,
+            ) from error
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_PROFILES_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            profile_store = require_product_profile_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        profile_store.write_product_profile_record(profile)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": profile.product},
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_PROFILES_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
     def read_product_context_cutover_audit(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
@@ -7966,6 +8075,34 @@ def create_launchplane_fastapi_app(
         responses={
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_PROFILES_ROUTE,
+        write_product_profile,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/LaunchplaneProductProfileRecord"}
+                    }
+                },
+            }
+        },
+        operation_id="write_product_profile",
+        summary="Write a Launchplane product profile",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
