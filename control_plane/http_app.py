@@ -91,6 +91,7 @@ from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditRecord,
     build_ingress_route_audit_record_id,
 )
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
@@ -274,6 +275,7 @@ _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/app
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
+_MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -1126,6 +1128,26 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("Product onboarding writes require product 'launchplane'.")
         self.product = "launchplane"
+        return self
+
+
+class MergeTrainPolicyImportEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str = "launchplane"
+    mode: Literal["dry_run", "apply"] = "dry_run"
+    reason: str = ""
+    record: MergeTrainPolicyRecord
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainPolicyImportEnvelope":
+        self.product = self.product.strip() or "launchplane"
+        if self.product != "launchplane":
+            raise ValueError("merge train policy import requires product 'launchplane'")
+        self.reason = self.reason.strip()
+        if self.mode == "apply" and not self.reason:
+            raise ValueError("merge train policy import apply requires reason")
         return self
 
 
@@ -6831,6 +6853,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_merge_train_policy_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Merge train policy writes require Launchplane database storage.",
+            )
+        return record_store
+
     def require_live_target_runtime_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -7264,6 +7298,112 @@ def create_launchplane_fastapi_app(
             response=onboarding_response,
         )
         return onboarding_response
+
+    async def import_merge_train_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            policy_import_request = MergeTrainPolicyImportEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="merge_train.policy_import",
+            product=policy_import_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot write Launchplane merge train policies.",
+            )
+        database_store = require_merge_train_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if policy_import_request.mode == "apply":
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=database_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_POLICY_IMPORT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=bool(normalized_idempotency_key),
+            )
+            if replay_response is not None:
+                return replay_response
+            database_store.write_merge_train_policy_record(policy_import_request.record)
+        result: dict[str, object] = {
+            "mode": policy_import_request.mode,
+            "record": {
+                "record_id": policy_import_request.record.record_id,
+                "status": policy_import_request.record.status,
+                "source": policy_import_request.record.source,
+                "updated_at": policy_import_request.record.updated_at,
+                "policy_sha256": policy_import_request.record.policy_sha256,
+                "repository_count": len(policy_import_request.record.policy.policies),
+                "policy_keys": [
+                    repository_policy.policy_key
+                    for repository_policy in policy_import_request.record.policy.policies
+                ],
+            },
+        }
+        policy_import_response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=result,
+        )
+        if policy_import_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_MERGE_TRAIN_POLICY_IMPORT_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=policy_import_response,
+            )
+        return policy_import_response
 
     async def apply_live_target_runtime(
         request: Request,
@@ -10617,6 +10757,34 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_onboarding",
         summary="Apply product onboarding records",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _MERGE_TRAIN_POLICY_IMPORT_ROUTE,
+        import_merge_train_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": MergeTrainPolicyImportEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="import_merge_train_policy",
+        summary="Import merge train policy records",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
