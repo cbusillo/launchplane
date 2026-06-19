@@ -2930,13 +2930,13 @@ def create_launchplane_fastapi_app(
                 resolved_control_plane_root,
                 trace_id,
             )
-        except ValueError as error:
+        except ValueError:
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
                 code="invalid_request",
                 message="GitHub webhook payload is invalid.",
-            ) from error
+            )
         return JSONResponse(status_code=status_code, content=payload)
 
     def read_every_code_work_request_worker_write_identity(
