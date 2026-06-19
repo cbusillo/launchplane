@@ -32,16 +32,6 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
 )
-from control_plane.contracts.agent_write_intent import (
-    AgentWriteIntentRecord,
-    AgentWriteIntentRequest,
-    AgentWriteIntentSecretEvidence,
-    agent_write_intent_secret_action,
-    authz_action_for_agent_write_intent,
-    build_agent_write_intent_record_id,
-    evaluate_agent_write_intent,
-    secret_evidence_for_agent_write_intent,
-)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
@@ -143,12 +133,6 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
     ReleaseStatus,
-)
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.runtime_key_safety import (
-    evaluate_runtime_key_safety_from_store,
-    latest_active_runtime_key_safety_policy,
-    runtime_key_safety_environment_class,
 )
 from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
 from control_plane.every_code_work_request_write import (
@@ -1687,7 +1671,6 @@ _VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
 
 _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
     {
-        "/v1/agent/write-intents/evaluate",
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/product-config/apply",
@@ -3469,7 +3452,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
-        "/v1/agent/write-intents/evaluate",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -3672,22 +3654,6 @@ class _PreviewPrFeedbackNotificationStore(Protocol):
     ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
 
 
-class _AgentWriteIntentRecordStore(Protocol):
-    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
-
-    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord: ...
-
-    def list_agent_write_intent_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[AgentWriteIntentRecord, ...]: ...
-
-
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
         "write_every_code_work_request_record",
@@ -3717,12 +3683,6 @@ def _preview_pr_feedback_notification_store(
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_PreviewPrFeedbackNotificationStore, record_store)
     return None
-
-
-def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentRecordStore:
-    if hasattr(record_store, "write_agent_write_intent_record"):
-        return cast(_AgentWriteIntentRecordStore, record_store)
-    raise TypeError("record store does not support agent write intent records")
 
 
 class _MergeTrainBatchCandidateRecordStore(Protocol):
@@ -5535,7 +5495,6 @@ def _accepted_payload(
         "request_id",
         "feedback_id",
         "state",
-        "agent_write_intent_record_id",
         "merge_train_batch_candidate_record_id",
         "merge_train_batch_landing_plan_record_id",
         "merge_train_stack_collapse_plan_record_id",
@@ -5797,43 +5756,6 @@ def _replay_idempotent_response(
         start_response=start_response,
         status_code=stored_record.response_status_code,
         payload=result_payload,
-    )
-
-
-def _agent_write_intent_secret_evidence(
-    *, record_store: object, request: AgentWriteIntentRequest
-) -> AgentWriteIntentSecretEvidence:
-    if not request.secret_bindings:
-        return secret_evidence_for_agent_write_intent(request=request, evaluation=None)
-    if request.destination is None:
-        return secret_evidence_for_agent_write_intent(
-            request=request, evaluation=None, unavailable=True
-        )
-    try:
-        policy_record = latest_active_runtime_key_safety_policy(
-            record_store  # type: ignore[arg-type]
-        )
-        evaluation = evaluate_runtime_key_safety_from_store(
-            record_store=record_store,  # type: ignore[arg-type]
-            policy_record=policy_record,
-            target=RuntimeKeySafetyTarget(
-                context=request.destination.context,
-                instance=request.destination.instance,
-                environment_class=runtime_key_safety_environment_class(
-                    request.destination.instance
-                ),
-            ),
-            required_binding_keys=request.secret_bindings,
-        )
-    except (AttributeError, ValueError):
-        return secret_evidence_for_agent_write_intent(
-            request=request, evaluation=None, unavailable=True
-        )
-    return secret_evidence_for_agent_write_intent(
-        request=request,
-        evaluation=evaluation,
-        policy_record_id=policy_record.record_id,
-        policy_sha256=policy_record.policy_sha256,
     )
 
 
@@ -7563,11 +7485,7 @@ def create_launchplane_service_app(
                         identity = verifier.verify(token)
                         if not isinstance(identity, GitHubActionsIdentity):
                             raise PermissionError("Mutation routes require GitHub Actions OIDC.")
-            if (
-                isinstance(identity, TerminalAgentIdentity)
-                and method != "GET"
-                and path != "/v1/agent/write-intents/evaluate"
-            ):
+            if isinstance(identity, TerminalAgentIdentity) and method != "GET":
                 return _json_response(
                     start_response=start_response,
                     status_code=403,
@@ -8937,68 +8855,6 @@ def create_launchplane_service_app(
                                             candidate_record.record_id
                                         )
                                     driver_result = result
-            elif path == "/v1/agent/write-intents/evaluate":
-                intent_request = AgentWriteIntentRequest.model_validate(payload)
-                intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
-                authorized = authz_policy.allows(
-                    identity=identity,
-                    action=intent_authz_action,
-                    product=intent_request.product,
-                    context=intent_request.context,
-                )
-                if intent_request.secret_bindings:
-                    secret_authz_action = agent_write_intent_secret_action(intent_request)
-                    authorized = authorized and authz_policy.allows(
-                        identity=identity,
-                        action=secret_authz_action,
-                        product=intent_request.product,
-                        context=intent_request.context,
-                    )
-                intent_audit = agent_authz_audit(
-                    identity=identity,
-                    action=intent_authz_action,
-                    product=intent_request.product,
-                    context=intent_request.context,
-                    decision="allowed" if authorized else "denied",
-                    reason_code="authorized" if authorized else "authorization_denied",
-                    policy_source=resolved_authz_policy_source,
-                    policy_sha256=resolved_authz_policy_sha256,
-                )
-                secret_evidence = _agent_write_intent_secret_evidence(
-                    record_store=record_store,
-                    request=intent_request,
-                )
-                evaluation = evaluate_agent_write_intent(
-                    request=intent_request,
-                    authorized=authorized,
-                    audit=intent_audit,
-                    secret_evidence=secret_evidence,
-                )
-                recorded_at = _utc_now_timestamp()
-                intent_record = AgentWriteIntentRecord(
-                    record_id=build_agent_write_intent_record_id(
-                        recorded_at=recorded_at,
-                        trace_id=request_trace_id,
-                        request=intent_request,
-                        evaluation=evaluation,
-                    ),
-                    recorded_at=recorded_at,
-                    trace_id=request_trace_id,
-                    idempotency_key=request_idempotency_key,
-                    request=intent_request,
-                    evaluation=evaluation,
-                )
-                _agent_write_intent_record_store(record_store).write_agent_write_intent_record(
-                    intent_record
-                )
-                result = {
-                    "intent": evaluation.model_dump(mode="json"),
-                    "record": {
-                        "record_id": intent_record.record_id,
-                        "recorded_at": intent_record.recorded_at,
-                    },
-                }
-                driver_result = result
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(

@@ -97,6 +97,10 @@ from control_plane.contracts.runner_lane_registration import (
     plan_runner_lane_registration,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, create_launchplane_fastapi_app
 from control_plane.service_auth import (
@@ -112,6 +116,7 @@ from control_plane.service_human_auth import (
     InMemoryHumanSessionStore,
     LaunchplaneHumanSession,
 )
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.work_graph_issue_inbox import (
@@ -4300,6 +4305,479 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["admission"]["status"], "admitted")
+
+
+class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("every_code_work_request.rerun",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="every_code_rerun",
+                    mode="dry_run",
+                    product="launchplane",
+                    context="launchplane",
+                    reason="Check whether rerun can be requested safely.",
+                ),
+                idempotency_key="agent-write-intent-rerun",
+            )
+            record_pointer = response.json()["result"]["record"]
+            record = store.read_agent_write_intent_record(record_pointer["record_id"])
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {})
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["authz_action"], "every_code_work_request.rerun")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["reason_code"], "authorized")
+        self.assertEqual(intent["audit"]["decision"], "allowed")
+        self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
+        self.assertEqual(record.evaluation.status, "allowed")
+        self.assertEqual(record.evaluation.intent, "every_code_rerun")
+        self.assertEqual(record.idempotency_key, "agent-write-intent-rerun")
+        self.assertEqual(record.request.source_url, _AGENT_WRITE_INTENT_SOURCE_URL)
+        self.assertEqual(record.trace_id, payload["trace_id"])
+
+    async def test_evaluate_replays_idempotent_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("every_code_work_request.rerun",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            payload = _agent_write_intent_payload(
+                intent="every_code_rerun",
+                mode="dry_run",
+                product="launchplane",
+                context="launchplane",
+            )
+
+            first_response = await _post_agent_write_intent_evaluate(
+                app,
+                payload,
+                idempotency_key="agent-write-intent-replay",
+            )
+            second_response = await _post_agent_write_intent_evaluate(
+                app,
+                payload,
+                idempotency_key="agent-write-intent-replay",
+            )
+            records = store.list_agent_write_intent_records(
+                product="launchplane",
+                context_name="launchplane",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        second_payload = second_response.json()
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_response.json()["trace_id"])
+        self.assertEqual(len(records), 1)
+
+    async def test_evaluate_replays_before_write_store_check(self) -> None:
+        payload = _agent_write_intent_payload(
+            intent="every_code_rerun",
+            mode="dry_run",
+            product="launchplane",
+            context="launchplane",
+        )
+        record_store = _AgentWriteIntentEvaluateReplayOnlyStore(
+            payload=payload,
+            idempotency_key="agent-write-intent-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_agent_write_intent_policy(
+                actions=("every_code_work_request.rerun",),
+                product="launchplane",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: record_store,
+        )
+
+        response = await _post_agent_write_intent_evaluate(
+            app,
+            payload,
+            idempotency_key="agent-write-intent-replay",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["replayed"])
+        self.assertEqual(response.json()["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(record_store.read_idempotency_calls, 1)
+
+    async def test_evaluate_rejects_reused_idempotency_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("every_code_work_request.rerun",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            first_response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="every_code_rerun",
+                    mode="dry_run",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                idempotency_key="agent-write-intent-reused",
+            )
+            conflict_response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="every_code_rerun",
+                    mode="dry_run",
+                    product="launchplane",
+                    context="launchplane",
+                    reason="Different request reason.",
+                ),
+                idempotency_key="agent-write-intent-reused",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_evaluate_denies_ungranted_intent_as_preflight_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("every_code_work_request.rerun",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="promotion_dispatch",
+                    mode="apply",
+                    product="verireel",
+                    context="verireel",
+                    reason="Request prod promotion dispatch.",
+                ),
+            )
+            record = store.read_agent_write_intent_record(
+                response.json()["result"]["record"]["record_id"]
+            )
+
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "authorization_denied")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["audit"]["decision"], "denied")
+        self.assertEqual(intent["audit"]["subject"]["action_safety"], "prod")
+        self.assertEqual(record.evaluation.status, "denied")
+
+    async def test_evaluate_requires_dry_run_for_config_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("product_config.apply",),
+                    product="verireel",
+                    context="verireel-testing",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="product_config_apply",
+                    mode="apply",
+                    product="verireel",
+                    context="verireel-testing",
+                    reason="Apply product config after review.",
+                ),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "dry_run_required")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["audit"]["reason_code"], "dry_run_required")
+
+    async def test_terminal_agent_evaluate_checks_scoped_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_terminal_agent_write_intent_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="every_code_rerun",
+                    mode="dry_run",
+                    product="launchplane",
+                    context="launchplane",
+                    reason="Check whether local agent can request a rerun.",
+                ),
+                authorization="Bearer terminal-read-token",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
+        self.assertFalse(intent["audit"]["subject"]["approval_capable"])
+
+    async def test_evaluate_checks_secret_binding_policy_without_reveal(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            _seed_agent_write_intent_secret_binding(store, binding_instance="prod")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("product_config.apply", "product_config.apply.secret"),
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="product_config_apply",
+                    mode="dry_run",
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                    source_url="https://github.com/cbusillo/launchplane/issues/387",
+                    reason="Preflight managed secret-backed product config.",
+                    secret_bindings=["SMTP_PASSWORD"],
+                    destination={
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                ),
+            )
+
+        response_text = json.dumps(response.json(), sort_keys=True)
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["secret_evidence"]["status"], "pass")
+        self.assertEqual(intent["secret_evidence"]["checked_binding_keys"], ["SMTP_PASSWORD"])
+        self.assertEqual(intent["secret_evidence"]["findings"], [])
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("ciphertext", response_text)
+
+    async def test_evaluate_denies_secret_without_secret_action_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            _seed_agent_write_intent_secret_binding(store, binding_instance="prod")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("product_config.apply",),
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="product_config_apply",
+                    mode="dry_run",
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                    secret_bindings=["SMTP_PASSWORD"],
+                    destination={
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                ),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "authorization_denied")
+        self.assertEqual(intent["secret_evidence"]["status"], "pass")
+
+    async def test_evaluate_denies_disallowed_secret_destination(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(root / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            _seed_agent_write_intent_secret_binding(store, binding_instance="testing")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("product_config.apply", "product_config.apply.secret"),
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                ),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="product_config_apply",
+                    mode="dry_run",
+                    product="sellyouroutboard",
+                    context="sellyouroutboard",
+                    secret_bindings=["SMTP_PASSWORD"],
+                    destination={
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "testing",
+                    },
+                ),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        intent = response.json()["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "secret_evidence_denied")
+        self.assertEqual(intent["secret_evidence"]["status"], "fail")
+        self.assertEqual(
+            intent["secret_evidence"]["findings"][0]["code"],
+            "secret_class_not_allowed",
+        )
+
+    async def test_evaluate_requires_agent_write_intent_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_agent_write_intent_policy(
+                actions=("every_code_work_request.rerun",),
+                product="launchplane",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_agent_write_intent_evaluate(
+            app,
+            _agent_write_intent_payload(
+                intent="every_code_rerun",
+                mode="dry_run",
+                product="launchplane",
+                context="launchplane",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_openapi_includes_agent_write_intent_evaluate_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_agent_write_intent_policy(
+                actions=("every_code_work_request.rerun",),
+                product="launchplane",
+                context="launchplane",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        route = openapi["paths"]["/v1/agent/write-intents/evaluate"]["post"]
+        self.assertEqual(route["operationId"], "evaluate_agent_write_intent")
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AgentWriteIntentRequest",
+        )
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "409", "503"):
+            self.assertIn("LaunchplaneErrorResponse", json.dumps(route["responses"][status_code]))
+
+    async def test_fastapi_evaluate_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("every_code_work_request.rerun",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "legacy-state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_agent_write_intent_evaluate(
+                app,
+                _agent_write_intent_payload(
+                    intent="every_code_rerun",
+                    mode="dry_run",
+                    product="launchplane",
+                    context="launchplane",
+                ),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["intent"]["status"], "allowed")
 
 
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
@@ -16498,6 +16976,103 @@ def _every_code_work_request_rerun_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+_AGENT_WRITE_INTENT_SOURCE_URL = "https://github.com/cbusillo/launchplane/issues/386"
+
+
+def _agent_write_intent_policy(
+    *, actions: tuple[str, ...], product: str, context: str
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": [product],
+                    "contexts": [context],
+                    "actions": list(actions),
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_write_intent_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["every_code_work_request.rerun"],
+                }
+            ]
+        }
+    )
+
+
+def _agent_write_intent_payload(
+    *,
+    intent: str,
+    mode: str,
+    product: str,
+    context: str,
+    source_url: str = _AGENT_WRITE_INTENT_SOURCE_URL,
+    reason: str = "Evaluate agent write intent.",
+    secret_bindings: list[str] | None = None,
+    destination: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "intent": intent,
+        "mode": mode,
+        "product": product,
+        "context": context,
+        "source_url": source_url,
+        "reason": reason,
+    }
+    if secret_bindings is not None:
+        payload["secret_bindings"] = secret_bindings
+    if destination is not None:
+        payload["destination"] = destination
+    return payload
+
+
+def _seed_agent_write_intent_secret_binding(store: Any, *, binding_instance: str) -> None:
+    store.write_runtime_key_safety_policy_record(
+        RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-write-intent-test",
+            status="active",
+            source="test",
+            updated_at="2026-05-05T20:00:00Z",
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SMTP_PASSWORD",
+                    secret_class="prod_only",
+                    allowed_contexts=("sellyouroutboard",),
+                    allowed_instances=("prod",),
+                ),
+            ),
+        )
+    )
+    store.write_secret_binding(
+        SecretBinding(
+            binding_id="secret-smtp-password-binding-smtp-password",
+            secret_id="secret-smtp-password",
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            binding_key="SMTP_PASSWORD",
+            context="sellyouroutboard",
+            instance=binding_instance,
+            created_at="2026-05-05T20:00:00Z",
+            updated_at="2026-05-05T20:00:00Z",
+        )
+    )
+
+
 def _seed_every_code_rerun_intent(
     store: Any,
     *,
@@ -17358,6 +17933,28 @@ async def _get_every_code_work_request(
         app,
         f"/v1/every-code/work-requests/{request_id}",
         headers=headers,
+    )
+
+
+async def _post_agent_write_intent_evaluate(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/agent/write-intents/evaluate",
+        headers=request_headers,
+        payload=payload,
     )
 
 
@@ -19010,6 +19607,62 @@ class _EveryCodeRerunReplayOnlyStore:
     ) -> tuple[AgentWriteIntentRecord, ...]:
         del product, context_name, status, limit, offset
         raise AssertionError("idempotent replay must not list write-intent evidence")
+
+
+class _AgentWriteIntentEvaluateReplayOnlyStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if (
+            route_path != "/v1/agent/write-intents/evaluate"
+            or idempotency_key != self._idempotency_key
+        ):
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {},
+                "result": {
+                    "intent": {
+                        "status": "allowed",
+                        "intent": "every_code_rerun",
+                    },
+                    "record": {
+                        "record_id": "agent-write-intent-original",
+                        "recorded_at": "2026-05-29T12:00:00Z",
+                    },
+                },
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        del record
+        raise AssertionError("idempotent replay must not write a new record")
+
+    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
+        del record
+        raise AssertionError("idempotent replay must not write write-intent evidence")
 
 
 class _ProductContextApplyReplayOnlyStore:

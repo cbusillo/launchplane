@@ -915,11 +915,17 @@ source, policy digest, and `authz_policy` source kind. Write-intent evaluations
 persist that same provenance as `launchplane_agent_write_intents` records and
 return the record id so later action routes can link to durable evidence.
 
-`POST /v1/agent/write-intents/evaluate` is the first scoped intent surface. It
-does not execute product/runtime mutations. It validates a requested intent,
-maps it to the exact existing policy action, evaluates the caller's policy grant,
-persists the evaluation record, and returns status, safe next action, source URL,
-record id, and `agent_audit` metadata.
+`POST /v1/agent/write-intents/evaluate` is a native FastAPI scoped intent
+surface. It does not execute product/runtime mutations. It validates a requested
+intent, maps it to the exact existing policy action, evaluates the caller's
+policy grant, persists the evaluation record, and returns status, safe next
+action, source URL, record id, and `agent_audit` metadata. Denied intents are
+successful preflight results with `202 accepted`; route errors are reserved for
+authentication, validation, and fail-closed storage-capability failures. The
+legacy WSGI branch is deleted, and terminal-agent bearer callers keep the
+route-specific preflight exception only through this native path. When callers
+send `Idempotency-Key`, Launchplane replays matching evaluations or rejects
+conflicting payloads before requiring the write-intent record store.
 Agents can use it to preflight safe rerun, preview, config, cleanup, and
 promotion-dispatch candidates without receiving a generic write token or reusable
 credentials. Some intents, such as product config apply and promotion dry-run,
