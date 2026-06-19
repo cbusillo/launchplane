@@ -150,7 +150,9 @@ VeriReel product paths:
     human-session, and Every Code worker-token callers)
   - `GET /v1/product-profiles/{product}` (native FastAPI for bearer-token and
     human-session callers)
-  - `POST /v1/product-profiles`
+  - `POST /v1/product-profiles` (native FastAPI for bearer-token callers,
+    product-profile write-contract validation, record storage, and optional
+    `Idempotency-Key` replay/conflict handling)
 - product config write route:
   - `POST /v1/product-config/apply`
 - runtime key-safety policy route:
@@ -1048,8 +1050,13 @@ refresh/destroy flow.
 - `POST /v1/product-profiles`
 
 Product profiles are Launchplane-owned product/driver bindings. They are written
-through authenticated service ingress and stored in Launchplane records; product
-repos do not carry repo-local Launchplane lifecycle manifests.
+through native FastAPI authenticated service ingress and stored in Launchplane
+records; product repos do not carry repo-local Launchplane lifecycle manifests.
+Writes require `product_profile.write` for the profile product in the
+Launchplane service context, validate the profile write contract before storage,
+and preserve optional `Idempotency-Key` replay/conflict behavior. The legacy WSGI
+write branch is deleted; direct fallback calls fail closed while the mounted
+fallback remains for retained non-native routes.
 
 Public ingress notification policy writes use
 `POST /v1/public-ingress/notification-policies/apply`. The request carries

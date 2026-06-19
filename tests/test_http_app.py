@@ -4096,7 +4096,7 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notification_response.status_code, 200)
 
 
-class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_product_profiles_returns_profiles_for_driver(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -4147,6 +4147,210 @@ class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["profile"]["product"], "sellyouroutboard")
         self.assertEqual(payload["profile"]["driver_id"], "generic-web")
         self.assertEqual(payload["profile"]["preview"]["slug_template"], "pr-{number}")
+
+    async def test_write_product_profile_persists_authorized_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            record_store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _post_product_profile(
+                app,
+                _product_profile_payload(),
+                idempotency_key="profile-sellyouroutboard",
+            )
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertNotIn("result", payload)
+        self.assertEqual(stored_profile.driver_id, "generic-web")
+        self.assertEqual(stored_profile.preview.slug_template, "pr-{number}")
+
+    async def test_write_product_profile_replays_idempotent_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            payload = _product_profile_payload()
+
+            first_response = await _post_product_profile(
+                app,
+                payload,
+                idempotency_key="profile-sellyouroutboard",
+            )
+            second_response = await _post_product_profile(
+                app,
+                payload,
+                idempotency_key="profile-sellyouroutboard",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        first_payload = first_response.json()
+        second_payload = second_response.json()
+        self.assertEqual(second_payload["records"], first_payload["records"])
+        self.assertTrue(second_payload["replayed"])
+        self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    async def test_write_product_profile_replays_before_write_store_check(self) -> None:
+        payload = _product_profile_payload()
+        record_store = _ProductProfileReplayOnlyStore(
+            payload=payload,
+            idempotency_key="profile-sellyouroutboard",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: record_store,
+        )
+
+        response = await _post_product_profile(
+            app,
+            payload,
+            idempotency_key="profile-sellyouroutboard",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        response_payload = response.json()
+        self.assertTrue(response_payload["replayed"])
+        self.assertEqual(response_payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(response_payload["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(record_store.read_idempotency_calls, 1)
+
+    async def test_write_product_profile_rejects_reused_idempotency_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            changed_payload = {
+                **_product_profile_payload(),
+                "display_name": "Changed Product Name",
+            }
+
+            await _post_product_profile(
+                app,
+                _product_profile_payload(),
+                idempotency_key="profile-sellyouroutboard",
+            )
+            response = await _post_product_profile(
+                app,
+                changed_payload,
+                idempotency_key="profile-sellyouroutboard",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "idempotency_key_reused")
+
+    async def test_write_product_profile_authenticates_before_malformed_body(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/product-profiles",
+            raw_body=b"{",
+            headers={"Content-Type": "application/json"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    async def test_write_product_profile_reports_schema_validation_message(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_profile(app, {"schema_version": 1})
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Request payload failed validation.")
+
+    async def test_write_product_profile_rejects_inert_health_monitoring(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            profile_payload = _product_profile_payload()
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "sellyouroutboard-testing",
+                    "health_monitoring": {
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}]
+                    },
+                },
+            )
+
+            response = await _post_product_profile(
+                app,
+                profile_payload,
+                idempotency_key="profile-sellyouroutboard",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "public HTTP health check requires base_url or explicit health_url",
+        )
+
+    async def test_write_product_profile_rejects_unauthorized_product(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="verireel"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_profile(app, _product_profile_payload())
+
+        self.assertEqual(response.status_code, 403)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    async def test_write_product_profile_requires_matching_store_method(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_product_profile(app, _product_profile_payload())
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.json()
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("write_product_profile_record", payload["error"]["message"])
 
     async def test_list_product_profiles_accepts_every_code_worker_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -4286,7 +4490,7 @@ class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("list_product_profile_records", list_response.json()["error"]["message"])
         self.assertIn("read_product_profile_record", show_response.json()["error"]["message"])
 
-    async def test_openapi_includes_product_profile_read_contracts(self) -> None:
+    async def test_openapi_includes_product_profile_contracts(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_product_profile_read_policy(product="launchplane"),
@@ -4298,17 +4502,29 @@ class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
         list_route = openapi["paths"]["/v1/product-profiles"]["get"]
+        write_route = openapi["paths"]["/v1/product-profiles"]["post"]
         show_route = openapi["paths"]["/v1/product-profiles/{product}"]["get"]
         self.assertEqual(list_route["operationId"], "list_product_profiles")
+        self.assertEqual(write_route["operationId"], "write_product_profile")
         self.assertEqual(show_route["operationId"], "read_product_profile")
         self.assertEqual(
             list_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ProductProfileListResponse",
         )
         self.assertEqual(
+            write_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            write_route["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/LaunchplaneProductProfileRecord",
+        )
+        self.assertEqual(
             show_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ProductProfileResponse",
         )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn(status_code, write_route["responses"])
         self.assertEqual(
             openapi["components"]["schemas"]["ProductProfileListResponse"]["additionalProperties"],
             False,
@@ -4361,6 +4577,30 @@ class FastApiProductProfileReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(show_response.status_code, 200)
         self.assertEqual(list_response.json()["profiles"][0]["product"], "sellyouroutboard")
         self.assertEqual(show_response.json()["profile"]["product"], "sellyouroutboard")
+
+    async def test_fastapi_product_profile_write_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = FilesystemRecordStore(state_dir=root / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: record_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "legacy-state",
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_product_profile(app, _product_profile_payload())
+            stored_profile = record_store.read_product_profile_record("sellyouroutboard")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"]["product_profile"], "sellyouroutboard")
+        self.assertEqual(stored_profile.driver_id, "generic-web")
 
 
 class FastApiProductContextCutoverAuditReadTests(unittest.IsolatedAsyncioTestCase):
@@ -14056,6 +14296,25 @@ def _product_profile_read_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     )
 
 
+def _product_profile_write_policy(*, product: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": [product],
+                    "contexts": ["launchplane"],
+                    "actions": ["product_profile.write"],
+                }
+            ]
+        }
+    )
+
+
 def _local_operator_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -15045,6 +15304,28 @@ async def _get_product_profile(
     )
 
 
+async def _post_product_profile(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
 async def _get_context_cutover_audit(
     app: FastAPI,
     *,
@@ -15360,11 +15641,14 @@ async def _asgi_request(
     *,
     headers: dict[str, str] | None = None,
     payload: dict[str, object] | None = None,
+    raw_body: bytes | None = None,
 ) -> _AsgiResponse:
     request_path, separator, raw_query_string = path.partition("?")
     request_headers_dict = dict(headers or {})
     body = b""
-    if payload is not None:
+    if raw_body is not None:
+        body = raw_body
+    elif payload is not None:
         body = json.dumps(payload).encode("utf-8")
         request_headers_dict.setdefault("Content-Type", "application/json")
     request_headers_dict.setdefault("Content-Length", str(len(body)))
@@ -15630,6 +15914,44 @@ class _PublicIngressMonitorIdempotencyReplayStore:
                 "trace_id": "launchplane_req_original",
                 "records": {},
                 "result": {"target_count": 1},
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        raise AssertionError("idempotent replay must not write a new record")
+
+
+class _ProductProfileReplayOnlyStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if route_path != "/v1/product-profiles" or idempotency_key != self._idempotency_key:
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {"product_profile": "sellyouroutboard"},
             },
         )
 

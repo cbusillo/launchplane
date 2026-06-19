@@ -3610,7 +3610,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
         "/v1/previews/lifecycle-sweep",
-        "/v1/product-profiles",
         "/v1/drivers/launchplane/self-deploy",
     }
     return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
@@ -11491,55 +11490,6 @@ def create_launchplane_service_app(
                         },
                     )
                 result = {"product_profile": legacy_cleanup_request.product}
-            elif path == "/v1/product-profiles":
-                product_profile_request = LaunchplaneProductProfileRecord.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="product_profile.write",
-                    product=product_profile_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write the requested product profile.",
-                            },
-                        },
-                    )
-                try:
-                    product_profile_request.validate_write_contract()
-                except ValueError as error:
-                    message = str(error).strip() or "Product profile request failed validation."
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_request",
-                                "message": message,
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                record_store.write_product_profile_record(product_profile_request)
-                result = {"product_profile": product_profile_request.product}
             elif path == "/v1/previews/lifecycle-plan":
                 preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
                     payload
