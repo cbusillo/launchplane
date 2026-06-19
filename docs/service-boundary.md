@@ -203,7 +203,10 @@ VeriReel product paths:
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
   - `POST /v1/every-code/github-webhook`
-  - `POST /v1/every-code/work-requests/create`
+  - `POST /v1/every-code/work-requests/create` (native FastAPI for
+    bearer-token callers, `every_code_work_request.write` authorization on
+    `launchplane`/`launchplane`, record-store write capability checks, and
+    optional `Idempotency-Key` replay/conflict handling)
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
