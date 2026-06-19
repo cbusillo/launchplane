@@ -103,7 +103,10 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
+from control_plane.work_graph_issue_inbox import (
+    GitHubIssueInboxReadModel,
+    GitHubIssueInboxReconcileResult,
+)
 from control_plane.workflows.launchplane_self_deploy import LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorResult,
@@ -3320,6 +3323,176 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
+    async def test_work_graph_issue_inbox_reconcile_dry_run_returns_missing_items(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(products=("launchplane",)),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_reconcile_provider=lambda request: (
+                GitHubIssueInboxReconcileResult.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "mode": request.mode,
+                        "repository_count": 1,
+                        "issue_count": 1,
+                        "would_add_count": 1,
+                        "items": [
+                            {
+                                "key": "cbusillo/launchplane#698",
+                                "repository": "cbusillo/launchplane",
+                                "number": 698,
+                                "title": "Reconcile missing GitHub issues into Code Plans",
+                                "url": "https://github.com/cbusillo/launchplane/issues/698",
+                                "action": "would_add",
+                            }
+                        ],
+                    }
+                )
+            ),
+        )
+
+        response = await _post_work_graph_issue_inbox_reconcile(
+            app,
+            payload={"mode": "dry_run"},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        reconcile = payload["result"]["reconcile"]
+        self.assertEqual(reconcile["mode"], "dry_run")
+        self.assertEqual(reconcile["would_add_count"], 1)
+        self.assertEqual(reconcile["items"][0]["action"], "would_add")
+
+    async def test_work_graph_issue_inbox_reconcile_apply_requires_reconcile_action(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(products=("launchplane",)),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_reconcile_provider=lambda request: (
+                GitHubIssueInboxReconcileResult.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "mode": request.mode,
+                        "repository_count": 0,
+                        "issue_count": 0,
+                    }
+                )
+            ),
+        )
+
+        response = await _post_work_graph_issue_inbox_reconcile(
+            app,
+            payload={"mode": "apply"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_work_graph_issue_inbox_reconcile_apply_returns_counts(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.issue_inbox.reconcile"],
+                    }
+                ]
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=policy,
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_reconcile_provider=lambda request: (
+                GitHubIssueInboxReconcileResult.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "mode": request.mode,
+                        "repository_count": 1,
+                        "issue_count": 1,
+                        "added_count": 1,
+                        "items": [
+                            {
+                                "key": "cbusillo/launchplane#698",
+                                "repository": "cbusillo/launchplane",
+                                "number": 698,
+                                "url": "https://github.com/cbusillo/launchplane/issues/698",
+                                "action": "added",
+                            }
+                        ],
+                    }
+                )
+            ),
+        )
+
+        response = await _post_work_graph_issue_inbox_reconcile(
+            app,
+            payload={"mode": "apply"},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        reconcile = response.json()["result"]["reconcile"]
+        self.assertEqual(reconcile["added_count"], 1)
+        self.assertEqual(reconcile["items"][0]["action"], "added")
+
+    async def test_work_graph_issue_inbox_reconcile_returns_invalid_request_without_provider(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(products=("launchplane",)),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_work_graph_issue_inbox_reconcile(
+            app,
+            payload={"mode": "dry_run"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_terminal_agent_cannot_reconcile_work_graph_issue_inbox(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_terminal_agent_work_graph_rank_policy(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-read-token",
+                terminal_agent_subject="local-owner-agent",
+                terminal_agent_token_label="local-owner-read",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            work_graph_issue_inbox_reconcile_provider=lambda request: (
+                GitHubIssueInboxReconcileResult.model_validate(
+                    {
+                        "generated_at": "2026-05-21T12:00:00Z",
+                        "mode": request.mode,
+                        "repository_count": 0,
+                        "issue_count": 0,
+                    }
+                )
+            ),
+        )
+
+        response = await _post_work_graph_issue_inbox_reconcile(
+            app,
+            payload={"mode": "dry_run"},
+            authorization="Bearer terminal-read-token",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
     async def test_agent_context_reads_require_identity(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -3339,6 +3512,11 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 authorization="",
             ),
             await _get_work_graph_issue_inbox(app, authorization=""),
+            await _post_work_graph_issue_inbox_reconcile(
+                app,
+                payload={"mode": "dry_run"},
+                authorization="",
+            ),
         ]
 
         for response in responses:
@@ -3488,6 +3666,20 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         for status_code in ("400", "401", "403"):
             self.assertIn(
                 "LaunchplaneErrorResponse", json.dumps(rank_route["responses"][status_code])
+            )
+        reconcile_route = openapi["paths"]["/v1/work-graph/github/issues/reconcile"]["post"]
+        self.assertEqual(
+            reconcile_route["operationId"],
+            "reconcile_work_graph_issue_inbox",
+        )
+        self.assertEqual(
+            reconcile_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403"):
+            self.assertIn(
+                "LaunchplaneErrorResponse",
+                json.dumps(reconcile_route["responses"][status_code]),
             )
 
     async def test_fastapi_agent_context_reads_precede_legacy_wsgi_fallback(self) -> None:
@@ -15440,6 +15632,22 @@ async def _get_work_graph_issue_inbox(
 ) -> _AsgiResponse:
     headers = {"Authorization": authorization} if authorization else {}
     return await _asgi_get(app, "/v1/work-graph/github/issues", headers=headers)
+
+
+async def _post_work_graph_issue_inbox_reconcile(
+    app: FastAPI,
+    *,
+    payload: dict[str, object],
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/github/issues/reconcile",
+        headers=headers,
+        payload=payload,
+    )
 
 
 async def _get_every_code_summary(

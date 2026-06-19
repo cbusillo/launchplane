@@ -224,6 +224,7 @@ VeriReel product paths:
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
   - `POST /v1/work-graph/rank` (native FastAPI)
+  - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once`
   - `POST /v1/work-graph/merge-train/pr-feedback`
   - `POST /v1/work-graph/merge-train/controller/run-once`
@@ -439,6 +440,13 @@ Actions OIDC and GitHub human-session callers, rejects owner-agent bearer tokens
 at the identity boundary even if a policy grant is too broad, performs no
 storage writes, and does not make Launchplane authoritative for copied GitHub or
 Code Plans state.
+
+`POST /v1/work-graph/github/issues/reconcile` reconciles the configured GitHub
+issue inbox into Code Plans Project state. `dry_run` mode requires
+`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. The
+route uses the native FastAPI write identity boundary for GitHub Actions OIDC
+and trusted owner-agent write credentials, then returns reconcile evidence under
+`result.reconcile`.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
