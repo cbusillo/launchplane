@@ -45,19 +45,9 @@ from control_plane.contracts.agent_write_intent import (
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
     close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
-)
-from control_plane.contracts.every_code_notifications import (
-    EveryCodeNotificationAttemptRecord,
-    EveryCodeNotificationDeliveryStatus,
-    EveryCodeNotificationDestination,
-    EveryCodeNotificationEvent,
-    EveryCodeNotificationPolicyRecord,
-    build_every_code_notification_attempt_id,
 )
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
@@ -1740,33 +1730,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("Launchplane self deploy requires product 'launchplane'.")
         return self
-
-
-class EveryCodeWorkRequestClaimEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-
-    @model_validator(mode="after")
-    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request claim requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code work request claim requires host")
-        return self
-
-
-class EveryCodeWorkRequestStatusEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-    state: Literal["running", "done", "blocked"]
-    result_pr_url: str = ""
-    result_summary: str = ""
-    error_message: str = ""
-    updated_at: str = ""
 
 
 class EveryCodeWorkRequestRerunEnvelope(BaseModel):
@@ -3528,9 +3491,7 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
-        "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
-        "/v1/every-code/work-requests/status",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -3704,33 +3665,6 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
-class _EveryCodeNotificationStore(Protocol):
-    def write_every_code_notification_policy_record(
-        self, record: EveryCodeNotificationPolicyRecord
-    ) -> object: ...
-
-    def list_every_code_notification_policy_records(
-        self,
-        *,
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]: ...
-
-    def write_every_code_notification_attempt_record(
-        self, record: EveryCodeNotificationAttemptRecord
-    ) -> object: ...
-
-    def list_every_code_notification_attempt_records(
-        self,
-        *,
-        request_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
-
-
 class _PreviewPrFeedbackNotificationStore(Protocol):
     def write_preview_pr_feedback_notification_policy_record(
         self, record: PreviewPrFeedbackNotificationPolicyRecord
@@ -3791,18 +3725,6 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
-
-
-def _every_code_notification_store(record_store: object) -> _EveryCodeNotificationStore | None:
-    required_methods = (
-        "write_every_code_notification_policy_record",
-        "list_every_code_notification_policy_records",
-        "write_every_code_notification_attempt_record",
-        "list_every_code_notification_attempt_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_EveryCodeNotificationStore, record_store)
-    return None
 
 
 def _preview_pr_feedback_notification_store(
@@ -6300,240 +6222,6 @@ def _launchplane_managed_secret_resolver(
     return resolve
 
 
-def _deliver_every_code_blocked_notifications(
-    *,
-    record_store: object,
-    request: EveryCodeWorkRequestRecord,
-    attempted_at: str,
-    discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
-) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
-    notification_store = _every_code_notification_store(record_store)
-    secret_store = _secret_capable_store(record_store)
-    if notification_store is None or secret_store is None:
-        return ()
-    policies = tuple(
-        policy
-        for policy in notification_store.list_every_code_notification_policy_records(
-            repository=request.repository,
-            status="enabled",
-            limit=None,
-        )
-        if policy.matches(request)
-    )
-    if not policies:
-        return ()
-    secret_resolver = _launchplane_managed_secret_resolver(
-        record_store=secret_store,
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-        instance_name="every-code",
-    )
-    attempts: list[EveryCodeNotificationAttemptRecord] = []
-    for policy in policies:
-        for destination in policy.destinations:
-            if destination.status != "enabled":
-                attempt = _write_every_code_notification_attempt(
-                    notification_store=notification_store,
-                    request=request,
-                    event="work_request_blocked",
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                    delivery_status="skipped",
-                    action="destination_disabled",
-                )
-                attempts.append(attempt)
-                continue
-            if destination.kind == "discord":
-                attempt = _deliver_every_code_discord_notification(
-                    notification_store=notification_store,
-                    secret_resolver=secret_resolver,
-                    discord_sender=discord_sender,
-                    request=request,
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                )
-                attempts.append(attempt)
-    return tuple(attempts)
-
-
-def _deliver_every_code_discord_notification(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    secret_resolver: Callable[[str], str],
-    discord_sender: Callable[[str, dict[str, object]], object],
-    request: EveryCodeWorkRequestRecord,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-    attempted_at: str,
-) -> EveryCodeNotificationAttemptRecord:
-    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
-    if not webhook_url:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="missing_discord_webhook",
-            error_message="Discord webhook secret could not be resolved.",
-        )
-    public_url_error = public_discord_url_error(webhook_url)
-    if public_url_error:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="invalid_discord_webhook",
-            error_message=f"Discord webhook URL is not public: {public_url_error}",
-        )
-    existing_attempt = _existing_every_code_notification_attempt(
-        notification_store=notification_store,
-        request=request,
-        event="work_request_blocked",
-        policy=policy,
-        destination=destination,
-    )
-    if existing_attempt is not None and existing_attempt.delivery_status in {
-        "pending",
-        "delivered",
-    }:
-        return existing_attempt
-    pending_attempt = _write_every_code_notification_attempt(
-        notification_store=notification_store,
-        request=request,
-        event="work_request_blocked",
-        policy=policy,
-        destination=destination,
-        attempted_at=attempted_at,
-        delivery_status="pending",
-        action="dispatching_discord",
-    )
-    try:
-        discord_sender(webhook_url, _every_code_blocked_discord_payload(request))
-    except Exception as error:  # noqa: BLE001 - delivery attempt records preserve failure detail.
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="discord_webhook_failed",
-            error_message=str(error) or error.__class__.__name__,
-        )
-    try:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="delivered",
-            action="posted_discord",
-        )
-    except Exception:  # noqa: BLE001 - the pending attempt preserves dispatch evidence.
-        return pending_attempt
-
-
-def _existing_every_code_notification_attempt(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    request: EveryCodeWorkRequestRecord,
-    event: EveryCodeNotificationEvent,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-) -> EveryCodeNotificationAttemptRecord | None:
-    attempt_id = build_every_code_notification_attempt_id(
-        request_id=request.request_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-        lifecycle_key=_every_code_notification_lifecycle_key(request),
-    )
-    return next(
-        (
-            attempt
-            for attempt in notification_store.list_every_code_notification_attempt_records(
-                request_id=request.request_id,
-                event=event,
-                limit=None,
-            )
-            if attempt.attempt_id == attempt_id
-        ),
-        None,
-    )
-
-
-def _write_every_code_notification_attempt(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    request: EveryCodeWorkRequestRecord,
-    event: EveryCodeNotificationEvent,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-    attempted_at: str,
-    delivery_status: EveryCodeNotificationDeliveryStatus,
-    action: str,
-    error_message: str = "",
-) -> EveryCodeNotificationAttemptRecord:
-    attempt = EveryCodeNotificationAttemptRecord(
-        attempt_id=build_every_code_notification_attempt_id(
-            request_id=request.request_id,
-            event=event,
-            policy_id=policy.policy_id,
-            destination_id=destination.destination_id,
-            lifecycle_key=_every_code_notification_lifecycle_key(request),
-        ),
-        request_id=request.request_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-        destination_kind=destination.kind,
-        delivery_status=delivery_status,
-        attempted_at=attempted_at,
-        action=action,
-        error_message=_bounded_text(error_message, max_length=500),
-    )
-    notification_store.write_every_code_notification_attempt_record(attempt)
-    return attempt
-
-
-def _every_code_notification_lifecycle_key(request: EveryCodeWorkRequestRecord) -> str:
-    return request.lifecycle_id
-
-
-def _every_code_blocked_discord_payload(
-    request: EveryCodeWorkRequestRecord,
-) -> dict[str, object]:
-    fields = [
-        {"name": "Repository", "value": request.repository, "inline": True},
-        {"name": "Issue", "value": str(request.issue_number), "inline": True},
-        {"name": "Host", "value": request.claimed_by_host, "inline": True},
-        {"name": "Request", "value": request.request_id, "inline": False},
-    ]
-    if request.issue_url:
-        fields.append({"name": "Issue URL", "value": request.issue_url, "inline": False})
-    return {
-        "embeds": [
-            {
-                "title": "Every Code work request blocked",
-                "description": _bounded_text(request.error_message, max_length=1500),
-                "color": 0xC62828,
-                "fields": fields,
-            }
-        ]
-    }
-
-
 def _bounded_text(value: str, *, max_length: int) -> str:
     normalized_value = " ".join(value.strip().split())
     if len(normalized_value) <= max_length:
@@ -6759,9 +6447,7 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
     return method == "POST" and path in {
-        "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
-        "/v1/every-code/work-requests/status",
     }
 
 
@@ -6788,38 +6474,8 @@ def _handle_every_code_worker_write(
     path: str,
     payload: dict[str, object],
     idempotency_key: str = "",
-    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/work-requests/claim":
-        claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
-        claimed_record = every_code_store.claim_every_code_work_request_record(
-            request_id=claim_request.request_id.strip(),
-            host=claim_request.host.strip(),
-            claimed_at=_utc_now_timestamp(),
-        )
-        if claimed_record is None:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "work_request_already_claimed",
-                        "message": "Every Code work request is not queued for claim.",
-                    },
-                },
-            )
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={"request_id": claimed_record.request_id, "state": claimed_record.state},
-                driver_result={"request": claimed_record.model_dump(mode="json")},
-            ),
-        )
     if path == "/v1/every-code/work-requests/rerun":
         rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
         rerun_checked_at = datetime.now(timezone.utc)
@@ -6880,47 +6536,17 @@ def _handle_every_code_worker_write(
                 driver_result={"request": requeued_record.model_dump(mode="json")},
             ),
         )
-    work_request_status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
-    existing_work_request_record = every_code_store.read_every_code_work_request_record(
-        work_request_status_request.request_id.strip()
-    )
-    updated_work_request_record = apply_every_code_work_request_status(
-        existing_work_request_record,
-        EveryCodeWorkRequestStatusUpdate(
-            state=work_request_status_request.state,
-            host=work_request_status_request.host,
-            updated_at=work_request_status_request.updated_at.strip() or _utc_now_timestamp(),
-            result_pr_url=work_request_status_request.result_pr_url,
-            result_summary=work_request_status_request.result_summary,
-            error_message=work_request_status_request.error_message,
-        ),
-    )
-    every_code_store.write_every_code_work_request_record(updated_work_request_record)
-    notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
-    if updated_work_request_record.state == "blocked":
-        notification_attempts = _deliver_every_code_blocked_notifications(
-            record_store=record_store,
-            request=updated_work_request_record,
-            attempted_at=_utc_now_timestamp(),
-            discord_sender=every_code_discord_sender,
-        )
     return _json_response(
         start_response=start_response,
-        status_code=202,
-        payload=_accepted_payload(
-            trace_id=trace_id,
-            result={
-                "request_id": updated_work_request_record.request_id,
-                "state": updated_work_request_record.state,
+        status_code=404,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "not_found",
+                "message": "Launchplane route was not found.",
             },
-            driver_result={
-                "request": updated_work_request_record.model_dump(mode="json"),
-                "notifications": [
-                    notification_attempt.model_dump(mode="json")
-                    for notification_attempt in notification_attempts
-                ],
-            },
-        ),
+        },
     )
 
 
@@ -7903,7 +7529,6 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
@@ -8203,7 +7828,6 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=_idempotency_key(environ),
-                    every_code_discord_sender=every_code_discord_sender,
                 )
             except ValueError as error:
                 return _json_response(
@@ -9682,45 +9306,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/every-code/work-requests/claim":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.claim",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot claim Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
             elif path == "/v1/every-code/work-requests/rerun":
                 if not authz_policy.allows(
                     identity=identity,
@@ -9758,46 +9343,6 @@ def create_launchplane_service_app(
                     path=path,
                     payload=payload,
                     idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
-            elif path == "/v1/every-code/work-requests/status":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.update",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot update Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
                 )
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
