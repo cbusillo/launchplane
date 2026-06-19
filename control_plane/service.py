@@ -21,7 +21,6 @@ from starlette.types import ASGIApp
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
-from control_plane import service_status as control_plane_service_status
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
@@ -427,10 +426,6 @@ from control_plane.workflows.odoo_prod_rollback import (
 from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementStore,
     build_odoo_stable_target_replacement_plan,
-)
-from control_plane.workflows.odoo_stable_operation_worker import (
-    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
-    reconcile_stale_odoo_stable_operation_records,
 )
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
@@ -3590,7 +3585,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/preview-gates",
         "/v1/work-graph/github/issues/reconcile",
         "/v1/work-graph/rank",
-        "/v1/service/odoo-workers/reconcile",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -8448,86 +8442,6 @@ def create_launchplane_service_app(
                                 "Terminal agent credentials can only read redacted "
                                 "Launchplane context."
                             ),
-                        },
-                    },
-                )
-            if path == "/v1/service/odoo-workers/reconcile":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="launchplane_service.reconcile_odoo_workers",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot reconcile Launchplane Odoo workers.",
-                            },
-                        },
-                    )
-                try:
-                    max_attempts = _query_int_value(
-                        query,
-                        "max_attempts",
-                        default=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
-                        minimum=1,
-                        maximum=100,
-                    )
-                    assert max_attempts is not None
-                    odoo_worker_reconcile_result = reconcile_stale_odoo_stable_operation_records(
-                        record_store=control_plane_service_status.require_odoo_stable_operation_worker_store(
-                            record_store
-                        ),
-                        max_attempts=max_attempts,
-                    )
-                except click.ClickException as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "operation_record_storage_required",
-                                "message": str(error),
-                            },
-                        },
-                    )
-                except ValueError as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_query",
-                                "message": str(error),
-                            },
-                        },
-                    )
-                reconciled_bootstrap_ids = list(
-                    odoo_worker_reconcile_result.reconciled_bootstrap_ids
-                )
-                reconciled_replacement_ids = list(
-                    odoo_worker_reconcile_result.reconciled_replacement_ids
-                )
-                return _json_response(
-                    start_response=start_response,
-                    status_code=200,
-                    payload={
-                        "status": "ok",
-                        "trace_id": request_trace_id,
-                        "reconcile_result": {
-                            "reconciled_bootstrap_ids": reconciled_bootstrap_ids,
-                            "reconciled_replacement_ids": reconciled_replacement_ids,
-                            "reconciled_count": len(reconciled_bootstrap_ids)
-                            + len(reconciled_replacement_ids),
                         },
                     },
                 )

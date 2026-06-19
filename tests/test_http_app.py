@@ -272,6 +272,153 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(worker_status["operations"][0]["operation_id"], "bootstrap-cm-testing")
         self.assertNotIn("request", worker_status["operations"][0])
 
+    async def test_worker_reconcile_recovers_stale_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _stale_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_local_operator_launchplane_service_reconcile_policy(),
+                record_store_factory=lambda: record_store,
+                bearer_identity_config=_local_operator_bearer_config(
+                    token_label="local-owner-write"
+                ),
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/service/odoo-workers/reconcile",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={},
+            )
+            operation = record_store.read_odoo_stable_bootstrap_operation_record(
+                "bootstrap-cm-testing"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
+        self.assertEqual(
+            payload["reconcile_result"],
+            {
+                "reconciled_bootstrap_ids": ["bootstrap-cm-testing"],
+                "reconciled_replacement_ids": [],
+                "reconciled_count": 1,
+            },
+        )
+        self.assertEqual(operation.status, "pending")
+        self.assertEqual(operation.lease_owner, "")
+
+    async def test_worker_reconcile_accepts_github_actions_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            record_store.write_odoo_stable_bootstrap_operation_record(
+                _stale_odoo_stable_bootstrap_record()
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_github_actions_launchplane_service_reconcile_policy(),
+                record_store_factory=lambda: record_store,
+            )
+
+            response = await _asgi_request(
+                app,
+                "POST",
+                "/v1/service/odoo-workers/reconcile",
+                headers={"Authorization": "Bearer valid-token"},
+                payload={},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["reconcile_result"]["reconciled_bootstrap_ids"],
+            ["bootstrap-cm-testing"],
+        )
+
+    async def test_worker_reconcile_requires_reconcile_authz(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/odoo-workers/reconcile",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_worker_reconcile_rejects_terminal_agent_mutation(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_terminal_agent_launchplane_service_reconcile_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="local-owner-agent",
+                terminal_agent_token_label="local-owner-read",
+            ),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/odoo-workers/reconcile",
+            headers={"Authorization": "Bearer terminal-agent-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_worker_reconcile_validates_max_attempts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_reconcile_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/odoo-workers/reconcile?max_attempts=0",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    async def test_worker_reconcile_requires_operation_record_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_launchplane_service_reconcile_policy(),
+            record_store_factory=lambda: _EmptyStore(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/odoo-workers/reconcile",
+            headers={"Authorization": "Bearer local-operator-token"},
+            payload={},
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "operation_record_storage_required")
+
     async def test_worker_status_requires_service_read_authz(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -299,11 +446,19 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
 
         runtime_response = await _asgi_get(app, "/v1/service/runtime")
         worker_response = await _asgi_get(app, "/v1/service/odoo-workers/status")
+        reconcile_response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/service/odoo-workers/reconcile",
+            payload={},
+        )
 
         self.assertEqual(runtime_response.status_code, 401)
         self.assertEqual(worker_response.status_code, 401)
+        self.assertEqual(reconcile_response.status_code, 401)
         self.assertEqual(runtime_response.json()["error"]["code"], "authentication_required")
         self.assertEqual(worker_response.json()["error"]["code"], "authentication_required")
+        self.assertEqual(reconcile_response.json()["error"]["code"], "authentication_required")
 
     async def test_runtime_rejects_human_session_without_service_read_authz(self) -> None:
         oauth_config = _github_oauth_config()
@@ -388,6 +543,7 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         openapi = response.json()
         runtime_route = openapi["paths"]["/v1/service/runtime"]["get"]
         worker_route = openapi["paths"]["/v1/service/odoo-workers/status"]["get"]
+        reconcile_route = openapi["paths"]["/v1/service/odoo-workers/reconcile"]["post"]
         self.assertEqual(runtime_route["operationId"], "read_launchplane_runtime")
         self.assertEqual(
             runtime_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
@@ -402,6 +558,14 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             "#/components/schemas/OdooStableOperationWorkerStatusResponse",
         )
         self.assertEqual(
+            reconcile_route["operationId"],
+            "reconcile_odoo_stable_operation_workers",
+        )
+        self.assertEqual(
+            reconcile_route["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/OdooStableOperationWorkerReconcileResponse",
+        )
+        self.assertEqual(
             openapi["components"]["schemas"]["LaunchplaneRuntimeResponse"]["additionalProperties"],
             False,
         )
@@ -411,8 +575,15 @@ class FastApiServiceRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             ],
             False,
         )
+        self.assertEqual(
+            openapi["components"]["schemas"]["OdooStableOperationWorkerReconcileResponse"][
+                "additionalProperties"
+            ],
+            False,
+        )
         self.assertTrue(set(runtime_route["responses"]) >= {"200", "401", "403"})
         self.assertTrue(set(worker_route["responses"]) >= {"200", "400", "401", "403", "503"})
+        self.assertTrue(set(reconcile_route["responses"]) >= {"200", "400", "401", "403", "503"})
 
     async def test_fastapi_service_runtime_precedes_legacy_wsgi_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14695,6 +14866,41 @@ def _local_operator_launchplane_service_read_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _local_operator_launchplane_service_reconcile_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-write"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service.reconcile_odoo_workers"],
+                }
+            ]
+        }
+    )
+
+
+def _github_actions_launchplane_service_reconcile_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service.reconcile_odoo_workers"],
+                }
+            ]
+        }
+    )
+
+
 def _pending_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecord:
     return OdooStableBootstrapOperationRecord.model_validate(
         {
@@ -14715,6 +14921,35 @@ def _pending_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecor
             "phase": "created",
             "created_at": "2026-05-17T00:00:00Z",
             "updated_at": "2026-05-17T00:00:00Z",
+        }
+    )
+
+
+def _stale_odoo_stable_bootstrap_record() -> OdooStableBootstrapOperationRecord:
+    return OdooStableBootstrapOperationRecord.model_validate(
+        {
+            "operation_id": "bootstrap-cm-testing",
+            "product": "odoo-tenant-cm",
+            "context": "cm",
+            "instance": "testing",
+            "idempotency_key": "bootstrap-cm-testing",
+            "request_fingerprint": "fingerprint-123",
+            "request": {
+                "schema_version": 1,
+                "product": "odoo-tenant-cm",
+                "context": "cm",
+                "instance": "testing",
+                "confirmation": "bootstrap cm testing",
+            },
+            "status": "running",
+            "phase": "created",
+            "created_at": "2026-05-17T00:00:00Z",
+            "updated_at": "2026-05-17T00:01:00Z",
+            "started_at": "2026-05-17T00:01:00Z",
+            "lease_owner": "old-worker",
+            "lease_expires_at": "2000-01-01T00:00:00Z",
+            "heartbeat_at": "2000-01-01T00:00:00Z",
+            "attempt": 1,
         }
     )
 
@@ -14837,6 +15072,22 @@ def _terminal_agent_launchplane_read_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _terminal_agent_launchplane_service_reconcile_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["launchplane_service.reconcile_odoo_workers"],
+                }
+            ]
+        }
+    )
+
+
 def _local_operator_artifact_protection_policy(
     *,
     products: tuple[str, ...] = ("*",),
@@ -14899,11 +15150,11 @@ def _github_human_identity(*, role: Literal["read_only", "admin"] = "admin") -> 
     )
 
 
-def _local_operator_bearer_config() -> BearerIdentityConfig:
+def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> BearerIdentityConfig:
     return BearerIdentityConfig(
         local_operator_token="local-operator-token",
         local_operator_subject="local-owner-agent",
-        local_operator_token_label="local-owner-read",
+        local_operator_token_label=token_label,
     )
 
 
