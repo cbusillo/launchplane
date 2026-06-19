@@ -138,6 +138,7 @@ from tests.test_service import (
     _seed_tracked_target_records,
     _sqlite_database_url,
     _write_runtime_key_safety_policy,
+    _work_graph_snapshot_payload,
 )
 from tests.test_service import _StubVerifier
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
@@ -3102,6 +3103,128 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
+    async def test_work_graph_rank_returns_ranked_queue(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_work_graph_rank(
+            app,
+            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"], {})
+        queue = payload["result"]["queue"]
+        self.assertEqual(len(queue["items"]), 1)
+        self.assertEqual(queue["hidden_count"], 1)
+        self.assertEqual(queue["items"][0]["number"], 190)
+        self.assertEqual(queue["items"][0]["recommendation"], "deep_work")
+
+    async def test_work_graph_rank_rejects_unauthorized_identity(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_work_graph_rank(
+            app,
+            payload={"snapshot": _work_graph_snapshot_payload()},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_work_graph_rank_rejects_owner_agent_bearer_identities(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "terminal_agent",
+                _terminal_agent_work_graph_rank_policy(),
+                BearerIdentityConfig(
+                    terminal_agent_token="terminal-read-token",
+                    terminal_agent_subject="local-owner-agent",
+                    terminal_agent_token_label="local-owner-read",
+                ),
+                "terminal-read-token",
+            ),
+            (
+                "local_operator",
+                _local_operator_work_graph_rank_policy(),
+                _local_operator_bearer_config(),
+                "local-operator-token",
+            ),
+            (
+                "local_admin",
+                _local_admin_work_graph_rank_policy(),
+                BearerIdentityConfig(
+                    local_admin_token="local-admin-token",
+                    local_admin_subject="local-owner-agent",
+                    local_admin_token_label="local-owner-admin",
+                ),
+                "local-admin-token",
+            ),
+        )
+        for label, policy, bearer_config, token in cases:
+            with self.subTest(identity=label):
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=policy,
+                    bearer_identity_config=bearer_config,
+                    record_store_factory=lambda: _MissingProductReadStore(),
+                )
+
+                response = await _post_work_graph_rank(
+                    app,
+                    payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+                    authorization=f"Bearer {token}",
+                )
+
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_work_graph_rank_rejects_unclassified_issue(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_work_graph_read_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        snapshot = _work_graph_snapshot_payload()
+        snapshot["repos"] = []
+
+        response = await _post_work_graph_rank(app, payload={"snapshot": snapshot})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_human_session_can_rank_work_graph_snapshot(self) -> None:
+        oauth_config = _github_oauth_config()
+        session_store = InMemoryHumanSessionStore()
+        session_manager = HumanSessionManager(config=oauth_config, session_store=session_store)
+        human_session = session_manager.issue(_github_human_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_github_human_work_graph_rank_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            human_session_manager=session_manager,
+        )
+
+        response = await _post_work_graph_rank(
+            app,
+            payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            authorization="",
+            headers={"Cookie": session_manager.session_cookie_header(human_session)},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["queue"]["items"][0]["number"], 190)
+
     async def test_work_graph_issue_inbox_returns_provider_payload(self) -> None:
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
@@ -3210,6 +3333,11 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
             await _get_repo_product_mapping(app, authorization=""),
             await _get_agent_context(app, authorization=""),
             await _get_work_graph_snapshot(app, authorization=""),
+            await _post_work_graph_rank(
+                app,
+                payload={"snapshot": _work_graph_snapshot_payload()},
+                authorization="",
+            ),
             await _get_work_graph_issue_inbox(app, authorization=""),
         ]
 
@@ -3350,6 +3478,16 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertFalse(
                 openapi["components"]["schemas"][response_model_name]["additionalProperties"]
+            )
+        rank_route = openapi["paths"]["/v1/work-graph/rank"]["post"]
+        self.assertEqual(rank_route["operationId"], "rank_work_graph_snapshot")
+        self.assertEqual(
+            rank_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403"):
+            self.assertIn(
+                "LaunchplaneErrorResponse", json.dumps(rank_route["responses"][status_code])
             )
 
     async def test_fastapi_agent_context_reads_precede_legacy_wsgi_fallback(self) -> None:
@@ -13206,6 +13344,70 @@ def _work_graph_read_policy(
     )
 
 
+def _github_human_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": ["admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["work_graph.rank"],
+                }
+            ]
+        }
+    )
+
+
+def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "terminal_agents": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["work_graph.rank"],
+                }
+            ]
+        }
+    )
+
+
+def _local_operator_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-read"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["work_graph.rank"],
+                }
+            ]
+        }
+    )
+
+
+def _local_admin_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "local_admins": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-admin"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["work_graph.rank"],
+                }
+            ]
+        }
+    )
+
+
 def _driver_read_policy(*, context: str = "launchplane") -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -15210,6 +15412,25 @@ async def _get_work_graph_snapshot(
 ) -> _AsgiResponse:
     headers = {"Authorization": authorization} if authorization else {}
     return await _asgi_get(app, "/v1/work-graph/snapshot", headers=headers)
+
+
+async def _post_work_graph_rank(
+    app: FastAPI,
+    *,
+    payload: dict[str, object],
+    authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/work-graph/rank",
+        headers=request_headers,
+        payload=payload,
+    )
 
 
 async def _get_work_graph_issue_inbox(
