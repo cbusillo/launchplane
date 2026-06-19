@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
-from typing import Annotated, Literal, Protocol, cast
+from typing import Annotated, Any, Literal, Protocol, cast
 from uuid import uuid4
 import click
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request, Response
@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from jwt import InvalidTokenError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from control_plane import authz_grant_service as control_plane_authz_grant_service
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
@@ -276,10 +277,25 @@ _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-conte
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _MERGE_TRAIN_POLICY_IMPORT_ROUTE = "/v1/merge-train/policies/import"
+_AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE = "/v1/authz-policies/github-actions/grants"
+_AUTHZ_POLICY_GITHUB_ACTIONS_REMOVALS_ROUTE = "/v1/authz-policies/github-actions/removals"
+_AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE = "/v1/authz-policies/github-humans/grants"
+_AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE = "/v1/authz-policies/terminal-agents/grants"
+_AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE = "/v1/authz-policies/local-operators/grants"
+_AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grants"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
+
+AuthzPolicyRouteEnvelope = (
+    control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope
+    | control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope
+    | control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope
+    | control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope
+    | control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope
+    | control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope
+)
 
 
 class RepoProductMappingReadStore(Protocol):
@@ -2655,6 +2671,10 @@ def resolve_launchplane_authz_policy(
     )
 
 
+def authz_policy_record_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def create_launchplane_fastapi_app(
     *,
     verifier: TokenVerifier,
@@ -2672,9 +2692,6 @@ def create_launchplane_fastapi_app(
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> FastAPI:
-    resolved_authz_policy_runtime = authz_policy_runtime or LaunchplaneAuthzPolicyRuntime(
-        authz_policy
-    )
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
     )
@@ -2683,6 +2700,22 @@ def create_launchplane_fastapi_app(
         if record_store_factory is not None
         else build_shared_record_store(database_url=database_url)
     )
+    if authz_policy_runtime is not None:
+        resolved_authz_policy_runtime = authz_policy_runtime
+    elif shared_record_store is not None:
+        resolved_authz_policy = resolve_launchplane_authz_policy(
+            record_store=shared_record_store,
+            bootstrap_policy=authz_policy,
+            policy_source="bootstrap-policy",
+            now_timestamp=authz_policy_record_timestamp(),
+        )
+        resolved_authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(
+            resolved_authz_policy.policy,
+            policy_sha256=resolved_authz_policy.policy_sha256,
+            source=resolved_authz_policy.source,
+        )
+    else:
+        resolved_authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(authz_policy)
     resolved_ingress_provider_factory = ingress_provider_factory
     if resolved_ingress_provider_factory is None:
         if npmplus_ingress_client_factory is not None:
@@ -6865,6 +6898,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_authz_policy_database_store(
+        *, record_store: object, trace_id: str, message: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=message,
+            )
+        return record_store
+
     def require_live_target_runtime_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -7404,6 +7449,246 @@ def create_launchplane_fastapi_app(
                 response=policy_import_response,
             )
         return policy_import_response
+
+    def authz_policy_route_records(result: dict[str, object]) -> dict[str, str]:
+        record_id = result.get("authz_policy_record_id")
+        if record_id is None:
+            return {}
+        return {"authz_policy_record_id": str(record_id)}
+
+    def validate_authz_policy_route_payload(
+        *,
+        raw_payload: object,
+        envelope_model: type[BaseModel],
+        trace_id: str,
+    ) -> AuthzPolicyRouteEnvelope:
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            return cast(
+                AuthzPolicyRouteEnvelope,
+                envelope_model.model_validate(raw_payload),
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+
+    async def apply_authz_policy_route(
+        *,
+        request: Request,
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        idempotency_key: str,
+        route_path: str,
+        envelope_model: type[BaseModel],
+        database_required_message: str,
+        denied_message: str,
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        authz_request = validate_authz_policy_route_payload(
+            raw_payload=raw_payload,
+            envelope_model=envelope_model,
+            trace_id=trace_id,
+        )
+        database_store = require_authz_policy_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            message=database_required_message,
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="authz_policy_grant.write",
+            product=authz_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=denied_message,
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if authz_request.mode == "apply":
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=database_store,
+                identity=identity,
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=bool(normalized_idempotency_key),
+            )
+            if replay_response is not None:
+                return replay_response
+        try:
+            route_result = control_plane_authz_grant_service.execute_authz_policy_route(
+                record_store=database_store,
+                request=authz_request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=authz_policy_record_timestamp,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="authz_policy_unavailable",
+                message="Launchplane active authz policy is unavailable.",
+            ) from error
+        if authz_request.mode == "apply":
+            resolved_authz_policy_runtime.update(
+                route_result.updated_policy,
+                policy_sha256=route_result.authz_policy_record.policy_sha256,
+                source="db",
+            )
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=authz_policy_route_records(route_result.result),
+            result=route_result.driver_result,
+        )
+        if authz_request.mode == "apply":
+            store_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=route_path,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
+        return response
+
+    async def grant_github_actions_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope,
+            database_required_message="Authz policy grant writes require Launchplane database storage.",
+            denied_message="Workflow cannot write Launchplane authz policy grants.",
+        )
+
+    async def remove_github_actions_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_GITHUB_ACTIONS_REMOVALS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope,
+            database_required_message="Authz policy removals require Launchplane database storage.",
+            denied_message="Workflow cannot remove Launchplane authz policy grants.",
+        )
+
+    async def grant_github_human_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope,
+            database_required_message="Authz human policy grant writes require Launchplane database storage.",
+            denied_message="Workflow cannot write Launchplane authz human policy grants.",
+        )
+
+    async def grant_terminal_agent_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope,
+            database_required_message="Authz terminal-agent policy grant writes require Launchplane database storage.",
+            denied_message="Workflow cannot write Launchplane authz terminal-agent policy grants.",
+        )
+
+    async def grant_local_operator_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope,
+            database_required_message="Authz local-operator policy grant writes require Launchplane database storage.",
+            denied_message="Workflow cannot write Launchplane authz local-operator policy grants.",
+        )
+
+    async def grant_local_admin_authz_policy(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        return await apply_authz_policy_route(
+            request=request,
+            identity=identity,
+            record_store=record_store,
+            idempotency_key=idempotency_key,
+            route_path=_AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE,
+            envelope_model=control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope,
+            database_required_message="Authz local-admin policy grant writes require Launchplane database storage.",
+            denied_message="Workflow cannot write Launchplane authz local-admin policy grants.",
+        )
 
     async def apply_live_target_runtime(
         request: Request,
@@ -10792,6 +11077,146 @@ def create_launchplane_fastapi_app(
             409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
+    )
+
+    authz_policy_route_responses: dict[int | str, dict[str, Any]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        409: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
+
+    app.add_api_route(
+        _AUTHZ_POLICY_GITHUB_ACTIONS_GRANTS_ROUTE,
+        grant_github_actions_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="grant_github_actions_authz_policy",
+        summary="Grant GitHub Actions authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_GITHUB_ACTIONS_REMOVALS_ROUTE,
+        remove_github_actions_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="remove_github_actions_authz_policy",
+        summary="Remove GitHub Actions authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_GITHUB_HUMANS_GRANTS_ROUTE,
+        grant_github_human_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="grant_github_human_authz_policy",
+        summary="Grant GitHub human authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_TERMINAL_AGENTS_GRANTS_ROUTE,
+        grant_terminal_agent_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="grant_terminal_agent_authz_policy",
+        summary="Grant terminal-agent authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_LOCAL_OPERATORS_GRANTS_ROUTE,
+        grant_local_operator_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="grant_local_operator_authz_policy",
+        summary="Grant local-operator authz policy rules",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
+        _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE,
+        grant_local_admin_authz_policy,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="grant_local_admin_authz_policy",
+        summary="Grant local-admin authz policy rules",
+        responses=authz_policy_route_responses,
     )
 
     app.add_api_route(

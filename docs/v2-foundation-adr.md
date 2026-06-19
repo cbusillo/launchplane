@@ -277,7 +277,7 @@ Representative checks for the model are generic and public-safe:
 - policy/admin action: can `subject:example-admin` administer
   `authz_policy:launchplane/example-policy`?
 
-Tuple writes must be service-owned. The current
+Tuple writes must be service-owned. The native FastAPI
 `POST /v1/authz-policies/*` grant and removal routes are the migration write
 boundary: they can plan tuple proposals from active DB-backed grants, run
 dry-run parity checks against the current DB policy result, and later write

@@ -403,6 +403,16 @@ AuthzPolicyGrantEnvelope = (
     | AuthzPolicyLocalOperatorGrantEnvelope
     | AuthzPolicyLocalAdminGrantEnvelope
 )
+AuthzPolicyRouteEnvelope = AuthzPolicyGrantEnvelope | AuthzPolicyGitHubActionsRemovalEnvelope
+
+
+class AuthzPolicyRouteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updated_policy: LaunchplaneAuthzPolicy
+    authz_policy_record: LaunchplaneAuthzPolicyRecord
+    result: dict[str, object]
+    driver_result: dict[str, object]
 
 
 def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
@@ -494,17 +504,14 @@ def authz_policy_github_actions_removal_diff(
     *, current_policy: LaunchplaneAuthzPolicy, removal: AuthzPolicyGitHubActionsGrant
 ) -> dict[str, object]:
     desired_rule = removal.to_policy_rule()
-    matched_rule_count = sum(
-        1 for rule in current_policy.github_actions if rule == desired_rule
-    )
+    matched_rule_count = sum(1 for rule in current_policy.github_actions if rule == desired_rule)
     changed = matched_rule_count > 0
     return {
         "changed": changed,
         "matched_rule_count": matched_rule_count,
         "removed_rule_count": matched_rule_count if changed else 0,
         "previous_github_actions_rule_count": len(current_policy.github_actions),
-        "new_github_actions_rule_count": len(current_policy.github_actions)
-        - matched_rule_count,
+        "new_github_actions_rule_count": len(current_policy.github_actions) - matched_rule_count,
         "previous_github_humans_rule_count": len(current_policy.github_humans),
         "new_github_humans_rule_count": len(current_policy.github_humans),
         "previous_terminal_agents_rule_count": len(current_policy.terminal_agents),
@@ -638,9 +645,7 @@ def authz_policy_github_actions_removal_response_audit_payload(
             "principal_type": "github_actions",
             "repository": requested_removal.get("repository", ""),
             "workflow_ref_count": len(requested_removal.get("workflow_refs") or ()),
-            "job_workflow_ref_count": len(
-                requested_removal.get("job_workflow_refs") or ()
-            ),
+            "job_workflow_ref_count": len(requested_removal.get("job_workflow_refs") or ()),
             "event_names": requested_removal.get("event_names") or (),
             "products": requested_removal.get("products") or (),
             "contexts": requested_removal.get("contexts") or (),
@@ -1235,3 +1240,177 @@ def build_authz_policy_github_actions_removal_service_result(
         "audit": authz_policy_github_actions_removal_response_audit_payload(audit),
     }
     return result, driver_result
+
+
+def _dry_run_authz_policy_record(
+    *, current_record: LaunchplaneAuthzPolicyRecord, audit: dict[str, object]
+) -> LaunchplaneAuthzPolicyRecord:
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=current_record.record_id,
+        status=current_record.status,
+        source=current_record.source,
+        updated_at=current_record.updated_at,
+        policy_sha256=current_record.policy_sha256,
+        policy=current_record.policy,
+        audit=audit,
+    )
+
+
+def execute_authz_policy_route(
+    *,
+    record_store: AuthzPolicyRecordStore,
+    request: AuthzPolicyRouteEnvelope,
+    identity: LaunchplaneIdentity,
+    trace_id: str,
+    now_timestamp: TimestampProvider,
+) -> AuthzPolicyRouteResult:
+    write_result: (
+        tuple[
+            LaunchplaneAuthzPolicy,
+            LaunchplaneAuthzPolicyRecord,
+            bool,
+            dict[str, object],
+            dict[str, object],
+        ]
+        | None
+    ) = None
+    if isinstance(request, AuthzPolicyGitHubActionsRemovalEnvelope):
+        current_policy, current_record, diff = plan_github_actions_authz_policy_removal(
+            record_store=record_store,
+            removal=request.removal,
+        )
+        audit = authz_policy_github_actions_removal_audit_payload(
+            request=request,
+            identity=identity,
+            previous_record=current_record,
+            new_record=None,
+            changed=bool(diff["changed"]),
+            trace_id=trace_id,
+            now_timestamp=now_timestamp,
+        )
+        updated_policy = current_policy
+        authz_policy_record = _dry_run_authz_policy_record(
+            current_record=current_record,
+            audit=audit,
+        )
+        changed = bool(diff["changed"])
+        if request.mode == "apply":
+            updated_policy, authz_policy_record, changed, diff, audit = (
+                write_github_actions_authz_policy_removal(
+                    record_store=record_store,
+                    request=request,
+                    identity=identity,
+                    trace_id=trace_id,
+                    now_timestamp=now_timestamp,
+                )
+            )
+        result, driver_result = build_authz_policy_github_actions_removal_service_result(
+            authz_policy_record=authz_policy_record,
+            changed=changed,
+            mode=request.mode,
+            diff=diff,
+            audit=audit,
+        )
+        return AuthzPolicyRouteResult(
+            updated_policy=updated_policy,
+            authz_policy_record=authz_policy_record,
+            result=result,
+            driver_result=driver_result,
+        )
+
+    if isinstance(request, AuthzPolicyGitHubActionsGrantEnvelope):
+        current_policy, current_record, diff = plan_github_actions_authz_policy_grant(
+            record_store=record_store,
+            grant=request.grant,
+        )
+        if request.mode == "apply":
+            write_result = write_github_actions_authz_policy_grant(
+                record_store=record_store,
+                request=request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=now_timestamp,
+            )
+    elif isinstance(request, AuthzPolicyGitHubHumanGrantEnvelope):
+        current_policy, current_record, diff = plan_github_human_authz_policy_grant(
+            record_store=record_store,
+            grant=request.grant,
+        )
+        if request.mode == "apply":
+            write_result = write_github_human_authz_policy_grant(
+                record_store=record_store,
+                request=request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=now_timestamp,
+            )
+    elif isinstance(request, AuthzPolicyTerminalAgentGrantEnvelope):
+        current_policy, current_record, diff = plan_terminal_agent_authz_policy_grant(
+            record_store=record_store,
+            grant=request.grant,
+        )
+        if request.mode == "apply":
+            write_result = write_terminal_agent_authz_policy_grant(
+                record_store=record_store,
+                request=request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=now_timestamp,
+            )
+    elif isinstance(request, AuthzPolicyLocalOperatorGrantEnvelope):
+        current_policy, current_record, diff = plan_local_operator_authz_policy_grant(
+            record_store=record_store,
+            grant=request.grant,
+        )
+        if request.mode == "apply":
+            write_result = write_local_operator_authz_policy_grant(
+                record_store=record_store,
+                request=request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=now_timestamp,
+            )
+    else:
+        current_policy, current_record, diff = plan_local_admin_authz_policy_grant(
+            record_store=record_store,
+            grant=request.grant,
+        )
+        if request.mode == "apply":
+            write_result = write_local_admin_authz_policy_grant(
+                record_store=record_store,
+                request=request,
+                identity=identity,
+                trace_id=trace_id,
+                now_timestamp=now_timestamp,
+            )
+
+    audit = authz_policy_grant_audit_payload(
+        request=request,
+        identity=identity,
+        previous_record=current_record,
+        new_record=None,
+        changed=bool(diff["changed"]),
+        trace_id=trace_id,
+        now_timestamp=now_timestamp,
+    )
+    updated_policy = current_policy
+    authz_policy_record = _dry_run_authz_policy_record(
+        current_record=current_record,
+        audit=audit,
+    )
+    changed = bool(diff["changed"])
+    if write_result is not None:
+        updated_policy, authz_policy_record, changed, diff, audit = write_result
+    result, driver_result = build_authz_policy_grant_service_result(
+        authz_policy_record=authz_policy_record,
+        changed=changed,
+        mode=request.mode,
+        diff=diff,
+        audit=audit,
+    )
+    return AuthzPolicyRouteResult(
+        updated_policy=updated_policy,
+        authz_policy_record=authz_policy_record,
+        result=result,
+        driver_result=driver_result,
+    )

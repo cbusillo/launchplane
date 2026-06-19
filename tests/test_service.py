@@ -47,6 +47,7 @@ from control_plane.every_code_notifications_delivery import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -131,6 +132,7 @@ from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
 )
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
@@ -1138,6 +1140,31 @@ def _signed_in_cookie(app: WsgiApp) -> str:
         query_string=f"code=github-code&state={state}",
     )
     return callback_headers["Set-Cookie"]
+
+
+def _fastapi_human_session_manager() -> HumanSessionManager:
+    return HumanSessionManager(
+        config=_github_oauth_config(),
+        session_store=InMemoryHumanSessionStore(),
+    )
+
+
+def _fastapi_signed_in_cookie(
+    session_manager: HumanSessionManager,
+    *,
+    role: Literal["read_only", "admin"] = "admin",
+) -> str:
+    human_session = session_manager.issue(_human_identity(role=role))
+    return session_manager.session_cookie_header(human_session)
+
+
+def _authz_policy_record_by_id(
+    records: tuple[LaunchplaneAuthzPolicyRecord, ...], record_id: object
+) -> LaunchplaneAuthzPolicyRecord:
+    for record in records:
+        if record.record_id == str(record_id):
+            return record
+    raise AssertionError(f"Authz policy record {record_id!r} was not found")
 
 
 def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
@@ -18796,7 +18823,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -18838,7 +18865,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
             repeat_status_code, repeat_payload = _invoke_app(
@@ -18927,7 +18957,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -18965,7 +18995,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
             repeat_status_code, repeat_payload = _invoke_app(
@@ -19025,7 +19058,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19133,7 +19166,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19208,16 +19241,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19249,7 +19282,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -19281,16 +19317,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19350,7 +19386,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -19392,14 +19431,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(policy)
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                authz_policy_runtime=authz_policy_runtime,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
@@ -19408,12 +19449,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
+                store.write_authz_policy_record(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="launchplane-authz-policy-human-dry-run-test",
+                        source="test",
+                        updated_at="2026-05-02T22:35:00Z",
+                        policy=policy,
+                    )
+                )
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(profile_payload)
                 )
             finally:
                 store.close()
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19450,31 +19499,28 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            workflow_status_code, workflow_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/generic-web/prod-promotion-workflow",
-                payload={
-                    "schema_version": 1,
-                    "product": "sellyouroutboard",
-                    "workflow": {
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "context": "sellyouroutboard",
-                        "dry_run": True,
-                    },
-                },
-                authorization="",
-                headers={"Cookie": cookie},
-            )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry_run")
         self.assertEqual(payload["result"]["changed"], True)
         self.assertEqual(len(active_records), 1)
         self.assertIsNone(dry_run_idempotency_record)
-        self.assertEqual(workflow_status_code, 403)
-        self.assertEqual(workflow_payload["error"]["code"], "authorization_denied")
+        self.assertFalse(
+            active_records[0].policy.allows(
+                identity=_human_identity(role="admin"),
+                action="generic_web_prod_promotion.dispatch",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+        self.assertFalse(
+            authz_policy_runtime.policy.allows(
+                identity=_human_identity(role="admin"),
+                action="generic_web_prod_promotion.dispatch",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
 
     def test_terminal_agent_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
         self,
@@ -19495,16 +19541,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19558,7 +19604,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -19602,14 +19651,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
@@ -19618,7 +19667,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19691,16 +19740,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19754,7 +19803,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -19799,16 +19851,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -19837,7 +19889,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -19874,7 +19929,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
                 authz_policy=policy,
@@ -19915,7 +19970,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19971,7 +20026,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20027,7 +20082,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
