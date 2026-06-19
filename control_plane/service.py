@@ -65,8 +65,6 @@ from control_plane.contracts.every_code_preview_gate_record import (
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackKind,
     EveryCodePrFeedbackRecord,
-    EveryCodePrFeedbackStatus,
-    apply_every_code_pr_feedback_status,
     build_every_code_pr_feedback_id,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -1787,22 +1785,6 @@ class EveryCodeWorkRequestRerunEnvelope(BaseModel):
         self.trigger_actor = self.trigger_actor.strip()
         self.source_url = self.source_url.strip()
         self.agent_write_intent_record_id = self.agent_write_intent_record_id.strip()
-        return self
-
-
-class EveryCodePrFeedbackStatusEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    feedback_id: str
-    request_id: str
-    status: EveryCodePrFeedbackStatus
-
-    @model_validator(mode="after")
-    def _validate_status(self) -> "EveryCodePrFeedbackStatusEnvelope":
-        if not self.feedback_id.strip():
-            raise ValueError("Every Code PR feedback status requires feedback_id")
-        if not self.request_id.strip():
-            raise ValueError("Every Code PR feedback status requires request_id")
         return self
 
 
@@ -3549,7 +3531,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
-        "/v1/every-code/pr-feedback/status",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -6781,7 +6762,6 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
-        "/v1/every-code/pr-feedback/status",
     }
 
 
@@ -6811,64 +6791,6 @@ def _handle_every_code_worker_write(
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/pr-feedback/status":
-        feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
-        feedback_matches = every_code_store.list_every_code_pr_feedback_records(
-            request_id=feedback_status_request.request_id.strip(),
-            limit=100,
-        )
-        existing_feedback_record = next(
-            (
-                record
-                for record in feedback_matches
-                if record.feedback_id == feedback_status_request.feedback_id.strip()
-            ),
-            None,
-        )
-        if existing_feedback_record is None:
-            return _json_response(
-                start_response=start_response,
-                status_code=404,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "not_found",
-                        "message": "Every Code PR feedback record was not found.",
-                    },
-                },
-            )
-        updated_feedback_record = apply_every_code_pr_feedback_status(
-            existing_feedback_record,
-            status=feedback_status_request.status,
-        )
-        if updated_feedback_record is None:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "feedback_already_final",
-                        "message": "Every Code PR feedback is already applied or ignored.",
-                    },
-                },
-            )
-        every_code_store.write_every_code_pr_feedback_record(updated_feedback_record)
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={
-                    "request_id": updated_feedback_record.request_id,
-                    "feedback_id": updated_feedback_record.feedback_id,
-                    "status": updated_feedback_record.status,
-                },
-                driver_result={"feedback": updated_feedback_record.model_dump(mode="json")},
-            ),
-        )
     if path == "/v1/every-code/work-requests/claim":
         claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
         claimed_record = every_code_store.claim_every_code_work_request_record(
