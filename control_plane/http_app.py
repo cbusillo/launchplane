@@ -717,6 +717,21 @@ class EveryCodeWorkRequestRecordResponse(BaseModel):
     request: EveryCodeWorkRequestRecord
 
 
+class EveryCodeWorkRequestClaimEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+
+    @model_validator(mode="after")
+    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code work request claim requires request_id")
+        if not self.host.strip():
+            raise ValueError("Every Code work request claim requires host")
+        return self
+
+
 class EveryCodeSummaryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1431,6 +1446,16 @@ class _EveryCodeWorkRequestWriteStore(Protocol):
     def write_every_code_work_request_record(
         self, record: EveryCodeWorkRequestRecord
     ) -> object: ...
+
+
+class _EveryCodeWorkRequestClaimStore(Protocol):
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None: ...
 
 
 class _EveryCodePrFeedbackReadStore(Protocol):
@@ -2559,6 +2584,13 @@ def create_launchplane_fastapi_app(
             return
         raise _authentication_required_error("Every Code worker token is required.")
 
+    def read_every_code_work_request_claim_identity(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> LaunchplaneIdentity | None:
+        if every_code_worker_token_authorized(authorization):
+            return None
+        return read_write_identity(authorization=authorization)
+
     def read_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
     ) -> LaunchplaneIdentity:
@@ -3143,6 +3175,16 @@ def create_launchplane_fastapi_app(
             capability="Every Code work request writes",
         )
         return cast(_EveryCodeWorkRequestWriteStore, record_store)
+
+    def require_every_code_work_request_claim_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestClaimStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("claim_every_code_work_request_record",),
+            capability="Every Code work request claim writes",
+        )
+        return cast(_EveryCodeWorkRequestClaimStore, record_store)
 
     def require_every_code_pr_feedback_read_store(
         record_store: object,
@@ -3904,6 +3946,84 @@ def create_launchplane_fastapi_app(
             response=response,
         )
         return response
+
+    async def claim_every_code_work_request(
+        request: Request,
+        payload: dict[str, object],
+        identity: Annotated[
+            LaunchplaneIdentity | None, Depends(read_every_code_work_request_claim_identity)
+        ],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if identity is not None:
+            if not resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action="every_code_work_request.claim",
+                product="launchplane",
+                context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            ):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Workflow cannot claim Every Code work requests.",
+                )
+            _, _, replayed_response = await replay_apply_idempotency(
+                request=request,
+                record_store=record_store,
+                identity=identity,
+                route_path="/v1/every-code/work-requests/claim",
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replayed_response is not None:
+                return replayed_response
+        try:
+            every_code_store = require_every_code_work_request_claim_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        try:
+            claimed_record = every_code_store.claim_every_code_work_request_record(
+                request_id=claim_request.request_id.strip(),
+                host=claim_request.host.strip(),
+                claimed_at=utc_now_timestamp(),
+            )
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if claimed_record is None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="work_request_already_claimed",
+                message="Every Code work request is not queued for claim.",
+            )
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"request_id": claimed_record.request_id, "state": claimed_record.state},
+            result={"request": claimed_record.model_dump(mode="json")},
+        )
 
     def list_every_code_pr_feedback(
         identity: Annotated[
@@ -8800,6 +8920,18 @@ def create_launchplane_fastapi_app(
         operation_id="create_every_code_work_request",
         summary="Create Every Code work request",
         responses=every_code_work_request_write_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/work-requests/claim",
+        claim_every_code_work_request,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="claim_every_code_work_request",
+        summary="Claim Every Code work request",
+        responses=every_code_worker_status_error_responses,
     )
 
     app.add_api_route(

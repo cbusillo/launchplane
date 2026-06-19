@@ -207,7 +207,12 @@ VeriReel product paths:
     bearer-token callers, `every_code_work_request.write` authorization on
     `launchplane`/`launchplane`, record-store write capability checks, and
     optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/claim`
+  - `POST /v1/every-code/work-requests/claim` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.claim`, record-store claim capability checks,
+    `404 not_found` for missing requests, `409 work_request_already_claimed`
+    for non-queued requests, and workflow `Idempotency-Key` replay/conflict
+    handling)
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
@@ -354,9 +359,10 @@ response. Matching pull-request close deliveries can close every linked request
 referenced by the PR, including still-queued requests that never stored a result
 PR URL.
 
-The Every Code worker read, claim, and status routes also accept a dedicated
-local-worker bearer token. Configure `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on
-the Launchplane service and on the Mac worker host, then run the worker with
+The Every Code worker read, native claim, and status routes also accept a
+dedicated local-worker bearer token. Configure
+`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on the Launchplane service and on the Mac
+worker host, then run the worker with
 `uv run launchplane every-code start --service-url https://...`. That token is
 scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
 readiness routes, plus read-only `GET /v1/product-profiles` for preview

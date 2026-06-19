@@ -1742,21 +1742,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         return self
 
 
-class EveryCodeWorkRequestClaimEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-
-    @model_validator(mode="after")
-    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request claim requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code work request claim requires host")
-        return self
-
-
 class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3528,7 +3513,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
-        "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
         "/v1/authz-policies/github-actions/grants",
@@ -6759,7 +6743,6 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
     return method == "POST" and path in {
-        "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
     }
@@ -6791,35 +6774,6 @@ def _handle_every_code_worker_write(
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/work-requests/claim":
-        claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
-        claimed_record = every_code_store.claim_every_code_work_request_record(
-            request_id=claim_request.request_id.strip(),
-            host=claim_request.host.strip(),
-            claimed_at=_utc_now_timestamp(),
-        )
-        if claimed_record is None:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "work_request_already_claimed",
-                        "message": "Every Code work request is not queued for claim.",
-                    },
-                },
-            )
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={"request_id": claimed_record.request_id, "state": claimed_record.state},
-                driver_result={"request": claimed_record.model_dump(mode="json")},
-            ),
-        )
     if path == "/v1/every-code/work-requests/rerun":
         rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
         rerun_checked_at = datetime.now(timezone.utc)
@@ -9682,45 +9636,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/every-code/work-requests/claim":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.claim",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot claim Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
             elif path == "/v1/every-code/work-requests/rerun":
                 if not authz_policy.allows(
                     identity=identity,

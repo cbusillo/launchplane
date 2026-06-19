@@ -4447,6 +4447,202 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
+    async def test_every_code_work_request_claim_accepts_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-worker-claim",
+            )
+            stored_request = store.read_every_code_work_request_record(seeded.request_id)
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["request_id"], seeded.request_id)
+        self.assertEqual(payload["records"]["state"], "claimed")
+        self.assertEqual(payload["result"]["request"]["state"], "claimed")
+        self.assertEqual(payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
+        self.assertEqual(stored_request.state, "claimed")
+        self.assertEqual(stored_request.claimed_by_host, "Chris-Studio")
+
+    async def test_every_code_work_request_claim_accepts_authorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_claim_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Runner-Host"},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["request"]["claimed_by_host"], "Runner-Host")
+
+    async def test_every_code_work_request_claim_replays_authorized_idempotency(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "request_id": "every-code-cbusillo-code-123-test",
+            "host": "Runner-Host",
+        }
+        store = _EveryCodeClaimReplayOnlyStore(
+            payload=payload,
+            idempotency_key="every-code-claim-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_work_request_claim_policy(),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_every_code_work_request_claim(
+            app,
+            payload,
+            idempotency_key="every-code-claim-replay",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["replayed"])
+        self.assertEqual(response.json()["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(store.read_idempotency_calls, 1)
+        self.assertEqual(store.claim_calls, 0)
+
+    async def test_every_code_work_request_claim_rejects_missing_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio"},
+                authorization="",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_work_request_claim_rejects_unauthorized_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_every_code_work_request_claim_rejects_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": "", "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_work_request_claim_returns_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": "every-code-cbusillo-code-123-test", "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_every_code_work_request_claim_rejects_already_claimed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            first_response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+            second_response = await _post_every_code_work_request_claim(
+                app,
+                {"request_id": seeded.request_id, "host": "Other-Host"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 409)
+        self.assertEqual(second_response.json()["error"]["code"], "work_request_already_claimed")
+
+    async def test_every_code_work_request_claim_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_work_request_claim(
+            app,
+            {"request_id": "every-code-cbusillo-code-123-test", "host": "Chris-Studio"},
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
     async def test_every_code_pr_feedback_write_stores_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -15464,6 +15660,24 @@ def _seed_every_code_read_records(store: Any) -> dict[str, str]:
     }
 
 
+def _seed_every_code_claim_request(store: Any) -> EveryCodeWorkRequestRecord:
+    record = EveryCodeWorkRequestRecord(
+        request_id="every-code-cbusillo-code-123-test",
+        source="manual",
+        state="queued",
+        repository="cbusillo/code",
+        issue_number=123,
+        issue_url="https://github.com/cbusillo/code/issues/123",
+        issue_title="Wire local automation",
+        trigger_label="every-code",
+        trigger_actor="cbusillo",
+        queued_at="2026-05-05T22:00:00Z",
+        updated_at="2026-05-05T22:00:00Z",
+    )
+    store.write_every_code_work_request_record(record)
+    return record
+
+
 def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
     return _record_read_policy(
         action="every_code_work_request.read",
@@ -15480,6 +15694,13 @@ def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
 def _every_code_work_request_write_policy() -> LaunchplaneAuthzPolicy:
     return _record_read_policy(
         action="every_code_work_request.write",
+        context="launchplane",
+    )
+
+
+def _every_code_work_request_claim_policy() -> LaunchplaneAuthzPolicy:
+    return _record_read_policy(
+        action="every_code_work_request.claim",
         context="launchplane",
     )
 
@@ -16311,6 +16532,28 @@ async def _post_every_code_work_request_create(
         app,
         "POST",
         "/v1/every-code/work-requests/create",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_every_code_work_request_claim(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/work-requests/claim",
         headers=request_headers,
         payload=payload,
     )
@@ -17669,6 +17912,69 @@ class _ProductProfileReplayOnlyStore:
 
     def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
         raise AssertionError("idempotent replay must not write a new record")
+
+
+class _EveryCodeClaimReplayOnlyStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self.claim_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if (
+            route_path != "/v1/every-code/work-requests/claim"
+            or idempotency_key != self._idempotency_key
+        ):
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "state": "claimed",
+                },
+                "result": {
+                    "request": {
+                        "request_id": "every-code-cbusillo-code-123-test",
+                        "state": "claimed",
+                        "claimed_by_host": "Runner-Host",
+                    }
+                },
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        raise AssertionError("idempotent replay must not write a new record")
+
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        del request_id, host, claimed_at
+        self.claim_calls += 1
+        raise AssertionError("idempotent replay must not claim a record")
 
 
 class _ProductContextApplyReplayOnlyStore:

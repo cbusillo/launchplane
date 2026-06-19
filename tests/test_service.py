@@ -1816,6 +1816,62 @@ def _seed_every_code_work_request_record(
     return record
 
 
+def _claim_every_code_work_request_record(
+    record_store: Any,
+    request_id: str,
+    *,
+    host: str = "Chris-Studio",
+) -> EveryCodeWorkRequestRecord:
+    record = record_store.claim_every_code_work_request_record(
+        request_id=request_id,
+        host=host,
+        claimed_at="2026-05-05T22:01:00Z",
+    )
+    if record is None:
+        raise AssertionError(f"Every Code work request {request_id} was not queued")
+    return cast(EveryCodeWorkRequestRecord, record)
+
+
+def _every_code_claim_fixture_response(
+    record: EveryCodeWorkRequestRecord,
+) -> tuple[int, dict[str, Any]]:
+    return (
+        202,
+        {
+            "records": {"request_id": record.request_id, "state": record.state},
+            "result": {"request": record.model_dump(mode="json")},
+        },
+    )
+
+
+def _claim_every_code_work_request_in_filesystem(
+    state_dir: Path,
+    request_id: str,
+    *,
+    host: str = "Chris-Studio",
+) -> tuple[int, dict[str, Any]]:
+    record = _claim_every_code_work_request_record(
+        FilesystemRecordStore(state_dir),
+        request_id,
+        host=host,
+    )
+    return _every_code_claim_fixture_response(record)
+
+
+def _claim_every_code_work_request_in_postgres(
+    database_url: str,
+    request_id: str,
+    *,
+    host: str = "Chris-Studio",
+) -> tuple[int, dict[str, Any]]:
+    store = PostgresRecordStore(database_url=database_url)
+    try:
+        record = _claim_every_code_work_request_record(store, request_id, host=host)
+    finally:
+        store.close()
+    return _every_code_claim_fixture_response(record)
+
+
 def _every_code_github_pr_comment_payload(
     *,
     repository: str = "cbusillo/code",
@@ -2640,12 +2696,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-blocked-notify-claim"},
+            claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
+                database_url,
+                request_id,
             )
             status_code, payload = _invoke_app(
                 app,
@@ -2758,12 +2811,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-blocked-notify-failed-claim"},
+            claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
+                database_url,
+                request_id,
             )
             status_code, payload = _invoke_app(
                 app,
@@ -7120,12 +7170,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(first_payload["records"]["request_id"])
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-webhook-claim"},
+            claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                request_id,
             )
             second_status, second_payload = _invoke_app(
                 app,
@@ -7306,12 +7353,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(first_payload["records"]["request_id"])
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-finished-claim"},
+            claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                request_id,
             )
             done_status, _done_payload = _invoke_app(
                 app,
@@ -7412,13 +7456,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-issue-close-claim"},
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -7515,13 +7553,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-close-claim"},
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -7594,8 +7626,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -7613,13 +7646,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-unmerged-close-claim"},
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -7690,8 +7717,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -7709,13 +7737,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-feedback-close-claim"},
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -7875,8 +7897,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -7894,13 +7917,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = str(create_payload["records"]["request_id"])
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                headers={"Idempotency-Key": "every-code-pr-number-claim"},
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -7965,8 +7982,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -7986,13 +8004,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 )
                 request_id = str(create_payload["records"]["request_id"])
-                _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/every-code/work-requests/claim",
-                    payload={"request_id": request_id, "host": "Chris-Studio"},
-                    headers={"Idempotency-Key": f"every-code-page-claim-{issue_number}"},
-                )
+                _claim_every_code_work_request_in_filesystem(state_dir, request_id)
                 _invoke_app(
                     app,
                     method="POST",
@@ -8098,12 +8110,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            claim_status, claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
+            claim_status, claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                str(request_id),
             )
             status_status, _status_payload = _invoke_app(
                 app,
@@ -8187,8 +8196,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 return_value={"id": 987},
             ) as create_comment,
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8206,12 +8216,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
+            claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                str(request_id),
             )
             status_status, _status_payload = _invoke_app(
                 app,
@@ -8322,13 +8329,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -8453,8 +8454,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ],
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8472,12 +8474,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
+            claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                str(request_id),
             )
             status_status, _status_payload = _invoke_app(
                 app,
@@ -8532,8 +8531,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8551,12 +8551,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
+            claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                str(request_id),
             )
             running_status, _running_payload = _invoke_app(
                 app,
@@ -8623,8 +8620,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 Path(home_directory_name),
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8642,13 +8640,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -8710,8 +8702,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 path=".codex/github-planning.json",
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8729,13 +8722,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -8871,12 +8858,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _claim_status, _claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
+            _claim_status, _claim_payload = _claim_every_code_work_request_in_filesystem(
+                state_dir,
+                str(request_id),
             )
             _running_status, _running_payload = _invoke_app(
                 app,
@@ -8927,8 +8911,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -8946,13 +8931,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -9037,13 +9016,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -9204,8 +9177,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -9223,13 +9197,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer dev-worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _invoke_app(
                 app,
                 method="POST",
@@ -9455,7 +9423,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "webhook_secret_not_configured")
 
-    def test_every_code_work_request_create_list_claim_and_status_flow(self) -> None:
+    def test_every_code_work_request_claim_is_retired_from_legacy_wsgi_app(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
@@ -9502,68 +9470,18 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={"request_id": request_id, "host": "Chris-Studio"},
                 headers={"Idempotency-Key": "every-code-claim-code-123"},
             )
-            second_claim_status, second_claim_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Other-Host"},
-                headers={"Idempotency-Key": "every-code-claim-code-123-other"},
-            )
-            status_status, status_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/status",
-                payload={
-                    "request_id": request_id,
-                    "host": "Chris-Studio",
-                    "state": "done",
-                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
-                    "updated_at": "2026-05-05T22:05:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-status-code-123-done"},
-            )
             stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
                 request_id
             )
 
         self.assertEqual(len(queued_requests), 1)
-        self.assertEqual(claim_status, 202)
-        self.assertEqual(claim_payload["records"]["state"], "claimed")
-        self.assertEqual(second_claim_status, 409)
-        self.assertEqual(second_claim_payload["error"]["code"], "work_request_already_claimed")
-        self.assertEqual(status_status, 202)
-        self.assertEqual(status_payload["records"]["state"], "done")
-        self.assertEqual(stored_request.state, "done")
-        self.assertEqual(
-            stored_request.result_pr_url,
-            "https://github.com/cbusillo/code/pull/26",
-        )
+        self.assertEqual(claim_status, 404)
+        self.assertEqual(claim_payload["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "queued")
 
-    def test_every_code_worker_token_can_claim_and_update_requests(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
+    def test_every_code_work_request_claim_worker_token_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -9574,8 +9492,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
             )
             seeded_request = _seed_every_code_work_request_record(state_dir)
@@ -9590,25 +9508,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={"request_id": request_id, "host": "Chris-Studio"},
                 authorization="Bearer worker-token",
             )
-            status_status, status_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/status",
-                payload={
-                    "request_id": request_id,
-                    "host": "Chris-Studio",
-                    "state": "done",
-                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
-                    "updated_at": "2026-05-05T22:05:00Z",
-                },
-                authorization="Bearer worker-token",
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
             )
 
-        self.assertEqual(queued_requests[0].request_id, request_id)
-        self.assertEqual(claim_status, 202)
-        self.assertEqual(claim_payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
-        self.assertEqual(status_status, 202)
-        self.assertEqual(status_payload["result"]["request"]["state"], "done")
+        self.assertEqual(len(queued_requests), 1)
+        self.assertEqual(claim_status, 404)
+        self.assertEqual(claim_payload["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "queued")
 
     def test_product_profile_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with (
@@ -9695,13 +9602,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=Path(temporary_directory_name),
             )
             request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -9795,13 +9696,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=Path(temporary_directory_name),
             )
             request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
@@ -9896,13 +9791,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=Path(temporary_directory_name),
             )
             request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/claim",
-                payload={"request_id": request_id, "host": "Chris-Studio"},
-                authorization="Bearer worker-token",
-            )
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
             _invoke_app(
                 app,
                 method="POST",
