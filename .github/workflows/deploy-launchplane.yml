@@ -184,7 +184,7 @@ jobs:
           PY
 
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.prep.outputs.checkout_ref }}
 
@@ -672,7 +672,7 @@ jobs:
       LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
 

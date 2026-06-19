@@ -36,7 +36,7 @@ jobs:
       CONFIRMATION: ${{ inputs.confirmation }}
       REASON: ${{ inputs.reason }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Resolve service endpoint
         id: service
