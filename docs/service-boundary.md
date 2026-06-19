@@ -1431,6 +1431,8 @@ only after a passing plan and a matching stored preview record are present.
   callers)
 - `GET /v1/service/odoo-workers/status` (native FastAPI for bearer-token and
   human-session callers)
+- `POST /v1/service/odoo-workers/reconcile` (native FastAPI on the bearer/OIDC
+  write identity path with `launchplane_service.reconcile_odoo_workers`)
 - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` (native
   FastAPI for bearer-token and human-session callers)
 - `GET /v1/drivers/odoo/target-replacement/operations/{operation_id}` (native

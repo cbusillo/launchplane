@@ -57,7 +57,11 @@ Keep a compatibility surface only when it is one of these:
   Its legacy WSGI branch is deleted; direct fallback calls fail closed while
   the mounted fallback remains for retained non-native routes.
 - Launchplane service runtime and Odoo worker status reads use native FastAPI
-  routes for bearer-token and human-session callers. Their legacy WSGI branch is
+  routes for bearer-token and human-session callers. Odoo worker reconcile uses
+  native FastAPI `POST /v1/service/odoo-workers/reconcile` on the bearer/OIDC
+  write identity path with the existing operation-record storage protocol,
+  `launchplane_service.reconcile_odoo_workers` authorization, `max_attempts`
+  validation, and `200` reconcile result payload. Their legacy WSGI branches are
   deleted; direct fallback calls fail closed while the mounted fallback remains
   for retained non-native routes.
 - Odoo stable-bootstrap and target-replacement operation status reads use native

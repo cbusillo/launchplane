@@ -174,6 +174,10 @@ from control_plane.workflows.npmplus_ingress import (
     NpmplusIngressApplyResult,
     NpmplusIngressClient,
 )
+from control_plane.workflows.odoo_stable_operation_worker import (
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+    reconcile_stale_odoo_stable_operation_records,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_service import (
@@ -363,6 +367,22 @@ class OdooStableOperationWorkerStatusResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     worker_status: OdooStableOperationWorkerStatusResponseModel
+
+
+class OdooStableOperationWorkerReconcileResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reconciled_bootstrap_ids: tuple[str, ...]
+    reconciled_replacement_ids: tuple[str, ...]
+    reconciled_count: int
+
+
+class OdooStableOperationWorkerReconcileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    reconcile_result: OdooStableOperationWorkerReconcileResultResponse
 
 
 class OdooStableBootstrapOperationStatusResponse(BaseModel):
@@ -2490,6 +2510,22 @@ def create_launchplane_fastapi_app(
                 message="Workflow cannot read Launchplane service runtime state.",
             )
 
+    def require_launchplane_service_reconcile_authorization(
+        *, identity: LaunchplaneIdentity, trace_id: str
+    ) -> None:
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="launchplane_service.reconcile_odoo_workers",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot reconcile Launchplane Odoo workers.",
+            )
+
     def read_launchplane_runtime(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -2544,6 +2580,53 @@ def create_launchplane_fastapi_app(
         return OdooStableOperationWorkerStatusResponse(
             trace_id=trace_id,
             worker_status=worker_status,
+        )
+
+    def reconcile_odoo_stable_operation_workers(
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        max_attempts: Annotated[str, Query()] = str(DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS),
+    ) -> OdooStableOperationWorkerReconcileResponse:
+        trace_id = next_trace_id()
+        require_launchplane_service_reconcile_authorization(identity=identity, trace_id=trace_id)
+        try:
+            parsed_max_attempts = control_plane_service_status.query_int_value(
+                max_attempts,
+                "max_attempts",
+                default=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                minimum=1,
+                maximum=100,
+            )
+            assert parsed_max_attempts is not None
+            reconcile_result = reconcile_stale_odoo_stable_operation_records(
+                record_store=control_plane_service_status.require_odoo_stable_operation_worker_store(
+                    record_store
+                ),
+                max_attempts=parsed_max_attempts,
+            )
+        except click.ClickException as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="operation_record_storage_required",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message=str(error),
+            ) from error
+        reconciled_bootstrap_ids = tuple(reconcile_result.reconciled_bootstrap_ids)
+        reconciled_replacement_ids = tuple(reconcile_result.reconciled_replacement_ids)
+        return OdooStableOperationWorkerReconcileResponse(
+            trace_id=trace_id,
+            reconcile_result=OdooStableOperationWorkerReconcileResultResponse(
+                reconciled_bootstrap_ids=reconciled_bootstrap_ids,
+                reconciled_replacement_ids=reconciled_replacement_ids,
+                reconciled_count=len(reconciled_bootstrap_ids) + len(reconciled_replacement_ids),
+            ),
         )
 
     def read_odoo_stable_bootstrap_operation_status(
@@ -7543,6 +7626,21 @@ def create_launchplane_fastapi_app(
         response_model=OdooStableOperationWorkerStatusResponse,
         operation_id="read_odoo_stable_operation_worker_status",
         summary="Read Odoo stable operation worker status",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        "/v1/service/odoo-workers/reconcile",
+        reconcile_odoo_stable_operation_workers,
+        methods=["POST"],
+        response_model=OdooStableOperationWorkerReconcileResponse,
+        operation_id="reconcile_odoo_stable_operation_workers",
+        summary="Reconcile stale Odoo stable operation workers",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
