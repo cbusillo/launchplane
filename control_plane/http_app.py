@@ -246,6 +246,10 @@ from control_plane.work_graph_service import (
     build_work_graph_snapshot_service_payload,
 )
 
+EveryCodeGitHubWebhookHandler = Callable[
+    [bytes, str, str, str, object, FilePath, str], tuple[int, dict[str, object]]
+]
+
 
 _BEARER_CHALLENGE_HEADER = {"WWW-Authenticate": 'Bearer realm="Launchplane API"'}
 _LAUNCHPLANE_DRIVER_READ_PRODUCT = "launchplane"
@@ -286,6 +290,7 @@ _AUTHZ_POLICY_LOCAL_ADMINS_GRANTS_ROUTE = "/v1/authz-policies/local-admins/grant
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
+_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 
 AuthzPolicyRouteEnvelope = (
@@ -2691,6 +2696,7 @@ def create_launchplane_fastapi_app(
     work_graph_issue_inbox_provider: WorkGraphIssueInboxProvider | None = None,
     work_graph_issue_inbox_reconcile_provider: WorkGraphIssueInboxReconcileProvider | None = None,
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
+    every_code_github_webhook_handler: EveryCodeGitHubWebhookHandler | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
         control_plane_root_path or FilePath(__file__).resolve().parent.parent
@@ -2898,6 +2904,40 @@ def create_launchplane_fastapi_app(
         if every_code_worker_token_authorized(authorization):
             return
         raise _authentication_required_error("Every Code worker token is required.")
+
+    async def handle_every_code_github_webhook(
+        request: Request,
+        x_github_event: Annotated[str, Header(alias="X-GitHub-Event")] = "",
+        x_github_delivery: Annotated[str, Header(alias="X-GitHub-Delivery")] = "",
+        x_hub_signature_256: Annotated[str, Header(alias="X-Hub-Signature-256")] = "",
+        record_store: object = Depends(get_record_store),
+    ) -> JSONResponse:
+        trace_id = next_trace_id()
+        if every_code_github_webhook_handler is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=f"No Launchplane route for {_EVERY_CODE_GITHUB_WEBHOOK_ROUTE}.",
+            )
+        try:
+            status_code, payload = every_code_github_webhook_handler(
+                await request.body(),
+                x_github_event,
+                x_github_delivery,
+                x_hub_signature_256,
+                record_store,
+                resolved_control_plane_root,
+                trace_id,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="GitHub webhook payload is invalid.",
+            ) from error
+        return JSONResponse(status_code=status_code, content=payload)
 
     def read_every_code_work_request_worker_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -10502,6 +10542,21 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+
+    app.add_api_route(
+        _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
+        handle_every_code_github_webhook,
+        methods=["POST"],
+        status_code=202,
+        operation_id="handle_every_code_github_webhook",
+        summary="Handle Every Code GitHub webhook",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
 
     app.add_api_route(
         "/v1/previews/readiness",

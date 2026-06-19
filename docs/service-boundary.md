@@ -212,7 +212,10 @@ VeriReel product paths:
   - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/github-webhook`
+  - `POST /v1/every-code/github-webhook` (native FastAPI,
+    unauthenticated GitHub HMAC verification, signed-event skip semantics,
+    Every Code work-request creation/dedupe, issue and pull-request close
+    handling, preview validation comments, and PR-feedback ingestion)
   - `POST /v1/every-code/work-requests/create` (native FastAPI for
     bearer-token callers, `every_code_work_request.write` authorization on
     `launchplane`/`launchplane`, record-store write capability checks, and
@@ -376,7 +379,8 @@ requests. Other signed events, actions, or labels return `202` with
 Every Code work request and include `deduped` plus the delivery id in the
 response. Matching pull-request close deliveries can close every linked request
 referenced by the PR, including still-queued requests that never stored a result
-PR URL.
+PR URL. The route is native FastAPI; the legacy WSGI branch is deleted, and
+direct WSGI fallback calls fail closed.
 
 The Every Code worker read, native claim, and status routes also accept a
 dedicated local-worker bearer token. Configure

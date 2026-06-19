@@ -131,6 +131,7 @@ from control_plane.merge_train import discover_merge_train_stack
 from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
+    handle_every_code_github_webhook_request,
 )
 from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -1423,6 +1424,19 @@ def create_launchplane_fastapi_wsgi_app(
         Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],
         ASGIMiddleware(app),
     )
+
+
+def create_every_code_github_webhook_app(
+    **kwargs: object,
+) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
+    state_dir = kwargs.pop("state_dir", None)
+    local_record_store = kwargs.pop("local_record_store_for_tests", None)
+    if local_record_store is None and "database_url" not in kwargs and isinstance(state_dir, Path):
+        local_record_store = FilesystemRecordStore(state_dir=state_dir)
+    if local_record_store is not None:
+        kwargs["record_store_factory"] = lambda: local_record_store
+    kwargs["every_code_github_webhook_handler"] = handle_every_code_github_webhook_request
+    return create_launchplane_fastapi_wsgi_app(**kwargs)
 
 
 def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
@@ -2787,7 +2801,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_every_code_worker_identity()),
                 authz_policy=_every_code_worker_policy(
@@ -2900,7 +2914,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_every_code_worker_identity()),
                 authz_policy=_every_code_worker_policy(
@@ -7448,7 +7462,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7521,7 +7535,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7567,6 +7581,38 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_payload["records"]["state"], "claimed")
         self.assertEqual(stored_request.state, "claimed")
         self.assertEqual(stored_request.github_delivery_id, "delivery-1")
+
+    def test_every_code_github_webhook_is_retired_from_legacy_wsgi_app(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_every_code_summary_read_route_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7704,7 +7750,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7801,7 +7847,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7892,7 +7938,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7979,7 +8025,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8064,7 +8110,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8148,7 +8194,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8238,7 +8284,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8317,7 +8363,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8381,7 +8427,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(identity),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8419,7 +8465,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8519,7 +8565,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ) as create_comment,
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8626,7 +8672,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8695,7 +8741,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8765,7 +8811,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8836,7 +8882,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8919,7 +8965,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8995,7 +9041,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -9063,7 +9109,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _write_github_planning_config(Path(home_directory_name), repo_managers={})
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -9125,7 +9171,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -9194,7 +9240,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -9273,14 +9319,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            webhook_app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
             )
             _issue_status, issue_response = _invoke_app(
-                app,
+                webhook_app,
                 method="POST",
                 path="/v1/every-code/github-webhook",
                 payload=issue_payload,
@@ -9302,7 +9348,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 updated_at="2026-05-06T16:00:00Z",
             )
             _invoke_app(
-                app,
+                webhook_app,
                 method="POST",
                 path="/v1/every-code/github-webhook",
                 payload=comment_payload,
@@ -9318,8 +9364,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 status="pending",
             )
             feedback_id = feedback_records[0].feedback_id
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
             status_status, status_response = _invoke_app(
-                app,
+                legacy_app,
                 method="POST",
                 path="/v1/every-code/pr-feedback/status",
                 payload={
@@ -9532,7 +9584,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
@@ -9564,7 +9616,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
@@ -9596,7 +9648,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ""},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),

@@ -415,7 +415,6 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _WHOLE_PRODUCT_CONTEXT = "*"
-_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
@@ -681,6 +680,7 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
 _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
+_EveryCodeWebhookResponse = tuple[int, dict[str, object]]
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -3337,7 +3337,6 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
-        _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
         _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
@@ -4295,10 +4294,6 @@ def _supports_every_code_work_requests(record_store: object) -> bool:
     return hasattr(record_store, "list_every_code_work_request_records")
 
 
-def _github_webhook_header(environ: dict[str, object], name: str) -> str:
-    return str(environ.get(f"HTTP_{name.upper().replace('-', '_')}", "")).strip()
-
-
 def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, object] | None:
     value = payload.get(key)
     if isinstance(value, dict):
@@ -4377,14 +4372,12 @@ def _every_code_feedback_actor_is_trusted(
 
 def _every_code_untrusted_feedback_response(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=202,
-        payload={
+) -> _EveryCodeWebhookResponse:
+    return (
+        202,
+        {
             "status": "accepted",
             "trace_id": trace_id,
             "skipped": True,
@@ -4394,20 +4387,20 @@ def _every_code_untrusted_feedback_response(
     )
 
 
-def _handle_every_code_github_webhook(
-    *,
-    environ: dict[str, object],
-    start_response: _StartResponse,
-    trace_id: str,
+def handle_every_code_github_webhook_request(
+    body_bytes: bytes,
+    event_name: str,
+    delivery_id: str,
+    signature_header: str,
     record_store: object,
     control_plane_root_path: Path,
-) -> list[bytes]:
+    trace_id: str,
+) -> _EveryCodeWebhookResponse:
     secret = os.environ.get(_EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
     if not secret:
-        return _json_response(
-            start_response=start_response,
-            status_code=503,
-            payload={
+        return (
+            503,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4417,18 +4410,16 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    body_bytes = _read_request_body(environ)
     try:
         verify_github_webhook_signature(
             payload_bytes=body_bytes,
-            signature_header=_github_webhook_header(environ, "X-Hub-Signature-256"),
+            signature_header=signature_header,
             secret=secret,
         )
     except click.ClickException:
-        return _json_response(
-            start_response=start_response,
-            status_code=401,
-            payload={
+        return (
+            401,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4438,12 +4429,10 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    delivery_id = _github_webhook_header(environ, "X-GitHub-Delivery")
-    if not delivery_id:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
+    if not delivery_id.strip():
+        return (
+            400,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4453,41 +4442,42 @@ def _handle_every_code_github_webhook(
             },
         )
 
+    normalized_delivery_id = delivery_id.strip()
+    normalized_event_name = event_name.strip()
     payload = _decode_json_request_body(body_bytes)
-    event_name = _github_webhook_header(environ, "X-GitHub-Event")
-    if event_name == "issue_comment":
+    if normalized_event_name == "issue_comment":
         preview_validation_response = _handle_every_code_preview_validation_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
             control_plane_root_path=control_plane_root_path,
         )
         if preview_validation_response is not None:
             return preview_validation_response
-    if event_name in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
+    if normalized_event_name in {
+        "issue_comment",
+        "pull_request_review",
+        "pull_request_review_comment",
+    }:
         return _handle_every_code_pr_feedback_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
-            event_name=event_name,
+            delivery_id=normalized_delivery_id,
+            event_name=normalized_event_name,
             payload=payload,
             record_store=record_store,
         )
-    if event_name == "pull_request":
+    if normalized_event_name == "pull_request":
         return _handle_every_code_pull_request_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
         )
-    if event_name != "issues":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+    if normalized_event_name != "issues":
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4496,17 +4486,15 @@ def _handle_every_code_github_webhook(
         )
     if payload.get("action") == "closed":
         return _handle_every_code_issue_closed_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
         )
     if payload.get("action") != "labeled":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4517,10 +4505,9 @@ def _handle_every_code_github_webhook(
     label = _github_webhook_mapping(payload, "label")
     label_name = _github_webhook_string(label, "name")
     if label_name.strip().lower() != _EVERY_CODE_TRIGGER_LABEL:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4542,7 +4529,7 @@ def _handle_every_code_github_webhook(
         issue_title=_github_webhook_string(issue_payload, "title"),
         trigger_label=_EVERY_CODE_TRIGGER_LABEL,
         trigger_actor=_github_webhook_string(sender_payload, "login"),
-        github_delivery_id=delivery_id,
+        github_delivery_id=normalized_delivery_id,
         source="github_issue_label",
         queued_at=_utc_now_timestamp(),
     )
@@ -4559,18 +4546,17 @@ def _handle_every_code_github_webhook(
         driver_result={"request": stored_record.model_dump(mode="json")},
     )
     accepted_payload["deduped"] = deduped
-    accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    accepted_payload["github_delivery_id"] = normalized_delivery_id
+    return 202, accepted_payload
 
 
 def _handle_every_code_issue_closed_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
     repository = _github_webhook_string(repository_payload, "full_name")
@@ -4618,11 +4604,7 @@ def _handle_every_code_issue_closed_webhook(
                 "request_id": terminal_record.request_id,
                 "state": terminal_record.state,
             }
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=response_payload,
-        )
+        return 202, response_payload
 
     updated_record = updated_records[0]
     accepted_payload = _accepted_payload(
@@ -4639,22 +4621,20 @@ def _handle_every_code_issue_closed_webhook(
         },
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _handle_every_code_pull_request_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     if payload.get("action") != "closed":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4706,10 +4686,9 @@ def _handle_every_code_pull_request_webhook(
             candidate_records[record.request_id] = record
 
     if not candidate_records:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4735,10 +4714,9 @@ def _handle_every_code_pull_request_webhook(
 
     if not updated_records:
         terminal_record = terminal_records[0]
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4766,7 +4744,7 @@ def _handle_every_code_pull_request_webhook(
         },
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _every_code_issue_url_matches_pull_request(
@@ -4793,13 +4771,12 @@ def _every_code_issue_url_matches_pull_request(
 
 def _handle_every_code_preview_validation_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
     control_plane_root_path: Path,
-) -> list[bytes] | None:
+) -> _EveryCodeWebhookResponse | None:
     if payload.get("action") != "created":
         return None
     issue_payload = _github_webhook_mapping(payload, "issue")
@@ -4828,7 +4805,6 @@ def _handle_every_code_preview_validation_webhook(
         source_issue_author=issue_author,
     ):
         return _every_code_untrusted_feedback_response(
-            start_response=start_response,
             trace_id=trace_id,
             delivery_id=delivery_id,
         )
@@ -4860,10 +4836,9 @@ def _handle_every_code_preview_validation_webhook(
             received_at=_utc_now_timestamp(),
         )
     except click.ClickException as exc:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4889,7 +4864,7 @@ def _handle_every_code_preview_validation_webhook(
     if bool(result.get("deduped")):
         accepted_payload["deduped"] = True
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _github_issue_numbers_referenced_by_pull_request(
@@ -4982,21 +4957,19 @@ def _iter_every_code_pr_feedback_records(
 
 def _handle_every_code_pr_feedback_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     event_name: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     if not _every_code_pr_feedback_action_supported(
         event_name=event_name,
         action=str(payload.get("action", "")),
     ):
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5011,10 +4984,9 @@ def _handle_every_code_pr_feedback_webhook(
         sender_payload=sender_payload,
         body_payload=body_payload,
     ):
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5028,7 +5000,6 @@ def _handle_every_code_pr_feedback_webhook(
     actor = _github_webhook_string(sender_payload, "login")
     if not _every_code_feedback_actor_is_trusted(repository=repository, actor=actor):
         return _every_code_untrusted_feedback_response(
-            start_response=start_response,
             trace_id=trace_id,
             delivery_id=delivery_id,
         )
@@ -5039,10 +5010,9 @@ def _handle_every_code_pr_feedback_webhook(
     )
     body = _github_webhook_string(body_payload, "body")
     if not body.strip():
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5092,10 +5062,9 @@ def _handle_every_code_pr_feedback_webhook(
                 matched_record = record
                 break
     if matched_record is None:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5122,10 +5091,9 @@ def _handle_every_code_pr_feedback_webhook(
     )
     for existing_feedback in existing_feedback_records:
         if existing_feedback.feedback_id == feedback_id:
-            return _json_response(
-                start_response=start_response,
-                status_code=202,
-                payload={
+            return (
+                202,
+                {
                     "status": "accepted",
                     "trace_id": trace_id,
                     "deduped": True,
@@ -5166,7 +5134,7 @@ def _handle_every_code_pr_feedback_webhook(
         driver_result={"feedback": feedback_record.model_dump(mode="json")},
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _every_code_pr_feedback_action_supported(*, event_name: str, action: str) -> bool:
@@ -7181,28 +7149,6 @@ def create_launchplane_service_app(
                     },
                 },
             )
-        if method == "POST" and path == _EVERY_CODE_GITHUB_WEBHOOK_ROUTE:
-            try:
-                return _handle_every_code_github_webhook(
-                    environ=environ,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    control_plane_root_path=resolved_root,
-                )
-            except ValueError:
-                return _json_response(
-                    start_response=start_response,
-                    status_code=400,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "invalid_request",
-                            "message": "GitHub webhook payload is invalid.",
-                        },
-                    },
-                )
         try:
             if method == "GET":
                 identity = _read_identity(
@@ -9384,6 +9330,7 @@ def serve_launchplane_service(
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
+        every_code_github_webhook_handler=handle_every_code_github_webhook_request,
     )
     fastapi_application.mount(
         "/",
