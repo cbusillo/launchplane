@@ -231,6 +231,18 @@ Keep a compatibility surface only when it is one of these:
   sessions, and local operator/admin bearer callers; apply requests preserve
   optional `Idempotency-Key` replay/conflict handling while dry-runs remain
   stateless.
+- Authz policy grant and removal routes use native FastAPI
+  `POST /v1/authz-policies/github-actions/grants`,
+  `POST /v1/authz-policies/github-actions/removals`,
+  `POST /v1/authz-policies/github-humans/grants`,
+  `POST /v1/authz-policies/terminal-agents/grants`,
+  `POST /v1/authz-policies/local-operators/grants`, and
+  `POST /v1/authz-policies/local-admins/grants` for DB-backed policy record
+  writes. Their legacy WSGI write branches are deleted, and direct WSGI
+  fallback calls fail closed. Requests require `authz_policy_grant.write` authz
+  on product/context `launchplane`, preserve signed-in GitHub human-session
+  callers, store optional `Idempotency-Key` replay/conflict evidence for apply
+  requests, and keep dry-runs stateless.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;

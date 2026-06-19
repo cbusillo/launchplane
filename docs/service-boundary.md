@@ -182,13 +182,16 @@ VeriReel product paths:
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-- authz policy maintenance route:
+- authz policy maintenance routes:
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-actions/removals`
   - `POST /v1/authz-policies/github-humans/grants`
   - `POST /v1/authz-policies/terminal-agents/grants`
   - `POST /v1/authz-policies/local-operators/grants`
   - `POST /v1/authz-policies/local-admins/grants`
+    (native FastAPI for bearer-token and signed-in GitHub human-session
+    callers, DB-backed policy records, apply-only `Idempotency-Key`
+    replay/conflict handling, and repeatable dry-runs)
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
