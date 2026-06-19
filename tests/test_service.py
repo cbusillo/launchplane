@@ -10889,7 +10889,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12490,7 +12490,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12558,7 +12558,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12597,6 +12597,103 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "idempotency_key_required")
         self.assertEqual(provider_targets, ())
+
+    def test_provider_target_operation_endpoint_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["provider_target.audit"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/provider-targets/operations",
+                payload={
+                    "schema_version": 1,
+                    "mode": "audit",
+                    "product": "launchplane",
+                    "provider_id": "dokploy",
+                    "context": "verireel",
+                    "instance": "testing",
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_provider_target_operation_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        payload = app.openapi()
+
+        route = payload["paths"]["/v1/provider-targets/operations"]["post"]
+        self.assertEqual(route["operationId"], "run_provider_target_operations")
+        self.assertEqual(route["responses"]["202"]["description"], "Successful Response")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "ProviderTargetOperationEnvelope")
+        self.assertEqual(request_schema["additionalProperties"], False)
+
+    def test_provider_target_operation_endpoint_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/provider-targets/operations",
+                payload={
+                    "schema_version": 1,
+                    "mode": "audit",
+                    "product": "launchplane",
+                    "provider_id": "dokploy",
+                    "context": "verireel",
+                    "instance": "testing",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_product_environment_read_legacy_wsgi_routes_are_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

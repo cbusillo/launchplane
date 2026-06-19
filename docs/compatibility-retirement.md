@@ -210,6 +210,13 @@ Keep a compatibility surface only when it is one of these:
   checkout `environments sync-live-target` drift-preview compatibility command
   is deleted. Operators use service/API identity so Launchplane resolves current
   DB-backed target authority and records sanitized key/count evidence.
+- Provider-target operations use native FastAPI
+  `POST /v1/provider-targets/operations` and the Provider Target Operations
+  workflow for shared and production provider-target audits/backfills. Its
+  legacy WSGI write branch and WSGI-only idempotency special-case are deleted,
+  and direct WSGI fallback calls fail closed. Audits and dry-runs remain
+  repeatable; apply requests require DB-backed storage, backfill authz, and an
+  `Idempotency-Key`.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;
