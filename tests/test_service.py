@@ -10091,139 +10091,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_work_graph_rank_returns_ranked_queue(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["work_graph.rank"],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/rank",
-                payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
-            )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["status"], "accepted")
-        queue = payload["result"]["queue"]
-        self.assertEqual(len(queue["items"]), 1)
-        self.assertEqual(queue["hidden_count"], 1)
-        self.assertEqual(queue["items"][0]["number"], 190)
-        self.assertEqual(queue["items"][0]["recommendation"], "deep_work")
-
-    def test_work_graph_rank_rejects_unauthorized_identity(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/rank",
-                payload={"snapshot": _work_graph_snapshot_payload()},
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_work_graph_rank_rejects_unclassified_issue(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": ["*"],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["work_graph.rank"],
-                    }
-                ]
-            }
-        )
-        snapshot = _work_graph_snapshot_payload()
-        snapshot["repos"] = []
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/rank",
-                payload={"snapshot": snapshot},
-            )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-
-    def test_human_session_can_rank_work_graph_snapshot(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_humans": [
-                    {
-                        "logins": ["alice"],
-                        "roles": ["read_only"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["work_graph.rank"],
-                    }
-                ]
-            }
-        )
-        oauth_client = _StubGitHubOAuthClient(_human_identity())
-        with TemporaryDirectory() as temporary_directory_name:
-            app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
-                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=policy,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=oauth_client,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            cookie = _signed_in_cookie(app)
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/work-graph/rank",
-                payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
-                authorization="",
-                headers={"Cookie": cookie},
-            )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["queue"]["items"][0]["number"], 190)
-
     def test_work_graph_reads_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
@@ -10248,6 +10115,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             responses = [
                 _invoke_app(app, method="GET", path="/v1/work-graph/snapshot"),
                 _invoke_app(app, method="GET", path="/v1/work-graph/github/issues"),
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/rank",
+                    payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+                ),
             ]
 
         for status_code, payload in responses:

@@ -183,8 +183,10 @@ from control_plane.work_graph_issue_inbox import GitHubIssueInboxReadModel
 from control_plane.work_graph_service import (
     WorkGraphIssueInboxProvider,
     WorkGraphPlanningFactsProvider,
+    WorkGraphRankEnvelope,
     WorkGraphWorkRequestStore,
     build_repo_product_mapping_service_payload,
+    build_work_graph_rank_result,
     build_work_graph_snapshot_service_payload,
 )
 
@@ -2417,6 +2419,45 @@ def create_launchplane_fastapi_app(
             return human_identity
         raise _authentication_required_error("Authorization header is required.")
 
+    def read_work_graph_rank_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> GitHubActionsIdentity | GitHubHumanIdentity:
+        human_identity = read_human_session_identity(
+            cookie_header=cookie,
+            request=request,
+            response=response,
+        )
+        if human_identity is not None:
+            return human_identity
+        header = authorization.strip()
+        if not header:
+            raise _authentication_required_error("Authorization header is required.")
+        scheme, _, token = header.partition(" ")
+        bearer_token = token.strip()
+        if scheme.lower() != "bearer" or not bearer_token:
+            raise _authentication_required_error("Bearer token is required.")
+        try:
+            owner_agent_identity = bearer_identity_from_token(
+                token=bearer_token,
+                config=bearer_identity_config or BearerIdentityConfig(),
+            )
+        except PermissionError as error:
+            raise _authentication_required_error(str(error)) from error
+        if owner_agent_identity is not None:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=next_trace_id(),
+                code="authorization_denied",
+                message=("Work graph rank requires GitHub Actions OIDC or a GitHub human session."),
+            )
+        try:
+            return verifier.verify(bearer_token)
+        except (InvalidTokenError, ValueError) as error:
+            raise _authentication_required_error(str(error)) from error
+
     def every_code_worker_token_authorized(authorization: str) -> bool:
         if bearer_identity_config is None:
             return False
@@ -3241,6 +3282,26 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             snapshot=WorkGraphSnapshot.model_validate(payload["snapshot"]),
             source=cast(dict[str, object], payload["source"]),
+        )
+
+    def rank_work_graph_snapshot(
+        payload: WorkGraphRankEnvelope,
+        identity: Annotated[
+            GitHubActionsIdentity | GitHubHumanIdentity,
+            Depends(read_work_graph_rank_identity),
+        ],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        require_work_graph_rank_authorization(
+            identity=identity,
+            trace_id=trace_id,
+            message="Workflow cannot rank the Launchplane work graph.",
+        )
+        _summary, driver_result = build_work_graph_rank_result(payload)
+        return AcceptedEvidenceResponse(
+            trace_id=trace_id,
+            records={},
+            result=driver_result,
         )
 
     def read_work_graph_issue_inbox(
@@ -8236,6 +8297,22 @@ def create_launchplane_fastapi_app(
         operation_id="read_work_graph_snapshot",
         summary="Read Launchplane work graph snapshot",
         responses=agent_context_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/work-graph/rank",
+        rank_work_graph_snapshot,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="rank_work_graph_snapshot",
+        summary="Rank Launchplane work graph snapshot",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

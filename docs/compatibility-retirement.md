@@ -108,10 +108,10 @@ Keep a compatibility surface only when it is one of these:
   FastAPI routes. Their legacy WSGI read branches are deleted; merge-train
   worker, controller mutation, feedback, and phase runner routes remain on the
   retained fallback until their native write replacements land.
-- Work graph snapshot and GitHub issue-inbox reads use native FastAPI routes.
-  Their legacy WSGI read branches and WSGI-only read helpers are deleted;
-  work-graph rank and GitHub issue-inbox reconcile writes remain on the retained
-  fallback until their native write replacements land.
+- Work graph snapshot, work-graph rank, and GitHub issue-inbox reads use native
+  FastAPI routes. Their legacy WSGI read/rank branches and WSGI-only read/rank
+  helpers are deleted; GitHub issue-inbox reconcile remains on the retained
+  fallback until its native write replacement lands.
 - Protected artifact inventory and product environment config-status reads use
   native FastAPI routes for bearer-token and human-session callers. Their legacy
   WSGI branches are deleted; cleanup callers use the service route instead of a

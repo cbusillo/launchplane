@@ -223,7 +223,7 @@ VeriReel product paths:
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
-  - `POST /v1/work-graph/rank`
+  - `POST /v1/work-graph/rank` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once`
   - `POST /v1/work-graph/merge-train/pr-feedback`
   - `POST /v1/work-graph/merge-train/controller/run-once`
@@ -434,9 +434,11 @@ fallback no longer owns these read paths.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
-`work_graph.rank` action for product/context `launchplane`, performs no storage
-writes, and does not make Launchplane authoritative for copied GitHub or Code
-Plans state.
+`work_graph.rank` action for product/context `launchplane`, accepts GitHub
+Actions OIDC and GitHub human-session callers, rejects owner-agent bearer tokens
+at the identity boundary even if a policy grant is too broad, performs no
+storage writes, and does not make Launchplane authoritative for copied GitHub or
+Code Plans state.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
