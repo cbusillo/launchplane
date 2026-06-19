@@ -138,9 +138,12 @@ Keep a compatibility surface only when it is one of these:
   The worker-facing read routes preserve the dedicated Every Code worker token;
   preview PR-feedback notification-attempt reads stay bearer/human authorized.
   The legacy WSGI read map, read payload helper, and worker-token GET bypass are
-  deleted; Every Code write, claim, status, rerun, webhook, notification-policy,
-  PR-feedback write/status, and preview-gate write routes remain on the mounted
-  WSGI fallback until their native write replacements land.
+  deleted. Every Code work-request create uses native FastAPI, preserves
+  `every_code_work_request.write` authorization, record-store write capability
+  checks, and optional `Idempotency-Key` replay/conflict behavior. Every Code
+  claim, status, rerun, webhook, PR-feedback write/status, and preview-gate
+  write routes remain on the mounted WSGI fallback until their native write
+  replacements land.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the

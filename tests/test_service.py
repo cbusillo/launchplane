@@ -1793,6 +1793,28 @@ def _every_code_github_pull_request_closed_payload(
     }
 
 
+def _seed_every_code_work_request_record(
+    state_dir: Path,
+    *,
+    request_id: str = "every-code-cbusillo-code-123-test",
+) -> EveryCodeWorkRequestRecord:
+    record = EveryCodeWorkRequestRecord(
+        request_id=request_id,
+        source="manual",
+        state="queued",
+        repository="cbusillo/code",
+        issue_number=123,
+        issue_url="https://github.com/cbusillo/code/issues/123",
+        issue_title="Wire local automation",
+        trigger_label="every-code",
+        trigger_actor="cbusillo",
+        queued_at="2026-05-05T22:00:00Z",
+        updated_at="2026-05-05T22:00:00Z",
+    )
+    FilesystemRecordStore(state_dir).write_every_code_work_request_record(record)
+    return record
+
+
 def _every_code_github_pr_comment_payload(
     *,
     repository: str = "cbusillo/code",
@@ -9445,23 +9467,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/code",
-                    "issue_number": 123,
-                    "issue_url": "https://github.com/cbusillo/code/issues/123",
-                    "issue_title": "Wire local automation",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-05T22:00:00Z",
-                },
-                headers={"Idempotency-Key": "every-code-create-code-123"},
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            seeded_request = _seed_every_code_work_request_record(state_dir)
+            request_id = seeded_request.request_id
             queued_requests = FilesystemRecordStore(state_dir).list_every_code_work_request_records(
                 state="queued"
             )
@@ -9496,8 +9503,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 request_id
             )
 
-        self.assertEqual(create_status, 202)
-        self.assertEqual(create_payload["records"]["state"], "queued")
         self.assertEqual(len(queued_requests), 1)
         self.assertEqual(claim_status, 202)
         self.assertEqual(claim_payload["records"]["state"], "claimed")
@@ -9550,22 +9555,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/code",
-                    "issue_number": 123,
-                    "issue_url": "https://github.com/cbusillo/code/issues/123",
-                    "issue_title": "Wire local automation",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-05T22:00:00Z",
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            seeded_request = _seed_every_code_work_request_record(state_dir)
+            request_id = seeded_request.request_id
             queued_requests = FilesystemRecordStore(state_dir).list_every_code_work_request_records(
                 state="queued"
             )
@@ -9590,7 +9581,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authorization="Bearer worker-token",
             )
 
-        self.assertEqual(create_status, 202)
         self.assertEqual(queued_requests[0].request_id, request_id)
         self.assertEqual(claim_status, 202)
         self.assertEqual(claim_payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
@@ -9674,28 +9664,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/code",
-                    "issue_number": 123,
-                    "issue_url": "https://github.com/cbusillo/code/issues/123",
-                    "issue_title": "Wire local automation",
-                    "trigger_label": "every-code",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-05T22:00:00Z",
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
             _invoke_app(
                 app,
                 method="POST",
@@ -9747,7 +9723,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 headers={"Idempotency-Key": "every-code-rerun-intent:123"},
             )
 
-        self.assertEqual(create_status, 202)
         self.assertEqual(intent_status, 202)
         self.assertEqual(rerun_status, 202)
         self.assertEqual(rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id)
@@ -9789,27 +9764,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
             ),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/code",
-                    "issue_number": 123,
-                    "issue_url": "https://github.com/cbusillo/code/issues/123",
-                    "issue_title": "Wire local automation",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-05T22:00:00Z",
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
             _invoke_app(
                 app,
                 method="POST",
@@ -9910,21 +9872,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _create_status, create_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/create",
-                payload={
-                    "repository": "cbusillo/code",
-                    "issue_number": 123,
-                    "issue_url": "https://github.com/cbusillo/code/issues/123",
-                    "issue_title": "Wire local automation",
-                    "trigger_actor": "cbusillo",
-                    "source": "manual",
-                    "queued_at": "2026-05-05T22:00:00Z",
-                },
-            )
-            request_id = str(create_payload["records"]["request_id"])
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
             _invoke_app(
                 app,
                 method="POST",
@@ -10068,12 +10016,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback_status, 405)
         self.assertEqual(feedback_payload["error"]["code"], "method_not_allowed")
 
-    def test_every_code_work_request_create_rejects_unauthorized_identity(self) -> None:
+    def test_every_code_work_request_create_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
-                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                authz_policy=_every_code_worker_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
             )
             status_code, payload = _invoke_app(
@@ -10087,8 +10035,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_work_graph_reads_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

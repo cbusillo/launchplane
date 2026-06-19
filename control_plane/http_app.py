@@ -127,6 +127,10 @@ from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
 from control_plane.drivers.registry import read_driver_descriptor as read_driver_descriptor_record
+from control_plane.every_code_work_request_write import (
+    EveryCodeWorkRequestCreateEnvelope,
+    build_every_code_work_request_record,
+)
 from control_plane.runtime_key_safety_http import (
     RuntimeKeySafetyPolicyApplyEnvelope,
     apply_runtime_key_safety_policy_route,
@@ -1401,6 +1405,12 @@ class _EveryCodeWorkRequestRecordStore(Protocol):
     def read_every_code_work_request_record(
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
+
+
+class _EveryCodeWorkRequestWriteStore(Protocol):
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
 
 
 class _EveryCodePrFeedbackReadStore(Protocol):
@@ -3081,6 +3091,16 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodeWorkRequestRecordStore, record_store)
 
+    def require_every_code_work_request_write_store(
+        record_store: object,
+    ) -> _EveryCodeWorkRequestWriteStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("write_every_code_work_request_record",),
+            capability="Every Code work request writes",
+        )
+        return cast(_EveryCodeWorkRequestWriteStore, record_store)
+
     def require_every_code_pr_feedback_read_store(
         record_store: object,
     ) -> _EveryCodePrFeedbackReadStore:
@@ -3735,6 +3755,79 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         return EveryCodeWorkRequestRecordResponse(trace_id=trace_id, request=record)
+
+    async def create_every_code_work_request(
+        request: Request,
+        every_code_request: EveryCodeWorkRequestCreateEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="every_code_work_request.write",
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot create Every Code work requests.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path="/v1/every-code/work-requests/create",
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            every_code_store = require_every_code_work_request_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            record = build_every_code_work_request_record(
+                every_code_request,
+                queued_at=every_code_request.queued_at.strip() or utc_now_timestamp(),
+            )
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message=str(error) or "Request could not be completed.",
+            ) from error
+        every_code_store.write_every_code_work_request_record(record)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"request_id": record.request_id, "state": record.state},
+            result={"request": record.model_dump(mode="json")},
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path="/v1/every-code/work-requests/create",
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
 
     def list_every_code_pr_feedback(
         identity: Annotated[
@@ -8238,6 +8331,13 @@ def create_launchplane_fastapi_app(
         404: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    every_code_work_request_write_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        409: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         "/v1/previews/readiness",
@@ -8463,6 +8563,18 @@ def create_launchplane_fastapi_app(
         operation_id="read_every_code_work_request",
         summary="Read one Every Code work request",
         responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/work-requests/create",
+        create_every_code_work_request,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="create_every_code_work_request",
+        summary="Create Every Code work request",
+        responses=every_code_work_request_write_error_responses,
     )
 
     app.add_api_route(

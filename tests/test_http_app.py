@@ -4292,6 +4292,161 @@ class FastApiMergeTrainReadTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_code_work_request_create_queues_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_write_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_create(
+                app,
+                _every_code_work_request_create_payload(),
+                idempotency_key="every-code-create-code-123",
+            )
+            stored_requests = store.list_every_code_work_request_records(state="queued")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["state"], "queued")
+        self.assertEqual(payload["result"]["request"]["state"], "queued")
+        self.assertEqual(payload["records"]["request_id"], stored_requests[0].request_id)
+        self.assertEqual(stored_requests[0].repository, "cbusillo/code")
+
+    async def test_every_code_work_request_create_replays_idempotency(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_write_policy(),
+                record_store_factory=lambda: store,
+            )
+            payload = _every_code_work_request_create_payload()
+
+            first_response = await _post_every_code_work_request_create(
+                app,
+                payload,
+                idempotency_key="every-code-create-code-123",
+            )
+            second_response = await _post_every_code_work_request_create(
+                app,
+                payload,
+                idempotency_key="every-code-create-code-123",
+            )
+            stored_requests = store.list_every_code_work_request_records(state="queued")
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(second_response.status_code, 202)
+        self.assertTrue(second_response.json()["replayed"])
+        self.assertEqual(
+            second_response.json()["original_trace_id"],
+            first_response.json()["trace_id"],
+        )
+        self.assertEqual(len(stored_requests), 1)
+
+    async def test_every_code_work_request_create_rejects_reused_idempotency_key(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_write_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            first_response = await _post_every_code_work_request_create(
+                app,
+                _every_code_work_request_create_payload(),
+                idempotency_key="every-code-create-code-123",
+            )
+            conflict_response = await _post_every_code_work_request_create(
+                app,
+                _every_code_work_request_create_payload(issue_number=124),
+                idempotency_key="every-code-create-code-123",
+            )
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_every_code_work_request_create_rejects_unauthorized_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_create(
+                app,
+                _every_code_work_request_create_payload(),
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_every_code_work_request_create_rejects_invalid_record_payload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_write_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_create(
+                app,
+                {
+                    **_every_code_work_request_create_payload(),
+                    "repository": "cbusillo-code",
+                },
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_every_code_work_request_create_rejects_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_every_code_work_request_write_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_create(
+                app,
+                _every_code_work_request_create_payload(),
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_work_request_create_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_work_request_write_policy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_every_code_work_request_create(
+            app,
+            _every_code_work_request_create_payload(),
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
     async def test_every_code_read_routes_return_native_payloads(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -4565,6 +4720,16 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(
                     "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
                 )
+        create_route = openapi["paths"]["/v1/every-code/work-requests/create"]["post"]
+        self.assertEqual(create_route["operationId"], "create_every_code_work_request")
+        self.assertEqual(
+            create_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn(
+                "LaunchplaneErrorResponse", json.dumps(create_route["responses"][status_code])
+            )
 
     async def test_fastapi_every_code_reads_precede_legacy_wsgi_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -14968,6 +15133,26 @@ def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _every_code_work_request_write_policy() -> LaunchplaneAuthzPolicy:
+    return _record_read_policy(
+        action="every_code_work_request.write",
+        context="launchplane",
+    )
+
+
+def _every_code_work_request_create_payload(*, issue_number: int = 123) -> dict[str, object]:
+    return {
+        "repository": "cbusillo/code",
+        "issue_number": issue_number,
+        "issue_url": f"https://github.com/cbusillo/code/issues/{issue_number}",
+        "issue_title": "Wire local automation",
+        "trigger_label": "every-code",
+        "trigger_actor": "cbusillo",
+        "source": "manual",
+        "queued_at": "2026-05-05T22:00:00Z",
+    }
+
+
 def _notification_policy_apply_policy(
     *, action: str, product: str, context: str
 ) -> LaunchplaneAuthzPolicy:
@@ -15725,6 +15910,28 @@ async def _get_every_code_work_request(
         app,
         f"/v1/every-code/work-requests/{request_id}",
         headers=headers,
+    )
+
+
+async def _post_every_code_work_request_create(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/work-requests/create",
+        headers=request_headers,
+        payload=payload,
     )
 
 

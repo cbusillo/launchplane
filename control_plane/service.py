@@ -47,8 +47,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
-    build_every_code_work_request_id,
-    build_every_code_work_request_lifecycle_id,
     close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
@@ -166,6 +164,10 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
+from control_plane.every_code_work_request_write import (
+    EveryCodeWorkRequestCreateEnvelope,
+    build_every_code_work_request_record,
+)
 from control_plane.notifications import post_discord_webhook, public_discord_url_error
 from control_plane.drivers.dispatch import (
     _DescriptorDriverDispatchContext as _DescriptorDriverDispatchContext,
@@ -1740,20 +1742,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("Launchplane self deploy requires product 'launchplane'.")
         return self
-
-
-class EveryCodeWorkRequestCreateEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    repository: str
-    issue_number: int = Field(ge=1)
-    issue_url: str
-    issue_title: str = ""
-    trigger_label: str = "every-code"
-    trigger_actor: str = ""
-    github_delivery_id: str = ""
-    source: Literal["github_issue_label", "manual", "reconciliation"] = "manual"
-    queued_at: str = ""
 
 
 class EveryCodeWorkRequestClaimEnvelope(BaseModel):
@@ -3566,7 +3554,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
-        "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
@@ -4847,7 +4834,7 @@ def _handle_every_code_github_webhook(
         source="github_issue_label",
         queued_at=_utc_now_timestamp(),
     )
-    record = _build_every_code_work_request_record(request, queued_at=request.queued_at)
+    record = build_every_code_work_request_record(request, queued_at=request.queued_at)
     every_code_store = _every_code_work_request_store(record_store)
     stored_record, created = every_code_store.create_every_code_work_request_record_if_absent(
         record
@@ -7534,34 +7521,6 @@ def _record_slug(value: str) -> str:
     return normalized or "launchplane-record"
 
 
-def _build_every_code_work_request_record(
-    request: EveryCodeWorkRequestCreateEnvelope, *, queued_at: str
-) -> EveryCodeWorkRequestRecord:
-    request_id = build_every_code_work_request_id(
-        repository=request.repository,
-        issue_number=request.issue_number,
-        trigger_label=request.trigger_label,
-    )
-    return EveryCodeWorkRequestRecord(
-        request_id=request_id,
-        lifecycle_id=build_every_code_work_request_lifecycle_id(
-            request_id=request_id,
-            queued_at=queued_at,
-        ),
-        source=request.source,
-        state="queued",
-        repository=request.repository.strip(),
-        issue_number=request.issue_number,
-        issue_url=request.issue_url.strip(),
-        issue_title=request.issue_title.strip(),
-        trigger_label=request.trigger_label.strip(),
-        trigger_actor=request.trigger_actor.strip(),
-        github_delivery_id=request.github_delivery_id.strip(),
-        queued_at=queued_at,
-        updated_at=queued_at,
-    )
-
-
 def _bootstrap_policy_source_from_env() -> str:
     if os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip():
         return "bootstrap-env:LAUNCHPLANE_POLICY_TOML"
@@ -8436,46 +8395,7 @@ def create_launchplane_service_app(
             effective_idempotency_route_path = path
             driver_result: BaseModel | dict[str, object] | None = None
             result: dict[str, object] = {}
-            if path == "/v1/every-code/work-requests/create":
-                every_code_request = EveryCodeWorkRequestCreateEnvelope.model_validate(payload)
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.write",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot create Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                every_code_store = _every_code_work_request_store(record_store)
-                record = _build_every_code_work_request_record(
-                    every_code_request,
-                    queued_at=every_code_request.queued_at.strip() or _utc_now_timestamp(),
-                )
-                every_code_store.write_every_code_work_request_record(record)
-                result = {"request_id": record.request_id, "state": record.state}
-                driver_result = {"request": record.model_dump(mode="json")}
-            elif path == _MERGE_TRAIN_RUN_ONCE_ROUTE:
+            if path == _MERGE_TRAIN_RUN_ONCE_ROUTE:
                 merge_train_request = MergeTrainRunOnceEnvelope.model_validate(payload)
                 policy_record = resolve_merge_train_policy_record(record_store)
                 policy = policy_record.policy
