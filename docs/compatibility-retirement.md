@@ -217,6 +217,12 @@ Keep a compatibility surface only when it is one of these:
   and direct WSGI fallback calls fail closed. Audits and dry-runs remain
   repeatable; apply requests require DB-backed storage, backfill authz, and an
   `Idempotency-Key`.
+- Product onboarding uses native FastAPI `POST /v1/product-onboarding/apply`
+  and the Product Onboarding workflow for shared and production onboarding
+  writes. Its legacy WSGI write branch is deleted, and direct WSGI fallback
+  calls fail closed. Requests require DB-backed storage and
+  `product_onboarding.apply` authz; `Idempotency-Key` replay/conflict handling
+  remains available when callers provide a key.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;

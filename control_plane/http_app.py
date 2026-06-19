@@ -28,6 +28,7 @@ from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
+from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
@@ -114,6 +115,7 @@ from control_plane.contracts.product_environment_read_model import (
     ProductReadModelStore,
     ProductSiteOverview,
 )
+from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 from control_plane.contracts.preview_evidence import (
@@ -206,6 +208,7 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorStore,
     public_ingress_notification_drivers,
@@ -270,6 +273,7 @@ _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
+_PRODUCT_ONBOARDING_APPLY_ROUTE = "/v1/product-onboarding/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -1108,6 +1112,21 @@ class AcceptedEvidenceResponse(BaseModel):
     result: dict[str, object] | None = None
     replayed: bool | None = None
     original_trace_id: str | None = None
+
+
+class ProductOnboardingApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    manifest: ProductOnboardingManifest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Product onboarding writes require product 'launchplane'.")
+        self.product = "launchplane"
+        return self
 
 
 class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
@@ -6800,6 +6819,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_product_onboarding_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product onboarding writes require Launchplane database storage.",
+            )
+        return record_store
+
     def require_live_target_runtime_database_store(
         *, record_store: object, trace_id: str
     ) -> PostgresRecordStore:
@@ -7131,6 +7162,108 @@ def create_launchplane_fastapi_app(
             response=product_config_response,
         )
         return product_config_response
+
+    async def apply_product_onboarding(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            onboarding_request = ProductOnboardingApplyEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_onboarding.apply",
+            product=onboarding_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot apply Launchplane product onboarding manifests.",
+            )
+        database_store = require_product_onboarding_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            onboarding_result = apply_product_onboarding_manifest(
+                record_store=database_store,
+                manifest=onboarding_request.manifest,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_onboarding_manifest",
+                message=str(error),
+            ) from error
+        result, driver_result = (
+            control_plane_product_onboarding_service.build_product_onboarding_service_result(
+                onboarding_result
+            )
+        )
+        onboarding_response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "product_profile": str(result["product_profile"]),
+                "provider_target_count": str(result["provider_target_count"]),
+                "provider_target_id_count": str(result["provider_target_id_count"]),
+                "runtime_environment_record_count": str(result["runtime_environment_record_count"]),
+                "secret_binding_count": str(result["secret_binding_count"]),
+            },
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=onboarding_response,
+        )
+        return onboarding_response
 
     async def apply_live_target_runtime(
         request: Request,
@@ -10456,6 +10589,34 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_config",
         summary="Plan or apply product config",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_ONBOARDING_APPLY_ROUTE,
+        apply_product_onboarding,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": ProductOnboardingApplyEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_onboarding",
+        summary="Apply product onboarding records",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

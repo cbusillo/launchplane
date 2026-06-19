@@ -163,7 +163,9 @@ VeriReel product paths:
     bearer-token callers, DB-backed storage, metadata-only policy writes, and
     optional `Idempotency-Key` replay/conflict handling)
 - product onboarding route:
-  - `POST /v1/product-onboarding/apply`
+  - `POST /v1/product-onboarding/apply` (native FastAPI for bearer-token
+    callers, DB-backed onboarding records, optional `Idempotency-Key`
+    replay/conflict handling, and sanitized onboarding evidence)
 - Dokploy target setup route:
   - `POST /v1/dokploy-targets/setup` (native FastAPI for bearer-token
     callers, DB-backed setup records, apply-only `Idempotency-Key`
@@ -1303,18 +1305,20 @@ context/instance scope and explicit preview instance patterns for dynamic PR
 lanes; policy apply merges those scopes additively without making checked-in
 files runtime authority.
 
-Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
-the same operator-approved manifest as `launchplane product-onboarding apply`
-and writes the full Launchplane-owned bundle: product profile, existing
-Dokploy-backed target records, target-id records, runtime-environment records,
-and managed secret binding placeholders. The manual `Product Onboarding`
-workflow is the supported shared and production caller: operators pass the
-manifest as runtime workflow input, and product-specific onboarding JSON stays
-out of checked-in catalogs. Manifests must use neutral `provider_targets`;
-obsolete `dokploy_targets` input is rejected with a clear validation error. The
-route is restricted to `product_onboarding.apply` authority for product/context
+Product onboarding uses the native FastAPI
+`POST /v1/product-onboarding/apply` route. The route accepts the same
+operator-approved manifest as `launchplane product-onboarding apply` and writes
+the full Launchplane-owned bundle: product profile, existing Dokploy-backed
+target records, target-id records, runtime-environment records, and managed
+secret binding placeholders. The manual `Product Onboarding` workflow is the
+supported shared and production caller: operators pass the manifest as runtime
+workflow input, and product-specific onboarding JSON stays out of checked-in
+catalogs. Manifests must use neutral `provider_targets`; obsolete
+`dokploy_targets` input is rejected with a clear validation error. The route is
+restricted to `product_onboarding.apply` authority for product/context
 `launchplane`, requires DB-backed storage, and returns only sanitized
-`provider_target*` summaries. Product records are not loaded from checked-in
+`provider_target*` summaries. Its legacy WSGI fallback branch is deleted; direct
+fallback calls fail closed. Product records are not loaded from checked-in
 catalogs or product repos.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
