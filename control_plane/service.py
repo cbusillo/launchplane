@@ -1806,14 +1806,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         return self
 
 
-class EveryCodePrFeedbackEnvelope(EveryCodePrFeedbackRecord):
-    pass
-
-
-class EveryCodePreviewGateEnvelope(EveryCodePreviewGateRecord):
-    pass
-
-
 class ProductOnboardingApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3557,9 +3549,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
-        "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
-        "/v1/every-code/preview-gates",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -6791,9 +6781,7 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
-        "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
-        "/v1/every-code/preview-gates",
     }
 
 
@@ -6823,38 +6811,6 @@ def _handle_every_code_worker_write(
     every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/preview-gates":
-        gate_record = EveryCodePreviewGateEnvelope.model_validate(payload)
-        every_code_store.write_every_code_preview_gate_record(gate_record)
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={
-                    "gate_id": gate_record.gate_id,
-                    "request_id": gate_record.request_id,
-                    "status": gate_record.status,
-                },
-                driver_result={"gate": gate_record.model_dump(mode="json")},
-            ),
-        )
-    if path == "/v1/every-code/pr-feedback":
-        feedback_record = EveryCodePrFeedbackEnvelope.model_validate(payload)
-        every_code_store.write_every_code_pr_feedback_record(feedback_record)
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={
-                    "request_id": feedback_record.request_id,
-                    "feedback_id": feedback_record.feedback_id,
-                    "status": feedback_record.status,
-                },
-                driver_result={"feedback": feedback_record.model_dump(mode="json")},
-            ),
-        )
     if path == "/v1/every-code/pr-feedback/status":
         feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
         feedback_matches = every_code_store.list_every_code_pr_feedback_records(

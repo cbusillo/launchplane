@@ -32,6 +32,7 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationDestination,
     EveryCodeNotificationPolicyRecord,
 )
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
@@ -7239,8 +7240,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(responses["/v1/every-code/pr-feedback"][0], 405)
-        self.assertEqual(responses["/v1/every-code/preview-gates"][0], 405)
+        self.assertEqual(responses["/v1/every-code/pr-feedback"][0], 404)
+        self.assertEqual(responses["/v1/every-code/preview-gates"][0], 404)
         self.assertEqual(responses["/v1/every-code/notification-attempts"][0], 404)
         self.assertEqual(
             responses["/v1/previews/pr-feedback/notification-attempts"][0],
@@ -9101,7 +9102,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_status, 409)
         self.assertEqual(second_response["error"]["code"], "feedback_already_final")
 
-    def test_every_code_worker_token_writes_pr_feedback_record(self) -> None:
+    def test_every_code_worker_feedback_and_gate_writes_are_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         feedback_record = EveryCodePrFeedbackRecord(
             feedback_id="every-code-pr-feedback-cbusillo-code-26-check-failure-build",
             request_id="every-code-cbusillo-code-123-test",
@@ -9115,6 +9118,21 @@ class LaunchplaneServiceTests(unittest.TestCase):
             body="GitHub check build failed on the Every Code PR branch.",
             html_url="https://github.com/cbusillo/code/actions/runs/1001/job/2002",
             received_at="2026-05-06T19:00:00Z",
+        )
+        gate_record = EveryCodePreviewGateRecord(
+            gate_id="every-code-preview-gate-cbusillo-code-26-checks",
+            request_id="every-code-cbusillo-code-123-test",
+            repository="cbusillo/code",
+            issue_number=123,
+            issue_url="https://github.com/cbusillo/code/issues/123",
+            pr_number=26,
+            pr_url="https://github.com/cbusillo/code/pull/26",
+            head_sha="abcdef1234567890",
+            status="ready",
+            created_at="2026-05-06T18:00:00Z",
+            updated_at="2026-05-06T18:01:00Z",
+            ready_at="2026-05-06T18:01:00Z",
+            last_checked_at="2026-05-06T18:01:00Z",
         )
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -9132,25 +9150,35 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
             )
-            write_status, write_response = _invoke_app(
+            feedback_status, feedback_response = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/every-code/pr-feedback",
                 payload=feedback_record.model_dump(mode="json"),
                 authorization="Bearer dev-worker-token",
             )
+            gate_status, gate_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/preview-gates",
+                payload=gate_record.model_dump(mode="json"),
+                authorization="Bearer dev-worker-token",
+            )
             feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
                 request_id=feedback_record.request_id,
                 status="pending",
             )
+            gate_records = FilesystemRecordStore(state_dir).list_every_code_preview_gate_records(
+                request_id=gate_record.request_id,
+                status="ready",
+            )
 
-        self.assertEqual(write_status, 202, write_response)
-        self.assertEqual(write_response["records"]["feedback_id"], feedback_record.feedback_id)
-        self.assertEqual(
-            write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id
-        )
-        self.assertEqual(len(feedback_records), 1)
-        self.assertEqual(feedback_records[0].feedback_id, feedback_record.feedback_id)
+        self.assertEqual(feedback_status, 404, feedback_response)
+        self.assertEqual(feedback_response["error"]["code"], "not_found")
+        self.assertEqual(gate_status, 404, gate_response)
+        self.assertEqual(gate_response["error"]["code"], "not_found")
+        self.assertEqual(feedback_records, ())
+        self.assertEqual(gate_records, ())
 
     def test_every_code_worker_token_reruns_terminal_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -10013,8 +10041,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(work_status, 404)
         self.assertEqual(work_payload["error"]["code"], "not_found")
-        self.assertEqual(feedback_status, 405)
-        self.assertEqual(feedback_payload["error"]["code"], "method_not_allowed")
+        self.assertEqual(feedback_status, 404)
+        self.assertEqual(feedback_payload["error"]["code"], "not_found")
 
     def test_every_code_work_request_create_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
