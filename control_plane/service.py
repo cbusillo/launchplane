@@ -26,7 +26,6 @@ from control_plane.http_app import (
     create_launchplane_fastapi_app,
     resolve_launchplane_authz_policy,
 )
-from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
@@ -1721,48 +1720,6 @@ class ProductOnboardingApplyEnvelope(BaseModel):
         return self
 
 
-class LiveTargetRuntimeApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: str
-    product: str
-    context: str
-    instance: str
-    deploy: bool = False
-    no_cache: bool = False
-    deploy_timeout_seconds: int | None = Field(default=None, gt=0)
-
-    @field_validator("mode")
-    @classmethod
-    def _validate_mode(cls, value: str) -> str:
-        normalized_value = value.strip().lower()
-        if normalized_value not in {"dry-run", "apply"}:
-            raise ValueError("Live target runtime mode must be 'dry-run' or 'apply'.")
-        return normalized_value
-
-    @model_validator(mode="after")
-    def _validate_route(self) -> "LiveTargetRuntimeApplyEnvelope":
-        self.product = self.product.strip()
-        self.context = self.context.strip()
-        self.instance = self.instance.strip()
-        if not self.product:
-            raise ValueError("Live target runtime apply requires product.")
-        if not self.context:
-            raise ValueError("Live target runtime apply requires context.")
-        if not self.instance:
-            raise ValueError("Live target runtime apply requires instance.")
-        if self.mode == "dry-run" and (
-            self.deploy or self.no_cache or self.deploy_timeout_seconds is not None
-        ):
-            raise ValueError("Deploy options require live target runtime mode 'apply'.")
-        return self
-
-    @property
-    def apply_changes(self) -> bool:
-        return self.mode == "apply"
-
-
 def _redirect_response(
     *,
     start_response: _StartResponse,
@@ -3452,7 +3409,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/local-operators/grants",
         "/v1/authz-policies/local-admins/grants",
         "/v1/merge-train/policies/import",
-        "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
         "/v1/previews/desired-state",
@@ -9549,102 +9505,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/live-target-runtime/apply":
-                live_target_runtime_request = LiveTargetRuntimeApplyEnvelope.model_validate(payload)
-                action = (
-                    "live_target_runtime.apply"
-                    if live_target_runtime_request.apply_changes
-                    else "live_target_runtime.plan"
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action=action,
-                    product=live_target_runtime_request.product,
-                    context=live_target_runtime_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot plan or apply live target runtime for"
-                                    " the requested product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Live target runtime apply requires DB-backed Launchplane"
-                                    " storage."
-                                ),
-                            },
-                        },
-                    )
-                try:
-                    driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
-                        control_plane_root=resolved_root,
-                        product_name=live_target_runtime_request.product,
-                        context_name=live_target_runtime_request.context,
-                        instance_name=live_target_runtime_request.instance,
-                        apply_changes=live_target_runtime_request.apply_changes,
-                        deploy=live_target_runtime_request.deploy,
-                        no_cache=live_target_runtime_request.no_cache,
-                        deploy_timeout_seconds=(live_target_runtime_request.deploy_timeout_seconds),
-                        deploy_trigger=(
-                            control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
-                        ),
-                    )
-                except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-                    status_code = 400
-                    if error.code in {
-                        "runtime_key_safety_unavailable",
-                        "runtime_environment_unavailable",
-                        "dokploy_target_read_failed",
-                    }:
-                        status_code = 503
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=status_code,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": error.code,
-                                "message": str(error),
-                            },
-                        },
-                    )
-                tracked_target = driver_result.get("tracked_target")
-                result = {}
-                if isinstance(tracked_target, dict):
-                    result = {
-                        "target_id": str(tracked_target.get("target_id", "")),
-                        "target_type": str(tracked_target.get("target_type", "")),
-                    }
             elif path == "/v1/product-onboarding/apply":
                 onboarding_request = ProductOnboardingApplyEnvelope.model_validate(payload)
                 if not isinstance(record_store, PostgresRecordStore):

@@ -1375,17 +1375,19 @@ environment responses because those responses can include provider target
 identifiers, runtime key names, managed-secret binding keys, and operational
 metadata.
 
-Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
-accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
-optional apply-only deploy controls. Dry-run requires `live_target_runtime.plan`;
-apply requires `live_target_runtime.apply`. The route resolves DB-backed runtime
-environment records, managed runtime secrets, and the tracked Dokploy target in
-the deployed Launchplane service, evaluates runtime key-safety policy, compares
-desired and live env by key, and returns sanitized key/count evidence without
-runtime values or secret plaintext. Apply updates only the product profile's
-expected runtime environment keys and runtime managed-secret binding keys for
-the selected lane, preserves unrelated live env, verifies persistence by key
-metadata, and can explicitly trigger a deploy when requested.
+Live target runtime sync uses the native FastAPI
+`POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
+or `mode: "apply"`, product/context/instance, and optional apply-only deploy
+controls. Dry-run requires `live_target_runtime.plan`; apply requires
+`live_target_runtime.apply`. The route resolves DB-backed runtime environment
+records, managed runtime secrets, and the tracked Dokploy target in the deployed
+Launchplane service, evaluates runtime key-safety policy, compares desired and
+live env by key, and returns sanitized key/count evidence without runtime values
+or secret plaintext. Apply updates only the product profile's expected runtime
+environment keys and runtime managed-secret binding keys for the selected lane,
+preserves unrelated live env, verifies persistence by key metadata, and can
+explicitly trigger a deploy when requested. Its legacy WSGI fallback branch is
+deleted; direct WSGI fallback calls fail closed.
 
 Live target runtime applies are service-boundary work. Operators and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make

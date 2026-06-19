@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
+from a2wsgi import ASGIMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.cli import main
@@ -1379,6 +1380,23 @@ def create_launchplane_service_app(
     )
 
 
+def create_launchplane_fastapi_wsgi_app(
+    **kwargs: object,
+) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
+    kwargs.pop("state_dir", None)
+    database_url = kwargs.get("database_url")
+    if isinstance(database_url, str) and database_url.startswith("sqlite"):
+        store = PostgresRecordStore(database_url=database_url)
+        store.ensure_schema()
+        store.close()
+    factory = cast(Any, create_launchplane_fastapi_app)
+    app = factory(**kwargs)
+    return cast(
+        Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],
+        ASGIMiddleware(app),
+    )
+
+
 def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
     state_dir = kwargs.pop("state_dir", None)
     local_record_store = kwargs.pop("local_record_store_for_tests", None)
@@ -2086,12 +2104,19 @@ def _invoke_app(
         "CONTENT_LENGTH": str(len(body_bytes)),
         "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
+        "SERVER_NAME": "testserver",
+        "SERVER_PORT": "80",
+        "wsgi.url_scheme": "http",
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured_status = ""
 
-    def start_response(status: str, _response_headers: list[tuple[str, str]]) -> None:
+    def start_response(
+        status: str,
+        _response_headers: list[tuple[str, str]],
+        _exc_info: object | None = None,
+    ) -> None:
         nonlocal captured_status
         captured_status = status
 
@@ -19614,7 +19639,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19634,7 +19659,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "LAUNCHPLANE_DATABASE_URL": database_url,
                         control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
                     },
                     clear=True,
@@ -19729,7 +19753,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19834,7 +19858,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -19960,7 +19984,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20119,7 +20143,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20136,7 +20160,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+                "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
                 side_effect=control_plane_live_target_runtime.LiveTargetRuntimeError(
                     "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed runtime key-safety evaluation.",
                     code="runtime_key_safety_unavailable",
@@ -20176,7 +20200,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
@@ -20202,6 +20226,113 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_live_target_runtime_apply_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/live-target-runtime/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                },
+                headers={"Idempotency-Key": "live-target-runtime:filesystem-store"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_live_target_runtime_apply_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(app, method="GET", path="/openapi.json")
+
+        self.assertEqual(status_code, 200)
+        route = payload["paths"]["/v1/live-target-runtime/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_live_target_runtime")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "LiveTargetRuntimeApplyEnvelope",
+        )
+        for response_status in ("400", "401", "403", "409", "503"):
+            self.assertIn(response_status, route["responses"])
+
+    def test_live_target_runtime_apply_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard"],
+                                "actions": ["live_target_runtime.apply"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/live-target-runtime/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                },
+                headers={"Idempotency-Key": "live-target-runtime:retired-wsgi"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_evidence_ingress_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

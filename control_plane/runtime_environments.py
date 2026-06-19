@@ -88,6 +88,7 @@ def resolve_runtime_environment_values(
             control_plane_root=control_plane_root,
             context_name=context_name,
             instance_name=instance_name,
+            database_url=database_url,
         )
     )
     return control_plane_secrets.overlay_runtime_environment_secret_values(
@@ -127,10 +128,12 @@ def resolve_tracked_target_environment_values(
     control_plane_root: Path,
     context_name: str,
     instance_name: str,
+    database_url: str | None = None,
 ) -> dict[str, str]:
     try:
         source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-            control_plane_root=control_plane_root
+            control_plane_root=control_plane_root,
+            database_url=database_url,
         )
     except click.ClickException as error:
         error_message = str(error)
