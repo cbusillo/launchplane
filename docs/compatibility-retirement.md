@@ -83,6 +83,12 @@ Keep a compatibility surface only when it is one of these:
   legacy WSGI read branch is deleted. Private health endpoint apply uses native
   FastAPI `POST /v1/private-health-endpoints/apply`; its legacy WSGI write
   branch is deleted, and direct fallback calls fail closed.
+- Product config apply uses native FastAPI `POST /v1/product-config/apply` for
+  GitHub Actions OIDC, signed-in GitHub human sessions, and local-operator
+  bearer callers. The route keeps DB-backed storage, redacted validation and
+  product-config service errors, local-operator dry-run continuity, live-target
+  next actions, and `Idempotency-Key` replay/conflict handling. Its legacy WSGI
+  write branch is deleted, and direct fallback calls fail closed.
 - Ingress canary route record reads use native FastAPI
   `GET /v1/ingress/canary-routes/records` and
   `GET /v1/ingress/canary-routes/records/{canary_key}` routes. Their legacy
