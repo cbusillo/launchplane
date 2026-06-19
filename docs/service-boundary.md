@@ -218,7 +218,12 @@ VeriReel product paths:
     `every_code_work_request.update`, replay-before-write idempotency handling,
     record-store status capability checks, `404 not_found` for missing requests,
     and blocked-notification delivery)
-  - `POST /v1/every-code/work-requests/rerun`
+  - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
+    evidence, workflow replay-before-write idempotency handling, record-store
+    rerun capability checks, `404 not_found` for missing requests, and
+    terminal-only requeue semantics)
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
     worker-token callers, direct PR-feedback record writes, and DB-backed
     storage capability enforcement without idempotency state)

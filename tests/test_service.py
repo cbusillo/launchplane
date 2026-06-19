@@ -9140,18 +9140,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback_records, ())
         self.assertEqual(gate_records, ())
 
-    def test_every_code_worker_token_reruns_terminal_request(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        issue_payload = _every_code_github_issue_labeled_payload()
+    def test_every_code_work_request_rerun_is_retired_from_legacy_wsgi_app(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
                     {
-                        "repository": "every/verireel",
+                        "repository": "cbusillo/launchplane",
                         "workflow_refs": [
-                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
                         ],
-                        "event_names": ["pull_request"],
+                        "event_names": ["workflow_dispatch"],
                         "products": ["launchplane"],
                         "contexts": ["launchplane"],
                         "actions": ["every_code_work_request.rerun"],
@@ -9159,36 +9157,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ]
             }
         )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
-                },
-            ),
-        ):
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(_identity()),
+                verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _issue_status, issue_response = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=issue_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-issue",
-                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
-                },
-            )
-            request_id = issue_response["records"]["request_id"]
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
             _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _update_every_code_work_request_status_in_filesystem(
                 state_dir,
@@ -9197,21 +9179,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 error_message="Needs another pass.",
                 updated_at="2026-05-06T16:00:00Z",
             )
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for blocked Every Code request.",
-                },
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
-
             rerun_status, rerun_response = _invoke_app(
                 app,
                 method="POST",
@@ -9219,81 +9186,44 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "request_id": request_id,
                     "trigger_actor": "ops",
-                    "agent_write_intent_record_id": intent_record_id,
                 },
-                authorization="Bearer dev-worker-token",
+                headers={"Idempotency-Key": "every-code-rerun-code-123"},
+            )
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
             )
 
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 202)
-        request = rerun_response["result"]["request"]
-        self.assertEqual(request["state"], "queued")
-        self.assertEqual(request["trigger_actor"], "ops")
-        self.assertEqual(request["claimed_by_host"], "")
-        self.assertEqual(request["error_message"], "")
+        self.assertEqual(rerun_status, 404)
+        self.assertEqual(rerun_response["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "blocked")
+        self.assertEqual(stored_request.error_message, "Needs another pass.")
 
-    def test_every_code_worker_token_cannot_rerun_active_request(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        issue_payload = _every_code_github_issue_labeled_payload()
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "every/verireel",
-                        "workflow_refs": [
-                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                        ],
-                        "event_names": ["pull_request"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["every_code_work_request.rerun"],
-                    }
-                ]
-            }
-        )
+    def test_every_code_work_request_rerun_worker_token_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
-                },
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token"},
             ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _issue_status, issue_response = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=issue_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-issue",
-                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
-                },
+            state_dir = Path(temporary_directory_name) / "state"
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="blocked",
+                error_message="Needs another pass.",
+                updated_at="2026-05-05T22:05:00Z",
             )
-            request_id = issue_response["records"]["request_id"]
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for active Every Code request.",
-                },
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
 
             rerun_status, rerun_response = _invoke_app(
                 app,
@@ -9302,14 +9232,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "request_id": request_id,
                     "trigger_actor": "ops",
-                    "agent_write_intent_record_id": intent_record_id,
                 },
                 authorization="Bearer dev-worker-token",
             )
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
+            )
 
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 400)
-        self.assertEqual(rerun_response["error"]["code"], "invalid_payload")
+        self.assertEqual(rerun_status, 404)
+        self.assertEqual(rerun_response["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "blocked")
+        self.assertEqual(stored_request.error_message, "Needs another pass.")
 
     def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -9646,294 +9579,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(show_payload["error"]["code"], "not_found")
         self.assertEqual(write_status, 404)
         self.assertEqual(write_payload["error"]["code"], "not_found")
-
-    def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                result_pr_url="https://github.com/cbusillo/code/pull/26",
-                result_summary="Detached session went stale.",
-                error_message="Detached session went stale.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for blocked Every Code request.",
-                },
-                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
-            rerun_status, rerun_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "trigger_actor": "cbusillo",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "agent_write_intent_record_id": intent_record_id,
-                },
-                authorization="Bearer worker-token",
-                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
-            )
-
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 202)
-        self.assertEqual(rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id)
-        self.assertEqual(rerun_payload["records"]["state"], "queued")
-        self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
-        self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["result_pr_url"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["error_message"], "")
-
-    def test_every_code_rerun_requires_matching_write_intent_evidence(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                error_message="Needs another pass.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-
-            missing_status, missing_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={"request_id": request_id, "trigger_actor": "cbusillo"},
-                authorization="Bearer worker-token",
-            )
-            wrong_source_status, wrong_source_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/999",
-                    "reason": "Approved rerun for a different Every Code request.",
-                },
-            )
-            wrong_source_record_id = wrong_source_payload["result"]["record"]["record_id"]
-            mismatched_status, mismatched_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "trigger_actor": "cbusillo",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "agent_write_intent_record_id": wrong_source_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-        self.assertEqual(missing_status, 409)
-        self.assertEqual(missing_payload["error"]["code"], "agent_write_intent_required")
-        self.assertEqual(wrong_source_status, 202)
-        self.assertEqual(mismatched_status, 409)
-        self.assertEqual(mismatched_payload["error"]["code"], "agent_write_intent_source_mismatch")
-
-    def test_every_code_rerun_rejects_stale_and_wrong_context_write_intents(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane", "other-context"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                error_message="Needs another pass.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-            _wrong_context_status, wrong_context_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "other-context",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun in the wrong context.",
-                },
-            )
-            wrong_context_record_id = wrong_context_payload["result"]["record"]["record_id"]
-            wrong_context_status, wrong_context_rerun_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "agent_write_intent_record_id": wrong_context_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-            _intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for a blocked Every Code request.",
-                },
-            )
-            stale_record_id = intent_payload["result"]["record"]["record_id"]
-            store = FilesystemRecordStore(state_dir)
-            stale_record = store.read_agent_write_intent_record(stale_record_id)
-            store.write_agent_write_intent_record(
-                stale_record.model_copy(update={"recorded_at": "2026-01-01T00:00:00Z"})
-            )
-            stale_status, stale_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "agent_write_intent_record_id": stale_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-        self.assertEqual(wrong_context_status, 409)
-        self.assertEqual(
-            wrong_context_rerun_payload["error"]["code"],
-            "agent_write_intent_scope_mismatch",
-        )
-        self.assertEqual(stale_status, 409)
-        self.assertEqual(stale_payload["error"]["code"], "agent_write_intent_stale")
 
     def test_every_code_worker_read_route_is_retired_before_authentication(self) -> None:
         with (

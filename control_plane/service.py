@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -47,7 +47,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
-    requeue_every_code_work_request,
 )
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
@@ -638,7 +637,6 @@ _GITHUB_ISSUE_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EVERY_CODE_TRIGGER_LABEL = "every-code"
-_AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -1729,25 +1727,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
     def _validate_alignment(self) -> "LaunchplaneSelfDeployEnvelope":
         if self.product.strip() != "launchplane":
             raise ValueError("Launchplane self deploy requires product 'launchplane'.")
-        return self
-
-
-class EveryCodeWorkRequestRerunEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    trigger_actor: str = ""
-    source_url: str = ""
-    agent_write_intent_record_id: str = ""
-
-    @model_validator(mode="after")
-    def _validate_rerun(self) -> "EveryCodeWorkRequestRerunEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request rerun requires request_id")
-        self.request_id = self.request_id.strip()
-        self.trigger_actor = self.trigger_actor.strip()
-        self.source_url = self.source_url.strip()
-        self.agent_write_intent_record_id = self.agent_write_intent_record_id.strip()
         return self
 
 
@@ -3491,7 +3470,6 @@ def _build_write_routes() -> frozenset[str]:
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
-        "/v1/every-code/work-requests/rerun",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -6445,267 +6423,6 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
     )
 
 
-def _is_every_code_worker_route(*, method: str, path: str) -> bool:
-    return method == "POST" and path in {
-        "/v1/every-code/work-requests/rerun",
-    }
-
-
-def _every_code_worker_token_authorized(
-    *, environ: dict[str, object], method: str, path: str
-) -> bool:
-    if not _is_every_code_worker_route(method=method, path=path):
-        return False
-    expected_token = _every_code_worker_token_from_env()
-    if not expected_token:
-        return False
-    try:
-        provided_token = _bearer_token(environ)
-    except PermissionError:
-        return False
-    return secrets.compare_digest(provided_token, expected_token)
-
-
-def _handle_every_code_worker_write(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    record_store: object,
-    path: str,
-    payload: dict[str, object],
-    idempotency_key: str = "",
-) -> list[bytes]:
-    every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/work-requests/rerun":
-        rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
-        rerun_checked_at = datetime.now(timezone.utc)
-        intent_record, intent_response = _validate_every_code_rerun_write_intent(
-            record_store=record_store,
-            rerun_request=rerun_request,
-            idempotency_key=idempotency_key,
-            now=rerun_checked_at,
-            trace_id=trace_id,
-            start_response=start_response,
-        )
-        if intent_response is not None:
-            return intent_response
-        existing_record = every_code_store.read_every_code_work_request_record(
-            rerun_request.request_id.strip()
-        )
-        if intent_record is None:
-            intent_record = _matching_every_code_rerun_intent_record(
-                record_store=record_store,
-                source_url=existing_record.issue_url,
-                now=rerun_checked_at,
-            )
-            if intent_record is None:
-                return _reject_agent_write_intent(
-                    start_response=start_response,
-                    trace_id=trace_id,
-                    code="agent_write_intent_required",
-                    message="Every Code rerun requires matching approved write-intent evidence.",
-                )
-        if rerun_request.source_url and rerun_request.source_url != existing_record.issue_url:
-            return _reject_agent_write_intent(
-                start_response=start_response,
-                trace_id=trace_id,
-                code="agent_write_intent_source_mismatch",
-                message="Every Code rerun source_url does not match the work-request issue URL.",
-                record_id=intent_record.record_id,
-            )
-        requeued_record = requeue_every_code_work_request(
-            existing_record,
-            queued_at=_utc_now_timestamp(),
-            trigger_actor=rerun_request.trigger_actor,
-        )
-        every_code_store.write_every_code_work_request_record(requeued_record)
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={
-                    "request_id": requeued_record.request_id,
-                    "state": requeued_record.state,
-                    **(
-                        {"agent_write_intent_record_id": intent_record.record_id}
-                        if intent_record is not None
-                        else {}
-                    ),
-                },
-                driver_result={"request": requeued_record.model_dump(mode="json")},
-            ),
-        )
-    return _json_response(
-        start_response=start_response,
-        status_code=404,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "not_found",
-                "message": "Launchplane route was not found.",
-            },
-        },
-    )
-
-
-def _agent_write_intent_rejection_payload(
-    *, trace_id: str, code: str, message: str, record_id: str = ""
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "status": "rejected",
-        "trace_id": trace_id,
-        "error": {"code": code, "message": message},
-    }
-    if record_id:
-        payload["records"] = {"agent_write_intent_record_id": record_id}
-    return payload
-
-
-def _reject_agent_write_intent(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    code: str,
-    message: str,
-    record_id: str = "",
-) -> list[bytes]:
-    status_code = 404 if code == "agent_write_intent_not_found" else 409
-    return _json_response(
-        start_response=start_response,
-        status_code=status_code,
-        payload=_agent_write_intent_rejection_payload(
-            trace_id=trace_id,
-            code=code,
-            message=message,
-            record_id=record_id,
-        ),
-    )
-
-
-def _validate_every_code_rerun_write_intent(
-    *,
-    record_store: object,
-    rerun_request: EveryCodeWorkRequestRerunEnvelope,
-    idempotency_key: str,
-    now: datetime,
-    trace_id: str,
-    start_response: _StartResponse,
-) -> tuple[AgentWriteIntentRecord | None, list[bytes] | None]:
-    record_id = rerun_request.agent_write_intent_record_id.strip()
-    if not record_id:
-        return None, None
-    try:
-        record = _agent_write_intent_record_store(record_store).read_agent_write_intent_record(
-            record_id
-        )
-    except FileNotFoundError:
-        return None, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_not_found",
-            message="Agent write-intent evidence record was not found.",
-            record_id=record_id,
-        )
-    if (
-        record.evaluation.status != "allowed"
-        or record.evaluation.intent != "every_code_rerun"
-        or record.evaluation.mode != "apply"
-        or not record.evaluation.safe_to_execute
-    ):
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_not_executable",
-            message="Every Code rerun requires an allowed apply-mode every_code_rerun intent record.",
-            record_id=record.record_id,
-        )
-    if (
-        record.evaluation.product != "launchplane"
-        or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT
-    ):
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_scope_mismatch",
-            message="Agent write-intent evidence does not match the Every Code rerun product/context.",
-            record_id=record.record_id,
-        )
-    if record.evaluation.authz_action != "every_code_work_request.rerun":
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_action_mismatch",
-            message="Agent write-intent evidence was evaluated for a different route action.",
-            record_id=record.record_id,
-        )
-    if rerun_request.source_url and rerun_request.source_url != record.request.source_url:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_source_mismatch",
-            message="Every Code rerun source_url does not match the write-intent source_url.",
-            record_id=record.record_id,
-        )
-    if idempotency_key and record.idempotency_key and idempotency_key != record.idempotency_key:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_idempotency_mismatch",
-            message="Every Code rerun idempotency key does not match the write-intent evidence.",
-            record_id=record.record_id,
-        )
-    try:
-        recorded_at = _parse_utc_timestamp(record.recorded_at)
-    except ValueError:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_stale",
-            message="Agent write-intent evidence timestamp is invalid or stale.",
-            record_id=record.record_id,
-        )
-    if recorded_at > now or now - recorded_at > _AGENT_WRITE_INTENT_MAX_AGE:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_stale",
-            message="Agent write-intent evidence is too old for Every Code rerun execution.",
-            record_id=record.record_id,
-        )
-    return record, None
-
-
-def _matching_every_code_rerun_intent_record(
-    *,
-    record_store: object,
-    source_url: str,
-    now: datetime,
-) -> AgentWriteIntentRecord | None:
-    for record in _agent_write_intent_record_store(record_store).list_agent_write_intent_records(
-        product="launchplane",
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-        status="allowed",
-        limit=50,
-    ):
-        if record.evaluation.intent != "every_code_rerun":
-            continue
-        if record.evaluation.mode != "apply" or not record.evaluation.safe_to_execute:
-            continue
-        if record.evaluation.authz_action != "every_code_work_request.rerun":
-            continue
-        if record.request.source_url != source_url:
-            continue
-        try:
-            recorded_at = _parse_utc_timestamp(record.recorded_at)
-        except ValueError:
-            continue
-        if recorded_at <= now and now - recorded_at <= _AGENT_WRITE_INTENT_MAX_AGE:
-            return record
-    return None
-
-
 def _session(
     *,
     environ: dict[str, object],
@@ -7815,30 +7532,6 @@ def create_launchplane_service_app(
                         "error": {
                             "code": "invalid_request",
                             "message": "GitHub webhook payload is invalid.",
-                        },
-                    },
-                )
-        if _every_code_worker_token_authorized(environ=environ, method=method, path=path):
-            payload = _read_json_request(environ)
-            try:
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=_idempotency_key(environ),
-                )
-            except ValueError as error:
-                return _json_response(
-                    start_response=start_response,
-                    status_code=400,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "invalid_payload",
-                            "message": str(error),
                         },
                     },
                 )
@@ -9306,44 +8999,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/every-code/work-requests/rerun":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.rerun",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot rerun Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                )
             elif path == "/v1/product-config/apply":
                 product_config_request, product_config_response = (
                     validate_product_config_apply_request(
