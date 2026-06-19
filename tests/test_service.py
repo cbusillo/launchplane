@@ -150,6 +150,7 @@ from control_plane.service_human_auth import (
     GITHUB_USER_URL,
     GitHubOAuthClient,
     GitHubOAuthConfig,
+    HumanSessionManager,
     InMemoryHumanSessionStore,
     LaunchplaneHumanSession,
     load_github_oauth_config_from_env,
@@ -6923,7 +6924,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -6994,7 +6995,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7042,6 +7043,71 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records, ())
         self.assertIsNone(idempotency_record)
 
+    def test_merge_train_policy_import_endpoint_human_admin_session_can_apply(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_human_identity(role="admin"))
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["merge_train.policy_import"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                human_session_manager=session_manager,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-human-import",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure codex-skills merge train.",
+                    "record": record.model_dump(mode="json"),
+                },
+                authorization="",
+                headers={
+                    "Cookie": session_manager.session_cookie_header(human_session),
+                    "Idempotency-Key": "merge-train-policy:human-import",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_merge_train_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual([stored.record_id for stored in records], [record.record_id])
+
     def test_merge_train_policy_import_endpoint_rejects_self_deploy_authority(
         self,
     ) -> None:
@@ -7064,7 +7130,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -7122,7 +7188,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -7158,6 +7224,167 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_merge_train_policy_import_endpoint_authorizes_before_storage_gate(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-authz-before-storage",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_merge_train_policy_import_endpoint_requires_database_storage(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["merge_train.policy_import"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-db-required",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure codex-skills merge train.",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:db-required"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_merge_train_policy_import_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        payload = app.openapi()
+
+        route = payload["paths"]["/v1/merge-train/policies/import"]["post"]
+        self.assertEqual(route["operationId"], "import_merge_train_policy")
+        self.assertEqual(route["responses"]["202"]["description"], "Successful Response")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "MergeTrainPolicyImportEnvelope")
+        self.assertEqual(request_schema["additionalProperties"], False)
+
+    def test_merge_train_policy_import_endpoint_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-legacy-retired",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

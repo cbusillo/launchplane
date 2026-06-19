@@ -658,12 +658,17 @@ The second batch service contract is
 creation and guarded PR-native landing, and writes
 `launchplane_merge_train_batch_landing_plans` records.
 
-`POST /v1/merge-train/policies/import` is the service-owned write path for merge
-train policy records. It requires database storage and
+`POST /v1/merge-train/policies/import` is the native FastAPI service-owned write
+path for merge train policy records. It requires database storage and
 `merge_train.policy_import` on product/context `launchplane`, accepts `dry_run`
-and `apply`, and writes the supplied typed record only in apply mode.
-Shared and production policy changes should use this route rather than direct DB
-CLI writes from an arbitrary checkout.
+and `apply`, and writes the supplied typed record only in apply mode. GitHub
+Actions OIDC callers, signed-in GitHub human sessions, and local operator/admin
+bearer callers may use the route when policy grants the action; terminal-agent
+credentials remain read-only. Apply requests preserve `Idempotency-Key`
+replay/conflict handling when callers provide a key; dry-runs remain stateless
+and repeatable. Shared and production policy changes should use this route rather
+than direct DB CLI writes from an arbitrary checkout, and the retired legacy WSGI
+fallback branch fails closed for direct calls.
 
 ## Host Assumption
 

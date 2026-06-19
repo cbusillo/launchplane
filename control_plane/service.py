@@ -69,7 +69,6 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackEvent,
     MergeTrainPrFeedbackRecord,
@@ -990,26 +989,6 @@ class PreviewPrFeedbackEnvelope(BaseModel):
         return self
 
 
-class MergeTrainPolicyImportEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str = "launchplane"
-    mode: Literal["dry_run", "apply"] = "dry_run"
-    reason: str = ""
-    record: MergeTrainPolicyRecord
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "MergeTrainPolicyImportEnvelope":
-        self.product = self.product.strip() or "launchplane"
-        if self.product != "launchplane":
-            raise ValueError("merge train policy import requires product 'launchplane'")
-        self.reason = self.reason.strip()
-        if self.mode == "apply" and not self.reason:
-            raise ValueError("merge train policy import apply requires reason")
-        return self
-
-
 class OdooPostDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     post_deploy: OdooPostDeployRequest
@@ -1661,7 +1640,6 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         "/v1/authz-policies/terminal-agents/grants",
         "/v1/authz-policies/local-operators/grants",
         "/v1/authz-policies/local-admins/grants",
-        "/v1/merge-train/policies/import",
     }
 )
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
@@ -3382,7 +3360,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/terminal-agents/grants",
         "/v1/authz-policies/local-operators/grants",
         "/v1/authz-policies/local-admins/grants",
-        "/v1/merge-train/policies/import",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -6072,12 +6049,6 @@ def _should_store_idempotency_record(
             "/v1/authz-policies/local-operators/grants",
             "/v1/authz-policies/local-admins/grants",
         }
-        and isinstance(driver_result, dict)
-        and driver_result.get("mode") == "dry_run"
-    ):
-        return False
-    if (
-        path == "/v1/merge-train/policies/import"
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
     ):
@@ -9409,68 +9380,6 @@ def create_launchplane_service_app(
                         audit=audit,
                     )
                 )
-            elif path == "/v1/merge-train/policies/import":
-                merge_train_policy_request = MergeTrainPolicyImportEnvelope.model_validate(payload)
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Merge train policy writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="merge_train.policy_import",
-                    product=merge_train_policy_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane merge train policies.",
-                            },
-                        },
-                    )
-                if merge_train_policy_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                    record_store.write_merge_train_policy_record(merge_train_policy_request.record)
-                result = {
-                    "mode": merge_train_policy_request.mode,
-                    "record": {
-                        "record_id": merge_train_policy_request.record.record_id,
-                        "status": merge_train_policy_request.record.status,
-                        "source": merge_train_policy_request.record.source,
-                        "updated_at": merge_train_policy_request.record.updated_at,
-                        "policy_sha256": merge_train_policy_request.record.policy_sha256,
-                        "repository_count": len(merge_train_policy_request.record.policy.policies),
-                        "policy_keys": [
-                            repository_policy.policy_key
-                            for repository_policy in merge_train_policy_request.record.policy.policies
-                        ],
-                    },
-                }
-                driver_result = result
             elif path in descriptor_driver_dispatch_routes:
                 try:
                     dispatch_response = _dispatch_descriptor_driver_route(

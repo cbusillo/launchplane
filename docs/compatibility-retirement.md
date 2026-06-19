@@ -223,6 +223,14 @@ Keep a compatibility surface only when it is one of these:
   calls fail closed. Requests require DB-backed storage and
   `product_onboarding.apply` authz; `Idempotency-Key` replay/conflict handling
   remains available when callers provide a key.
+- Merge-train policy import uses native FastAPI
+  `POST /v1/merge-train/policies/import` for DB-backed policy record writes.
+  Its legacy WSGI write branch is deleted, and direct WSGI fallback calls fail
+  closed. Requests require `merge_train.policy_import` authz on
+  product/context `launchplane` for GitHub Actions OIDC, signed-in GitHub human
+  sessions, and local operator/admin bearer callers; apply requests preserve
+  optional `Idempotency-Key` replay/conflict handling while dry-runs remain
+  stateless.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;
