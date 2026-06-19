@@ -4603,7 +4603,355 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_profile.driver_id, "generic-web")
 
 
-class FastApiProductContextCutoverAuditReadTests(unittest.IsolatedAsyncioTestCase):
+class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_cutover_apply_updates_profile_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            payload: dict[str, object] = {
+                "product": "sellyouroutboard",
+                "source_context": "sellyouroutboard-testing",
+                "target_context": "sellyouroutboard",
+                "mode": "apply",
+                "display_name": "SellYourOutboard",
+                "source_label": "test:context-cutover",
+            }
+            response = await _post_context_cutover_apply(
+                app,
+                payload,
+                idempotency_key="profile-context-cutover",
+            )
+            replay_response = await _post_context_cutover_apply(
+                app,
+                payload,
+                idempotency_key="profile-context-cutover",
+            )
+            stored_profile = app_store.read_product_profile_record("sellyouroutboard")
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        body = response.json()
+        replay_body = replay_response.json()
+        self.assertEqual(body["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertEqual(replay_body["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(replay_body["result"], body["result"])
+        self.assertEqual(body["result"]["profile"]["display_name"], "SellYourOutboard")
+        self.assertEqual(stored_profile.display_name, "SellYourOutboard")
+        self.assertEqual({lane.context for lane in stored_profile.lanes}, {"sellyouroutboard"})
+        self.assertEqual(stored_profile.preview.context, "sellyouroutboard")
+
+    async def test_context_cutover_apply_rejects_contexts_outside_product_boundary(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _post_context_cutover_apply(
+                app,
+                {
+                    "product": "sellyouroutboard",
+                    "source_context": "verireel-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "dry-run",
+                    "display_name": "SellYourOutboard",
+                },
+                idempotency_key="profile-context-cutover-cross-product",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "context_not_in_product_boundary")
+
+    async def test_legacy_context_cleanup_apply_returns_redacted_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            profile_payload = _product_profile_payload_with_prod()
+            profile_lanes = cast(tuple[dict[str, object], ...], profile_payload["lanes"])
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": "sellyouroutboard"} for lane in profile_lanes
+            )
+            profile_preview = cast(dict[str, object], profile_payload["preview"])
+            profile_payload["preview"] = {
+                **profile_preview,
+                "context": "sellyouroutboard",
+            }
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                )
+            finally:
+                store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _post_legacy_context_cleanup_apply(
+                app,
+                {
+                    "product": "sellyouroutboard",
+                    "source_context": "sellyouroutboard-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "dry-run",
+                },
+                idempotency_key="legacy-context-cleanup-dry-run",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        body = response.json()
+        self.assertEqual(body["records"], {"product_profile": "sellyouroutboard"})
+        self.assertFalse(body["result"]["blocked"])
+        self.assertEqual(body["result"]["groups"]["runtime_environment_records"], [])
+
+    async def test_context_apply_authenticates_before_malformed_body(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_context_cutover_apply(
+            app,
+            {},
+            authorization="",
+            raw_body=b"{",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_context_apply_rejects_malformed_body_after_authentication(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_context_cutover_apply(
+            app,
+            {},
+            raw_body=b"\xff",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+
+    async def test_context_cutover_apply_reports_schema_validation_message(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_context_cutover_apply(app, {"product": "sellyouroutboard"})
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "invalid_request")
+        self.assertEqual(body["error"]["message"], "Request payload failed validation.")
+
+    async def test_context_cutover_apply_requires_database_storage(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _post_context_cutover_apply(
+            app,
+            {
+                "product": "sellyouroutboard",
+                "source_context": "sellyouroutboard-testing",
+                "target_context": "sellyouroutboard",
+            },
+        )
+
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "database_required")
+        self.assertEqual(
+            body["error"]["message"],
+            "Product context cutover requires Launchplane database storage.",
+        )
+
+    async def test_context_cutover_apply_requires_database_before_idempotency_replay(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "sellyouroutboard",
+            "source_context": "sellyouroutboard-testing",
+            "target_context": "sellyouroutboard",
+        }
+        store = _ProductContextApplyReplayOnlyStore(
+            route_path="/v1/product-profiles/context-cutover/apply",
+            payload=payload,
+            idempotency_key="context-cutover-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_context_cutover_apply(
+            app,
+            payload,
+            idempotency_key="context-cutover-replay",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+        self.assertEqual(store.read_idempotency_calls, 0)
+
+    async def test_legacy_context_cleanup_apply_requires_database_before_idempotency_replay(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "product": "sellyouroutboard",
+            "source_context": "sellyouroutboard-testing",
+            "target_context": "sellyouroutboard",
+            "mode": "dry-run",
+        }
+        store = _ProductContextApplyReplayOnlyStore(
+            route_path="/v1/product-profiles/legacy-context-cleanup/apply",
+            payload=payload,
+            idempotency_key="legacy-context-cleanup-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_legacy_context_cleanup_apply(
+            app,
+            payload,
+            idempotency_key="legacy-context-cleanup-replay",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+        self.assertEqual(store.read_idempotency_calls, 0)
+
+    async def test_openapi_includes_context_apply_contracts(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        openapi = response.json()
+        cutover_route = openapi["paths"]["/v1/product-profiles/context-cutover/apply"]["post"]
+        cleanup_route = openapi["paths"]["/v1/product-profiles/legacy-context-cleanup/apply"][
+            "post"
+        ]
+        self.assertEqual(cutover_route["operationId"], "apply_product_context_cutover")
+        self.assertEqual(
+            cleanup_route["operationId"],
+            "apply_product_legacy_context_cleanup",
+        )
+        self.assertEqual(
+            cutover_route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "ProductContextCutoverRequest",
+        )
+        self.assertEqual(
+            cleanup_route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "LegacyContextCleanupRequest",
+        )
+        for route in (cutover_route, cleanup_route):
+            self.assertEqual(
+                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/AcceptedEvidenceResponse",
+            )
+            for status_code in ("400", "401", "403", "404", "409", "503"):
+                self.assertIn(status_code, route["responses"])
+
+    async def test_fastapi_context_apply_precedes_legacy_wsgi_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_profile_write_policy(product="sellyouroutboard"),
+                record_store_factory=lambda: app_store,
+            )
+            legacy_app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
+                control_plane_root_path=root,
+            )
+            app.mount("/", cast(ASGIApp, WSGIMiddleware(cast(Any, legacy_app))))
+
+            response = await _post_context_cutover_apply(
+                app,
+                {
+                    "product": "sellyouroutboard",
+                    "source_context": "sellyouroutboard-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "dry-run",
+                },
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"], {"product_profile": "sellyouroutboard"})
+
     async def test_context_cutover_audit_returns_redacted_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -15326,6 +15674,54 @@ async def _post_product_profile(
     )
 
 
+async def _post_context_cutover_apply(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+    raw_body: bytes | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles/context-cutover/apply",
+        headers=request_headers,
+        payload=payload,
+        raw_body=raw_body,
+    )
+
+
+async def _post_legacy_context_cleanup_apply(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+    raw_body: bytes | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-profiles/legacy-context-cleanup/apply",
+        headers=request_headers,
+        payload=payload,
+        raw_body=raw_body,
+    )
+
+
 async def _get_context_cutover_audit(
     app: FastAPI,
     *,
@@ -15936,6 +16332,51 @@ class _ProductProfileReplayOnlyStore:
     ) -> LaunchplaneIdempotencyRecord | None:
         self.read_idempotency_calls += 1
         if route_path != "/v1/product-profiles" or idempotency_key != self._idempotency_key:
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {"product_profile": "sellyouroutboard"},
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        raise AssertionError("idempotent replay must not write a new record")
+
+
+class _ProductContextApplyReplayOnlyStore:
+    def __init__(
+        self,
+        *,
+        route_path: str,
+        payload: dict[str, object],
+        idempotency_key: str,
+    ) -> None:
+        self.read_idempotency_calls = 0
+        self._route_path = route_path
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if route_path != self._route_path or idempotency_key != self._idempotency_key:
             return None
         return LaunchplaneIdempotencyRecord(
             record_id="idempotency-launchplane_req_original",
