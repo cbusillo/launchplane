@@ -150,14 +150,19 @@ Keep a compatibility surface only when it is one of these:
   `every_code_work_request.update` workflow authorization, checks idempotency
   before requiring write-store capabilities, preserves blocked-notification
   delivery, and keeps the existing `404 not_found` transition semantics. Every
-  Code PR-feedback write, PR-feedback status, and preview-gate write routes use
-  native FastAPI, preserve the dedicated Every Code worker token, require only
-  their direct PR-feedback or preview-gate record-store capabilities, and
-  intentionally do not add idempotency state. The PR-feedback status route also
-  preserves the existing `404 not_found` and `409 feedback_already_final`
-  transition semantics. Their legacy WSGI write branches are deleted; direct
-  WSGI fallback calls fail closed. Every Code rerun and webhook routes remain on
-  the mounted WSGI fallback until their native write replacements land.
+  Code work-request rerun uses native FastAPI, preserves the dedicated Every Code
+  worker token and `every_code_work_request.rerun` workflow authorization,
+  requires approved `every_code_rerun` write-intent evidence, checks workflow
+  idempotency replay before requiring write-store capabilities, and keeps the
+  terminal-only requeue semantics. Every Code PR-feedback write, PR-feedback
+  status, and preview-gate write routes use native FastAPI, preserve the
+  dedicated Every Code worker token, require only their direct PR-feedback or
+  preview-gate record-store capabilities, and intentionally do not add
+  idempotency state. The PR-feedback status route also preserves the existing
+  `404 not_found` and `409 feedback_already_final` transition semantics. Their
+  legacy WSGI write branches are deleted; direct WSGI fallback calls fail closed.
+  The Every Code GitHub webhook route remains on the mounted WSGI fallback until
+  its native replacement lands.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the

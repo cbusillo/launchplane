@@ -18,6 +18,12 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.agent_write_intent import (
+    AgentWriteIntentRecord,
+    AgentWriteIntentRequest,
+    build_agent_write_intent_record_id,
+    evaluate_agent_write_intent,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -32,7 +38,11 @@ from control_plane.contracts.every_code_notifications import (
 )
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
-from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+    apply_every_code_work_request_status,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
@@ -94,6 +104,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     GitHubActionsIdentity,
     LaunchplaneAuthzPolicy,
+    agent_authz_audit,
 )
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
@@ -4953,6 +4964,428 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("embeds", discord_payload)
         self.assertEqual(payload["result"]["notifications"][0]["delivery_status"], "delivered")
         self.assertEqual(attempts[0].delivery_status, "delivered")
+
+    async def test_every_code_work_request_rerun_accepts_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            blocked = apply_every_code_work_request_status(
+                claimed,
+                EveryCodeWorkRequestStatusUpdate(
+                    state="blocked",
+                    host="Chris-Studio",
+                    updated_at="2026-05-05T22:05:00Z",
+                    result_pr_url="https://github.com/cbusillo/code/pull/26",
+                    result_summary="Detached session went stale.",
+                    error_message="Detached session went stale.",
+                ),
+            )
+            store.write_every_code_work_request_record(blocked)
+            intent = _seed_every_code_rerun_intent(
+                store,
+                idempotency_key="every-code-rerun-intent:123",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "trigger_actor": "cbusillo",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "agent_write_intent_record_id": intent.record_id,
+                },
+                authorization="Bearer worker-token",
+                idempotency_key="every-code-rerun-intent:123",
+            )
+            stored_request = store.read_every_code_work_request_record(seeded.request_id)
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["request_id"], seeded.request_id)
+        self.assertEqual(payload["records"]["state"], "queued")
+        self.assertEqual(payload["records"]["agent_write_intent_record_id"], intent.record_id)
+        self.assertEqual(payload["result"]["request"]["trigger_actor"], "cbusillo")
+        self.assertEqual(stored_request.state, "queued")
+        self.assertEqual(stored_request.claimed_by_host, "")
+        self.assertEqual(stored_request.result_pr_url, "")
+        self.assertEqual(stored_request.error_message, "")
+
+    async def test_every_code_work_request_rerun_accepts_authorized_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Runner-Host",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            done = apply_every_code_work_request_status(
+                claimed,
+                EveryCodeWorkRequestStatusUpdate(
+                    state="done",
+                    host="Runner-Host",
+                    updated_at="2026-05-05T22:05:00Z",
+                    result_pr_url="https://github.com/cbusillo/code/pull/26",
+                ),
+            )
+            store.write_every_code_work_request_record(done)
+            intent = _seed_every_code_rerun_intent(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_rerun_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "trigger_actor": "ops",
+                    "agent_write_intent_record_id": intent.record_id,
+                },
+                idempotency_key="every-code-rerun-code-123",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"]["state"], "queued")
+        self.assertEqual(response.json()["result"]["request"]["trigger_actor"], "ops")
+
+    async def test_every_code_work_request_rerun_uses_matching_intent_evidence(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            blocked = apply_every_code_work_request_status(
+                claimed,
+                EveryCodeWorkRequestStatusUpdate(
+                    state="blocked",
+                    host="Chris-Studio",
+                    updated_at="2026-05-05T22:05:00Z",
+                    error_message="Needs another pass.",
+                ),
+            )
+            store.write_every_code_work_request_record(blocked)
+            intent = _seed_every_code_rerun_intent(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_rerun(
+                app,
+                {"request_id": seeded.request_id, "trigger_actor": "ops"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.json()["records"]["agent_write_intent_record_id"],
+            intent.record_id,
+        )
+        self.assertEqual(response.json()["records"]["state"], "queued")
+
+    async def test_every_code_work_request_rerun_replays_authorized_idempotency(
+        self,
+    ) -> None:
+        payload: dict[str, object] = {
+            "request_id": "every-code-cbusillo-code-123-test",
+            "agent_write_intent_record_id": "agent-write-intent-test",
+        }
+        store = _EveryCodeRerunReplayOnlyStore(
+            payload=payload,
+            idempotency_key="every-code-rerun-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_work_request_rerun_policy(),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_every_code_work_request_rerun(
+            app,
+            payload,
+            idempotency_key="every-code-rerun-replay",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["replayed"])
+        self.assertEqual(response.json()["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(store.read_idempotency_calls, 1)
+        self.assertEqual(store.read_calls, 0)
+        self.assertEqual(store.write_calls, 0)
+
+    async def test_every_code_work_request_rerun_rejects_invalid_inputs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            active_response = await _post_every_code_work_request_rerun(
+                app,
+                {"request_id": seeded.request_id},
+                authorization="Bearer worker-token",
+            )
+            invalid_response = await _post_every_code_work_request_rerun(
+                app,
+                {"request_id": ""},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(active_response.status_code, 409)
+        self.assertEqual(active_response.json()["error"]["code"], "agent_write_intent_required")
+        self.assertEqual(invalid_response.status_code, 400)
+        self.assertEqual(invalid_response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_work_request_rerun_validation_error_omits_records(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _asgi_request(
+            app,
+            "POST",
+            "/v1/every-code/work-requests/rerun",
+            headers={
+                "Authorization": "Bearer worker-token",
+                "Content-Type": "application/json",
+            },
+            raw_body=b'{"request_id":',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertNotIn("records", response.json())
+
+    async def test_every_code_work_request_rerun_rejects_non_terminal_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            intent = _seed_every_code_rerun_intent(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "agent_write_intent_record_id": intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_work_request_rerun_requires_write_intent_evidence(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            blocked = apply_every_code_work_request_status(
+                claimed,
+                EveryCodeWorkRequestStatusUpdate(
+                    state="blocked",
+                    host="Chris-Studio",
+                    updated_at="2026-05-05T22:05:00Z",
+                    error_message="Needs another pass.",
+                ),
+            )
+            store.write_every_code_work_request_record(blocked)
+            wrong_source_intent = _seed_every_code_rerun_intent(
+                store,
+                source_url="https://github.com/cbusillo/code/issues/999",
+            )
+            wrong_context_intent = _seed_every_code_rerun_intent(
+                store,
+                context="other-context",
+            )
+            stale_intent = _seed_every_code_rerun_intent(
+                store,
+                recorded_at="2026-01-01T00:00:00Z",
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            missing_response = await _post_every_code_work_request_rerun(
+                app,
+                {"request_id": seeded.request_id},
+                authorization="Bearer worker-token",
+            )
+            mismatch_response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "agent_write_intent_record_id": wrong_source_intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+            mismatch_without_source_response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "agent_write_intent_record_id": wrong_source_intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+            wrong_context_response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "agent_write_intent_record_id": wrong_context_intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+            stale_response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "agent_write_intent_record_id": stale_intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+            not_found_response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "agent_write_intent_record_id": "agent-write-intent-missing",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(missing_response.status_code, 409)
+        self.assertEqual(missing_response.json()["error"]["code"], "agent_write_intent_required")
+        self.assertEqual(mismatch_response.status_code, 409)
+        self.assertEqual(
+            mismatch_response.json()["error"]["code"],
+            "agent_write_intent_source_mismatch",
+        )
+        self.assertEqual(
+            mismatch_response.json()["records"]["agent_write_intent_record_id"],
+            wrong_source_intent.record_id,
+        )
+        self.assertEqual(mismatch_without_source_response.status_code, 409)
+        self.assertEqual(
+            mismatch_without_source_response.json()["error"]["code"],
+            "agent_write_intent_source_mismatch",
+        )
+        self.assertEqual(wrong_context_response.status_code, 409)
+        self.assertEqual(
+            wrong_context_response.json()["error"]["code"],
+            "agent_write_intent_scope_mismatch",
+        )
+        self.assertEqual(stale_response.status_code, 409)
+        self.assertEqual(stale_response.json()["error"]["code"], "agent_write_intent_stale")
+        self.assertEqual(not_found_response.status_code, 404)
+        self.assertEqual(
+            not_found_response.json()["error"]["code"],
+            "agent_write_intent_not_found",
+        )
+
+    async def test_every_code_work_request_rerun_returns_not_found_for_missing_request(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            intent = _seed_every_code_rerun_intent(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_rerun(
+                app,
+                {
+                    "request_id": "every-code-cbusillo-code-123-missing",
+                    "agent_write_intent_record_id": intent.record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_every_code_work_request_rerun_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_work_request_rerun(
+            app,
+            {"request_id": "every-code-cbusillo-code-123-test"},
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+        self.assertNotIn("records", response.json())
 
     async def test_every_code_pr_feedback_write_stores_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -16058,6 +16491,66 @@ def _every_code_work_request_status_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _every_code_work_request_rerun_policy() -> LaunchplaneAuthzPolicy:
+    return _record_read_policy(
+        action="every_code_work_request.rerun",
+        context="launchplane",
+    )
+
+
+def _seed_every_code_rerun_intent(
+    store: Any,
+    *,
+    source_url: str = "https://github.com/cbusillo/code/issues/123",
+    context: str = "launchplane",
+    idempotency_key: str = "",
+    recorded_at: str = "",
+    authorized: bool = True,
+) -> AgentWriteIntentRecord:
+    resolved_recorded_at = recorded_at or datetime.now(timezone.utc).replace(
+        microsecond=0
+    ).isoformat().replace("+00:00", "Z")
+    request = AgentWriteIntentRequest(
+        intent="every_code_rerun",
+        mode="apply",
+        product="launchplane",
+        context=context,
+        source_url=source_url,
+        idempotency_key=idempotency_key,
+        reason="Approved rerun for blocked Every Code request.",
+    )
+    audit = agent_authz_audit(
+        identity=_identity(),
+        action="every_code_work_request.rerun",
+        product="launchplane",
+        context=context,
+        decision="allowed" if authorized else "denied",
+        reason_code="authorized" if authorized else "authorization_denied",
+        policy_source="test",
+        policy_sha256="test-policy-sha256",
+    )
+    evaluation = evaluate_agent_write_intent(
+        request=request,
+        authorized=authorized,
+        audit=audit,
+    )
+    record = AgentWriteIntentRecord(
+        record_id=build_agent_write_intent_record_id(
+            recorded_at=resolved_recorded_at,
+            trace_id="launchplane_req_every_code_rerun_test",
+            request=request,
+            evaluation=evaluation,
+        ),
+        recorded_at=resolved_recorded_at,
+        trace_id="launchplane_req_every_code_rerun_test",
+        idempotency_key=idempotency_key,
+        request=request,
+        evaluation=evaluation,
+    )
+    store.write_agent_write_intent_record(record)
+    return record
+
+
 def _every_code_work_request_create_payload(*, issue_number: int = 123) -> dict[str, object]:
     return {
         "repository": "cbusillo/code",
@@ -16929,6 +17422,28 @@ async def _post_every_code_work_request_status(
         app,
         "POST",
         "/v1/every-code/work-requests/status",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_every_code_work_request_rerun(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/work-requests/rerun",
         headers=request_headers,
         payload=payload,
     )
@@ -18414,6 +18929,87 @@ class _EveryCodeStatusReplayOnlyStore:
         del record
         self.write_calls += 1
         raise AssertionError("idempotent replay must not write a work request")
+
+
+class _EveryCodeRerunReplayOnlyStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self.read_calls = 0
+        self.write_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if (
+            route_path != "/v1/every-code/work-requests/rerun"
+            or idempotency_key != self._idempotency_key
+        ):
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "state": "queued",
+                    "agent_write_intent_record_id": "agent-write-intent-test",
+                },
+                "result": {
+                    "request": {
+                        "request_id": "every-code-cbusillo-code-123-test",
+                        "state": "queued",
+                        "trigger_actor": "cbusillo",
+                    }
+                },
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        del record
+        raise AssertionError("idempotent replay must not write a new record")
+
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
+        del request_id
+        self.read_calls += 1
+        raise AssertionError("idempotent replay must not read a work request")
+
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> None:
+        del record
+        self.write_calls += 1
+        raise AssertionError("idempotent replay must not write a work request")
+
+    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
+        del record_id
+        raise AssertionError("idempotent replay must not read write-intent evidence")
+
+    def list_agent_write_intent_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[AgentWriteIntentRecord, ...]:
+        del product, context_name, status, limit, offset
+        raise AssertionError("idempotent replay must not list write-intent evidence")
 
 
 class _ProductContextApplyReplayOnlyStore:
