@@ -1426,6 +1426,10 @@ class _EveryCodePrFeedbackReadStore(Protocol):
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
 
+class _EveryCodePrFeedbackWriteStore(Protocol):
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
+
+
 class _EveryCodePreviewGateReadStore(Protocol):
     def list_every_code_preview_gate_records(
         self,
@@ -1437,6 +1441,12 @@ class _EveryCodePreviewGateReadStore(Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
+
+
+class _EveryCodePreviewGateWriteStore(Protocol):
+    def write_every_code_preview_gate_record(
+        self, record: EveryCodePreviewGateRecord
+    ) -> object: ...
 
 
 class _EveryCodeNotificationAttemptReadStore(Protocol):
@@ -2516,6 +2526,13 @@ def create_launchplane_fastapi_app(
             cookie=cookie,
         )
 
+    def require_every_code_worker_write_token(
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+    ) -> None:
+        if every_code_worker_token_authorized(authorization):
+            return
+        raise _authentication_required_error("Every Code worker token is required.")
+
     def read_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
     ) -> LaunchplaneIdentity:
@@ -3111,6 +3128,16 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodePrFeedbackReadStore, record_store)
 
+    def require_every_code_pr_feedback_write_store(
+        record_store: object,
+    ) -> _EveryCodePrFeedbackWriteStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("write_every_code_pr_feedback_record",),
+            capability="Every Code PR feedback writes",
+        )
+        return cast(_EveryCodePrFeedbackWriteStore, record_store)
+
     def require_every_code_preview_gate_read_store(
         record_store: object,
     ) -> _EveryCodePreviewGateReadStore:
@@ -3120,6 +3147,16 @@ def create_launchplane_fastapi_app(
             capability="Every Code preview gate reads",
         )
         return cast(_EveryCodePreviewGateReadStore, record_store)
+
+    def require_every_code_preview_gate_write_store(
+        record_store: object,
+    ) -> _EveryCodePreviewGateWriteStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("write_every_code_preview_gate_record",),
+            capability="Every Code preview gate writes",
+        )
+        return cast(_EveryCodePreviewGateWriteStore, record_store)
 
     def require_every_code_notification_attempt_read_store(
         record_store: object,
@@ -3872,6 +3909,41 @@ def create_launchplane_fastapi_app(
             feedback=records,
         )
 
+    def write_every_code_pr_feedback(
+        payload: dict[str, object],
+        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            every_code_store = require_every_code_pr_feedback_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            feedback_record = EveryCodePrFeedbackRecord.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        every_code_store.write_every_code_pr_feedback_record(feedback_record)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "request_id": feedback_record.request_id,
+                "feedback_id": feedback_record.feedback_id,
+                "status": feedback_record.status,
+            },
+            result={"feedback": feedback_record.model_dump(mode="json")},
+        )
+
     def list_every_code_preview_gates(
         identity: Annotated[
             LaunchplaneIdentity | None, Depends(read_every_code_worker_read_identity)
@@ -3913,6 +3985,41 @@ def create_launchplane_fastapi_app(
             repository=repository.strip(),
             status_filter=status.strip(),
             gates=records,
+        )
+
+    def write_every_code_preview_gate(
+        payload: dict[str, object],
+        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            every_code_store = require_every_code_preview_gate_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            gate_record = EveryCodePreviewGateRecord.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        every_code_store.write_every_code_preview_gate_record(gate_record)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "gate_id": gate_record.gate_id,
+                "request_id": gate_record.request_id,
+                "status": gate_record.status,
+            },
+            result={"gate": gate_record.model_dump(mode="json")},
         )
 
     def list_every_code_notification_attempts(
@@ -8338,6 +8445,12 @@ def create_launchplane_fastapi_app(
         409: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    every_code_worker_write_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         "/v1/previews/readiness",
@@ -8588,6 +8701,18 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        "/v1/every-code/pr-feedback",
+        write_every_code_pr_feedback,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_pr_feedback",
+        summary="Write Every Code PR feedback",
+        responses=every_code_worker_write_error_responses,
+    )
+
+    app.add_api_route(
         "/v1/every-code/preview-gates",
         list_every_code_preview_gates,
         methods=["GET"],
@@ -8595,6 +8720,18 @@ def create_launchplane_fastapi_app(
         operation_id="list_every_code_preview_gates",
         summary="List Every Code preview gates",
         responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/preview-gates",
+        write_every_code_preview_gate,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_preview_gate",
+        summary="Write Every Code preview gate",
+        responses=every_code_worker_write_error_responses,
     )
 
     app.add_api_route(

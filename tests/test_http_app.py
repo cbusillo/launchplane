@@ -4447,6 +4447,166 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
+    async def test_every_code_pr_feedback_write_stores_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback(
+                app,
+                _every_code_pr_feedback_payload(),
+                authorization="Bearer worker-token",
+            )
+            records = store.list_every_code_pr_feedback_records(
+                request_id="every-code-cbusillo-code-123-test",
+                status="pending",
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["feedback_id"], records[0].feedback_id)
+        self.assertEqual(payload["result"]["feedback"]["feedback_id"], records[0].feedback_id)
+        self.assertEqual(len(records), 1)
+
+    async def test_every_code_pr_feedback_write_rejects_missing_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_read_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback(
+                app,
+                _every_code_pr_feedback_payload(),
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_pr_feedback_write_rejects_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback(
+                app,
+                {**_every_code_pr_feedback_payload(), "repository": "cbusillo-code"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_pr_feedback_write_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_pr_feedback(
+            app,
+            _every_code_pr_feedback_payload(),
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_every_code_preview_gate_write_stores_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_preview_gate(
+                app,
+                _every_code_preview_gate_payload(),
+                authorization="Bearer worker-token",
+            )
+            records = store.list_every_code_preview_gate_records(
+                request_id="every-code-cbusillo-code-123-test",
+                status="ready",
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["gate_id"], records[0].gate_id)
+        self.assertEqual(payload["result"]["gate"]["gate_id"], records[0].gate_id)
+        self.assertEqual(len(records), 1)
+
+    async def test_every_code_preview_gate_write_rejects_missing_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_read_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_preview_gate(
+                app,
+                _every_code_preview_gate_payload(),
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_preview_gate_write_rejects_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_preview_gate(
+                app,
+                {**_every_code_preview_gate_payload(), "repository": "cbusillo-code"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_preview_gate_write_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_preview_gate(
+            app,
+            _every_code_preview_gate_payload(),
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
     async def test_every_code_read_routes_return_native_payloads(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -4730,6 +4890,22 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(
                 "LaunchplaneErrorResponse", json.dumps(create_route["responses"][status_code])
             )
+        worker_write_routes = {
+            "/v1/every-code/pr-feedback": "write_every_code_pr_feedback",
+            "/v1/every-code/preview-gates": "write_every_code_preview_gate",
+        }
+        for path, operation_id in worker_write_routes.items():
+            route = openapi["paths"][path]["post"]
+            self.assertEqual(route["operationId"], operation_id)
+            self.assertEqual(
+                route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/AcceptedEvidenceResponse",
+            )
+            for status_code in ("400", "401", "403", "503"):
+                self.assertIn(
+                    "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
+                )
+            self.assertNotIn("409", route["responses"])
 
     async def test_fastapi_every_code_reads_precede_legacy_wsgi_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -15153,6 +15329,43 @@ def _every_code_work_request_create_payload(*, issue_number: int = 123) -> dict[
     }
 
 
+def _every_code_pr_feedback_payload() -> dict[str, object]:
+    return {
+        "feedback_id": "every-code-pr-feedback-cbusillo-code-31-review-1",
+        "request_id": "every-code-cbusillo-code-123-test",
+        "repository": "cbusillo/code",
+        "pr_number": 31,
+        "pr_url": "https://github.com/cbusillo/code/pull/31",
+        "feedback_kind": "pull_request_review_comment",
+        "github_delivery_id": "delivery-feedback-1",
+        "github_node_id": "PRRC_kwDOTest123",
+        "actor": "reviewer",
+        "author_association": "MEMBER",
+        "body": "Please tighten the FastAPI write route coverage.",
+        "html_url": "https://github.com/cbusillo/code/pull/31#discussion_r1",
+        "received_at": "2026-06-18T12:07:00Z",
+        "status": "pending",
+    }
+
+
+def _every_code_preview_gate_payload() -> dict[str, object]:
+    return {
+        "gate_id": "every-code-preview-gate-cbusillo-code-31-test",
+        "request_id": "every-code-cbusillo-code-123-test",
+        "repository": "cbusillo/code",
+        "issue_number": 123,
+        "issue_url": "https://github.com/cbusillo/code/issues/123",
+        "pr_number": 31,
+        "pr_url": "https://github.com/cbusillo/code/pull/31",
+        "head_sha": "abcdef1234567890",
+        "status": "ready",
+        "created_at": "2026-06-18T12:05:00Z",
+        "updated_at": "2026-06-18T12:06:00Z",
+        "ready_at": "2026-06-18T12:06:00Z",
+        "last_checked_at": "2026-06-18T12:06:00Z",
+    }
+
+
 def _notification_policy_apply_policy(
     *, action: str, product: str, context: str
 ) -> LaunchplaneAuthzPolicy:
@@ -15959,6 +16172,22 @@ async def _get_every_code_pr_feedback(
     return await _asgi_get(app, f"/v1/every-code/pr-feedback{suffix}", headers=headers)
 
 
+async def _post_every_code_pr_feedback(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/pr-feedback",
+        headers=headers,
+        payload=payload,
+    )
+
+
 async def _get_every_code_preview_gates(
     app: FastAPI,
     *,
@@ -15981,6 +16210,22 @@ async def _get_every_code_preview_gates(
     )
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(app, f"/v1/every-code/preview-gates{suffix}", headers=headers)
+
+
+async def _post_every_code_preview_gate(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/preview-gates",
+        headers=headers,
+        payload=payload,
+    )
 
 
 async def _get_every_code_notification_attempts(

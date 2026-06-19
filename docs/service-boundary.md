@@ -210,9 +210,13 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
-  - `POST /v1/every-code/pr-feedback`
+  - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
+    worker-token callers, direct PR-feedback record writes, and DB-backed
+    storage capability enforcement without idempotency state)
   - `POST /v1/every-code/pr-feedback/status`
-  - `POST /v1/every-code/preview-gates`
+  - `POST /v1/every-code/preview-gates` (native FastAPI for Every Code
+    worker-token callers, direct preview-gate record writes, and DB-backed
+    storage capability enforcement without idempotency state)
 - preview PR feedback notification policy route:
   - `POST /v1/previews/pr-feedback/notification-policies/apply` (native FastAPI
     for bearer-token callers, DB-backed storage, explicit product/context scope,
@@ -434,7 +438,11 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
 not for the preview PR-feedback notification-attempt route. The legacy WSGI
-fallback no longer owns these read paths.
+fallback no longer owns these read paths. Every Code PR-feedback and preview-gate
+record writes are also native FastAPI routes for the dedicated Every Code worker
+token. They require only the matching record-store write capability, preserve the
+direct worker signal payloads, do not create idempotency records, and fail closed
+when called through the direct WSGI fallback.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the

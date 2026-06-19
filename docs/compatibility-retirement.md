@@ -141,8 +141,12 @@ Keep a compatibility surface only when it is one of these:
   deleted. Every Code work-request create uses native FastAPI, preserves
   `every_code_work_request.write` authorization, record-store write capability
   checks, and optional `Idempotency-Key` replay/conflict behavior. Every Code
-  claim, status, rerun, webhook, PR-feedback write/status, and preview-gate
-  write routes remain on the mounted WSGI fallback until their native write
+  PR-feedback write and preview-gate write routes use native FastAPI, preserve
+  the dedicated Every Code worker token, require only their direct record-store
+  write capabilities, and intentionally do not add idempotency state. Their
+  legacy WSGI write branches are deleted; direct WSGI fallback calls fail
+  closed. Every Code claim, status, rerun, webhook, and PR-feedback status
+  routes remain on the mounted WSGI fallback until their native write
   replacements land.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
