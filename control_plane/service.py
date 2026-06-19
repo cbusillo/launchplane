@@ -20,7 +20,6 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
-from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
@@ -127,7 +126,6 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -312,7 +310,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
 )
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -1694,21 +1691,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
     def _validate_alignment(self) -> "LaunchplaneSelfDeployEnvelope":
         if self.product.strip() != "launchplane":
             raise ValueError("Launchplane self deploy requires product 'launchplane'.")
-        return self
-
-
-class ProductOnboardingApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    manifest: ProductOnboardingManifest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError("Product onboarding writes require product 'launchplane'.")
-        self.product = "launchplane"
         return self
 
 
@@ -3401,7 +3383,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/local-operators/grants",
         "/v1/authz-policies/local-admins/grants",
         "/v1/merge-train/policies/import",
-        "/v1/product-onboarding/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -9490,73 +9471,6 @@ def create_launchplane_service_app(
                     },
                 }
                 driver_result = result
-            elif path == "/v1/product-onboarding/apply":
-                onboarding_request = ProductOnboardingApplyEnvelope.model_validate(payload)
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Product onboarding writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="product_onboarding.apply",
-                    product=onboarding_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot apply Launchplane product onboarding manifests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                try:
-                    onboarding_result = apply_product_onboarding_manifest(
-                        record_store=record_store,
-                        manifest=onboarding_request.manifest,
-                    )
-                except ValueError as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_product_onboarding_manifest",
-                                "message": str(error),
-                            },
-                        },
-                    )
-                result, driver_result = (
-                    control_plane_product_onboarding_service.build_product_onboarding_service_result(
-                        onboarding_result
-                    )
-                )
             elif path in descriptor_driver_dispatch_routes:
                 try:
                     dispatch_response = _dispatch_descriptor_driver_route(
