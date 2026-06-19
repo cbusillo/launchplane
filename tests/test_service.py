@@ -9001,7 +9001,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertTrue(second_response["deduped"])
 
-    def test_every_code_worker_token_lists_and_marks_pr_feedback(self) -> None:
+    def test_every_code_worker_pr_feedback_status_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload()
         comment_payload = _every_code_github_pr_comment_payload(comment_id=3003)
@@ -9084,23 +9086,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="Bearer dev-worker-token",
             )
-            second_status, second_response = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/pr-feedback/status",
-                payload={
-                    "feedback_id": feedback_id,
-                    "request_id": request_id,
-                    "status": "ignored",
-                },
-                authorization="Bearer dev-worker-token",
+            pending_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id,
+                status="pending",
             )
 
         self.assertEqual(len(feedback_records), 1)
-        self.assertEqual(status_status, 202)
-        self.assertEqual(status_response["result"]["feedback"]["status"], "applied")
-        self.assertEqual(second_status, 409)
-        self.assertEqual(second_response["error"]["code"], "feedback_already_final")
+        self.assertEqual(status_status, 404, status_response)
+        self.assertEqual(status_response["error"]["code"], "not_found")
+        self.assertEqual(len(pending_records), 1)
+        self.assertEqual(pending_records[0].feedback_id, feedback_id)
 
     def test_every_code_worker_feedback_and_gate_writes_are_retired_from_legacy_wsgi_app(
         self,

@@ -46,7 +46,11 @@ from control_plane.contracts.driver_descriptor import DriverContextView, DriverD
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
-from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.every_code_pr_feedback_record import (
+    EveryCodePrFeedbackRecord,
+    EveryCodePrFeedbackStatus,
+    apply_every_code_pr_feedback_status,
+)
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
     EveryCodeNotificationPolicyRecord,
@@ -740,6 +744,22 @@ class EveryCodePrFeedbackRecordsResponse(BaseModel):
     feedback: tuple[EveryCodePrFeedbackRecord, ...]
 
 
+class EveryCodePrFeedbackStatusEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    feedback_id: str
+    request_id: str
+    status: EveryCodePrFeedbackStatus
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "EveryCodePrFeedbackStatusEnvelope":
+        if not self.feedback_id.strip():
+            raise ValueError("Every Code PR feedback status requires feedback_id")
+        if not self.request_id.strip():
+            raise ValueError("Every Code PR feedback status requires request_id")
+        return self
+
+
 class EveryCodePreviewGateRecordsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1428,6 +1448,12 @@ class _EveryCodePrFeedbackReadStore(Protocol):
 
 class _EveryCodePrFeedbackWriteStore(Protocol):
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
+
+
+class _EveryCodePrFeedbackStatusStore(
+    _EveryCodePrFeedbackReadStore, _EveryCodePrFeedbackWriteStore, Protocol
+):
+    pass
 
 
 class _EveryCodePreviewGateReadStore(Protocol):
@@ -3138,6 +3164,19 @@ def create_launchplane_fastapi_app(
         )
         return cast(_EveryCodePrFeedbackWriteStore, record_store)
 
+    def require_every_code_pr_feedback_status_store(
+        record_store: object,
+    ) -> _EveryCodePrFeedbackStatusStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=(
+                "list_every_code_pr_feedback_records",
+                "write_every_code_pr_feedback_record",
+            ),
+            capability="Every Code PR feedback status writes",
+        )
+        return cast(_EveryCodePrFeedbackStatusStore, record_store)
+
     def require_every_code_preview_gate_read_store(
         record_store: object,
     ) -> _EveryCodePreviewGateReadStore:
@@ -3942,6 +3981,71 @@ def create_launchplane_fastapi_app(
                 "status": feedback_record.status,
             },
             result={"feedback": feedback_record.model_dump(mode="json")},
+        )
+
+    def write_every_code_pr_feedback_status(
+        payload: dict[str, object],
+        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            every_code_store = require_every_code_pr_feedback_status_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        try:
+            feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
+        except (ValueError, ValidationError) as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_payload",
+                message=str(error),
+            ) from error
+        feedback_matches = every_code_store.list_every_code_pr_feedback_records(
+            request_id=feedback_status_request.request_id.strip(),
+            limit=100,
+        )
+        existing_feedback_record = next(
+            (
+                record
+                for record in feedback_matches
+                if record.feedback_id == feedback_status_request.feedback_id.strip()
+            ),
+            None,
+        )
+        if existing_feedback_record is None:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Every Code PR feedback record was not found.",
+            )
+        updated_feedback_record = apply_every_code_pr_feedback_status(
+            existing_feedback_record,
+            status=feedback_status_request.status,
+        )
+        if updated_feedback_record is None:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="feedback_already_final",
+                message="Every Code PR feedback is already applied or ignored.",
+            )
+        every_code_store.write_every_code_pr_feedback_record(updated_feedback_record)
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={
+                "request_id": updated_feedback_record.request_id,
+                "feedback_id": updated_feedback_record.feedback_id,
+                "status": updated_feedback_record.status,
+            },
+            result={"feedback": updated_feedback_record.model_dump(mode="json")},
         )
 
     def list_every_code_preview_gates(
@@ -8451,6 +8555,14 @@ def create_launchplane_fastapi_app(
         403: {"model": LaunchplaneErrorResponse},
         503: {"model": LaunchplaneErrorResponse},
     }
+    every_code_worker_status_error_responses: dict[int | str, dict[str, object]] = {
+        400: {"model": LaunchplaneErrorResponse},
+        401: {"model": LaunchplaneErrorResponse},
+        403: {"model": LaunchplaneErrorResponse},
+        404: {"model": LaunchplaneErrorResponse},
+        409: {"model": LaunchplaneErrorResponse},
+        503: {"model": LaunchplaneErrorResponse},
+    }
 
     app.add_api_route(
         "/v1/previews/readiness",
@@ -8710,6 +8822,18 @@ def create_launchplane_fastapi_app(
         operation_id="write_every_code_pr_feedback",
         summary="Write Every Code PR feedback",
         responses=every_code_worker_write_error_responses,
+    )
+
+    app.add_api_route(
+        "/v1/every-code/pr-feedback/status",
+        write_every_code_pr_feedback_status,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="write_every_code_pr_feedback_status",
+        summary="Write Every Code PR feedback status",
+        responses=every_code_worker_status_error_responses,
     )
 
     app.add_api_route(

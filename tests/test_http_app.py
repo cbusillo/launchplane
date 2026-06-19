@@ -4527,6 +4527,164 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
+    async def test_every_code_pr_feedback_status_write_updates_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            feedback_record = EveryCodePrFeedbackRecord.model_validate(
+                _every_code_pr_feedback_payload()
+            )
+            store.write_every_code_pr_feedback_record(feedback_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback_status(
+                app,
+                {
+                    "feedback_id": feedback_record.feedback_id,
+                    "request_id": feedback_record.request_id,
+                    "status": "applied",
+                },
+                authorization="Bearer worker-token",
+            )
+            applied_records = store.list_every_code_pr_feedback_records(
+                request_id=feedback_record.request_id,
+                status="applied",
+            )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(payload["records"]["status"], "applied")
+        self.assertEqual(payload["result"]["feedback"]["status"], "applied")
+        self.assertEqual(len(applied_records), 1)
+        self.assertEqual(applied_records[0].feedback_id, feedback_record.feedback_id)
+
+    async def test_every_code_pr_feedback_status_write_rejects_missing_worker_token(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            feedback_record = EveryCodePrFeedbackRecord.model_validate(
+                _every_code_pr_feedback_payload()
+            )
+            store.write_every_code_pr_feedback_record(feedback_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_read_policy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback_status(
+                app,
+                {
+                    "feedback_id": feedback_record.feedback_id,
+                    "request_id": feedback_record.request_id,
+                    "status": "applied",
+                },
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_pr_feedback_status_write_rejects_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback_status(
+                app,
+                {
+                    "feedback_id": "",
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "status": "applied",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_pr_feedback_status_write_returns_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback_status(
+                app,
+                {
+                    "feedback_id": "missing-feedback",
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "status": "applied",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_every_code_pr_feedback_status_write_rejects_final_feedback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            feedback_record = EveryCodePrFeedbackRecord.model_validate(
+                {**_every_code_pr_feedback_payload(), "status": "applied"}
+            )
+            store.write_every_code_pr_feedback_record(feedback_record)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_pr_feedback_status(
+                app,
+                {
+                    "feedback_id": feedback_record.feedback_id,
+                    "request_id": feedback_record.request_id,
+                    "status": "ignored",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "feedback_already_final")
+
+    async def test_every_code_pr_feedback_status_write_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_pr_feedback_status(
+            app,
+            {
+                "feedback_id": "feedback-1",
+                "request_id": "every-code-cbusillo-code-123-test",
+                "status": "applied",
+            },
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
     async def test_every_code_preview_gate_write_stores_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -4906,6 +5064,16 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                     "LaunchplaneErrorResponse", json.dumps(route["responses"][status_code])
                 )
             self.assertNotIn("409", route["responses"])
+        status_route = openapi["paths"]["/v1/every-code/pr-feedback/status"]["post"]
+        self.assertEqual(status_route["operationId"], "write_every_code_pr_feedback_status")
+        self.assertEqual(
+            status_route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(
+                "LaunchplaneErrorResponse", json.dumps(status_route["responses"][status_code])
+            )
 
     async def test_fastapi_every_code_reads_precede_legacy_wsgi_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -16183,6 +16351,22 @@ async def _post_every_code_pr_feedback(
         app,
         "POST",
         "/v1/every-code/pr-feedback",
+        headers=headers,
+        payload=payload,
+    )
+
+
+async def _post_every_code_pr_feedback_status(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+) -> _AsgiResponse:
+    headers = {"Authorization": authorization} if authorization else {}
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/pr-feedback/status",
         headers=headers,
         payload=payload,
     )
