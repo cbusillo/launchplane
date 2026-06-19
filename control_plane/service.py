@@ -260,12 +260,6 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.ui_static_http import serve_ui_route
-from control_plane.product_config_http import (
-    ProductConfigRouteResult,
-    apply_product_config_route,
-    product_config_database_required_response,
-    validate_product_config_apply_request,
-)
 from control_plane.provider_target_operations_http import (
     PROVIDER_TARGET_OPERATIONS_ROUTE,
     ProviderTargetOperationEnvelope,
@@ -1673,7 +1667,6 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
     {
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-        "/v1/product-config/apply",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-actions/removals",
         "/v1/authz-policies/github-humans/grants",
@@ -3462,7 +3455,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
-        "/v1/product-config/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -5431,22 +5423,6 @@ def _idempotency_request_fingerprint(*, route_path: str, payload: dict[str, obje
     )
 
 
-def _local_operator_product_config_continuity_payload(
-    *, payload: dict[str, object]
-) -> dict[str, object]:
-    canonical_payload = json.loads(json.dumps(payload))
-    if isinstance(canonical_payload, dict):
-        canonical_payload.pop("mode", None)
-        canonical_payload.pop("reason", None)
-    return cast(dict[str, object], canonical_payload)
-
-
-def _local_operator_product_config_dry_run_key(*, payload: dict[str, object]) -> str:
-    return "local-operator-product-config-dry-run:" + _request_fingerprint(
-        _local_operator_product_config_continuity_payload(payload=payload)
-    )
-
-
 def _accepted_payload(
     *,
     trace_id: str,
@@ -5804,44 +5780,6 @@ def _write_idempotency_record(
             recorded_at=_utc_now_timestamp(),
             response_payload=response_payload,
         )
-    )
-
-
-def _write_local_operator_product_config_dry_run_record(
-    *,
-    record_store: object,
-    scope: str,
-    request_payload: dict[str, object],
-    response_trace_id: str,
-    response_payload: dict[str, object],
-) -> None:
-    _write_idempotency_record(
-        record_store=record_store,
-        scope=scope,
-        route_path="/v1/product-config/apply",
-        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
-        request_fingerprint=_request_fingerprint(
-            _local_operator_product_config_continuity_payload(payload=request_payload)
-        ),
-        response_status_code=202,
-        response_trace_id=f"{response_trace_id}-local-operator-dry-run",
-        response_payload=response_payload,
-    )
-
-
-def _local_operator_product_config_dry_run_exists(
-    *, record_store: object, scope: str, request_payload: dict[str, object]
-) -> bool:
-    stored_record = _read_idempotency_record(
-        record_store=record_store,
-        scope=scope,
-        route_path="/v1/product-config/apply",
-        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
-    )
-    if stored_record is None:
-        return False
-    return stored_record.request_fingerprint == _request_fingerprint(
-        _local_operator_product_config_continuity_payload(payload=request_payload)
     )
 
 
@@ -8855,86 +8793,6 @@ def create_launchplane_service_app(
                                             candidate_record.record_id
                                         )
                                     driver_result = result
-            elif path == "/v1/product-config/apply":
-                product_config_request, product_config_response = (
-                    validate_product_config_apply_request(
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        payload=payload,
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                )
-                if product_config_response is not None:
-                    return product_config_response
-                assert product_config_request is not None
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and product_config_request.mode == "apply"
-                    and not _local_operator_product_config_dry_run_exists(
-                        record_store=record_store,
-                        scope=request_scope,
-                        request_payload=payload,
-                    )
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=409,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "matching_dry_run_required",
-                                "message": (
-                                    "Local operator product-config apply requires a prior matching dry-run."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if not isinstance(record_store, PostgresRecordStore):
-                    return product_config_database_required_response(
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                product_config_result = apply_product_config_route(
-                    record_store=record_store,
-                    request=product_config_request,
-                    actor=_identity_actor(identity),
-                    trace_id=request_trace_id,
-                    json_response=_json_response,
-                    start_response=start_response,
-                )
-                if not isinstance(product_config_result, ProductConfigRouteResult):
-                    return product_config_result
-                driver_result = product_config_result.driver_result
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and product_config_request.mode == "dry-run"
-                ):
-                    _write_local_operator_product_config_dry_run_record(
-                        record_store=record_store,
-                        scope=request_scope,
-                        request_payload=payload,
-                        response_trace_id=request_trace_id,
-                        response_payload=_accepted_payload(
-                            trace_id=request_trace_id,
-                            result=result,
-                            driver_result=driver_result,
-                        ),
-                    )
             elif path == "/v1/authz-policies/github-actions/grants":
                 authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
                     payload

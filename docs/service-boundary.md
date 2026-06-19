@@ -154,7 +154,10 @@ VeriReel product paths:
     product-profile write-contract validation, record storage, and optional
     `Idempotency-Key` replay/conflict handling)
 - product config write route:
-  - `POST /v1/product-config/apply`
+  - `POST /v1/product-config/apply` (native FastAPI for GitHub Actions OIDC,
+    signed-in GitHub human sessions, and local-operator bearer callers, with
+    DB-backed storage, redacted planning/apply behavior, local-operator dry-run
+    continuity, and optional `Idempotency-Key` replay/conflict handling)
 - runtime key-safety policy route:
   - `POST /v1/runtime-key-safety/policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, metadata-only policy writes, and
@@ -1175,7 +1178,8 @@ key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
 
-Product config writes use `POST /v1/product-config/apply`. The request carries
+Product config writes use `POST /v1/product-config/apply`. The route is native
+FastAPI and its legacy WSGI fallback branch is deleted. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
@@ -1183,17 +1187,22 @@ accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
 dedicated local-operator bearer credential with a non-empty `reason`, but
 terminal-agent read bearer credentials remain read-only and cannot execute the
 mutation. Local-operator apply requests additionally require a previously
-recorded matching local-operator dry-run. The route authorizes the top-level
-product/context/instance target and rejects nested runtime or secret targets
-that try to broaden or change that authorized target. It reuses the same
-planner/writer as `launchplane product-config apply`, returns only actions,
-keys, counts, actor/source metadata, and secret IDs, uses generic validation
-messages for rejected requests, and fails closed when a secret bundle is
-submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane
-runtime or without an active runtime key-safety policy that allows the requested
-managed secret binding for the target runtime class. Request bodies for this
-route must not be copied into logs, issues, docs, or workflow artifacts because
-they can contain plaintext secret values.
+recorded matching local-operator dry-run with the same payload after removing
+`mode` and `reason`, so operators can update the apply reason without changing
+the reviewed runtime/secret content. Normal `Idempotency-Key` replay/conflict
+uses the full request body and is checked before DB-backed mutation.
+
+The route authorizes the top-level product/context/instance target and rejects
+nested runtime or secret targets that try to broaden or change that authorized
+target. It reuses the same planner/writer as `launchplane product-config apply`,
+returns only actions, keys, counts, actor/source metadata, and secret IDs, uses
+generic validation messages for rejected requests, and fails closed when the
+record store is not DB-backed, when a secret bundle is submitted without
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime, or when
+there is no active runtime key-safety policy that allows the requested managed
+secret binding for the target runtime class. Request bodies for this route must
+not be copied into logs, issues, docs, or workflow artifacts because they can
+contain plaintext secret values.
 
 #### Product-config secret source contract
 
@@ -1262,7 +1271,7 @@ Common failure classes are stable enough for helper summaries:
 - `authorization_denied`: caller lacks `product_config.plan`,
   `product_config.apply`, or the product/context grant.
 - `reason_required`: local-operator calls omitted a concrete reason.
-- `local_operator_dry_run_required`: local-operator apply did not match a prior
+- `matching_dry_run_required`: local-operator apply did not match a prior
   recorded dry-run request.
 - `secret_configuration_required`: trusted Launchplane runtime cannot write
   managed secrets.

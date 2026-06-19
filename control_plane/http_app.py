@@ -24,6 +24,8 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
 )
+from control_plane import product_config as control_plane_product_config
+from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_read_service as control_plane_product_read_service
@@ -154,6 +156,10 @@ from control_plane.every_code_work_request_write import (
 )
 from control_plane.every_code_notifications_delivery import deliver_every_code_blocked_notifications
 from control_plane.notifications import post_discord_webhook
+from control_plane.product_config_http import (
+    ProductConfigApplyEnvelope,
+    product_config_live_target_next_actions,
+)
 from control_plane.runtime_key_safety_http import (
     RuntimeKeySafetyPolicyApplyEnvelope,
     apply_runtime_key_safety_policy_route,
@@ -254,6 +260,7 @@ _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
+_PRODUCT_CONFIG_APPLY_ROUTE = "/v1/product-config/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
@@ -2338,6 +2345,114 @@ def idempotency_scope(identity: LaunchplaneIdentity) -> str:
 def request_fingerprint(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def product_config_continuity_payload(payload: dict[str, object]) -> dict[str, object]:
+    continuity_payload = dict(payload)
+    continuity_payload.pop("mode", None)
+    continuity_payload.pop("reason", None)
+    return continuity_payload
+
+
+def product_config_dry_run_key(payload: dict[str, object]) -> str:
+    return (
+        "local-operator-product-config-dry-run:"
+        f"{request_fingerprint(product_config_continuity_payload(payload))}"
+    )
+
+
+def product_config_identity_actor(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return f"github:{identity.login}"
+    if isinstance(identity, LocalOperatorIdentity):
+        return f"local-operator:{identity.subject}"
+    if isinstance(identity, LocalAdminIdentity):
+        return f"local-admin:{identity.subject}"
+    if isinstance(identity, TerminalAgentIdentity):
+        return f"terminal-agent:{identity.subject}"
+    return (
+        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
+    )
+
+
+def product_config_dry_run_exists(
+    *, record_store: object, identity: LaunchplaneIdentity, request_payload: dict[str, object]
+) -> bool:
+    idempotency_store = idempotency_capable_store(record_store)
+    if idempotency_store is None:
+        return False
+    continuity_fingerprint = request_fingerprint(product_config_continuity_payload(request_payload))
+    stored_record = idempotency_store.read_idempotency_record(
+        scope=idempotency_scope(identity),
+        route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+        idempotency_key=product_config_dry_run_key(request_payload),
+    )
+    return stored_record is not None and stored_record.request_fingerprint == continuity_fingerprint
+
+
+def product_config_dry_run_record_matches(
+    *, record: LaunchplaneIdempotencyRecord | None, request_fingerprint_value: str
+) -> bool:
+    return record is not None and record.request_fingerprint == request_fingerprint_value
+
+
+def store_product_config_dry_run_record(
+    *,
+    record_store: object,
+    identity: LaunchplaneIdentity,
+    request_payload: dict[str, object],
+    trace_id: str,
+    response: AcceptedEvidenceResponse,
+) -> None:
+    idempotency_store = idempotency_capable_store(record_store)
+    if idempotency_store is None:
+        return
+    dry_run_idempotency_key = product_config_dry_run_key(request_payload)
+    dry_run_request_fingerprint = request_fingerprint(
+        product_config_continuity_payload(request_payload)
+    )
+    stored_record = idempotency_store.read_idempotency_record(
+        scope=idempotency_scope(identity),
+        route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+        idempotency_key=dry_run_idempotency_key,
+    )
+    if product_config_dry_run_record_matches(
+        record=stored_record,
+        request_fingerprint_value=dry_run_request_fingerprint,
+    ):
+        return
+    dry_run_trace_id = f"{trace_id}-local-operator-dry-run"
+    try:
+        idempotency_store.write_idempotency_record(
+            LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(
+                    response_trace_id=dry_run_trace_id
+                ),
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                idempotency_key=dry_run_idempotency_key,
+                request_fingerprint=dry_run_request_fingerprint,
+                response_status_code=202,
+                response_trace_id=dry_run_trace_id,
+                recorded_at=utc_now_timestamp(),
+                response_payload=response.model_dump(mode="json", exclude_none=True),
+            )
+        )
+    except Exception as write_error:
+        try:
+            stored_record = idempotency_store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+                idempotency_key=dry_run_idempotency_key,
+            )
+        except Exception as read_error:
+            raise write_error from read_error
+        if product_config_dry_run_record_matches(
+            record=stored_record,
+            request_fingerprint_value=dry_run_request_fingerprint,
+        ):
+            return
+        raise
 
 
 def parse_utc_timestamp(value: str) -> datetime:
@@ -6664,6 +6779,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_product_config_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Product config apply requires DB-backed Launchplane storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -6811,6 +6938,166 @@ def create_launchplane_fastapi_app(
                 response_payload=response.model_dump(mode="json", exclude_none=True),
             )
         )
+
+    async def apply_product_config(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product config request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product config request failed validation.",
+            )
+        request_payload = cast(dict[str, object], raw_payload)
+        try:
+            product_config_request = ProductConfigApplyEnvelope.model_validate(request_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Product config request failed validation.",
+            ) from error
+        if (
+            isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
+            and not product_config_request.reason
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="reason_required",
+                message="Local operator product-config requests require a reason.",
+            )
+        action = (
+            "product_config.apply"
+            if product_config_request.mode == "apply"
+            else "product_config.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=product_config_request.product,
+            context=product_config_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan or apply product config for the requested"
+                    " product/context."
+                ),
+            )
+        if (
+            isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
+            and product_config_request.mode == "apply"
+            and not product_config_dry_run_exists(
+                record_store=record_store,
+                identity=identity,
+                request_payload=request_payload,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="matching_dry_run_required",
+                message="Local operator product-config apply requires a prior matching dry-run.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        database_store = require_product_config_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        driver_result, product_config_error = (
+            control_plane_product_config_service.apply_product_config_service_request(
+                record_store=database_store,
+                payload=product_config_request.product_config_payload(),
+                mode=cast(
+                    control_plane_product_config.ProductConfigMode, product_config_request.mode
+                ),
+                actor=product_config_identity_actor(identity),
+                source_label=product_config_request.source_label,
+            )
+        )
+        if product_config_error is not None:
+            raise _launchplane_http_error(
+                status_code=product_config_error.status_code,
+                trace_id=trace_id,
+                code=product_config_error.code,
+                message=product_config_error.message,
+            )
+        next_actions = product_config_live_target_next_actions(
+            request=product_config_request,
+            driver_result=driver_result,
+            tracked_targets=database_store.list_dokploy_target_records(),
+        )
+        if next_actions and driver_result is not None:
+            driver_result = {
+                **driver_result,
+                "status": "records_applied_live_sync_required",
+                "next_actions": next_actions,
+            }
+        product_config_response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=driver_result,
+        )
+        if (
+            isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
+            and product_config_request.mode == "dry-run"
+        ):
+            store_product_config_dry_run_record(
+                record_store=database_store,
+                identity=identity,
+                request_payload=request_payload,
+                trace_id=trace_id,
+                response=product_config_response,
+            )
+        store_apply_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_CONFIG_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=product_config_response,
+        )
+        return product_config_response
 
     async def apply_product_context_cutover(
         request: Request,
@@ -9883,6 +10170,32 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_CONFIG_APPLY_ROUTE,
+        apply_product_config,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": ProductConfigApplyEnvelope.model_json_schema()}
+                },
+            }
+        },
+        operation_id="apply_product_config",
+        summary="Plan or apply product config",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )

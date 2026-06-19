@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import unittest
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -102,12 +103,18 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretSafetyRule,
 )
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
-from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, create_launchplane_fastapi_app
+from control_plane.http_app import (
+    AcceptedEvidenceResponse,
+    LaunchplaneAuthzPolicyRuntime,
+    create_launchplane_fastapi_app,
+    store_product_config_dry_run_record,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
     GitHubActionsIdentity,
     LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
     agent_authz_audit,
 )
 from control_plane.service_human_auth import (
@@ -153,6 +160,9 @@ from tests.test_service import (
     _product_profile_payload_with_prod,
     _npmplus_proxy_host,
     _npmplus_ingress_route_payload,
+    _meta_product_config_payload,
+    _product_config_payload,
+    _product_config_secrets,
     _seed_merge_train_policy,
     _seed_tracked_target_records,
     _sqlite_database_url,
@@ -7064,6 +7074,827 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["records"]["product_profile"], "sellyouroutboard")
         self.assertEqual(stored_profile.driver_id, "generic-web")
+
+
+class FastApiProductConfigApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_config_dry_run_returns_redacted_plan_without_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    _product_config_payload(),
+                    idempotency_key="product-config-dry-run",
+                )
+            runtime_records = app_store.list_runtime_environment_records()
+            secret_records = app_store.list_secret_records()
+            app_store.close()
+
+        payload = response.json()
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
+        self.assertEqual(runtime_records, ())
+        self.assertEqual(secret_records, ())
+
+    async def test_product_config_apply_writes_runtime_and_managed_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.apply"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = {**_product_config_payload(), "mode": "apply"}
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    request_payload,
+                    idempotency_key="product-config-apply",
+                )
+                runtime_records = app_store.list_runtime_environment_records()
+                secret_records = app_store.list_secret_records()
+                secret_binding = app_store.list_secret_bindings(limit=None)[0]
+            app_store.close()
+
+        payload = response.json()
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(
+            runtime_records[0],
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard-prod",
+                instance="prod",
+                env={
+                    "CONTACT_EMAIL_MODE": "smtp",
+                    "SELLYOUROUTBOARD_SITE_URL": "https://www.sellyouroutboard.com",
+                },
+                updated_at=runtime_records[0].updated_at,
+                source_label="product-config-api-test",
+            ),
+        )
+        self.assertEqual(len(secret_records), 1)
+        self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
+        self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
+
+    async def test_product_config_apply_reports_live_target_runtime_next_action(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-prod",
+                instance="prod",
+                target_id="application-syo-prod",
+                target_type="application",
+                target_name="syo-prod-app",
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.apply"),
+                record_store_factory=lambda: app_store,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    {**_product_config_payload(), "mode": "apply"},
+                    idempotency_key="product-config-live-sync",
+                )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        result = response.json()["result"]
+        self.assertEqual(result["status"], "records_applied_live_sync_required")
+        next_action = result["next_actions"][0]
+        self.assertEqual(next_action["kind"], "live_target_runtime_apply")
+        self.assertEqual(next_action["dry_run"]["endpoint"], "/v1/live-target-runtime/apply")
+        self.assertEqual(next_action["apply"]["endpoint"], "/v1/live-target-runtime/apply")
+        self.assertEqual(next_action["target"]["target_type"], "application")
+        self.assertEqual(next_action["target"]["target_name"], "syo-prod-app")
+        self.assertNotIn("smtp-secret-value", json.dumps(response.json(), sort_keys=True))
+
+    async def test_product_config_human_admin_session_can_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity())
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_product_config_policy(action="product_config.apply"),
+                record_store_factory=lambda: app_store,
+                human_session_manager=session_manager,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    _meta_product_config_payload(mode="apply"),
+                    authorization="",
+                    headers={"Cookie": session_manager.session_cookie_header(human_session)},
+                    idempotency_key="product-config-human-apply",
+                )
+                runtime_records = app_store.list_runtime_environment_records()
+                secret_records = app_store.list_secret_records()
+            app_store.close()
+
+        response_text = json.dumps(response.json(), sort_keys=True)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "apply")
+        self.assertNotIn("meta-conversions-api-secret-value", response_text)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(runtime_records[0].context, "sellyouroutboard")
+        self.assertEqual(len(secret_records), 1)
+        self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
+
+    async def test_product_config_apply_requires_apply_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _post_product_config_apply(
+                app,
+                {**_product_config_payload(), "mode": "apply"},
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_product_config_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(
+                    action="product_config.plan",
+                    context="sellyouroutboard-testing",
+                ),
+                record_store_factory=lambda: app_store,
+            )
+
+            response = await _post_product_config_apply(app, _product_config_payload())
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_product_config_rejects_read_only_human_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            oauth_config = _github_oauth_config()
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=oauth_config,
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_github_human_identity(role="read_only"))
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_github_human_product_config_policy(
+                    action="product_config.apply",
+                    role="read_only",
+                ),
+                record_store_factory=lambda: app_store,
+                human_session_manager=session_manager,
+            )
+
+            response = await _post_product_config_apply(
+                app,
+                _meta_product_config_payload(mode="apply"),
+                authorization="",
+                headers={"Cookie": session_manager.session_cookie_header(human_session)},
+                idempotency_key="product-config-read-only-human-apply",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_product_config_terminal_agent_remains_read_only(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_product_config_policy(action="product_config.apply"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="terminal-agent",
+                terminal_agent_token_label="terminal-read-token",
+            ),
+        )
+
+        response = await _post_product_config_apply(
+            app,
+            _meta_product_config_payload(mode="apply"),
+            authorization="Bearer terminal-agent-token",
+            idempotency_key="product-config-terminal-agent",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_product_config_requires_configured_local_operator_identity(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_policy(
+                actions=("product_config.plan",),
+                products=("sellyouroutboard",),
+                contexts=("sellyouroutboard",),
+                token_label="configured-write-token",
+            ),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="local-operator-token",
+            ),
+        )
+
+        response = await _post_product_config_apply(
+            app,
+            _meta_product_config_payload(reason="Dry-run Meta config from local operator."),
+            authorization="Bearer local-operator-token",
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_product_config_local_operator_allows_configured_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.plan",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                    subject="configured-local-owner",
+                    token_label="configured-write-token",
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="configured-local-owner",
+                    local_operator_token_label="configured-write-token",
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    _meta_product_config_payload(reason="Dry-run Meta config from local operator."),
+                    authorization="Bearer local-operator-token",
+                    idempotency_key="product-config-configured-local-operator",
+                )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["result"]["mode"], "dry-run")
+
+    async def test_product_config_terminal_agent_rejects_before_payload_validation(
+        self,
+    ) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_product_config_policy(action="product_config.apply"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="terminal-agent-token",
+                terminal_agent_subject="terminal-agent",
+                terminal_agent_token_label="terminal-read-token",
+            ),
+        )
+
+        response = await _post_product_config_apply(
+            app,
+            {},
+            authorization="Bearer terminal-agent-token",
+            raw_body=b"not-json",
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_product_config_rejects_missing_master_key_for_secret_bundle(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                response = await _post_product_config_apply(app, _product_config_payload())
+            app_store.close()
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["error"]["code"], "secret_configuration_required")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Launchplane service is missing required secret write configuration.",
+        )
+        self.assertNotIn("LAUNCHPLANE_MASTER_ENCRYPTION_KEY", json.dumps(payload))
+
+    async def test_product_config_requires_runtime_key_safety_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                response = await _post_product_config_apply(
+                    app,
+                    _product_config_payload(),
+                    idempotency_key="product-config-missing-key-policy",
+                )
+            app_store.close()
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["error"]["code"], "runtime_key_safety_unavailable")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Launchplane runtime key-safety policy is unavailable.",
+        )
+
+    async def test_product_config_rejects_runtime_env_target_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = _product_config_payload()
+            runtime_env = dict(cast(dict[str, object], request_payload["runtime_env"]))
+            runtime_env["context"] = "sellyouroutboard-testing"
+            request_payload["runtime_env"] = runtime_env
+
+            response = await _post_product_config_apply(app, request_payload)
+            app_store.close()
+
+        payload = response.json()
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("sellyouroutboard-testing", response_text)
+
+    async def test_product_config_rejects_secret_scope_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = _product_config_payload()
+            request_secrets = _product_config_secrets(request_payload)
+            request_payload["secrets"] = [{**request_secrets[0], "scope": "global"}]
+
+            response = await _post_product_config_apply(app, request_payload)
+            app_store.close()
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+
+    async def test_product_config_rejects_secret_target_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = _product_config_payload()
+            request_secrets = _product_config_secrets(request_payload)
+            request_payload["secrets"] = [
+                {
+                    **request_secrets[0],
+                    "context": "sellyouroutboard-testing",
+                }
+            ]
+
+            response = await _post_product_config_apply(app, request_payload)
+            app_store.close()
+
+        payload = response.json()
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("sellyouroutboard-testing", response_text)
+
+    async def test_product_config_local_operator_apply_requires_matching_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app_store.ensure_schema()
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.apply",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                    token_label="local-owner-write",
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="local-owner-agent",
+                    local_operator_token_label="local-owner-write",
+                ),
+            )
+
+            response = await _post_product_config_apply(
+                app,
+                _meta_product_config_payload(
+                    mode="apply",
+                    reason="Apply Meta config after dry-run.",
+                ),
+                authorization="Bearer local-operator-token",
+                idempotency_key="product-config-local-operator-apply-missing-dry-run",
+            )
+            app_store.close()
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "matching_dry_run_required")
+
+    async def test_product_config_local_operator_apply_succeeds_after_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=_local_operator_policy(
+                    actions=("product_config.plan", "product_config.apply"),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard",),
+                    token_label="local-owner-write",
+                ),
+                record_store_factory=lambda: app_store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_operator_token="local-operator-token",
+                    local_operator_subject="local-owner-agent",
+                    local_operator_token_label="local-owner-write",
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                dry_run_response = await _post_product_config_apply(
+                    app,
+                    _meta_product_config_payload(
+                        reason="Dry-run Meta config before terminal apply."
+                    ),
+                    authorization="Bearer local-operator-token",
+                    idempotency_key="product-config-local-operator-dry-run",
+                )
+                repeat_dry_run_response = await _post_product_config_apply(
+                    app,
+                    _meta_product_config_payload(
+                        reason="Dry-run Meta config before terminal apply."
+                    ),
+                    authorization="Bearer local-operator-token",
+                    idempotency_key="product-config-local-operator-dry-run-repeat",
+                )
+                apply_response = await _post_product_config_apply(
+                    app,
+                    _meta_product_config_payload(
+                        mode="apply",
+                        reason="Apply Meta config after review.",
+                    ),
+                    authorization="Bearer local-operator-token",
+                    idempotency_key="product-config-local-operator-apply",
+                )
+                runtime_records = app_store.list_runtime_environment_records()
+                secret_records = app_store.list_secret_records()
+            app_store.close()
+
+        self.assertEqual(dry_run_response.status_code, 202)
+        self.assertEqual(repeat_dry_run_response.status_code, 202)
+        self.assertEqual(apply_response.status_code, 202)
+        self.assertEqual(apply_response.json()["result"]["mode"], "apply")
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(len(secret_records), 1)
+
+    async def test_product_config_dry_run_marker_accepts_concurrent_matching_insert(
+        self,
+    ) -> None:
+        store = _ConcurrentProductConfigDryRunMarkerStore()
+
+        store_product_config_dry_run_record(
+            record_store=store,
+            identity=LocalOperatorIdentity(
+                subject="local-owner-agent",
+                token_label="local-owner-write",
+            ),
+            request_payload=_meta_product_config_payload(
+                reason="Dry-run Meta config before terminal apply."
+            ),
+            trace_id="launchplane_req_product_config_dry_run",
+            response=AcceptedEvidenceResponse(
+                trace_id="launchplane_req_product_config_dry_run",
+                records={},
+                result={"mode": "dry-run"},
+            ),
+        )
+
+        self.assertEqual(store.read_calls, 2)
+        self.assertEqual(store.write_calls, 1)
+
+    async def test_product_config_dry_run_marker_reraises_without_concurrent_insert(
+        self,
+    ) -> None:
+        store = _ConcurrentProductConfigDryRunMarkerStore(after_write="missing")
+
+        with self.assertRaisesRegex(RuntimeError, "simulated duplicate dry-run marker write"):
+            store_product_config_dry_run_record(
+                record_store=store,
+                identity=LocalOperatorIdentity(
+                    subject="local-owner-agent",
+                    token_label="local-owner-write",
+                ),
+                request_payload=_meta_product_config_payload(
+                    reason="Dry-run Meta config before terminal apply."
+                ),
+                trace_id="launchplane_req_product_config_dry_run",
+                response=AcceptedEvidenceResponse(
+                    trace_id="launchplane_req_product_config_dry_run",
+                    records={},
+                    result={"mode": "dry-run"},
+                ),
+            )
+
+        self.assertEqual(store.read_calls, 2)
+        self.assertEqual(store.write_calls, 1)
+
+    async def test_product_config_dry_run_marker_reraises_mismatched_concurrent_insert(
+        self,
+    ) -> None:
+        store = _ConcurrentProductConfigDryRunMarkerStore(after_write="mismatched")
+
+        with self.assertRaisesRegex(RuntimeError, "simulated duplicate dry-run marker write"):
+            store_product_config_dry_run_record(
+                record_store=store,
+                identity=LocalOperatorIdentity(
+                    subject="local-owner-agent",
+                    token_label="local-owner-write",
+                ),
+                request_payload=_meta_product_config_payload(
+                    reason="Dry-run Meta config before terminal apply."
+                ),
+                trace_id="launchplane_req_product_config_dry_run",
+                response=AcceptedEvidenceResponse(
+                    trace_id="launchplane_req_product_config_dry_run",
+                    records={},
+                    result={"mode": "dry-run"},
+                ),
+            )
+
+        self.assertEqual(store.read_calls, 2)
+        self.assertEqual(store.write_calls, 1)
+
+    async def test_product_config_idempotency_replay_and_conflict(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url)
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.apply"),
+                record_store_factory=lambda: app_store,
+            )
+            payload = {**_product_config_payload(), "mode": "apply"}
+            changed_payload = {
+                **payload,
+                "runtime_env": {"scope": "instance", "env": {"CONTACT_EMAIL_MODE": "api"}},
+            }
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                first_response = await _post_product_config_apply(
+                    app,
+                    payload,
+                    idempotency_key="product-config-idempotent",
+                )
+                replay_response = await _post_product_config_apply(
+                    app,
+                    payload,
+                    idempotency_key="product-config-idempotent",
+                )
+                conflict_response = await _post_product_config_apply(
+                    app,
+                    changed_payload,
+                    idempotency_key="product-config-idempotent",
+                )
+            app_store.close()
+
+        self.assertEqual(first_response.status_code, 202)
+        self.assertEqual(replay_response.status_code, 202)
+        self.assertTrue(replay_response.json()["replayed"])
+        self.assertEqual(
+            replay_response.json()["original_trace_id"], first_response.json()["trace_id"]
+        )
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertEqual(conflict_response.json()["error"]["code"], "idempotency_key_reused")
+
+    async def test_product_config_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_product_config_apply(
+                app,
+                _product_config_payload(),
+                idempotency_key="product-config-filesystem-store",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_required")
+
+    async def test_product_config_validation_errors_are_sanitized(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app_store = PostgresRecordStore(database_url=database_url)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_config_policy(action="product_config.plan"),
+                record_store_factory=lambda: app_store,
+            )
+            request_payload = _product_config_payload()
+            request_payload["secrets"] = []
+            request_payload["runtime_env"] = {"scope": "instance", "env": {"API_TOKEN": "nope"}}
+
+            response = await _post_product_config_apply(app, request_payload)
+            app_store.close()
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("API_TOKEN", json.dumps(payload, sort_keys=True))
+
+    async def test_openapi_includes_product_config_apply_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_config_policy(action="product_config.plan"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+
+        response = await _asgi_get(app, "/openapi.json")
+
+        self.assertEqual(response.status_code, 200)
+        route = response.json()["paths"]["/v1/product-config/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_product_config")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "ProductConfigApplyEnvelope",
+        )
+        for status_code in ("400", "401", "403", "409", "503"):
+            self.assertIn(status_code, route["responses"])
 
 
 class FastApiProductContextCutoverTests(unittest.IsolatedAsyncioTestCase):
@@ -17436,6 +18267,52 @@ def _product_profile_write_policy(*, product: str) -> LaunchplaneAuthzPolicy:
     )
 
 
+def _product_config_policy(
+    *,
+    action: str,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard-prod",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "every/verireel",
+                    "workflow_refs": [
+                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                    ],
+                    "event_names": ["pull_request"],
+                    "products": [product],
+                    "contexts": [context],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
+def _github_human_product_config_policy(
+    *,
+    action: str,
+    product: str = "sellyouroutboard",
+    context: str = "sellyouroutboard",
+    role: str = "admin",
+) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_humans": [
+                {
+                    "logins": ["example-operator"],
+                    "roles": [role],
+                    "products": [product],
+                    "contexts": [context],
+                    "actions": [action],
+                }
+            ]
+        }
+    )
+
+
 def _local_operator_product_environment_read_policy(*, context: str) -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -18720,6 +19597,30 @@ async def _post_product_profile(
     )
 
 
+async def _post_product_config_apply(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+    raw_body: bytes | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/product-config/apply",
+        headers=request_headers,
+        payload=payload,
+        raw_body=raw_body,
+    )
+
+
 async def _post_context_cutover_apply(
     app: FastAPI,
     payload: dict[str, object],
@@ -19150,6 +20051,46 @@ class _CaseInsensitiveHeaders(dict[str, str]):
 
 class _MissingProductReadStore:
     pass
+
+
+class _ConcurrentProductConfigDryRunMarkerStore:
+    def __init__(
+        self, *, after_write: Literal["matching", "missing", "mismatched"] = "matching"
+    ) -> None:
+        self.after_write = after_write
+        self.read_calls = 0
+        self.write_calls = 0
+        self._stored_record: LaunchplaneIdempotencyRecord | None = None
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_calls += 1
+        if self._stored_record is None:
+            return None
+        if (
+            self._stored_record.scope != scope
+            or self._stored_record.route_path != route_path
+            or self._stored_record.idempotency_key != idempotency_key
+        ):
+            return None
+        return self._stored_record
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        self.write_calls += 1
+        if self.after_write == "matching":
+            self._stored_record = record
+        elif self.after_write == "mismatched":
+            self._stored_record = record.model_copy(
+                update={"request_fingerprint": f"mismatched-{record.request_fingerprint}"}
+            )
+        else:
+            self._stored_record = None
+        raise RuntimeError("simulated duplicate dry-run marker write")
 
 
 class _EmptyStore:

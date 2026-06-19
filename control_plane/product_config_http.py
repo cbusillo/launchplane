@@ -1,29 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol, cast
-
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane import product_config as control_plane_product_config
-from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.product_config import ProductConfigStore
-from control_plane.service_auth import (
-    LaunchplaneAuthzPolicy,
-    LaunchplaneIdentity,
-    LocalAdminIdentity,
-    LocalOperatorIdentity,
-)
-
-
-JsonResponse = Callable[..., list[bytes]]
-StartResponse = Callable[[str, list[tuple[str, str]]], None]
-
-
-class ProductConfigRouteStore(ProductConfigStore, Protocol):
-    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]: ...
 
 
 class ProductConfigApplyEnvelope(BaseModel):
@@ -72,11 +51,6 @@ class ProductConfigApplyEnvelope(BaseModel):
         if self.runtime_environment is not None:
             payload["runtime_environment"] = self.runtime_environment
         return payload
-
-
-@dataclass(frozen=True)
-class ProductConfigRouteResult:
-    driver_result: dict[str, object] | None
 
 
 def product_config_live_target_next_actions(
@@ -133,116 +107,3 @@ def product_config_live_target_next_actions(
             ),
         }
     ]
-
-
-def validate_product_config_apply_request(
-    *,
-    authz_policy: LaunchplaneAuthzPolicy,
-    identity: LaunchplaneIdentity,
-    payload: dict[str, object],
-    trace_id: str,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> tuple[ProductConfigApplyEnvelope | None, list[bytes] | None]:
-    request = ProductConfigApplyEnvelope.model_validate(payload)
-    if isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity)) and not request.reason:
-        return None, json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": "reason_required",
-                    "message": "Local operator product-config requests require a reason.",
-                },
-            },
-        )
-    action = "product_config.apply" if request.mode == "apply" else "product_config.plan"
-    if authz_policy.allows(
-        identity=identity,
-        action=action,
-        product=request.product,
-        context=request.context,
-    ):
-        return request, None
-    return None, json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": (
-                    "Workflow cannot plan or apply product config for the requested"
-                    " product/context."
-                ),
-            },
-        },
-    )
-
-
-def apply_product_config_route(
-    *,
-    record_store: ProductConfigRouteStore,
-    request: ProductConfigApplyEnvelope,
-    actor: str,
-    trace_id: str,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> ProductConfigRouteResult | list[bytes]:
-    driver_result, product_config_error = (
-        control_plane_product_config_service.apply_product_config_service_request(
-            record_store=record_store,
-            payload=request.product_config_payload(),
-            mode=cast(control_plane_product_config.ProductConfigMode, request.mode),
-            actor=actor,
-            source_label=request.source_label,
-        )
-    )
-    if product_config_error is not None:
-        return json_response(
-            start_response=start_response,
-            status_code=product_config_error.status_code,
-            payload={
-                "status": "rejected",
-                "trace_id": trace_id,
-                "error": {
-                    "code": product_config_error.code,
-                    "message": product_config_error.message,
-                },
-            },
-        )
-    next_actions = product_config_live_target_next_actions(
-        request=request,
-        driver_result=driver_result,
-        tracked_targets=record_store.list_dokploy_target_records(),
-    )
-    if next_actions and driver_result is not None:
-        driver_result = {
-            **driver_result,
-            "status": "records_applied_live_sync_required",
-            "next_actions": next_actions,
-        }
-    return ProductConfigRouteResult(driver_result=driver_result)
-
-
-def product_config_database_required_response(
-    *,
-    trace_id: str,
-    json_response: JsonResponse,
-    start_response: StartResponse,
-) -> list[bytes]:
-    return json_response(
-        start_response=start_response,
-        status_code=503,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "database_required",
-                "message": "Product config apply requires DB-backed Launchplane storage.",
-            },
-        },
-    )
