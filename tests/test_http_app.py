@@ -4643,6 +4643,317 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
 
+    async def test_every_code_work_request_status_accepts_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "host": "Chris-Studio",
+                    "state": "running",
+                    "updated_at": "2026-05-05T22:02:00Z",
+                },
+                authorization="Bearer worker-token",
+            )
+            stored_request = store.read_every_code_work_request_record(seeded.request_id)
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["request_id"], seeded.request_id)
+        self.assertEqual(payload["records"]["state"], "running")
+        self.assertEqual(payload["result"]["request"]["state"], "running")
+        self.assertEqual(payload["result"]["request"]["started_at"], "2026-05-05T22:02:00Z")
+        self.assertEqual(stored_request.state, "running")
+
+    async def test_every_code_work_request_status_accepts_authorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Runner-Host",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_every_code_work_request_status_policy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {
+                    "request_id": seeded.request_id,
+                    "host": "Runner-Host",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Opened a PR with the requested fix.",
+                },
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["records"]["state"], "done")
+        self.assertEqual(
+            response.json()["result"]["request"]["result_pr_url"],
+            "https://github.com/cbusillo/code/pull/26",
+        )
+
+    async def test_every_code_work_request_status_replays_authorized_idempotency(self) -> None:
+        payload: dict[str, object] = {
+            "request_id": "every-code-cbusillo-code-123-test",
+            "host": "Runner-Host",
+            "state": "done",
+            "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+        }
+        store = _EveryCodeStatusReplayOnlyStore(
+            payload=payload,
+            idempotency_key="every-code-status-replay",
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_every_code_work_request_status_policy(),
+            record_store_factory=lambda: store,
+        )
+
+        response = await _post_every_code_work_request_status(
+            app,
+            payload,
+            idempotency_key="every-code-status-replay",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["replayed"])
+        self.assertEqual(response.json()["original_trace_id"], "launchplane_req_original")
+        self.assertEqual(store.read_idempotency_calls, 1)
+        self.assertEqual(store.read_calls, 0)
+        self.assertEqual(store.write_calls, 0)
+
+    async def test_every_code_work_request_status_rejects_missing_worker_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio", "state": "running"},
+                authorization="",
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_required")
+
+    async def test_every_code_work_request_status_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {"request_id": seeded.request_id, "host": "Chris-Studio", "state": "running"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+
+    async def test_every_code_work_request_status_rejects_invalid_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            seeded = _seed_every_code_claim_request(store)
+            claimed = store.claim_every_code_work_request_record(
+                request_id=seeded.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            if claimed is None:
+                raise AssertionError("expected seeded request to be claimable")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {"request_id": seeded.request_id, "host": "Other-Host", "state": "running"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_payload")
+
+    async def test_every_code_work_request_status_returns_not_found(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+            )
+
+            response = await _post_every_code_work_request_status(
+                app,
+                {
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "host": "Chris-Studio",
+                    "state": "running",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
+
+    async def test_every_code_work_request_status_requires_store_capability(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: _MissingProductReadStore(),
+            bearer_identity_config=BearerIdentityConfig(every_code_worker_token="worker-token"),
+        )
+
+        response = await _post_every_code_work_request_status(
+            app,
+            {
+                "request_id": "every-code-cbusillo-code-123-test",
+                "host": "Chris-Studio",
+                "state": "running",
+            },
+            authorization="Bearer worker-token",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "database_storage_required")
+
+    async def test_every_code_work_request_status_sends_blocked_notifications(self) -> None:
+        sent_payloads: list[tuple[str, dict[str, object]]] = []
+
+        def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
+            sent_payloads.append((webhook_url, payload))
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                "os.environ",
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
+                        "test-master-key"
+                    ),
+                },
+                clear=True,
+            ),
+        ):
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            try:
+                store.ensure_schema()
+                seeded = _seed_every_code_claim_request(store)
+                claimed = store.claim_every_code_work_request_record(
+                    request_id=seeded.request_id,
+                    host="Chris-Studio",
+                    claimed_at="2026-05-05T22:01:00Z",
+                )
+                if claimed is None:
+                    raise AssertionError("expected seeded request to be claimable")
+                secret_result = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration="every-code-notifications",
+                    name="discord webhook",
+                    plaintext_value="https://discord.com/api/webhooks/test/webhook",
+                    binding_key="DISCORD_WEBHOOK",
+                    context_name="launchplane",
+                    instance_name="every-code",
+                    actor="test",
+                    source_label="test",
+                )
+                store.write_every_code_notification_policy_record(
+                    EveryCodeNotificationPolicyRecord(
+                        policy_id="every-code-notification-discord",
+                        repository="cbusillo/code",
+                        status="enabled",
+                        created_at="2026-06-14T18:10:00Z",
+                        updated_at="2026-06-14T18:10:00Z",
+                        source="test",
+                        destinations=(
+                            EveryCodeNotificationDestination(
+                                destination_id="discord",
+                                kind="discord",
+                                discord_webhook_secret=str(secret_result["secret_id"]),
+                            ),
+                        ),
+                    )
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    record_store_factory=lambda: store,
+                    bearer_identity_config=BearerIdentityConfig(
+                        every_code_worker_token="worker-token"
+                    ),
+                    every_code_discord_sender=send_discord,
+                )
+
+                response = await _post_every_code_work_request_status(
+                    app,
+                    {
+                        "request_id": seeded.request_id,
+                        "host": "Chris-Studio",
+                        "state": "blocked",
+                        "error_message": "Every Code bot auth actor mismatch.",
+                    },
+                    authorization="Bearer worker-token",
+                )
+                attempts = store.list_every_code_notification_attempt_records(
+                    request_id=seeded.request_id,
+                    event="work_request_blocked",
+                )
+            finally:
+                store.close()
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(payload["records"]["state"], "blocked")
+        self.assertEqual(len(sent_payloads), 1)
+        webhook_url, discord_payload = sent_payloads[0]
+        self.assertEqual(webhook_url, "https://discord.com/api/webhooks/test/webhook")
+        self.assertIn("embeds", discord_payload)
+        self.assertEqual(payload["result"]["notifications"][0]["delivery_status"], "delivered")
+        self.assertEqual(attempts[0].delivery_status, "delivered")
+
     async def test_every_code_pr_feedback_write_stores_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
@@ -5243,6 +5554,41 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         for status_code in ("400", "401", "403", "409", "503"):
             self.assertIn(
                 "LaunchplaneErrorResponse", json.dumps(create_route["responses"][status_code])
+            )
+        work_request_status_route = openapi["paths"]["/v1/every-code/work-requests/status"]["post"]
+        self.assertEqual(
+            work_request_status_route["operationId"],
+            "write_every_code_work_request_status",
+        )
+        self.assertEqual(
+            work_request_status_route["requestBody"]["content"]["application/json"]["schema"][
+                "title"
+            ],
+            "EveryCodeWorkRequestStatusEnvelope",
+        )
+        self.assertFalse(
+            work_request_status_route["requestBody"]["content"]["application/json"]["schema"][
+                "additionalProperties"
+            ]
+        )
+        self.assertEqual(
+            set(
+                work_request_status_route["requestBody"]["content"]["application/json"]["schema"][
+                    "required"
+                ]
+            ),
+            {"request_id", "host", "state"},
+        )
+        self.assertEqual(
+            work_request_status_route["responses"]["202"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        for status_code in ("400", "401", "403", "404", "409", "503"):
+            self.assertIn(
+                "LaunchplaneErrorResponse",
+                json.dumps(work_request_status_route["responses"][status_code]),
             )
         worker_write_routes = {
             "/v1/every-code/pr-feedback": "write_every_code_pr_feedback",
@@ -15705,6 +16051,13 @@ def _every_code_work_request_claim_policy() -> LaunchplaneAuthzPolicy:
     )
 
 
+def _every_code_work_request_status_policy() -> LaunchplaneAuthzPolicy:
+    return _record_read_policy(
+        action="every_code_work_request.update",
+        context="launchplane",
+    )
+
+
 def _every_code_work_request_create_payload(*, issue_number: int = 123) -> dict[str, object]:
     return {
         "repository": "cbusillo/code",
@@ -16554,6 +16907,28 @@ async def _post_every_code_work_request_claim(
         app,
         "POST",
         "/v1/every-code/work-requests/claim",
+        headers=request_headers,
+        payload=payload,
+    )
+
+
+async def _post_every_code_work_request_status(
+    app: FastAPI,
+    payload: dict[str, object],
+    *,
+    authorization: str = "Bearer valid-token",
+    idempotency_key: str = "",
+    headers: dict[str, str] | None = None,
+) -> _AsgiResponse:
+    request_headers = dict(headers or {})
+    if authorization:
+        request_headers["Authorization"] = authorization
+    if idempotency_key:
+        request_headers["Idempotency-Key"] = idempotency_key
+    return await _asgi_request(
+        app,
+        "POST",
+        "/v1/every-code/work-requests/status",
         headers=request_headers,
         payload=payload,
     )
@@ -17975,6 +18350,70 @@ class _EveryCodeClaimReplayOnlyStore:
         del request_id, host, claimed_at
         self.claim_calls += 1
         raise AssertionError("idempotent replay must not claim a record")
+
+
+class _EveryCodeStatusReplayOnlyStore:
+    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
+        self.read_idempotency_calls = 0
+        self.read_calls = 0
+        self.write_calls = 0
+        self._payload = payload
+        self._idempotency_key = idempotency_key
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord | None:
+        self.read_idempotency_calls += 1
+        if (
+            route_path != "/v1/every-code/work-requests/status"
+            or idempotency_key != self._idempotency_key
+        ):
+            return None
+        return LaunchplaneIdempotencyRecord(
+            record_id="idempotency-launchplane_req_original",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=hashlib.sha256(
+                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            response_status_code=202,
+            response_trace_id="launchplane_req_original",
+            recorded_at="2026-05-29T12:00:00Z",
+            response_payload={
+                "status": "accepted",
+                "trace_id": "launchplane_req_original",
+                "records": {
+                    "request_id": "every-code-cbusillo-code-123-test",
+                    "state": "done",
+                },
+                "result": {
+                    "request": {
+                        "request_id": "every-code-cbusillo-code-123-test",
+                        "state": "done",
+                        "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    },
+                    "notifications": [],
+                },
+            },
+        )
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
+        raise AssertionError("idempotent replay must not write a new record")
+
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
+        del request_id
+        self.read_calls += 1
+        raise AssertionError("idempotent replay must not read a work request")
+
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> None:
+        del record
+        self.write_calls += 1
+        raise AssertionError("idempotent replay must not write a work request")
 
 
 class _ProductContextApplyReplayOnlyStore:

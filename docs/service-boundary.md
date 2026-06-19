@@ -213,8 +213,12 @@ VeriReel product paths:
     `404 not_found` for missing requests, `409 work_request_already_claimed`
     for non-queued requests, and workflow `Idempotency-Key` replay/conflict
     handling)
+  - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.update`, replay-before-write idempotency handling,
+    record-store status capability checks, `404 not_found` for missing requests,
+    and blocked-notification delivery)
   - `POST /v1/every-code/work-requests/rerun`
-  - `POST /v1/every-code/work-requests/status`
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
     worker-token callers, direct PR-feedback record writes, and DB-backed
     storage capability enforcement without idempotency state)
@@ -447,14 +451,19 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
 not for the preview PR-feedback notification-attempt route. The legacy WSGI
-fallback no longer owns these read paths. Every Code PR-feedback write,
-PR-feedback status, and preview-gate write routes are also native FastAPI routes
-for the dedicated Every Code worker token. They require only the matching
-PR-feedback or preview-gate record-store capabilities, preserve the direct worker
-signal payloads, do not create idempotency records, and fail closed when called
-through the direct WSGI fallback. PR-feedback status preserves the worker
-transition semantics: missing feedback returns `404 not_found`, and already
-applied or ignored feedback returns `409 feedback_already_final`.
+fallback no longer owns these read paths. Every Code work-request status is also
+a native FastAPI route for the dedicated Every Code worker token and workflows
+authorized for `every_code_work_request.update`. It checks idempotency replay
+before requiring status-write store capabilities, writes successful idempotency
+records, preserves missing-request `404 not_found`, and delivers configured
+blocked notifications when a request transitions to `blocked`. Every Code
+PR-feedback write, PR-feedback status, and preview-gate write routes are also
+native FastAPI routes for the dedicated Every Code worker token. They require
+only the matching PR-feedback or preview-gate record-store capabilities, preserve
+the direct worker signal payloads, do not create idempotency records, and fail
+closed when called through the direct WSGI fallback. PR-feedback status preserves
+the worker transition semantics: missing feedback returns `404 not_found`, and
+already applied or ignored feedback returns `409 feedback_already_final`.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
