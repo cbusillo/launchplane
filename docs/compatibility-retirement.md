@@ -123,6 +123,13 @@ Keep a compatibility surface only when it is one of these:
   bearer-token callers and preserve product-profile write-contract validation,
   record storage, and optional `Idempotency-Key` replay/conflict behavior. The
   legacy WSGI write branch is deleted; direct WSGI fallback calls fail closed.
+- Product context cutover and legacy context cleanup apply writes use native
+  FastAPI `POST /v1/product-profiles/context-cutover/apply` and
+  `POST /v1/product-profiles/legacy-context-cleanup/apply` for bearer-token
+  callers. They preserve `product_profile.write` authorization, DB-backed
+  storage gating, redacted result payloads, and optional `Idempotency-Key`
+  replay/conflict behavior. Their legacy WSGI write branches are deleted;
+  direct WSGI fallback calls fail closed.
 - Every Code work-request, summary, PR-feedback, preview-gate,
   notification-attempt, and preview-readiness reads use native FastAPI routes.
   The worker-facing read routes preserve the dedicated Every Code worker token;

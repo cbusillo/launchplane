@@ -1563,23 +1563,30 @@ inventory and release tuple pointers, and append-only evidence counts. It does
 not return runtime values, secret plaintext, secret ciphertext, or full provider
 environment text.
 
-Product context cutover apply uses `product_profile.write` for the requested
-product in the Launchplane service context. It supports `dry-run` and `apply`
-modes, copies only current-authority records into the target context, updates
-lane/preview product profile context fields, and returns key names/counts only.
-It does not copy append-only deployments, promotions, backup gates, or preview
-history.
+Product context cutover apply uses native FastAPI
+`POST /v1/product-profiles/context-cutover/apply` and `product_profile.write`
+for the requested product in the Launchplane service context. It supports
+`dry-run` and `apply` modes, copies only current-authority records into the
+target context, updates lane/preview product profile context fields, returns key
+names/counts only, and preserves optional `Idempotency-Key` replay/conflict
+behavior. Its legacy WSGI fallback branch is deleted; direct fallback calls fail
+closed. It does not copy append-only deployments, promotions, backup gates, or
+preview history.
 
-Product legacy context cleanup uses `product_profile.write` for the requested
-product in the Launchplane service context. It supports `dry-run` and `apply`
-modes after a context cutover has moved the product profile to the target
-context. Cleanup refuses to run while the source context is still owned by this
-or another product profile. It deletes legacy runtime environment records and
-Dokploy target lookup records only when matching target-context records already
-exist, disables legacy managed secret records and bindings, and preserves
-inventory, release tuple, deployment, promotion, backup gate, and preview
-history records as evidence. Responses remain redacted to key names, counts,
-target metadata, secret IDs, and binding keys/status.
+Product legacy context cleanup uses native FastAPI
+`POST /v1/product-profiles/legacy-context-cleanup/apply` and
+`product_profile.write` for the requested product in the Launchplane service
+context. It supports `dry-run` and `apply` modes after a context cutover has
+moved the product profile to the target context, preserves optional
+`Idempotency-Key` replay/conflict behavior, and has its legacy WSGI fallback
+branch deleted. Direct fallback calls fail closed. Cleanup refuses to run while
+the source context is still owned by this or another product profile. It deletes
+legacy runtime environment records and Dokploy target lookup records only when
+matching target-context records already exist, disables legacy managed secret
+records and bindings, and preserves inventory, release tuple, deployment,
+promotion, backup gate, and preview history records as evidence. Responses
+remain redacted to key names, counts, target metadata, secret IDs, and binding
+keys/status.
 
 ### Driver execution endpoints
 

@@ -20,7 +20,6 @@ from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
 from control_plane import authz_grant_service as control_plane_authz_grant_service
-from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import service_status as control_plane_service_status
 from control_plane.http_app import (
@@ -3603,8 +3602,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/product-onboarding/apply",
         PROVIDER_TARGET_OPERATIONS_ROUTE,
         "/v1/product-config/apply",
-        "/v1/product-profiles/context-cutover/apply",
-        "/v1/product-profiles/legacy-context-cleanup/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -7435,31 +7432,6 @@ def _authz_policy_unavailable_response(
             },
         },
     )
-
-
-def _product_profile_context_cutover_allowed_contexts(
-    profile: LaunchplaneProductProfileRecord,
-) -> frozenset[str]:
-    contexts = {profile.product.strip()}
-    contexts.update(lane.context.strip() for lane in profile.lanes if lane.context.strip())
-    if profile.preview.enabled and profile.preview.context.strip():
-        contexts.add(profile.preview.context.strip())
-    return frozenset(context for context in contexts if context)
-
-
-def _product_profile_context_cutover_contexts_allowed(
-    *,
-    profile: LaunchplaneProductProfileRecord,
-    source_context: str,
-    target_context: str,
-    preview_context: str,
-) -> bool:
-    allowed_contexts = _product_profile_context_cutover_allowed_contexts(profile)
-    requested_contexts = {source_context.strip(), target_context.strip()}
-    if preview_context.strip():
-        requested_contexts.add(preview_context.strip())
-    requested_contexts.discard("")
-    return requested_contexts.issubset(allowed_contexts)
 
 
 def _product_driver_compatible(
@@ -11324,172 +11296,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == "/v1/product-profiles/context-cutover/apply":
-                context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Product context cutover requires Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="product_profile.write",
-                    product=context_cutover_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot cut over the requested product profile context.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                profile = record_store.read_product_profile_record(context_cutover_request.product)
-                if not _product_profile_context_cutover_contexts_allowed(
-                    profile=profile,
-                    source_context=context_cutover_request.source_context,
-                    target_context=context_cutover_request.target_context,
-                    preview_context="",
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "context_not_in_product_boundary",
-                                "message": "Requested cutover contexts are not owned by the product profile.",
-                            },
-                        },
-                    )
-                try:
-                    driver_result = (
-                        control_plane_product_context_cutover.apply_product_context_cutover(
-                            record_store=record_store,
-                            request=context_cutover_request,
-                        )
-                    )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_context_cutover_request",
-                                "message": "Product context cutover context_cutover_request is invalid.",
-                            },
-                        },
-                    )
-                result = {"product_profile": context_cutover_request.product}
-            elif path == "/v1/product-profiles/legacy-context-cleanup/apply":
-                legacy_cleanup_request = control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Legacy context cleanup requires Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="product_profile.write",
-                    product=legacy_cleanup_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot clean up the requested legacy product context.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                try:
-                    driver_result = (
-                        control_plane_product_context_cutover.apply_legacy_context_cleanup(
-                            record_store=record_store,
-                            request=legacy_cleanup_request,
-                        )
-                    )
-                except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "context_not_in_product_boundary",
-                                "message": "Requested cleanup contexts are not in the product cleanup boundary.",
-                            },
-                        },
-                    )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_legacy_context_cleanup_request",
-                                "message": "Legacy context cleanup legacy_cleanup_request is invalid.",
-                            },
-                        },
-                    )
-                result = {"product_profile": legacy_cleanup_request.product}
             elif path == "/v1/previews/lifecycle-plan":
                 preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
                     payload

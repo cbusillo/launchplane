@@ -24,6 +24,7 @@ from control_plane.dokploy_target_setup_http import (
     execute_dokploy_target_setup,
 )
 from control_plane import product_context_audit as control_plane_product_context_audit
+from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
@@ -208,6 +209,8 @@ _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
 _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
+_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
+_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 
 
@@ -5315,6 +5318,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_product_context_apply_database_store(
+        *, record_store: object, trace_id: str, label: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message=f"{label} requires Launchplane database storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -5462,6 +5477,233 @@ def create_launchplane_fastapi_app(
                 response_payload=response.model_dump(mode="json", exclude_none=True),
             )
         )
+
+    async def apply_product_context_cutover(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            )
+        try:
+            context_cutover_request = (
+                control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=context_cutover_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot cut over the requested product profile context.",
+            )
+        database_store = require_product_context_apply_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            label="Product context cutover",
+        )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            profile = database_store.read_product_profile_record(context_cutover_request.product)
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        if not product_profile_context_cutover_contexts_allowed(
+            profile=profile,
+            source_context=context_cutover_request.source_context,
+            target_context=context_cutover_request.target_context,
+            preview_context="",
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="context_not_in_product_boundary",
+                message="Requested cutover contexts are not owned by the product profile.",
+            )
+        try:
+            result = control_plane_product_context_cutover.apply_product_context_cutover(
+                record_store=database_store,
+                request=context_cutover_request,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_context_cutover_request",
+                message="Product context cutover context_cutover_request is invalid.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": context_cutover_request.product},
+            result=result,
+        )
+        store_apply_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_product_legacy_context_cleanup(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            )
+        try:
+            legacy_cleanup_request = (
+                control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action="product_profile.write",
+            product=legacy_cleanup_request.product,
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot clean up the requested legacy product context.",
+            )
+        database_store = require_product_context_apply_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+            label="Legacy context cleanup",
+        )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            result = control_plane_product_context_cutover.apply_legacy_context_cleanup(
+                record_store=database_store,
+                request=legacy_cleanup_request,
+            )
+        except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="context_not_in_product_boundary",
+                message="Requested cleanup contexts are not in the product cleanup boundary.",
+            ) from error
+        except FileNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_legacy_context_cleanup_request",
+                message="Legacy context cleanup legacy_cleanup_request is invalid.",
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={"product_profile": legacy_cleanup_request.product},
+            result=result,
+        )
+        store_apply_idempotency(
+            record_store=database_store,
+            identity=identity,
+            route_path=_PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
 
     def resolve_ingress_edge_endpoint(
         *,
@@ -8118,6 +8360,64 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             404: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE,
+        apply_product_context_cutover,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_product_context_cutover.ProductContextCutoverRequest.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_context_cutover",
+        summary="Plan or apply product context cutover",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE,
+        apply_product_legacy_context_cleanup,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_product_context_cutover.LegacyContextCleanupRequest.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_product_legacy_context_cleanup",
+        summary="Plan or apply legacy product context cleanup",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
             503: {"model": LaunchplaneErrorResponse},
         },
     )
