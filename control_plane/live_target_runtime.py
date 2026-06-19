@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Protocol
 
 import click
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -34,6 +35,48 @@ class LiveTargetRuntimeError(Exception):
         super().__init__(message)
         self.code = code
         self.summary = summary or {}
+
+
+class LiveTargetRuntimeApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: str
+    product: str
+    context: str
+    instance: str
+    deploy: bool = False
+    no_cache: bool = False
+    deploy_timeout_seconds: int | None = Field(default=None, gt=0)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, value: str) -> str:
+        normalized_value = value.strip().lower()
+        if normalized_value not in {"dry-run", "apply"}:
+            raise ValueError("Live target runtime mode must be 'dry-run' or 'apply'.")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_route(self) -> "LiveTargetRuntimeApplyEnvelope":
+        self.product = self.product.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        if not self.product:
+            raise ValueError("Live target runtime apply requires product.")
+        if not self.context:
+            raise ValueError("Live target runtime apply requires context.")
+        if not self.instance:
+            raise ValueError("Live target runtime apply requires instance.")
+        if self.mode == "dry-run" and (
+            self.deploy or self.no_cache or self.deploy_timeout_seconds is not None
+        ):
+            raise ValueError("Deploy options require live target runtime mode 'apply'.")
+        return self
+
+    @property
+    def apply_changes(self) -> bool:
+        return self.mode == "apply"
 
 
 class DokployDeployTrigger(Protocol):
@@ -338,6 +381,7 @@ def require_dokploy_target_definition(
 def apply_live_target_runtime_environment(
     *,
     control_plane_root: Path,
+    database_url: str | None = None,
     product_name: str = "",
     context_name: str,
     instance_name: str,
@@ -349,6 +393,7 @@ def apply_live_target_runtime_environment(
 ) -> dict[str, object]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
+        database_url=database_url,
     )
     target_definition = require_dokploy_target_definition(
         source_of_truth=source_of_truth,
@@ -361,6 +406,7 @@ def apply_live_target_runtime_environment(
             control_plane_root=control_plane_root,
             context_name=context_name,
             instance_name=instance_name,
+            database_url=database_url,
         )
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="runtime_environment_unavailable") from error
@@ -370,7 +416,7 @@ def apply_live_target_runtime_environment(
             code="runtime_environment_empty",
         )
 
-    database_url = resolve_database_url(None)
+    database_url = resolve_database_url(database_url)
     runtime_secret_binding_keys: set[str] = set()
     if product_name.strip():
         if database_url is None:
@@ -410,7 +456,8 @@ def apply_live_target_runtime_environment(
 
     try:
         host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
+            control_plane_root=control_plane_root,
+            database_url=database_url,
         )
         target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
             host=host,

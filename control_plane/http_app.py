@@ -32,6 +32,7 @@ from control_plane import product_read_service as control_plane_product_read_ser
 from control_plane import secrets as control_plane_secrets
 from control_plane import service_status as control_plane_service_status
 from control_plane import tracked_target_logs as control_plane_tracked_target_logs
+from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.agent_context_service import (
     AgentContextPayload,
     agent_context_action_allowed,
@@ -254,6 +255,7 @@ _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
 _RUNTIME_KEY_SAFETY_POLICY_APPLY_ROUTE = "/v1/runtime-key-safety/policies/apply"
 _EDGE_ENDPOINT_APPLY_ROUTE = "/v1/edge-endpoints/apply"
 _PRIVATE_HEALTH_ENDPOINT_APPLY_ROUTE = "/v1/private-health-endpoints/apply"
+_LIVE_TARGET_RUNTIME_APPLY_ROUTE = "/v1/live-target-runtime/apply"
 _INGRESS_ROUTE_APPLY_ROUTE = "/v1/drivers/ingress/route-apply"
 _INGRESS_CANARY_ROUTE_RECORD_APPLY_ROUTE = "/v1/ingress/canary-routes/records/apply"
 _INGRESS_CANARY_ROUTE_APPLY_ROUTE = "/v1/ingress/canary-routes/apply"
@@ -6791,6 +6793,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_live_target_runtime_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Live target runtime apply requires DB-backed Launchplane storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -7098,6 +7112,133 @@ def create_launchplane_fastapi_app(
             response=product_config_response,
         )
         return product_config_response
+
+    async def apply_live_target_runtime(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            )
+        try:
+            live_target_runtime_request = (
+                control_plane_live_target_runtime.LiveTargetRuntimeApplyEnvelope.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        action = (
+            "live_target_runtime.apply"
+            if live_target_runtime_request.apply_changes
+            else "live_target_runtime.plan"
+        )
+        if not resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=action,
+            product=live_target_runtime_request.product,
+            context=live_target_runtime_request.context,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan or apply live target runtime for the requested"
+                    " product/context."
+                ),
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=bool(idempotency_key.strip()),
+        )
+        if replay_response is not None:
+            return replay_response
+        live_target_runtime_store = require_live_target_runtime_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        try:
+            driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
+                control_plane_root=resolved_control_plane_root,
+                database_url=live_target_runtime_store.database_url,
+                product_name=live_target_runtime_request.product,
+                context_name=live_target_runtime_request.context,
+                instance_name=live_target_runtime_request.instance,
+                apply_changes=live_target_runtime_request.apply_changes,
+                deploy=live_target_runtime_request.deploy,
+                no_cache=live_target_runtime_request.no_cache,
+                deploy_timeout_seconds=live_target_runtime_request.deploy_timeout_seconds,
+                deploy_trigger=(
+                    control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
+                ),
+            )
+        except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
+            status_code = 400
+            if error.code in {
+                "runtime_key_safety_unavailable",
+                "runtime_environment_unavailable",
+                "dokploy_target_read_failed",
+            }:
+                status_code = 503
+            raise _launchplane_http_error(
+                status_code=status_code,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
+        tracked_target = driver_result.get("tracked_target")
+        records: dict[str, str] = {}
+        if isinstance(tracked_target, dict):
+            records = {
+                "target_id": str(tracked_target.get("target_id", "")),
+                "target_type": str(tracked_target.get("target_type", "")),
+            }
+        live_target_runtime_response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=driver_result,
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=live_target_runtime_response,
+        )
+        return live_target_runtime_response
 
     async def apply_product_context_cutover(
         request: Request,
@@ -10191,6 +10332,34 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_product_config",
         summary="Plan or apply product config",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        _LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+        apply_live_target_runtime,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": control_plane_live_target_runtime.LiveTargetRuntimeApplyEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="apply_live_target_runtime",
+        summary="Plan or apply live target runtime",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

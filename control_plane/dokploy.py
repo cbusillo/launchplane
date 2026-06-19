@@ -566,11 +566,12 @@ def read_control_plane_environment_values(
 def read_control_plane_dokploy_source_of_truth(
     *,
     control_plane_root: Path,
+    database_url: str | None = None,
     allow_incomplete_target_ids: bool = False,
     allowed_incomplete_target_routes: tuple[tuple[str, str], ...] = (),
 ) -> DokploySourceOfTruth:
     del control_plane_root
-    database_url = resolve_database_url()
+    database_url = resolve_database_url(database_url)
     if not database_url:
         raise click.ClickException(
             "Missing Launchplane tracked Dokploy target authority. Configure DB-backed tracked target records."
