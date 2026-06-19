@@ -169,7 +169,9 @@ VeriReel product paths:
     callers, DB-backed setup records, apply-only `Idempotency-Key`
     replay/conflict handling, and repeatable dry-runs)
 - provider-target operation route:
-  - `POST /v1/provider-targets/operations`
+  - `POST /v1/provider-targets/operations` (native FastAPI for bearer-token
+    callers, DB-backed audit/backfill records, apply-only `Idempotency-Key`
+    replay/conflict handling, and repeatable audits/dry-runs)
 - product context cutover route:
   - `POST /v1/product-profiles/context-cutover/apply`
 - product legacy context cleanup route:
@@ -1321,14 +1323,16 @@ deleted runtime identity records under neutral `provider_targets` and
 provider-specific execution/config storage where needed, but service responses
 must not reintroduce Dokploy-named target buckets for these workflows.
 
-Provider-target Phase Two operations use `POST /v1/provider-targets/operations`.
-The route accepts one Launchplane-owned route at a time with mode `audit`,
-`backfill-dry-run`, or `backfill-apply`, `provider_id`, `context`, `instance`,
-and an apply-only `reason`. It requires DB-backed storage and authorizes through
+Provider-target Phase Two operations use the native FastAPI
+`POST /v1/provider-targets/operations` route. The route accepts one
+Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
+`backfill-apply`, `provider_id`, `context`, `instance`, and an apply-only
+`reason`. It requires DB-backed storage and authorizes through
 `provider_target.audit` for audit/dry-run or `provider_target.backfill` for
 apply, always scoped to product/context `launchplane`. Apply requests are
 idempotency-keyed and write only complete non-conflicting Dokploy target/id
 projections; existing rows and conflicts are reported rather than overwritten.
+Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
 

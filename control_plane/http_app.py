@@ -161,6 +161,13 @@ from control_plane.product_config_http import (
     ProductConfigApplyEnvelope,
     product_config_live_target_next_actions,
 )
+from control_plane.provider_target_operations_http import (
+    PROVIDER_TARGET_OPERATIONS_ROUTE,
+    ProviderTargetOperationEnvelope,
+    execute_provider_target_operation_route,
+    provider_target_operation_authorized,
+    provider_target_operation_requires_reason,
+)
 from control_plane.runtime_key_safety_http import (
     RuntimeKeySafetyPolicyApplyEnvelope,
     apply_runtime_key_safety_policy_route,
@@ -6805,6 +6812,18 @@ def create_launchplane_fastapi_app(
             )
         return record_store
 
+    def require_provider_target_operation_database_store(
+        *, record_store: object, trace_id: str
+    ) -> PostgresRecordStore:
+        if not isinstance(record_store, PostgresRecordStore):
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_required",
+                message="Provider-target operations require Launchplane database storage.",
+            )
+        return record_store
+
     def require_local_operator_notification_policy_reason(
         *, identity: LaunchplaneIdentity, reason: str, trace_id: str, message: str
     ) -> None:
@@ -7239,6 +7258,111 @@ def create_launchplane_fastapi_app(
             response=live_target_runtime_response,
         )
         return live_target_runtime_response
+
+    async def run_provider_target_operations(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            )
+        try:
+            provider_target_request = ProviderTargetOperationEnvelope.model_validate(raw_payload)
+        except ValidationError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request payload failed validation.",
+            ) from error
+        provider_target_store = require_provider_target_operation_database_store(
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        if provider_target_operation_requires_reason(
+            identity=identity,
+            request=provider_target_request,
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="reason_required",
+                message="Local operator provider-target backfill apply requires a reason.",
+            )
+        if not provider_target_operation_authorized(
+            authz_policy=resolved_authz_policy_runtime.policy,
+            identity=identity,
+            request=provider_target_request,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot run Launchplane provider-target operations.",
+            )
+        normalized_idempotency_key = idempotency_key.strip()
+        payload_fingerprint = request_fingerprint(cast(dict[str, object], raw_payload))
+        if provider_target_request.mode == "backfill-apply":
+            if not normalized_idempotency_key:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="idempotency_key_required",
+                    message=(
+                        "Provider-target backfill apply requests require an Idempotency-Key header."
+                    ),
+                )
+            (
+                normalized_idempotency_key,
+                payload_fingerprint,
+                replay_response,
+            ) = await replay_apply_idempotency(
+                request=request,
+                record_store=provider_target_store,
+                identity=identity,
+                route_path=PROVIDER_TARGET_OPERATIONS_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                trace_id=trace_id,
+                check_replay=True,
+            )
+            if replay_response is not None:
+                return replay_response
+        provider_target_result = execute_provider_target_operation_route(
+            record_store=provider_target_store,
+            request=provider_target_request,
+        )
+        provider_target_response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result=provider_target_result.driver_result,
+        )
+        if provider_target_request.mode == "backfill-apply":
+            store_apply_idempotency(
+                record_store=provider_target_store,
+                identity=identity,
+                route_path=PROVIDER_TARGET_OPERATIONS_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=provider_target_response,
+            )
+        return provider_target_response
 
     async def apply_product_context_cutover(
         request: Request,
@@ -10360,6 +10484,34 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_live_target_runtime",
         summary="Plan or apply live target runtime",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        PROVIDER_TARGET_OPERATIONS_ROUTE,
+        run_provider_target_operations,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": ProviderTargetOperationEnvelope.model_json_schema()
+                    }
+                },
+            }
+        },
+        operation_id="run_provider_target_operations",
+        summary="Audit or backfill provider-target records",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
