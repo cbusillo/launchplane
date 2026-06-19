@@ -41,7 +41,16 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
-from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
+from control_plane.contracts.agent_write_intent import (
+    AgentWriteIntentRecord,
+    AgentWriteIntentRequest,
+    AgentWriteIntentSecretEvidence,
+    agent_write_intent_secret_action,
+    authz_action_for_agent_write_intent,
+    build_agent_write_intent_record_id,
+    evaluate_agent_write_intent,
+    secret_evidence_for_agent_write_intent,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
@@ -134,6 +143,7 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.contracts.runner_lane_registration_evidence import (
     RunnerLaneRegistrationAuditEvidenceEnvelope,
 )
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
 from control_plane.drivers.registry import build_driver_context_view, list_driver_descriptors
@@ -148,6 +158,11 @@ from control_plane.runtime_key_safety_http import (
     RuntimeKeySafetyPolicyApplyEnvelope,
     apply_runtime_key_safety_policy_route,
 )
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubActionsIdentity,
@@ -158,6 +173,7 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
     TerminalAgentIdentity,
     TokenVerifier,
+    agent_authz_audit,
     bearer_identity_from_token,
 )
 from control_plane.service_human_auth import HumanSessionManager, LaunchplaneHumanSession
@@ -239,6 +255,7 @@ _PRODUCT_PROFILES_ROUTE = "/v1/product-profiles"
 _PRODUCT_CONTEXT_CUTOVER_APPLY_ROUTE = "/v1/product-profiles/context-cutover/apply"
 _PRODUCT_LEGACY_CONTEXT_CLEANUP_APPLY_ROUTE = "/v1/product-profiles/legacy-context-cleanup/apply"
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+_AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
 _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
 _AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 
@@ -1541,6 +1558,10 @@ class _AgentWriteIntentRecordReadStore(Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[AgentWriteIntentRecord, ...]: ...
+
+
+class _AgentWriteIntentRecordWriteStore(Protocol):
+    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
 
 
 class _EveryCodePrFeedbackReadStore(Protocol):
@@ -3321,6 +3342,50 @@ def create_launchplane_fastapi_app(
         )
         return cast(_AgentWriteIntentRecordReadStore, record_store)
 
+    def require_agent_write_intent_write_store(
+        record_store: object,
+    ) -> _AgentWriteIntentRecordWriteStore:
+        require_every_code_read_methods(
+            record_store,
+            required_methods=("write_agent_write_intent_record",),
+            capability="agent write-intent records",
+        )
+        return cast(_AgentWriteIntentRecordWriteStore, record_store)
+
+    def agent_write_intent_secret_evidence(
+        *, record_store: object, request: AgentWriteIntentRequest
+    ) -> AgentWriteIntentSecretEvidence:
+        if not request.secret_bindings:
+            return secret_evidence_for_agent_write_intent(request=request, evaluation=None)
+        if request.destination is None:
+            return secret_evidence_for_agent_write_intent(
+                request=request, evaluation=None, unavailable=True
+            )
+        try:
+            policy_record = latest_active_runtime_key_safety_policy(record_store)  # type: ignore[arg-type]
+            evaluation = evaluate_runtime_key_safety_from_store(
+                record_store=record_store,  # type: ignore[arg-type]
+                policy_record=policy_record,
+                target=RuntimeKeySafetyTarget(
+                    context=request.destination.context,
+                    instance=request.destination.instance,
+                    environment_class=runtime_key_safety_environment_class(
+                        request.destination.instance
+                    ),
+                ),
+                required_binding_keys=request.secret_bindings,
+            )
+        except (AttributeError, ValueError):
+            return secret_evidence_for_agent_write_intent(
+                request=request, evaluation=None, unavailable=True
+            )
+        return secret_evidence_for_agent_write_intent(
+            request=request,
+            evaluation=evaluation,
+            policy_record_id=policy_record.record_id,
+            policy_sha256=policy_record.policy_sha256,
+        )
+
     def reject_agent_write_intent(
         *, trace_id: str, code: str, message: str, record_id: str = ""
     ) -> HTTPException:
@@ -4137,6 +4202,110 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         return EveryCodeWorkRequestRecordResponse(trace_id=trace_id, request=record)
+
+    async def evaluate_agent_write_intent_route(
+        request: Request,
+        intent_request: AgentWriteIntentRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace_id = next_trace_id()
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replayed_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=_AGENT_WRITE_INTENT_EVALUATE_ROUTE,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+        )
+        if replayed_response is not None:
+            return replayed_response
+        try:
+            intent_store = require_agent_write_intent_write_store(record_store)
+        except TypeError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message=str(error),
+            ) from error
+        intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
+        authorized = resolved_authz_policy_runtime.policy.allows(
+            identity=identity,
+            action=intent_authz_action,
+            product=intent_request.product,
+            context=intent_request.context,
+        )
+        if intent_request.secret_bindings:
+            secret_authz_action = agent_write_intent_secret_action(intent_request)
+            authorized = authorized and resolved_authz_policy_runtime.policy.allows(
+                identity=identity,
+                action=secret_authz_action,
+                product=intent_request.product,
+                context=intent_request.context,
+            )
+        intent_audit = agent_authz_audit(
+            identity=identity,
+            action=intent_authz_action,
+            product=intent_request.product,
+            context=intent_request.context,
+            decision="allowed" if authorized else "denied",
+            reason_code="authorized" if authorized else "authorization_denied",
+            policy_source=resolved_authz_policy_runtime.source,
+            policy_sha256=resolved_authz_policy_runtime.policy_sha256,
+        )
+        secret_evidence = agent_write_intent_secret_evidence(
+            record_store=record_store,
+            request=intent_request,
+        )
+        evaluation = evaluate_agent_write_intent(
+            request=intent_request,
+            authorized=authorized,
+            audit=intent_audit,
+            secret_evidence=secret_evidence,
+        )
+        recorded_at = utc_now_timestamp()
+        intent_record = AgentWriteIntentRecord(
+            record_id=build_agent_write_intent_record_id(
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                request=intent_request,
+                evaluation=evaluation,
+            ),
+            recorded_at=recorded_at,
+            trace_id=trace_id,
+            idempotency_key=normalized_idempotency_key,
+            request=intent_request,
+            evaluation=evaluation,
+        )
+        intent_store.write_agent_write_intent_record(intent_record)
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records={},
+            result={
+                "intent": evaluation.model_dump(mode="json"),
+                "record": {
+                    "record_id": intent_record.record_id,
+                    "recorded_at": intent_record.recorded_at,
+                },
+            },
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=_AGENT_WRITE_INTENT_EVALUATE_ROUTE,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
 
     async def create_every_code_work_request(
         request: Request,
@@ -9448,6 +9617,23 @@ def create_launchplane_fastapi_app(
         operation_id="read_every_code_work_request",
         summary="Read one Every Code work request",
         responses=every_code_read_error_responses,
+    )
+
+    app.add_api_route(
+        _AGENT_WRITE_INTENT_EVALUATE_ROUTE,
+        evaluate_agent_write_intent_route,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="evaluate_agent_write_intent",
+        summary="Evaluate an agent write intent",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     app.add_api_route(

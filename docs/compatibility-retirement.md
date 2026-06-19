@@ -163,6 +163,13 @@ Keep a compatibility surface only when it is one of these:
   legacy WSGI write branches are deleted; direct WSGI fallback calls fail closed.
   The Every Code GitHub webhook route remains on the mounted WSGI fallback until
   its native replacement lands.
+- Agent write-intent evaluation uses native FastAPI
+  `POST /v1/agent/write-intents/evaluate`, preserves terminal-agent scoped
+  preflight access, returns denied intents as successful `202 accepted` preflight
+  results, stores durable evaluation evidence, preserves `Idempotency-Key`
+  replay/conflict behavior before requiring write-intent record storage, and
+  evaluates secret-backed intents without revealing plaintext or ciphertext. Its
+  legacy WSGI branch is deleted; direct WSGI fallback calls fail closed.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the
