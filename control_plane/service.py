@@ -4387,6 +4387,22 @@ def _every_code_untrusted_feedback_response(
     )
 
 
+def _every_code_github_webhook_invalid_payload_response(
+    trace_id: str,
+) -> _EveryCodeWebhookResponse:
+    return (
+        400,
+        {
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "invalid_request",
+                "message": "GitHub webhook payload is invalid.",
+            },
+        },
+    )
+
+
 def handle_every_code_github_webhook_request(
     body_bytes: bytes,
     event_name: str,
@@ -4444,7 +4460,32 @@ def handle_every_code_github_webhook_request(
 
     normalized_delivery_id = delivery_id.strip()
     normalized_event_name = event_name.strip()
-    payload = _decode_json_request_body(body_bytes)
+    try:
+        payload = _decode_json_request_body(body_bytes)
+    except ValueError:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    try:
+        return _handle_decoded_every_code_github_webhook_request(
+            trace_id=trace_id,
+            normalized_delivery_id=normalized_delivery_id,
+            normalized_event_name=normalized_event_name,
+            payload=payload,
+            record_store=record_store,
+            control_plane_root_path=control_plane_root_path,
+        )
+    except ValueError:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+
+
+def _handle_decoded_every_code_github_webhook_request(
+    *,
+    trace_id: str,
+    normalized_delivery_id: str,
+    normalized_event_name: str,
+    payload: dict[str, object],
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _EveryCodeWebhookResponse:
     if normalized_event_name == "issue_comment":
         preview_validation_response = _handle_every_code_preview_validation_webhook(
             trace_id=trace_id,

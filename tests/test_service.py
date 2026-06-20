@@ -1800,10 +1800,14 @@ def _meta_product_config_payload(
     return payload
 
 
-def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
-    body_bytes = json.dumps(payload).encode("utf-8")
+def _github_webhook_body_signature(body_bytes: bytes, secret: str) -> str:
     signature = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
     return f"sha256={signature}"
+
+
+def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
+    body_bytes = json.dumps(payload).encode("utf-8")
+    return _github_webhook_body_signature(body_bytes, secret)
 
 
 def _every_code_github_issue_labeled_payload(
@@ -2199,21 +2203,29 @@ def _invoke_raw_app(
     authorization: str = "",
     query_string: str = "",
     headers: dict[str, str] | None = None,
+    body_bytes: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
-        "CONTENT_LENGTH": "0",
-        "wsgi.input": io.BytesIO(b""),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
+        "SERVER_NAME": "testserver",
+        "SERVER_PORT": "80",
+        "wsgi.url_scheme": "http",
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured_status = ""
     captured_headers: list[tuple[str, str]] = []
 
-    def start_response(status: str, response_headers: list[tuple[str, str]]) -> None:
+    def start_response(
+        status: str,
+        response_headers: list[tuple[str, str]],
+        _exc_info: object | None = None,
+    ) -> None:
         nonlocal captured_status, captured_headers
         captured_status = status
         captured_headers = response_headers
@@ -9605,6 +9617,44 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "webhook_signature_invalid")
+
+    def test_every_code_github_webhook_rejects_invalid_json_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        body_bytes = b'{"action":'
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, _headers, response_body = _invoke_raw_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                authorization="",
+                body_bytes=body_bytes,
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-invalid-json",
+                    "X-Hub-Signature-256": _github_webhook_body_signature(
+                        body_bytes,
+                        secret,
+                    ),
+                },
+            )
+            payload = json.loads(response_body.decode("utf-8"))
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
 
     def test_every_code_github_webhook_ignores_other_labels(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

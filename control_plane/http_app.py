@@ -2920,23 +2920,15 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=f"No Launchplane route for {_EVERY_CODE_GITHUB_WEBHOOK_ROUTE}.",
             )
-        try:
-            status_code, payload = every_code_github_webhook_handler(
-                await request.body(),
-                x_github_event,
-                x_github_delivery,
-                x_hub_signature_256,
-                record_store,
-                resolved_control_plane_root,
-                trace_id,
-            )
-        except ValueError:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="GitHub webhook payload is invalid.",
-            ) from None
+        status_code, payload = every_code_github_webhook_handler(
+            await request.body(),
+            x_github_event,
+            x_github_delivery,
+            x_hub_signature_256,
+            record_store,
+            resolved_control_plane_root,
+            trace_id,
+        )
         return JSONResponse(status_code=status_code, content=payload)
 
     def read_every_code_work_request_worker_write_identity(
