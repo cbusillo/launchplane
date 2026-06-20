@@ -54,7 +54,7 @@ jobs:
   runner-lane-registration:
     runs-on:
       - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}
     env:
       RUNNER_REGISTRATION_HOST: ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_HOST }}
       RUNNER_REGISTRATION_EXECUTION_LANE: >-
