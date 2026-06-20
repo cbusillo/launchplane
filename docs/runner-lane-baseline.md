@@ -285,11 +285,59 @@ registration planning remains a later slice. The workflow still uploads the JSON
 artifact so operators can inspect the exact plan/result packet for cm-website or
 any other product proof.
 
+The current host bootstrap uses a root-owned template that runs the packaged
+service wrapper rather than the interactive runner script:
+
+```ini
+[Unit]
+Description=Launchplane GitHub Actions Runner (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=launchplane-runner-hygiene
+WorkingDirectory=/home/launchplane-runner-hygiene/actions-runners/%i
+ExecStart=/home/launchplane-runner-hygiene/actions-runners/%i/bin/runsvc.sh
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`bin/runsvc.sh` is part of the official GitHub Actions runner tarball and traps
+service termination for the runner listener. `run.sh` remains the interactive
+script and must not be the long-lived systemd entrypoint for this supervised
+path. Validate the template with `systemd-analyze verify` before enabling any
+lane service.
+
+The sudo boundary should validate the lane-shaped unit argument rather than use
+a broad shell glob. On sudo versions that support command-argument regular
+expressions, the installed shape is:
+
+<!-- markdownlint-disable MD013 -->
+
+```sudoers
+Cmnd_Alias LAUNCHPLANE_RUNNER_REG_ENABLE = /usr/bin/systemctl ^enable --now launchplane-runner@[a-z0-9][a-z0-9._-]{0,127}\.service$
+Cmnd_Alias LAUNCHPLANE_RUNNER_REG_ACTIVE = /usr/bin/systemctl ^is-active --quiet launchplane-runner@[a-z0-9][a-z0-9._-]{0,127}\.service$
+launchplane-runner-hygiene ALL=(root) NOPASSWD: LAUNCHPLANE_RUNNER_REG_ENABLE, LAUNCHPLANE_RUNNER_REG_ACTIVE
+```
+
+<!-- markdownlint-enable MD013 -->
+
+Validate sudoers changes with `visudo -cf`. If a host cannot support sudoers
+argument regex, use a tiny root-owned helper that validates the lane name before
+calling `systemctl`; do not broaden the rule to arbitrary `systemctl`, shell,
+file-write, or generic restart authority.
+
 ## Supervised Runner Maintainer Plan
 
 The durable runner maintainer grows from the create-only executor into full
 desired-state reconciliation. It must keep reconciling runner state rather than
-simply start `run.sh`:
+starting a transient runner process:
 
 1. Read GitHub runner inventory and local service state for the requested lane.
 2. If registration is required, request a short-lived GitHub registration token
@@ -297,7 +345,8 @@ simply start `run.sh`:
 3. Install or update a persistent supervisor outside the GitHub Actions job
    process tree. Prefer a root-owned systemd unit such as
    `launchplane-runner@<lane>.service` with `User=<service_user>`, an approved
-   `WorkingDirectory`, `ExecStart=<runner-dir>/run.sh`, and `Restart=always`.
+   `WorkingDirectory`, `ExecStart=<runner-dir>/bin/runsvc.sh`, and
+   `Restart=always`.
 4. Use a small validated root helper or narrow sudo rule for the privileged
    systemd verbs. Do not grant arbitrary `systemctl`, file-write, or shell
    authority.
