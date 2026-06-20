@@ -58,10 +58,10 @@ totals.
 When a policy requires Docker toolchain observation, missing toolchain evidence
 or missing Buildx CLI version evidence is not ready. When it sets a
 `minimum_docker_buildx_version`, an unparsable Buildx version is not ready, and
-a stale Buildx CLI plugin is not ready. The `0.13.1+ds1` Debian-packaged Buildx
-plugin observed on `chris-testing` fails a `0.23.0` minimum even when the
-workflow's BuildKit builder container is newer; the readiness gate is about the
-host-side Docker CLI plugin used by `docker buildx build --load`.
+a stale Buildx CLI plugin is not ready. For example, a `0.13.1+ds1`
+Debian-packaged Buildx plugin fails a `0.23.0` minimum even when the workflow's
+BuildKit builder container is newer; the readiness gate is about the host-side
+Docker CLI plugin used by `docker buildx build --load`.
 
 ## Operations
 
@@ -76,6 +76,11 @@ That command reads GitHub runner metadata only. Host-level observation and futur
 reconciliation must run through a Launchplane-owned runner lane flow, not through
 product workflow edits and not through ad hoc retries after a shared Docker
 credential race.
+
+Before increasing a shared host's general lane count, confirm that workflows do
+not rely on shared mutable Docker names. Buildx builder names and loaded image
+tags should be unique per run or per job so two admitted jobs cannot race on the
+same host-local builder state or image tag.
 
 To inspect whether recent workflow jobs look runner-capacity constrained from
 GitHub Actions timing evidence, run:
