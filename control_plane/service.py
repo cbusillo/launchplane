@@ -100,7 +100,6 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
-    PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -843,27 +842,6 @@ _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS = frozenset(
 _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
     _GENERIC_WEB_BASE_DRIVER_SHARED_ROUTE_PATHS | _GENERIC_WEB_BASE_DRIVER_PREVIEW_ROUTE_PATHS
 )
-
-
-class PreviewLifecyclePlanEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str
-    desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
-    desired_state_id: str = ""
-    source: str = "workflow"
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PreviewLifecyclePlanEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview lifecycle plan requires product")
-        if not self.context.strip():
-            raise ValueError("preview lifecycle plan requires context")
-        if not self.source.strip():
-            raise ValueError("preview lifecycle plan requires source")
-        return self
 
 
 class PreviewDesiredStateEnvelope(BaseModel):
@@ -3346,7 +3324,6 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
-        "/v1/previews/lifecycle-plan",
         "/v1/previews/lifecycle-sweep",
         "/v1/drivers/launchplane/self-deploy",
     }
@@ -8719,59 +8696,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == "/v1/previews/lifecycle-plan":
-                preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
-                    payload
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_lifecycle.plan",
-                    product=preview_lifecycle_plan_request.product,
-                    context=preview_lifecycle_plan_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot plan preview lifecycle for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = build_preview_lifecycle_plan(
-                    product=preview_lifecycle_plan_request.product,
-                    context=preview_lifecycle_plan_request.context,
-                    planned_at=_utc_now_timestamp(),
-                    source=preview_lifecycle_plan_request.source,
-                    desired_previews=preview_lifecycle_plan_request.desired_previews,
-                    desired_state_id=preview_lifecycle_plan_request.desired_state_id,
-                    latest_inventory_scan=_latest_preview_inventory_scan(
-                        record_store=record_store,
-                        context_name=preview_lifecycle_plan_request.context,
-                    ),
-                )
-                preview_lifecycle_plan_id = _write_preview_lifecycle_plan_if_supported(
-                    record_store=record_store,
-                    record=driver_result,
-                )
-                result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
             elif path == "/v1/previews/desired-state":
                 preview_desired_state_request = PreviewDesiredStateEnvelope.model_validate(payload)
                 if not authz_policy.allows(

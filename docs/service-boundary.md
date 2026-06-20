@@ -1103,6 +1103,12 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized GitHub Actions workflow.
 
+`POST /v1/previews/lifecycle-plan` is a native FastAPI route. It requires
+`preview_lifecycle.plan` authorization for the requested product/context,
+preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
+preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
+direct fallback calls fail closed.
+
 PR feedback delivery is part of the same preview lifecycle boundary. Product
 repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
