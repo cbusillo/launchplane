@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 from click import ClickException, Command
 from click.testing import CliRunner
+from a2wsgi import ASGIMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.cli import main
@@ -46,6 +47,7 @@ from control_plane.every_code_notifications_delivery import (
 )
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -122,7 +124,6 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationRequest,
     plan_runner_lane_registration,
 )
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -130,7 +131,9 @@ from control_plane.merge_train import discover_merge_train_stack
 from control_plane.service import (
     GenericWebPreviewVerificationRequest,
     create_launchplane_service_app as _create_launchplane_service_app,
+    handle_every_code_github_webhook_request,
 )
+from control_plane.http_app import LaunchplaneAuthzPolicyRuntime
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.drivers import generic_web_preview_dispatch
 from control_plane.service_auth import (
@@ -150,6 +153,7 @@ from control_plane.service_human_auth import (
     GITHUB_USER_URL,
     GitHubOAuthClient,
     GitHubOAuthConfig,
+    HumanSessionManager,
     InMemoryHumanSessionStore,
     LaunchplaneHumanSession,
     load_github_oauth_config_from_env,
@@ -1139,6 +1143,31 @@ def _signed_in_cookie(app: WsgiApp) -> str:
     return callback_headers["Set-Cookie"]
 
 
+def _fastapi_human_session_manager() -> HumanSessionManager:
+    return HumanSessionManager(
+        config=_github_oauth_config(),
+        session_store=InMemoryHumanSessionStore(),
+    )
+
+
+def _fastapi_signed_in_cookie(
+    session_manager: HumanSessionManager,
+    *,
+    role: Literal["read_only", "admin"] = "admin",
+) -> str:
+    human_session = session_manager.issue(_human_identity(role=role))
+    return session_manager.session_cookie_header(human_session)
+
+
+def _authz_policy_record_by_id(
+    records: tuple[LaunchplaneAuthzPolicyRecord, ...], record_id: object
+) -> LaunchplaneAuthzPolicyRecord:
+    for record in records:
+        if record.record_id == str(record_id):
+            return record
+    raise AssertionError(f"Authz policy record {record_id!r} was not found")
+
+
 def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -1378,6 +1407,36 @@ def create_launchplane_service_app(
         Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],
         factory(**kwargs),
     )
+
+
+def create_launchplane_fastapi_wsgi_app(
+    **kwargs: object,
+) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
+    kwargs.pop("state_dir", None)
+    database_url = kwargs.get("database_url")
+    if isinstance(database_url, str) and database_url.startswith("sqlite"):
+        store = PostgresRecordStore(database_url=database_url)
+        store.ensure_schema()
+        store.close()
+    factory = cast(Any, create_launchplane_fastapi_app)
+    app = factory(**kwargs)
+    return cast(
+        Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]],
+        ASGIMiddleware(app),
+    )
+
+
+def create_every_code_github_webhook_app(
+    **kwargs: object,
+) -> Callable[[dict[str, object], Callable[[str, list[tuple[str, str]]], None]], list[bytes]]:
+    state_dir = kwargs.pop("state_dir", None)
+    local_record_store = kwargs.pop("local_record_store_for_tests", None)
+    if local_record_store is None and "database_url" not in kwargs and isinstance(state_dir, Path):
+        local_record_store = FilesystemRecordStore(state_dir=state_dir)
+    if local_record_store is not None:
+        kwargs["record_store_factory"] = lambda: local_record_store
+    kwargs["every_code_github_webhook_handler"] = handle_every_code_github_webhook_request
+    return create_launchplane_fastapi_wsgi_app(**kwargs)
 
 
 def create_launchplane_dokploy_target_setup_app(**kwargs: object) -> Any:
@@ -1741,10 +1800,14 @@ def _meta_product_config_payload(
     return payload
 
 
-def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
-    body_bytes = json.dumps(payload).encode("utf-8")
+def _github_webhook_body_signature(body_bytes: bytes, secret: str) -> str:
     signature = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
     return f"sha256={signature}"
+
+
+def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
+    body_bytes = json.dumps(payload).encode("utf-8")
+    return _github_webhook_body_signature(body_bytes, secret)
 
 
 def _every_code_github_issue_labeled_payload(
@@ -2080,19 +2143,27 @@ def _invoke_app(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     body_bytes = json.dumps(payload).encode("utf-8") if payload is not None else b""
-    environ = {
+    environ: dict[str, object] = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
         "CONTENT_LENGTH": str(len(body_bytes)),
+        "CONTENT_TYPE": "application/json" if payload is not None else "",
         "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
+        "SERVER_NAME": "testserver",
+        "SERVER_PORT": "80",
+        "wsgi.url_scheme": "http",
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured_status = ""
 
-    def start_response(status: str, _response_headers: list[tuple[str, str]]) -> None:
+    def start_response(
+        status: str,
+        _response_headers: list[tuple[str, str]],
+        _exc_info: object | None = None,
+    ) -> None:
         nonlocal captured_status
         captured_status = status
 
@@ -2133,21 +2204,29 @@ def _invoke_raw_app(
     authorization: str = "",
     query_string: str = "",
     headers: dict[str, str] | None = None,
+    body_bytes: bytes = b"",
 ) -> tuple[int, dict[str, str], bytes]:
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
-        "CONTENT_LENGTH": "0",
-        "wsgi.input": io.BytesIO(b""),
+        "CONTENT_LENGTH": str(len(body_bytes)),
+        "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
+        "SERVER_NAME": "testserver",
+        "SERVER_PORT": "80",
+        "wsgi.url_scheme": "http",
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured_status = ""
     captured_headers: list[tuple[str, str]] = []
 
-    def start_response(status: str, response_headers: list[tuple[str, str]]) -> None:
+    def start_response(
+        status: str,
+        response_headers: list[tuple[str, str]],
+        _exc_info: object | None = None,
+    ) -> None:
         nonlocal captured_status, captured_headers
         captured_status = status
         captured_headers = response_headers
@@ -2688,6 +2767,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             self.assertEqual(payload["error"]["code"], "not_found")
 
+    def test_preview_lifecycle_plan_legacy_wsgi_fallback_is_removed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            responses = tuple(
+                _invoke_app(
+                    app,
+                    method=method,
+                    path="/v1/previews/lifecycle-plan",
+                    payload={"schema_version": 1},
+                )
+                for method in ("GET", "POST")
+            )
+
+        for status_code, payload in responses:
+            self.assertEqual(status_code, 404)
+            self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_runtime_key_safety_policy_apply_legacy_wsgi_fallback_is_removed(
         self,
     ) -> None:
@@ -2735,7 +2837,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_every_code_worker_identity()),
                 authz_policy=_every_code_worker_policy(
@@ -2848,7 +2950,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_every_code_worker_identity()),
                 authz_policy=_every_code_worker_policy(
@@ -6899,7 +7001,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -6970,7 +7072,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7018,6 +7120,71 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records, ())
         self.assertIsNone(idempotency_record)
 
+    def test_merge_train_policy_import_endpoint_human_admin_session_can_apply(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            session_store = InMemoryHumanSessionStore()
+            session_manager = HumanSessionManager(
+                config=_github_oauth_config(),
+                session_store=session_store,
+            )
+            human_session = session_manager.issue(_human_identity(role="admin"))
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["merge_train.policy_import"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                human_session_manager=session_manager,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-human-import",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure codex-skills merge train.",
+                    "record": record.model_dump(mode="json"),
+                },
+                authorization="",
+                headers={
+                    "Cookie": session_manager.session_cookie_header(human_session),
+                    "Idempotency-Key": "merge-train-policy:human-import",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_merge_train_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual([stored.record_id for stored in records], [record.record_id])
+
     def test_merge_train_policy_import_endpoint_rejects_self_deploy_authority(
         self,
     ) -> None:
@@ -7040,7 +7207,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -7098,7 +7265,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -7135,6 +7302,167 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_merge_train_policy_import_endpoint_authorizes_before_storage_gate(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-authz-before-storage",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_merge_train_policy_import_endpoint_requires_database_storage(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["merge_train.policy_import"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-db-required",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure codex-skills merge train.",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:db-required"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_merge_train_policy_import_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        payload = app.openapi()
+
+        route = payload["paths"]["/v1/merge-train/policies/import"]["post"]
+        self.assertEqual(route["operationId"], "import_merge_train_policy")
+        self.assertEqual(route["responses"]["202"]["description"], "Successful Response")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "MergeTrainPolicyImportEnvelope")
+        self.assertEqual(request_schema["additionalProperties"], False)
+
+    def test_merge_train_policy_import_endpoint_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-legacy-retired",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -7170,7 +7498,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7243,7 +7571,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7289,6 +7617,38 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_payload["records"]["state"], "claimed")
         self.assertEqual(stored_request.state, "claimed")
         self.assertEqual(stored_request.github_delivery_id, "delivery-1")
+
+    def test_every_code_github_webhook_is_retired_from_legacy_wsgi_app(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_every_code_summary_read_route_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7426,7 +7786,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7523,7 +7883,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7614,7 +7974,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7701,7 +8061,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7786,7 +8146,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7870,7 +8230,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -7960,7 +8320,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8039,7 +8399,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
@@ -8103,7 +8463,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(identity),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8141,7 +8501,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8241,7 +8601,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ) as create_comment,
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8301,6 +8661,54 @@ class LaunchplaneServiceTests(unittest.TestCase):
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
 
+    def test_every_code_preview_validation_failure_returns_generic_webhook_response(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            body="/preview ok",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+            patch(
+                "control_plane.service.resolve_launchplane_github_token",
+                side_effect=ClickException(
+                    "Traceback (most recent call last): secret token leaked"
+                ),
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-validation-failed",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertIs(payload["skipped"], True)
+        self.assertEqual(payload["reason"], "preview_validation_failed")
+        self.assertNotIn("message", payload)
+        self.assertNotIn("Traceback", json.dumps(payload, sort_keys=True))
+
     def test_every_code_preview_ok_allows_repo_owner_override(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload(
@@ -8348,7 +8756,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8417,7 +8825,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8487,7 +8895,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8558,7 +8966,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8641,7 +9049,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8717,7 +9125,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
             )
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8785,7 +9193,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _write_github_planning_config(Path(home_directory_name), repo_managers={})
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8847,7 +9255,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8916,7 +9324,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
@@ -8995,14 +9403,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
+            webhook_app = create_every_code_github_webhook_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy(),
                 control_plane_root_path=Path(temporary_directory_name),
             )
             _issue_status, issue_response = _invoke_app(
-                app,
+                webhook_app,
                 method="POST",
                 path="/v1/every-code/github-webhook",
                 payload=issue_payload,
@@ -9024,7 +9432,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 updated_at="2026-05-06T16:00:00Z",
             )
             _invoke_app(
-                app,
+                webhook_app,
                 method="POST",
                 path="/v1/every-code/github-webhook",
                 payload=comment_payload,
@@ -9040,8 +9448,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 status="pending",
             )
             feedback_id = feedback_records[0].feedback_id
+            legacy_app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
             status_status, status_response = _invoke_app(
-                app,
+                legacy_app,
                 method="POST",
                 path="/v1/every-code/pr-feedback/status",
                 payload={
@@ -9140,18 +9554,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback_records, ())
         self.assertEqual(gate_records, ())
 
-    def test_every_code_worker_token_reruns_terminal_request(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        issue_payload = _every_code_github_issue_labeled_payload()
+    def test_every_code_work_request_rerun_is_retired_from_legacy_wsgi_app(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
                     {
-                        "repository": "every/verireel",
+                        "repository": "cbusillo/launchplane",
                         "workflow_refs": [
-                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
                         ],
-                        "event_names": ["pull_request"],
+                        "event_names": ["workflow_dispatch"],
                         "products": ["launchplane"],
                         "contexts": ["launchplane"],
                         "actions": ["every_code_work_request.rerun"],
@@ -9159,36 +9571,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ]
             }
         )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
-                },
-            ),
-        ):
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
-                verifier=_StubVerifier(_identity()),
+                verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _issue_status, issue_response = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=issue_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-issue",
-                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
-                },
-            )
-            request_id = issue_response["records"]["request_id"]
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
             _claim_every_code_work_request_in_filesystem(state_dir, str(request_id))
             _update_every_code_work_request_status_in_filesystem(
                 state_dir,
@@ -9197,21 +9593,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 error_message="Needs another pass.",
                 updated_at="2026-05-06T16:00:00Z",
             )
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for blocked Every Code request.",
-                },
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
-
             rerun_status, rerun_response = _invoke_app(
                 app,
                 method="POST",
@@ -9219,81 +9600,44 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "request_id": request_id,
                     "trigger_actor": "ops",
-                    "agent_write_intent_record_id": intent_record_id,
                 },
-                authorization="Bearer dev-worker-token",
+                headers={"Idempotency-Key": "every-code-rerun-code-123"},
+            )
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
             )
 
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 202)
-        request = rerun_response["result"]["request"]
-        self.assertEqual(request["state"], "queued")
-        self.assertEqual(request["trigger_actor"], "ops")
-        self.assertEqual(request["claimed_by_host"], "")
-        self.assertEqual(request["error_message"], "")
+        self.assertEqual(rerun_status, 404)
+        self.assertEqual(rerun_response["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "blocked")
+        self.assertEqual(stored_request.error_message, "Needs another pass.")
 
-    def test_every_code_worker_token_cannot_rerun_active_request(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-        issue_payload = _every_code_github_issue_labeled_payload()
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "every/verireel",
-                        "workflow_refs": [
-                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                        ],
-                        "event_names": ["pull_request"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": ["every_code_work_request.rerun"],
-                    }
-                ]
-            }
-        )
+    def test_every_code_work_request_rerun_worker_token_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
-                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
-                },
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token"},
             ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            _issue_status, issue_response = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/github-webhook",
-                payload=issue_payload,
-                authorization="",
-                headers={
-                    "X-GitHub-Event": "issues",
-                    "X-GitHub-Delivery": "delivery-issue",
-                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
-                },
+            state_dir = Path(temporary_directory_name) / "state"
+            request_id = _seed_every_code_work_request_record(state_dir).request_id
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="blocked",
+                error_message="Needs another pass.",
+                updated_at="2026-05-05T22:05:00Z",
             )
-            request_id = issue_response["records"]["request_id"]
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for active Every Code request.",
-                },
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
 
             rerun_status, rerun_response = _invoke_app(
                 app,
@@ -9302,14 +9646,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "request_id": request_id,
                     "trigger_actor": "ops",
-                    "agent_write_intent_record_id": intent_record_id,
                 },
                 authorization="Bearer dev-worker-token",
             )
+            stored_request = FilesystemRecordStore(state_dir).read_every_code_work_request_record(
+                request_id
+            )
 
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 400)
-        self.assertEqual(rerun_response["error"]["code"], "invalid_payload")
+        self.assertEqual(rerun_status, 404)
+        self.assertEqual(rerun_response["error"]["code"], "not_found")
+        self.assertEqual(stored_request.state, "blocked")
+        self.assertEqual(stored_request.error_message, "Needs another pass.")
 
     def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
@@ -9321,7 +9668,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
@@ -9343,6 +9690,441 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "webhook_signature_invalid")
 
+    def test_every_code_github_webhook_rejects_invalid_json_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        body_bytes = b'{"action":'
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, _headers, response_body = _invoke_raw_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                authorization="",
+                body_bytes=body_bytes,
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-invalid-json",
+                    "X-Hub-Signature-256": _github_webhook_body_signature(
+                        body_bytes,
+                        secret,
+                    ),
+                },
+            )
+            payload = json.loads(response_body.decode("utf-8"))
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_issue_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        webhook_payload["repository"] = {}
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-malformed-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_bool_issue_number(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        issue = cast(dict[str, object], webhook_payload["issue"])
+        issue["number"] = True
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-bool-issue-number",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_repository_name(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        repository = cast(dict[str, object], webhook_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-malformed-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_pull_request_repository(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        repository = cast(dict[str, object], webhook_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-malformed-pr-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_pull_request_url(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        pull_request = cast(dict[str, object], webhook_payload["pull_request"])
+        pull_request["html_url"] = ""
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-malformed-pr-url",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_feedback_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        comment = cast(dict[str, object], comment_payload["comment"])
+        comment.pop("node_id")
+        comment.pop("id")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-malformed-feedback",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
+    def test_every_code_github_webhook_rejects_malformed_feedback_repository(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        repository = cast(dict[str, object], comment_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-malformed-feedback-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
+    def test_every_code_github_webhook_rejects_slug_unsafe_feedback_identity(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        comment = cast(dict[str, object], comment_payload["comment"])
+        comment["node_id"] = "---"
+        comment.pop("id")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-slug-unsafe-feedback",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
     def test_every_code_github_webhook_ignores_other_labels(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         webhook_payload = _every_code_github_issue_labeled_payload(label="bug")
@@ -9353,7 +10135,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
@@ -9385,7 +10167,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ""},
             ),
         ):
-            app = create_launchplane_service_app(
+            app = create_every_code_github_webhook_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
@@ -9646,294 +10428,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(show_payload["error"]["code"], "not_found")
         self.assertEqual(write_status, 404)
         self.assertEqual(write_payload["error"]["code"], "not_found")
-
-    def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                result_pr_url="https://github.com/cbusillo/code/pull/26",
-                result_summary="Detached session went stale.",
-                error_message="Detached session went stale.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-            intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for blocked Every Code request.",
-                },
-                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
-            )
-            intent_record_id = intent_payload["result"]["record"]["record_id"]
-            rerun_status, rerun_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "trigger_actor": "cbusillo",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "agent_write_intent_record_id": intent_record_id,
-                },
-                authorization="Bearer worker-token",
-                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
-            )
-
-        self.assertEqual(intent_status, 202)
-        self.assertEqual(rerun_status, 202)
-        self.assertEqual(rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id)
-        self.assertEqual(rerun_payload["records"]["state"], "queued")
-        self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
-        self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["result_pr_url"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["error_message"], "")
-
-    def test_every_code_rerun_requires_matching_write_intent_evidence(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                error_message="Needs another pass.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-
-            missing_status, missing_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={"request_id": request_id, "trigger_actor": "cbusillo"},
-                authorization="Bearer worker-token",
-            )
-            wrong_source_status, wrong_source_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/999",
-                    "reason": "Approved rerun for a different Every Code request.",
-                },
-            )
-            wrong_source_record_id = wrong_source_payload["result"]["record"]["record_id"]
-            mismatched_status, mismatched_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "trigger_actor": "cbusillo",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "agent_write_intent_record_id": wrong_source_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-        self.assertEqual(missing_status, 409)
-        self.assertEqual(missing_payload["error"]["code"], "agent_write_intent_required")
-        self.assertEqual(wrong_source_status, 202)
-        self.assertEqual(mismatched_status, 409)
-        self.assertEqual(mismatched_payload["error"]["code"], "agent_write_intent_source_mismatch")
-
-    def test_every_code_rerun_rejects_stale_and_wrong_context_write_intents(self) -> None:
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/launchplane",
-                        "workflow_refs": [
-                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
-                        ],
-                        "event_names": ["workflow_dispatch"],
-                        "products": ["launchplane"],
-                        "contexts": ["launchplane", "other-context"],
-                        "actions": [
-                            "every_code_work_request.write",
-                            "every_code_work_request.rerun",
-                        ],
-                    }
-                ]
-            }
-        )
-        identity = _identity(
-            repository="cbusillo/launchplane",
-            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
-            event_name="workflow_dispatch",
-        )
-        with (
-            TemporaryDirectory() as temporary_directory_name,
-            patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
-            ),
-        ):
-            state_dir = Path(temporary_directory_name) / "state"
-            app = create_launchplane_service_app(
-                state_dir=state_dir,
-                verifier=_StubVerifier(identity),
-                authz_policy=policy,
-                control_plane_root_path=Path(temporary_directory_name),
-            )
-            request_id = _seed_every_code_work_request_record(state_dir).request_id
-            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
-            _update_every_code_work_request_status_in_filesystem(
-                state_dir,
-                request_id,
-                state="blocked",
-                error_message="Needs another pass.",
-                updated_at="2026-05-05T22:05:00Z",
-            )
-            _wrong_context_status, wrong_context_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "other-context",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun in the wrong context.",
-                },
-            )
-            wrong_context_record_id = wrong_context_payload["result"]["record"]["record_id"]
-            wrong_context_status, wrong_context_rerun_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "agent_write_intent_record_id": wrong_context_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-            _intent_status, intent_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "every_code_rerun",
-                    "mode": "apply",
-                    "product": "launchplane",
-                    "context": "launchplane",
-                    "source_url": "https://github.com/cbusillo/code/issues/123",
-                    "reason": "Approved rerun for a blocked Every Code request.",
-                },
-            )
-            stale_record_id = intent_payload["result"]["record"]["record_id"]
-            store = FilesystemRecordStore(state_dir)
-            stale_record = store.read_agent_write_intent_record(stale_record_id)
-            store.write_agent_write_intent_record(
-                stale_record.model_copy(update={"recorded_at": "2026-01-01T00:00:00Z"})
-            )
-            stale_status, stale_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/every-code/work-requests/rerun",
-                payload={
-                    "request_id": request_id,
-                    "agent_write_intent_record_id": stale_record_id,
-                },
-                authorization="Bearer worker-token",
-            )
-
-        self.assertEqual(wrong_context_status, 409)
-        self.assertEqual(
-            wrong_context_rerun_payload["error"]["code"],
-            "agent_write_intent_scope_mismatch",
-        )
-        self.assertEqual(stale_status, 409)
-        self.assertEqual(stale_payload["error"]["code"], "agent_write_intent_stale")
 
     def test_every_code_worker_read_route_is_retired_before_authentication(self) -> None:
         with (
@@ -10924,7 +11418,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -11021,6 +11515,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(secret_bindings[0].binding_key, "DISCORD_TOKEN")
         self.assertNotIn("secret_id", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("app-discord-blue", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("/var/lib/discord-blue", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("https://discord-blue.example.test", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("DISCORD_BLUE_STATE_DIR", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("DISCORD_TOKEN", json.dumps(payload, sort_keys=True))
+        self.assertNotIn("test:discord-blue-onboarding", json.dumps(payload, sort_keys=True))
 
     def test_product_onboarding_endpoint_rejects_provider_target_conflict(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -11061,7 +11561,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -11141,7 +11641,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -11189,6 +11689,191 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_product_onboarding_endpoint_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_onboarding.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/cbusillo/discord-blue",
+                        "runtime_port": 8787,
+                        "health_path": "/health",
+                        "lanes": [
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                                "base_url": "https://discord-blue.example.test",
+                            }
+                        ],
+                        "updated_at": "2026-05-04T18:00:00Z",
+                        "source_label": "test:discord-blue-onboarding",
+                    },
+                },
+                headers={"Idempotency-Key": "product-onboarding-filesystem-denied"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_product_onboarding_endpoint_checks_authz_before_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/product-onboarding.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/cbusillo/discord-blue",
+                        "runtime_port": 8787,
+                        "health_path": "/health",
+                        "lanes": [
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                                "base_url": "https://discord-blue.example.test",
+                            }
+                        ],
+                        "updated_at": "2026-05-04T18:00:00Z",
+                        "source_label": "test:discord-blue-onboarding",
+                    },
+                },
+                headers={"Idempotency-Key": "product-onboarding-authz-denied"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_openapi_includes_product_onboarding_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        payload = app.openapi()
+
+        route = payload["paths"]["/v1/product-onboarding/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_product_onboarding")
+        self.assertEqual(route["responses"]["202"]["description"], "Successful Response")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "ProductOnboardingApplyEnvelope")
+        self.assertEqual(request_schema["additionalProperties"], False)
+
+    def test_product_onboarding_endpoint_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "lanes": [
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                            }
+                        ],
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
     def test_provider_target_operation_endpoint_backfills_route(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -11220,7 +11905,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12821,7 +13506,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12889,7 +13574,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -12928,6 +13613,103 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "idempotency_key_required")
         self.assertEqual(provider_targets, ())
+
+    def test_provider_target_operation_endpoint_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["provider_target.audit"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/provider-target-operations.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/provider-targets/operations",
+                payload={
+                    "schema_version": 1,
+                    "mode": "audit",
+                    "product": "launchplane",
+                    "provider_id": "dokploy",
+                    "context": "verireel",
+                    "instance": "testing",
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_provider_target_operation_contract(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: FilesystemRecordStore(state_dir=Path("unused")),
+        )
+
+        payload = app.openapi()
+
+        route = payload["paths"]["/v1/provider-targets/operations"]["post"]
+        self.assertEqual(route["operationId"], "run_provider_target_operations")
+        self.assertEqual(route["responses"]["202"]["description"], "Successful Response")
+        request_schema = route["requestBody"]["content"]["application/json"]["schema"]
+        self.assertEqual(request_schema["title"], "ProviderTargetOperationEnvelope")
+        self.assertEqual(request_schema["additionalProperties"], False)
+
+    def test_provider_target_operation_endpoint_is_retired_from_legacy_wsgi_app(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/provider-targets/operations",
+                payload={
+                    "schema_version": 1,
+                    "mode": "audit",
+                    "product": "launchplane",
+                    "provider_id": "dokploy",
+                    "context": "verireel",
+                    "instance": "testing",
+                },
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_product_environment_read_legacy_wsgi_routes_are_retired(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -13110,31 +13892,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 404)
             self.assertEqual(payload["error"]["code"], "not_found")
 
-    def test_agent_write_intent_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
+    def test_agent_write_intent_evaluate_is_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            state_dir = root / "state"
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.rerun"],
-                        }
-                    ]
-                }
-            )
+            state_dir = Path(temporary_directory_name) / "state"
             app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
             )
 
             status_code, payload = _invoke_app(
@@ -13150,1414 +13915,23 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "reason": "Check whether rerun can be requested safely.",
                 },
             )
-
-            record_pointer = payload["result"]["record"]
-            record = FilesystemRecordStore(state_dir).read_agent_write_intent_record(
-                record_pointer["record_id"]
+            records = FilesystemRecordStore(state_dir).list_agent_write_intent_records(
+                product="launchplane",
+                context_name="launchplane",
             )
 
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["authz_action"], "every_code_work_request.rerun")
-        self.assertFalse(intent["safe_to_execute"])
-        self.assertEqual(intent["reason_code"], "authorized")
-        self.assertEqual(intent["audit"]["decision"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
-        self.assertEqual(record.evaluation.status, "allowed")
-        self.assertEqual(record.evaluation.intent, "every_code_rerun")
-        self.assertEqual(
-            record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386"
-        )
-        self.assertEqual(record.trace_id, payload["trace_id"])
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(records, ())
 
-    def test_agent_write_intent_evaluate_denies_ungranted_intent(self) -> None:
+    def test_product_config_apply_is_retired_from_legacy_wsgi_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.rerun"],
-                        }
-                    ]
-                }
-            )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({}),
                 control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "promotion_dispatch",
-                    "mode": "apply",
-                    "product": "verireel",
-                    "context": "verireel",
-                    "source_url": "https://github.com/cbusillo/launchplane/issues/386",
-                    "reason": "Request prod promotion dispatch.",
-                },
-            )
-
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "denied")
-        self.assertEqual(intent["reason_code"], "authorization_denied")
-        self.assertFalse(intent["safe_to_execute"])
-        self.assertEqual(intent["audit"]["decision"], "denied")
-        self.assertEqual(intent["audit"]["subject"]["action_safety"], "prod")
-
-    def test_agent_write_intent_evaluate_requires_dry_run_for_config_apply(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["verireel"],
-                            "contexts": ["verireel-testing"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "product_config_apply",
-                    "mode": "apply",
-                    "product": "verireel",
-                    "context": "verireel-testing",
-                    "source_url": "https://github.com/cbusillo/launchplane/issues/386",
-                    "reason": "Apply product config after review.",
-                },
-            )
-
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "denied")
-        self.assertEqual(intent["reason_code"], "dry_run_required")
-        self.assertFalse(intent["safe_to_execute"])
-        self.assertEqual(intent["audit"]["reason_code"], "dry_run_required")
-
-    def test_terminal_agent_write_intent_evaluate_checks_scoped_policy(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "terminal_agents": [
-                        {
-                            "subjects": ["local-owner-agent"],
-                            "token_labels": ["local-owner-read"],
-                            "products": ["launchplane"],
-                            "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.rerun"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-            )
-
-            with patch.dict(
-                os.environ,
-                TERMINAL_AGENT_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/agent/write-intents/evaluate",
-                    authorization="Bearer terminal-read-token",
-                    payload={
-                        "intent": "every_code_rerun",
-                        "mode": "dry_run",
-                        "product": "launchplane",
-                        "context": "launchplane",
-                        "source_url": "https://github.com/cbusillo/launchplane/issues/386",
-                        "reason": "Check whether local agent can request a rerun.",
-                    },
-                )
-
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
-        self.assertFalse(intent["audit"]["subject"]["approval_capable"])
-
-    def test_agent_write_intent_evaluate_checks_secret_binding_policy_without_reveal(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_runtime_key_safety_policy_record(
-                RuntimeKeySafetyPolicyRecord(
-                    record_id="runtime-key-safety-policy-service-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-05-05T20:00:00Z",
-                    rules=(
-                        RuntimeSecretSafetyRule(
-                            binding_key="SMTP_PASSWORD",
-                            secret_class="prod_only",
-                            allowed_contexts=("sellyouroutboard",),
-                            allowed_instances=("prod",),
-                        ),
-                    ),
-                )
-            )
-            store.write_secret_binding(
-                SecretBinding(
-                    binding_id="secret-smtp-password-binding-smtp-password",
-                    secret_id="secret-smtp-password",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    binding_key="SMTP_PASSWORD",
-                    context="sellyouroutboard",
-                    instance="prod",
-                    created_at="2026-05-05T20:00:00Z",
-                    updated_at="2026-05-05T20:00:00Z",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": [
-                                "product_config.apply",
-                                "product_config.apply.secret",
-                            ],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "product_config_apply",
-                    "mode": "dry_run",
-                    "product": "sellyouroutboard",
-                    "context": "sellyouroutboard",
-                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
-                    "reason": "Preflight managed secret-backed product config.",
-                    "secret_bindings": ["SMTP_PASSWORD"],
-                    "destination": {
-                        "kind": "runtime_environment",
-                        "context": "sellyouroutboard",
-                        "instance": "prod",
-                    },
-                },
-            )
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["secret_evidence"]["status"], "pass")
-        self.assertEqual(intent["secret_evidence"]["checked_binding_keys"], ["SMTP_PASSWORD"])
-        self.assertEqual(intent["secret_evidence"]["findings"], [])
-        self.assertNotIn("smtp-secret-value", response_text)
-        self.assertNotIn("ciphertext", response_text)
-
-    def test_agent_write_intent_evaluate_denies_secret_without_secret_action_grant(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_runtime_key_safety_policy_record(
-                RuntimeKeySafetyPolicyRecord(
-                    record_id="runtime-key-safety-policy-service-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-05-05T20:00:00Z",
-                    rules=(
-                        RuntimeSecretSafetyRule(
-                            binding_key="SMTP_PASSWORD",
-                            secret_class="prod_only",
-                            allowed_contexts=("sellyouroutboard",),
-                            allowed_instances=("prod",),
-                        ),
-                    ),
-                )
-            )
-            store.write_secret_binding(
-                SecretBinding(
-                    binding_id="secret-smtp-password-binding-smtp-password",
-                    secret_id="secret-smtp-password",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    binding_key="SMTP_PASSWORD",
-                    context="sellyouroutboard",
-                    instance="prod",
-                    created_at="2026-05-05T20:00:00Z",
-                    updated_at="2026-05-05T20:00:00Z",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "product_config_apply",
-                    "mode": "dry_run",
-                    "product": "sellyouroutboard",
-                    "context": "sellyouroutboard",
-                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
-                    "reason": "Preflight managed secret-backed product config.",
-                    "secret_bindings": ["SMTP_PASSWORD"],
-                    "destination": {
-                        "kind": "runtime_environment",
-                        "context": "sellyouroutboard",
-                        "instance": "prod",
-                    },
-                },
-            )
-
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "denied")
-        self.assertEqual(intent["reason_code"], "authorization_denied")
-        self.assertEqual(intent["secret_evidence"]["status"], "pass")
-
-    def test_agent_write_intent_evaluate_denies_disallowed_secret_destination(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_runtime_key_safety_policy_record(
-                RuntimeKeySafetyPolicyRecord(
-                    record_id="runtime-key-safety-policy-service-test",
-                    status="active",
-                    source="test",
-                    updated_at="2026-05-05T20:00:00Z",
-                    rules=(
-                        RuntimeSecretSafetyRule(
-                            binding_key="SMTP_PASSWORD",
-                            secret_class="prod_only",
-                            allowed_contexts=("sellyouroutboard",),
-                            allowed_instances=("prod",),
-                        ),
-                    ),
-                )
-            )
-            store.write_secret_binding(
-                SecretBinding(
-                    binding_id="secret-smtp-password-binding-smtp-password",
-                    secret_id="secret-smtp-password",
-                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    binding_key="SMTP_PASSWORD",
-                    context="sellyouroutboard",
-                    instance="testing",
-                    created_at="2026-05-05T20:00:00Z",
-                    updated_at="2026-05-05T20:00:00Z",
-                )
-            )
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": [
-                                "product_config.apply",
-                                "product_config.apply.secret",
-                            ],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/agent/write-intents/evaluate",
-                payload={
-                    "intent": "product_config_apply",
-                    "mode": "dry_run",
-                    "product": "sellyouroutboard",
-                    "context": "sellyouroutboard",
-                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
-                    "reason": "Preflight managed secret-backed product config.",
-                    "secret_bindings": ["SMTP_PASSWORD"],
-                    "destination": {
-                        "kind": "runtime_environment",
-                        "context": "sellyouroutboard",
-                        "instance": "testing",
-                    },
-                },
-            )
-
-        self.assertEqual(status_code, 202)
-        intent = payload["result"]["intent"]
-        self.assertEqual(intent["status"], "denied")
-        self.assertEqual(intent["reason_code"], "secret_evidence_denied")
-        self.assertEqual(intent["secret_evidence"]["status"], "fail")
-        self.assertEqual(
-            intent["secret_evidence"]["findings"][0]["code"],
-            "secret_class_not_allowed",
-        )
-
-    def test_product_config_api_dry_run_returns_redacted_plan_without_writes(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(database_url=database_url)
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_product_config_payload(),
-                    headers={"Idempotency-Key": "product-config-dry-run"},
-                )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                runtime_records = store.list_runtime_environment_records()
-                secret_records = store.list_secret_records()
-            finally:
-                store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertNotIn("smtp-secret-value", response_text)
-        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
-        self.assertEqual(runtime_records, ())
-        self.assertEqual(secret_records, ())
-
-    def test_product_config_api_apply_writes_runtime_and_managed_secret(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(database_url=database_url)
-            request_payload = {**_product_config_payload(), "mode": "apply"}
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=request_payload,
-                    headers={"Idempotency-Key": "product-config-apply"},
-                )
-                store = PostgresRecordStore(database_url=database_url)
-                store.ensure_schema()
-                try:
-                    runtime_records = store.list_runtime_environment_records()
-                    secret_records = store.list_secret_records()
-                    secret_binding = store.list_secret_bindings(limit=None)[0]
-                finally:
-                    store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "apply")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertNotIn("smtp-secret-value", response_text)
-        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
-        self.assertEqual(len(runtime_records), 1)
-        self.assertEqual(
-            runtime_records[0],
-            RuntimeEnvironmentRecord(
-                scope="instance",
-                context="sellyouroutboard-prod",
-                instance="prod",
-                env={
-                    "CONTACT_EMAIL_MODE": "smtp",
-                    "SELLYOUROUTBOARD_SITE_URL": "https://www.sellyouroutboard.com",
-                },
-                updated_at=runtime_records[0].updated_at,
-                source_label="product-config-api-test",
-            ),
-        )
-        self.assertEqual(len(secret_records), 1)
-        self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
-        self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
-
-    def test_product_config_api_apply_reports_live_target_runtime_next_action(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(database_url=database_url)
-            _seed_tracked_target_records(
-                database_url=database_url,
-                context="sellyouroutboard-prod",
-                instance="prod",
-                target_id="application-syo-prod",
-                target_type="application",
-                target_name="syo-prod-app",
-            )
-            request_payload = {**_product_config_payload(), "mode": "apply"}
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=request_payload,
-                    headers={"Idempotency-Key": "product-config-apply-live-sync"},
-                )
-
-        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2, sort_keys=True))
-        result = payload["result"]
-        self.assertEqual(result["status"], "records_applied_live_sync_required")
-        next_actions = result["next_actions"]
-        self.assertEqual(len(next_actions), 1)
-        next_action = next_actions[0]
-        self.assertEqual(next_action["kind"], "live_target_runtime_apply")
-        self.assertTrue(next_action["required"])
-        self.assertEqual(next_action["dry_run"]["endpoint"], "/v1/live-target-runtime/apply")
-        self.assertEqual(next_action["dry_run"]["mode"], "dry-run")
-        self.assertEqual(next_action["apply"]["endpoint"], "/v1/live-target-runtime/apply")
-        self.assertEqual(next_action["apply"]["mode"], "apply")
-        self.assertEqual(next_action["target"]["target_type"], "application")
-        self.assertEqual(next_action["target"]["target_name"], "syo-prod-app")
-        self.assertIn("Redeploying the same app image", next_action["instruction"])
-        self.assertNotIn("smtp-secret-value", json.dumps(payload, sort_keys=True))
-
-    def test_product_config_api_human_admin_dry_run_returns_redacted_meta_plan(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_humans": [
-                        {
-                            "logins": ["alice"],
-                            "roles": ["admin"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
-            )
-            _write_runtime_key_safety_policy(
-                database_url=database_url,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="META_CONVERSIONS_API_TOKEN",
-                        secret_class="prod_only",
-                        allowed_contexts=("sellyouroutboard",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            )
-            cookie = _signed_in_cookie(app)
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(),
-                    authorization="",
-                    headers={
-                        "Cookie": cookie,
-                        "Idempotency-Key": "product-config-human-dry-run-meta",
-                    },
-                )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                runtime_records = store.list_runtime_environment_records()
-                secret_records = store.list_secret_records()
-            finally:
-                store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(
-            payload["result"]["runtime_environment"]["changed_keys"],
-            ["NEXT_PUBLIC_META_PIXEL_ID"],
-        )
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertEqual(
-            payload["result"]["secrets"][0]["binding_key"],
-            "META_CONVERSIONS_API_TOKEN",
-        )
-        self.assertEqual(payload["result"]["runtime_key_safety"]["status"], "pass")
-        self.assertNotIn("123456789012345", response_text)
-        self.assertNotIn("meta-conversions-api-secret-value", response_text)
-        self.assertEqual(runtime_records, ())
-        self.assertEqual(secret_records, ())
-
-    def test_product_config_api_human_admin_apply_writes_meta_config(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_humans": [
-                        {
-                            "logins": ["alice"],
-                            "roles": ["admin"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
-            )
-            _write_runtime_key_safety_policy(
-                database_url=database_url,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="META_CONVERSIONS_API_TOKEN",
-                        secret_class="prod_only",
-                        allowed_contexts=("sellyouroutboard",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            )
-            cookie = _signed_in_cookie(app)
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(mode="apply"),
-                    authorization="",
-                    headers={
-                        "Cookie": cookie,
-                        "Idempotency-Key": "product-config-human-apply-meta",
-                    },
-                )
-                store = PostgresRecordStore(database_url=database_url)
-                store.ensure_schema()
-                try:
-                    runtime_records = store.list_runtime_environment_records()
-                    secret_records = store.list_secret_records()
-                    secret_binding = store.list_secret_bindings(limit=None)[0]
-                finally:
-                    store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "apply")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertNotIn("123456789012345", response_text)
-        self.assertNotIn("meta-conversions-api-secret-value", response_text)
-        self.assertEqual(len(runtime_records), 1)
-        self.assertEqual(runtime_records[0].context, "sellyouroutboard")
-        self.assertEqual(runtime_records[0].instance, "prod")
-        self.assertEqual(runtime_records[0].env["NEXT_PUBLIC_META_PIXEL_ID"], "123456789012345")
-        self.assertEqual(len(secret_records), 1)
-        self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
-        self.assertEqual(secret_binding.binding_key, "META_CONVERSIONS_API_TOKEN")
-
-    def test_product_config_api_human_read_only_cannot_apply_product_config(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_humans": [
-                        {
-                            "logins": ["alice"],
-                            "roles": ["read_only"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="read_only")),
-            )
-            cookie = _signed_in_cookie(app)
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-config/apply",
-                payload=_meta_product_config_payload(mode="apply"),
-                authorization="",
-                headers={
-                    "Cookie": cookie,
-                    "Idempotency-Key": "product-config-human-read-only-apply",
-                },
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_product_config_api_terminal_agent_remains_read_only(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "terminal_agents": [
-                        {
-                            "subjects": ["local-owner-agent"],
-                            "token_labels": ["local-owner-read"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                TERMINAL_AGENT_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(mode="apply"),
-                    authorization="Bearer terminal-read-token",
-                    headers={"Idempotency-Key": "product-config-terminal-denied"},
-                )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-        self.assertEqual(
-            payload["error"]["message"],
-            "Terminal agent credentials can only read redacted Launchplane context.",
-        )
-
-    def test_product_config_api_local_operator_dry_run_returns_redacted_meta_plan(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.plan",),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(
-                database_url=database_url,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="META_CONVERSIONS_API_TOKEN",
-                        secret_class="prod_only",
-                        allowed_contexts=("sellyouroutboard",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
-                },
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(
-                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
-                    ),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-dry-run"},
-                )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            try:
-                runtime_records = store.list_runtime_environment_records()
-                secret_records = store.list_secret_records()
-            finally:
-                store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertNotIn("123456789012345", response_text)
-        self.assertNotIn("meta-conversions-api-secret-value", response_text)
-        self.assertEqual(runtime_records, ())
-        self.assertEqual(secret_records, ())
-
-    def test_product_config_api_local_operator_requires_configured_identity(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.apply",),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(mode="apply"),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-no-identity"},
-                )
-
-        self.assertEqual(status_code, 401)
-        self.assertEqual(payload["error"]["code"], "authentication_required")
-
-    def test_product_config_api_local_operator_apply_requires_reason(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.apply",),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                LOCAL_OPERATOR_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(mode="apply"),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-no-reason"},
-                )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "reason_required")
-
-    def test_product_config_api_local_operator_apply_requires_matching_dry_run(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.apply",),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                LOCAL_OPERATOR_AUTH_ENV,
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(
-                        mode="apply",
-                        reason="Apply reviewed SellYourOutBoard Meta config from terminal operator.",
-                    ),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-no-dry-run"},
-                )
-
-        self.assertEqual(status_code, 409)
-        self.assertEqual(payload["error"]["code"], "matching_dry_run_required")
-
-    def test_product_config_api_local_operator_apply_writes_meta_config_after_dry_run(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.plan", "product_config.apply"),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(
-                database_url=database_url,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="META_CONVERSIONS_API_TOKEN",
-                        secret_class="prod_only",
-                        allowed_contexts=("sellyouroutboard",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    **LOCAL_OPERATOR_AUTH_ENV,
-                },
-                clear=True,
-            ):
-                dry_run_status_code, dry_run_payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(
-                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
-                    ),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-apply-dry-run"},
-                )
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(
-                        mode="apply",
-                        reason="Apply reviewed SellYourOutBoard Meta config from terminal operator.",
-                    ),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-local-operator-apply"},
-                )
-                store = PostgresRecordStore(database_url=database_url)
-                store.ensure_schema()
-                try:
-                    runtime_records = store.list_runtime_environment_records()
-                    secret_records = store.list_secret_records()
-                    secret_binding = store.list_secret_bindings(limit=None)[0]
-                finally:
-                    store.close()
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(dry_run_status_code, 202)
-        self.assertEqual(dry_run_payload["result"]["mode"], "dry-run")
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "apply")
-        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
-        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
-        self.assertNotIn("123456789012345", response_text)
-        self.assertNotIn("meta-conversions-api-secret-value", response_text)
-        self.assertEqual(len(runtime_records), 1)
-        self.assertEqual(runtime_records[0].env["NEXT_PUBLIC_META_PIXEL_ID"], "123456789012345")
-        self.assertEqual(len(secret_records), 1)
-        self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
-        self.assertEqual(secret_binding.binding_key, "META_CONVERSIONS_API_TOKEN")
-
-    def test_product_config_api_local_operator_allows_configured_identity(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=_local_operator_policy(
-                    actions=("product_config.plan",),
-                    products=("sellyouroutboard",),
-                    contexts=("sellyouroutboard",),
-                    subject="configured-local-owner",
-                    token_label="configured-write-token",
-                ),
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            _write_runtime_key_safety_policy(
-                database_url=database_url,
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="META_CONVERSIONS_API_TOKEN",
-                        secret_class="prod_only",
-                        allowed_contexts=("sellyouroutboard",),
-                        allowed_instances=("prod",),
-                    ),
-                ),
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "configured-local-owner",
-                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "configured-write-token",
-                },
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_meta_product_config_payload(
-                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
-                    ),
-                    authorization="Bearer local-operator-token",
-                    headers={"Idempotency-Key": "product-config-configured-local-operator"},
-                )
-
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["mode"], "dry-run")
-
-    def test_product_config_api_rejects_missing_master_key_for_secret_bundle(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(os.environ, {}, clear=True):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_product_config_payload(),
-                )
-
-        self.assertEqual(status_code, 503)
-        self.assertEqual(payload["error"]["code"], "secret_configuration_required")
-        self.assertEqual(
-            payload["error"]["message"],
-            "Launchplane service is missing required secret write configuration.",
-        )
-        self.assertNotIn("LAUNCHPLANE_MASTER_ENCRYPTION_KEY", json.dumps(payload))
-
-    def test_product_config_api_requires_runtime_key_safety_policy(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=_product_config_payload(),
-                    headers={"Idempotency-Key": "product-config-missing-key-policy"},
-                )
-
-        self.assertEqual(status_code, 503)
-        self.assertEqual(payload["error"]["code"], "runtime_key_safety_unavailable")
-        self.assertEqual(
-            payload["error"]["message"],
-            "Launchplane runtime key-safety policy is unavailable.",
-        )
-
-    def test_product_config_api_rejects_secret_shaped_runtime_key(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            request_payload = _product_config_payload()
-            request_payload["secrets"] = []
-            request_payload["runtime_env"] = {"scope": "instance", "env": {"API_TOKEN": "nope"}}
-
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                status_code, payload = _invoke_app(
-                    app,
-                    method="POST",
-                    path="/v1/product-config/apply",
-                    payload=request_payload,
-                )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
-        self.assertNotIn("API_TOKEN", json.dumps(payload))
-
-    def test_product_config_api_apply_requires_apply_authorization(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            request_payload = {**_product_config_payload(), "mode": "apply"}
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-config/apply",
-                payload=request_payload,
-            )
-
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_product_config_api_rejects_unauthorized_context(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-testing"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
             )
 
             status_code, payload = _invoke_app(
@@ -14565,146 +13939,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="POST",
                 path="/v1/product-config/apply",
                 payload=_product_config_payload(),
+                headers={"Idempotency-Key": "product-config-legacy-retired"},
             )
 
-        self.assertEqual(status_code, 403)
-        self.assertEqual(payload["error"]["code"], "authorization_denied")
-
-    def test_product_config_api_rejects_runtime_env_target_override(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            request_payload = _product_config_payload()
-            runtime_env = dict(cast(dict[str, object], request_payload["runtime_env"]))
-            runtime_env["context"] = "sellyouroutboard-testing"
-            request_payload["runtime_env"] = runtime_env
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-config/apply",
-                payload=request_payload,
-            )
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
-        self.assertNotIn("sellyouroutboard-testing", response_text)
-
-    def test_product_config_api_rejects_secret_scope_override(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            request_payload = _product_config_payload()
-            request_secrets = _product_config_secrets(request_payload)
-            request_payload["secrets"] = [{**request_secrets[0], "scope": "global"}]
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-config/apply",
-                payload=request_payload,
-            )
-
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
-
-    def test_product_config_api_rejects_secret_target_override(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
-            policy = LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "github_actions": [
-                        {
-                            "repository": "every/verireel",
-                            "workflow_refs": [
-                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                            ],
-                            "event_names": ["pull_request"],
-                            "products": ["sellyouroutboard"],
-                            "contexts": ["sellyouroutboard-prod"],
-                            "actions": ["product_config.plan"],
-                        }
-                    ]
-                }
-            )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
-                verifier=_StubVerifier(_identity()),
-                authz_policy=policy,
-                control_plane_root_path=root,
-                database_url=database_url,
-            )
-            request_payload = _product_config_payload()
-            request_secrets = _product_config_secrets(request_payload)
-            request_payload["secrets"] = [
-                {
-                    **request_secrets[0],
-                    "context": "sellyouroutboard-testing",
-                }
-            ]
-
-            status_code, payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/product-config/apply",
-                payload=request_payload,
-            )
-
-        response_text = json.dumps(payload, sort_keys=True)
-        self.assertEqual(status_code, 400)
-        self.assertEqual(payload["error"]["code"], "invalid_request")
-        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
-        self.assertNotIn("sellyouroutboard-testing", response_text)
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_generic_web_deploy_route_uses_profile_lane_for_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -20155,7 +19394,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20197,7 +19436,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
             repeat_status_code, repeat_payload = _invoke_app(
@@ -20286,7 +19528,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20324,7 +19566,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
             repeat_status_code, repeat_payload = _invoke_app(
@@ -20384,7 +19629,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20492,7 +19737,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -20567,16 +19812,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -20608,7 +19853,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -20640,16 +19888,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -20709,7 +19957,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -20751,14 +20002,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            authz_policy_runtime = LaunchplaneAuthzPolicyRuntime(policy)
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
+                authz_policy_runtime=authz_policy_runtime,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
@@ -20767,12 +20020,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
+                store.write_authz_policy_record(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="launchplane-authz-policy-human-dry-run-test",
+                        source="test",
+                        updated_at="2026-05-02T22:35:00Z",
+                        policy=policy,
+                    )
+                )
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(profile_payload)
                 )
             finally:
                 store.close()
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -20809,31 +20070,28 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            workflow_status_code, workflow_payload = _invoke_app(
-                app,
-                method="POST",
-                path="/v1/drivers/generic-web/prod-promotion-workflow",
-                payload={
-                    "schema_version": 1,
-                    "product": "sellyouroutboard",
-                    "workflow": {
-                        "schema_version": 1,
-                        "product": "sellyouroutboard",
-                        "context": "sellyouroutboard",
-                        "dry_run": True,
-                    },
-                },
-                authorization="",
-                headers={"Cookie": cookie},
-            )
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry_run")
         self.assertEqual(payload["result"]["changed"], True)
         self.assertEqual(len(active_records), 1)
         self.assertIsNone(dry_run_idempotency_record)
-        self.assertEqual(workflow_status_code, 403)
-        self.assertEqual(workflow_payload["error"]["code"], "authorization_denied")
+        self.assertFalse(
+            active_records[0].policy.allows(
+                identity=_human_identity(role="admin"),
+                action="generic_web_prod_promotion.dispatch",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+        self.assertFalse(
+            authz_policy_runtime.policy.allows(
+                identity=_human_identity(role="admin"),
+                action="generic_web_prod_promotion.dispatch",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
 
     def test_terminal_agent_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
         self,
@@ -20854,16 +20112,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -20917,7 +20175,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -20961,14 +20222,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
@@ -20977,7 +20238,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
             finally:
                 store.close()
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -21050,16 +20311,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -21113,7 +20374,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -21158,16 +20422,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            session_manager = _fastapi_human_session_manager()
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
-                github_oauth_config=_github_oauth_config(),
-                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),
+                human_session_manager=session_manager,
             )
-            cookie = _signed_in_cookie(app)
+            cookie = _fastapi_signed_in_cookie(session_manager)
 
             status_code, payload = _invoke_app(
                 app,
@@ -21196,7 +20460,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             store = PostgresRecordStore(database_url=database_url)
             try:
-                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+                active_policy = _authz_policy_record_by_id(
+                    store.list_authz_policy_records(status="active"),
+                    payload["records"]["authz_policy_record_id"],
+                )
             finally:
                 store.close()
 
@@ -21233,7 +20500,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
                 authz_policy=policy,
@@ -21274,7 +20541,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21330,7 +20597,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21386,7 +20653,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21513,7 +20780,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21533,7 +20800,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "LAUNCHPLANE_DATABASE_URL": database_url,
                         control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
                     },
                     clear=True,
@@ -21628,7 +20894,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21733,7 +20999,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -21859,7 +21125,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -22018,7 +21284,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -22035,7 +21301,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.control_plane_live_target_runtime.apply_live_target_runtime_environment",
+                "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment",
                 side_effect=control_plane_live_target_runtime.LiveTargetRuntimeError(
                     "Live target runtime apply requires LAUNCHPLANE_DATABASE_URL for DB-backed runtime key-safety evaluation.",
                     code="runtime_key_safety_unavailable",
@@ -22075,7 +21341,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
+            app = create_launchplane_fastapi_wsgi_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
@@ -22101,6 +21367,113 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_live_target_runtime_apply_requires_database_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/live-target-runtime/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "dry-run",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                },
+                headers={"Idempotency-Key": "live-target-runtime:filesystem-store"},
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
+    def test_openapi_includes_live_target_runtime_apply_contract(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_fastapi_wsgi_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            status_code, payload = _invoke_app(app, method="GET", path="/openapi.json")
+
+        self.assertEqual(status_code, 200)
+        route = payload["paths"]["/v1/live-target-runtime/apply"]["post"]
+        self.assertEqual(route["operationId"], "apply_live_target_runtime")
+        self.assertEqual(
+            route["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AcceptedEvidenceResponse",
+        )
+        self.assertEqual(
+            route["requestBody"]["content"]["application/json"]["schema"]["title"],
+            "LiveTargetRuntimeApplyEnvelope",
+        )
+        for response_status in ("400", "401", "403", "409", "503"):
+            self.assertIn(response_status, route["responses"])
+
+    def test_live_target_runtime_apply_is_retired_from_legacy_wsgi_app(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "products": ["sellyouroutboard"],
+                                "contexts": ["sellyouroutboard"],
+                                "actions": ["live_target_runtime.apply"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/live-target-runtime/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                },
+                headers={"Idempotency-Key": "live-target-runtime:retired-wsgi"},
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
 
     def test_evidence_ingress_routes_are_retired_from_legacy_wsgi_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -24364,8 +23737,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -24376,6 +23748,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -24442,8 +23815,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -24454,6 +23826,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -24489,8 +23862,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_launchplane_service_app(
-                state_dir=root / "state",
+            app = create_launchplane_fastapi_wsgi_app(
                 verifier=_StubVerifier(
                     _identity(
                         workflow_ref=(
@@ -24501,6 +23873,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 authz_policy=policy,
                 control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
             )
 
             status_code, payload = _invoke_app(
@@ -24518,6 +23891,184 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "missing_inventory")
         self.assertEqual(payload["result"]["orphaned_slugs"], [])
         self.assertIn("has not recorded", payload["result"]["error_message"])
+
+    def test_preview_lifecycle_plan_endpoint_replays_idempotent_request(self) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "source": "preview-janitor",
+            "desired_previews": [{"preview_slug": "pr-42"}],
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            first_status, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:42"},
+            )
+            replay_status, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:42"},
+            )
+            plan_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_lifecycle_plan_records(context_name="verireel-testing")
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(replay_status, 202)
+        self.assertTrue(replay_payload["replayed"])
+        self.assertEqual(
+            replay_payload["records"]["preview_lifecycle_plan_id"],
+            first_payload["records"]["preview_lifecycle_plan_id"],
+        )
+        self.assertEqual(replay_payload["result"], first_payload["result"])
+        self.assertEqual(len(plan_records), 1)
+
+    def test_preview_lifecycle_plan_endpoint_rejects_idempotency_key_reuse(
+        self,
+    ) -> None:
+        request_payload = {
+            "product": "verireel",
+            "context": "verireel-testing",
+            "source": "preview-janitor",
+            "desired_previews": [{"preview_slug": "pr-42"}],
+        }
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=lambda: FilesystemRecordStore(state_dir=root / "state"),
+            )
+
+            first_status, _first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload=request_payload,
+                headers={"Idempotency-Key": "preview-lifecycle-plan:reuse"},
+            )
+            conflict_status, conflict_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload={
+                    **request_payload,
+                    "desired_previews": [{"preview_slug": "pr-43"}],
+                },
+                headers={"Idempotency-Key": "preview-lifecycle-plan:reuse"},
+            )
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(conflict_status, 409)
+        self.assertEqual(conflict_payload["error"]["code"], "idempotency_key_reused")
+
+    def test_preview_lifecycle_plan_endpoint_requires_plan_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_wsgi_app(
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                record_store_factory=object,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-plan",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "desired_previews": [{"preview_slug": "pr-42"}],
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_storage_required")
+        self.assertIn("preview lifecycle plan applies", payload["error"]["message"])
 
     def test_preview_desired_state_endpoint_discovers_and_records_labeled_prs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
