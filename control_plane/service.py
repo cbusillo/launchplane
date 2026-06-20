@@ -4301,18 +4301,44 @@ def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, o
     return None
 
 
-def _github_webhook_required_mapping(payload: dict[str, object], key: str) -> dict[str, object]:
-    value = _github_webhook_mapping(payload, key)
-    if value is None:
-        raise ValueError(f"GitHub webhook requires object field {key!r}")
-    return value
-
-
 def _github_webhook_string(mapping: dict[str, object] | None, key: str) -> str:
     if mapping is None:
         return ""
     value = mapping.get(key)
     return value.strip() if isinstance(value, str) else ""
+
+
+def _github_webhook_raw_string(mapping: dict[str, object] | None, key: str) -> str:
+    if mapping is None:
+        return ""
+    value = mapping.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _github_webhook_positive_int(mapping: dict[str, object] | None, key: str) -> int | None:
+    if mapping is None:
+        return None
+    value = mapping.get(key)
+    if type(value) is int and value >= 1:
+        return value
+    return None
+
+
+def _github_repository_full_name_is_valid(repository: str) -> bool:
+    if repository.strip() != repository:
+        return False
+    owner, separator, name = repository.partition("/")
+    if not (owner and separator and name) or "/" in name:
+        return False
+    return all(_github_repository_component_is_valid(part) for part in (owner, name))
+
+
+def _github_repository_component_is_valid(value: str) -> bool:
+    return bool(
+        value
+        and value.strip() == value
+        and all(character.isalnum() or character in {".", "_", "-"} for character in value)
+    )
 
 
 def _github_login_normalized(login: str) -> str:
@@ -4460,21 +4486,17 @@ def handle_every_code_github_webhook_request(
 
     normalized_delivery_id = delivery_id.strip()
     normalized_event_name = event_name.strip()
-    try:
-        payload = _decode_json_request_body(body_bytes)
-    except ValueError:
+    payload = _decode_json_request_body_or_none(body_bytes)
+    if payload is None:
         return _every_code_github_webhook_invalid_payload_response(trace_id)
-    try:
-        return _handle_decoded_every_code_github_webhook_request(
-            trace_id=trace_id,
-            normalized_delivery_id=normalized_delivery_id,
-            normalized_event_name=normalized_event_name,
-            payload=payload,
-            record_store=record_store,
-            control_plane_root_path=control_plane_root_path,
-        )
-    except ValueError:
-        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    return _handle_decoded_every_code_github_webhook_request(
+        trace_id=trace_id,
+        normalized_delivery_id=normalized_delivery_id,
+        normalized_event_name=normalized_event_name,
+        payload=payload,
+        record_store=record_store,
+        control_plane_root_path=control_plane_root_path,
+    )
 
 
 def _handle_decoded_every_code_github_webhook_request(
@@ -4559,14 +4581,20 @@ def _handle_decoded_every_code_github_webhook_request(
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
     sender_payload = _github_webhook_mapping(payload, "sender")
-    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
-    if not isinstance(issue_number_value, int):
-        raise ValueError("GitHub issue webhook requires integer issue.number")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    issue_url = _github_webhook_string(issue_payload, "html_url")
+    issue_number_value = _github_webhook_positive_int(issue_payload, "number")
+    if (
+        issue_number_value is None
+        or not _github_repository_full_name_is_valid(repository)
+        or not issue_url.strip()
+    ):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
 
     request = EveryCodeWorkRequestCreateEnvelope(
-        repository=_github_webhook_string(repository_payload, "full_name"),
+        repository=repository,
         issue_number=issue_number_value,
-        issue_url=_github_webhook_string(issue_payload, "html_url"),
+        issue_url=issue_url,
         issue_title=_github_webhook_string(issue_payload, "title"),
         trigger_label=_EVERY_CODE_TRIGGER_LABEL,
         trigger_actor=_github_webhook_string(sender_payload, "login"),
@@ -4600,10 +4628,10 @@ def _handle_every_code_issue_closed_webhook(
 ) -> _EveryCodeWebhookResponse:
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
-    repository = _github_webhook_string(repository_payload, "full_name")
-    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
-    if not isinstance(issue_number_value, int):
-        raise ValueError("GitHub issue webhook requires integer issue.number")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    issue_number_value = _github_webhook_positive_int(issue_payload, "number")
+    if issue_number_value is None or not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     issue_url = _github_webhook_string(issue_payload, "html_url")
     closed_at = _github_webhook_string(issue_payload, "closed_at") or _utc_now_timestamp()
     state_reason = _github_webhook_string(issue_payload, "state_reason")
@@ -4685,8 +4713,12 @@ def _handle_every_code_pull_request_webhook(
 
     repository_payload = _github_webhook_mapping(payload, "repository")
     pull_request_payload = _github_webhook_mapping(payload, "pull_request")
-    repository = _github_webhook_string(repository_payload, "full_name")
-    pr_url = _github_webhook_string(pull_request_payload, "html_url")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    if not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    pr_url = _github_webhook_raw_string(pull_request_payload, "html_url")
+    if not pr_url.strip() or pr_url.strip() != pr_url:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     linked_issue_numbers = (
         _github_issue_numbers_referenced_by_pull_request(
             pull_request_payload,
@@ -5021,6 +5053,8 @@ def _handle_every_code_pr_feedback_webhook(
 
     sender_payload = _github_webhook_mapping(payload, "sender")
     body_payload = _every_code_feedback_body_payload(event_name=event_name, payload=payload)
+    if body_payload is None:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     if _every_code_feedback_actor_is_automation(
         sender_payload=sender_payload,
         body_payload=body_payload,
@@ -5037,18 +5071,23 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     repository_payload = _github_webhook_mapping(payload, "repository")
-    repository = _github_webhook_string(repository_payload, "full_name")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    if not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     actor = _github_webhook_string(sender_payload, "login")
     if not _every_code_feedback_actor_is_trusted(repository=repository, actor=actor):
         return _every_code_untrusted_feedback_response(
             trace_id=trace_id,
             delivery_id=delivery_id,
         )
-    pr_number, pr_url = _every_code_feedback_pr_reference(
+    pr_reference = _every_code_feedback_pr_reference(
         event_name=event_name,
         payload=payload,
         repository=repository,
     )
+    if pr_reference is None:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    pr_number, pr_url = pr_reference
     body = _github_webhook_string(body_payload, "body")
     if not body.strip():
         return (
@@ -5115,8 +5154,13 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     github_node_id = _github_webhook_string(body_payload, "node_id")
-    github_id_value = body_payload.get("id") if body_payload is not None else ""
+    github_id_value = body_payload.get("id")
     github_id = str(github_id_value) if github_id_value is not None else ""
+    github_feedback_identity = github_node_id.strip() or github_id.strip()
+    if not github_feedback_identity or not any(
+        character.isalnum() for character in github_feedback_identity
+    ):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     feedback_id = build_every_code_pr_feedback_id(
         repository=repository,
         pr_number=pr_number,
@@ -5219,9 +5263,9 @@ def _every_code_feedback_kind(event_name: str) -> EveryCodePrFeedbackKind:
 
 def _every_code_feedback_body_payload(
     *, event_name: str, payload: dict[str, object]
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     key = "review" if event_name == "pull_request_review" else "comment"
-    return _github_webhook_required_mapping(payload, key)
+    return _github_webhook_mapping(payload, key)
 
 
 def _every_code_feedback_pr_reference(
@@ -5229,18 +5273,22 @@ def _every_code_feedback_pr_reference(
     event_name: str,
     payload: dict[str, object],
     repository: str,
-) -> tuple[int, str]:
+) -> tuple[int, str] | None:
     if event_name == "issue_comment":
-        issue_payload = _github_webhook_required_mapping(payload, "issue")
+        issue_payload = _github_webhook_mapping(payload, "issue")
+        if issue_payload is None:
+            return None
         pull_request_marker = issue_payload.get("pull_request")
         if not isinstance(pull_request_marker, dict):
-            raise ValueError("Every Code PR feedback issue_comment requires pull_request issue")
-        pr_number_value = issue_payload.get("number")
+            return None
+        pr_number_value = _github_webhook_positive_int(issue_payload, "number")
     else:
-        pull_request_payload = _github_webhook_required_mapping(payload, "pull_request")
-        pr_number_value = pull_request_payload.get("number")
-    if not isinstance(pr_number_value, int):
-        raise ValueError("Every Code PR feedback requires integer pull request number")
+        pull_request_payload = _github_webhook_mapping(payload, "pull_request")
+        if pull_request_payload is None:
+            return None
+        pr_number_value = _github_webhook_positive_int(pull_request_payload, "number")
+    if pr_number_value is None:
+        return None
     return pr_number_value, f"https://github.com/{repository}/pull/{pr_number_value}"
 
 
@@ -6083,6 +6131,16 @@ def _decode_json_request_body(body_bytes: bytes) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("Request body must decode to a JSON object.")
     return payload
+
+
+def _decode_json_request_body_or_none(body_bytes: bytes) -> dict[str, object] | None:
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return cast(dict[str, object], payload)
 
 
 def _bearer_token(environ: dict[str, object]) -> str:

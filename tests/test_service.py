@@ -9656,6 +9656,403 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "invalid_request")
         self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
 
+    def test_every_code_github_webhook_rejects_malformed_issue_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        webhook_payload["repository"] = {}
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-malformed-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_bool_issue_number(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        issue = cast(dict[str, object], webhook_payload["issue"])
+        issue["number"] = True
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-bool-issue-number",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_repository_name(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        repository = cast(dict[str, object], webhook_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-malformed-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_pull_request_repository(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        repository = cast(dict[str, object], webhook_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-malformed-pr-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_pull_request_url(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_pull_request_closed_payload()
+        pull_request = cast(dict[str, object], webhook_payload["pull_request"])
+        pull_request["html_url"] = ""
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-malformed-pr-url",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["status"], "rejected")
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "GitHub webhook payload is invalid.")
+
+    def test_every_code_github_webhook_rejects_malformed_feedback_payload(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        comment = cast(dict[str, object], comment_payload["comment"])
+        comment.pop("node_id")
+        comment.pop("id")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-malformed-feedback",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
+    def test_every_code_github_webhook_rejects_malformed_feedback_repository(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        repository = cast(dict[str, object], comment_payload["repository"])
+        repository["full_name"] = " cbusillo/code"
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-malformed-feedback-repository",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
+    def test_every_code_github_webhook_rejects_slug_unsafe_feedback_identity(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        comment = cast(dict[str, object], comment_payload["comment"])
+        comment["node_id"] = "---"
+        comment.pop("id")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_every_code_github_webhook_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(issue_response["records"]["request_id"])
+            _claim_every_code_work_request_in_filesystem(state_dir, request_id)
+            _update_every_code_work_request_status_in_filesystem(
+                state_dir,
+                request_id,
+                state="done",
+                result_pr_url="https://github.com/cbusillo/code/pull/26",
+                result_summary="Opened PR.",
+                updated_at="2026-05-06T16:00:00Z",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-slug-unsafe-feedback",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            feedback_records = FilesystemRecordStore(state_dir).list_every_code_pr_feedback_records(
+                request_id=request_id
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_response["status"], "rejected")
+        self.assertEqual(feedback_response["error"]["code"], "invalid_request")
+        self.assertEqual(
+            feedback_response["error"]["message"], "GitHub webhook payload is invalid."
+        )
+        self.assertEqual(feedback_records, ())
+
     def test_every_code_github_webhook_ignores_other_labels(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         webhook_payload = _every_code_github_issue_labeled_payload(label="bug")
