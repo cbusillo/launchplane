@@ -508,6 +508,13 @@ class RunnerLaneRegistrationWorkflowTests(unittest.TestCase):
         self.assertIn("RUNNER_PACKAGE_URL: ${{ inputs.runner_package_url }}", workflow_text)
         self.assertIn('--runner-package-url "$RUNNER_PACKAGE_URL"', workflow_text)
         self.assertIn('[ "$MUTATE_REQUESTED" = "true" ]', workflow_text)
+        self.assertIn(
+            "    runs-on:\n"
+            "      - self-hosted\n"
+            "      - ${{ vars.LAUNCHPLANE_RUNNER_HOST_HYGIENE_EXECUTION_LANE }}\n",
+            workflow_text,
+        )
+        self.assertNotIn("${{ vars.LAUNCHPLANE_RUNNER_LABEL }}", workflow_text)
 
     def test_workflow_does_not_allowlist_user_registration_root(self) -> None:
         workflow_text = Path(".github/workflows/runner-lane-registration.yml").read_text(
