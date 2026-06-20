@@ -83,6 +83,12 @@ Keep a compatibility surface only when it is one of these:
   legacy WSGI read branch is deleted. Private health endpoint apply uses native
   FastAPI `POST /v1/private-health-endpoints/apply`; its legacy WSGI write
   branch is deleted, and direct fallback calls fail closed.
+- Product config apply uses native FastAPI `POST /v1/product-config/apply` for
+  GitHub Actions OIDC, signed-in GitHub human sessions, and local-operator
+  bearer callers. The route keeps DB-backed storage, redacted validation and
+  product-config service errors, local-operator dry-run continuity, live-target
+  next actions, and `Idempotency-Key` replay/conflict handling. Its legacy WSGI
+  write branch is deleted, and direct fallback calls fail closed.
 - Ingress canary route record reads use native FastAPI
   `GET /v1/ingress/canary-routes/records` and
   `GET /v1/ingress/canary-routes/records/{canary_key}` routes. Their legacy
@@ -141,15 +147,38 @@ Keep a compatibility surface only when it is one of these:
   deleted. Every Code work-request create uses native FastAPI, preserves
   `every_code_work_request.write` authorization, record-store write capability
   checks, and optional `Idempotency-Key` replay/conflict behavior. Every Code
-  PR-feedback write, PR-feedback status, and preview-gate write routes use
-  native FastAPI, preserve the dedicated Every Code worker token, require only
-  their direct PR-feedback or preview-gate record-store capabilities, and
-  intentionally do not add idempotency state. The PR-feedback status route also
-  preserves the existing `404 not_found` and `409 feedback_already_final`
-  transition semantics. Their legacy WSGI write branches are deleted; direct
-  WSGI fallback calls fail closed. Every Code claim, status, rerun, and webhook
-  routes remain on the mounted WSGI fallback until their native write
-  replacements land.
+  work-request claim uses native FastAPI, preserves both dedicated worker-token
+  claims and `every_code_work_request.claim` workflow authorization, keeps the
+  `404 not_found` and `409 work_request_already_claimed` transition semantics,
+  and honors existing workflow idempotency replays without adding worker-token
+  idempotency state. Every Code work-request status uses native FastAPI,
+  preserves the dedicated Every Code worker token and
+  `every_code_work_request.update` workflow authorization, checks idempotency
+  before requiring write-store capabilities, preserves blocked-notification
+  delivery, and keeps the existing `404 not_found` transition semantics. Every
+  Code work-request rerun uses native FastAPI, preserves the dedicated Every Code
+  worker token and `every_code_work_request.rerun` workflow authorization,
+  requires approved `every_code_rerun` write-intent evidence, checks workflow
+  idempotency replay before requiring write-store capabilities, and keeps the
+  terminal-only requeue semantics. Every Code PR-feedback write, PR-feedback
+  status, and preview-gate write routes use native FastAPI, preserve the
+  dedicated Every Code worker token, require only their direct PR-feedback or
+  preview-gate record-store capabilities, and intentionally do not add
+  idempotency state. The PR-feedback status route also preserves the existing
+  `404 not_found` and `409 feedback_already_final` transition semantics. Their
+  legacy WSGI write branches are deleted; direct WSGI fallback calls fail closed.
+  The Every Code GitHub webhook uses native FastAPI, preserves unauthenticated
+  GitHub HMAC verification, delivery/event/signature validation, signed-event
+  skip semantics, work-request creation/dedupe, issue and pull-request close
+  handling, preview validation comments, and PR-feedback ingestion. Its legacy
+  WSGI write branch is deleted; direct WSGI fallback calls fail closed.
+- Agent write-intent evaluation uses native FastAPI
+  `POST /v1/agent/write-intents/evaluate`, preserves terminal-agent scoped
+  preflight access, returns denied intents as successful `202 accepted` preflight
+  results, stores durable evaluation evidence, preserves `Idempotency-Key`
+  replay/conflict behavior before requiring write-intent record storage, and
+  evaluates secret-backed intents without revealing plaintext or ciphertext. Its
+  legacy WSGI branch is deleted; direct WSGI fallback calls fail closed.
 - Deployment, backup-gate, promotion, preview generation, preview destroyed,
   runner-host hygiene audit, and runner-lane registration audit evidence
   ingestion use native FastAPI routes for bearer-token callers and preserve the
@@ -164,6 +193,12 @@ Keep a compatibility surface only when it is one of these:
   local checkout `public-ingress-monitor run-once` CLI mutation command are
   deleted; the route has no `GET` API, manual reruns go through the GitHub
   workflow, and direct WSGI fallback calls fail closed.
+- Preview lifecycle plan uses native FastAPI
+  `POST /v1/previews/lifecycle-plan`, preserves
+  `preview_lifecycle.plan` authorization and optional `Idempotency-Key`
+  replay/conflict behavior, writes the typed lifecycle plan record, and returns
+  the stored plan as accepted evidence. Its legacy WSGI write branch is deleted,
+  and direct WSGI fallback calls fail closed.
 - Public ingress, Every Code, and preview PR feedback notification policy apply
   use native FastAPI routes for bearer-token callers and preserve DB-backed
   storage enforcement, local operator reason requirements, explicit preview
@@ -176,13 +211,47 @@ Keep a compatibility surface only when it is one of these:
   enforcement, metadata-only policy writes, and optional `Idempotency-Key`
   replay/conflict behavior. Its legacy WSGI write branch and WSGI-only helper
   code are deleted, and direct WSGI fallback calls fail closed.
-- Live target runtime apply uses `POST /v1/live-target-runtime/apply` and the
-  `live-target-runtime.yml` workflow for shared and production live changes.
-  The local checkout `environments apply-live-target` mutation command is
-  deleted, and the local checkout `environments sync-live-target` drift-preview
-  compatibility command is deleted. Operators use service/API identity so
-  Launchplane resolves current DB-backed target authority and records sanitized
-  key/count evidence.
+- Live target runtime apply uses native FastAPI
+  `POST /v1/live-target-runtime/apply` and the `live-target-runtime.yml`
+  workflow for shared and production live changes. Its legacy WSGI write branch
+  is deleted, and direct WSGI fallback calls fail closed. The local checkout
+  `environments apply-live-target` mutation command is deleted, and the local
+  checkout `environments sync-live-target` drift-preview compatibility command
+  is deleted. Operators use service/API identity so Launchplane resolves current
+  DB-backed target authority and records sanitized key/count evidence.
+- Provider-target operations use native FastAPI
+  `POST /v1/provider-targets/operations` and the Provider Target Operations
+  workflow for shared and production provider-target audits/backfills. Its
+  legacy WSGI write branch and WSGI-only idempotency special-case are deleted,
+  and direct WSGI fallback calls fail closed. Audits and dry-runs remain
+  repeatable; apply requests require DB-backed storage, backfill authz, and an
+  `Idempotency-Key`.
+- Product onboarding uses native FastAPI `POST /v1/product-onboarding/apply`
+  and the Product Onboarding workflow for shared and production onboarding
+  writes. Its legacy WSGI write branch is deleted, and direct WSGI fallback
+  calls fail closed. Requests require DB-backed storage and
+  `product_onboarding.apply` authz; `Idempotency-Key` replay/conflict handling
+  remains available when callers provide a key.
+- Merge-train policy import uses native FastAPI
+  `POST /v1/merge-train/policies/import` for DB-backed policy record writes.
+  Its legacy WSGI write branch is deleted, and direct WSGI fallback calls fail
+  closed. Requests require `merge_train.policy_import` authz on
+  product/context `launchplane` for GitHub Actions OIDC, signed-in GitHub human
+  sessions, and local operator/admin bearer callers; apply requests preserve
+  optional `Idempotency-Key` replay/conflict handling while dry-runs remain
+  stateless.
+- Authz policy grant and removal routes use native FastAPI
+  `POST /v1/authz-policies/github-actions/grants`,
+  `POST /v1/authz-policies/github-actions/removals`,
+  `POST /v1/authz-policies/github-humans/grants`,
+  `POST /v1/authz-policies/terminal-agents/grants`,
+  `POST /v1/authz-policies/local-operators/grants`, and
+  `POST /v1/authz-policies/local-admins/grants` for DB-backed policy record
+  writes. Their legacy WSGI write branches are deleted, and direct WSGI
+  fallback calls fail closed. Requests require `authz_policy_grant.write` authz
+  on product/context `launchplane`, preserve signed-in GitHub human-session
+  callers, store optional `Idempotency-Key` replay/conflict evidence for apply
+  requests, and keep dry-runs stateless.
 - Provider-target manifest input and product-onboarding service response aliases
   are retired. Product context audit/cutover responses are also retired from
   Dokploy-named target buckets. Manifests must use `provider_targets`;

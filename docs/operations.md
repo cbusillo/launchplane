@@ -169,6 +169,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/authz-policies/github-actions/grants`
+- `POST /v1/authz-policies/github-actions/removals`
 - `POST /v1/authz-policies/github-humans/grants`
 - `POST /v1/authz-policies/terminal-agents/grants`
 - `POST /v1/authz-policies/local-operators/grants`
@@ -200,6 +201,13 @@ and record contracts.
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
 rather than creating separate ad hoc ingress patterns.
+
+Authz policy grant and removal routes are native FastAPI service routes. They
+require DB-backed policy storage, enforce `authz_policy_grant.write` through
+the active runtime policy, preserve signed-in GitHub human-session callers,
+store `Idempotency-Key` replay/conflict evidence for apply requests, and keep
+dry-runs stateless. Their legacy WSGI branches are deleted; direct WSGI
+fallback calls to those paths fail closed.
 
 Operators should mutate shared or production authz through the deployed service,
 not by running arbitrary local DB writes from a checkout. Use

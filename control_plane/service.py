@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -19,45 +19,18 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from jwt import InvalidTokenError
 from starlette.types import ASGIApp
 
-from control_plane import authz_grant_service as control_plane_authz_grant_service
-from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane.http_app import (
     LaunchplaneAuthzPolicyRuntime,
     create_launchplane_fastapi_app,
     resolve_launchplane_authz_policy,
 )
-from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.authz_policy_record import (
-    LaunchplaneAuthzPolicyRecord,
-)
-from control_plane.contracts.agent_write_intent import (
-    AgentWriteIntentRecord,
-    AgentWriteIntentRequest,
-    AgentWriteIntentSecretEvidence,
-    agent_write_intent_secret_action,
-    authz_action_for_agent_write_intent,
-    build_agent_write_intent_record_id,
-    evaluate_agent_write_intent,
-    secret_evidence_for_agent_write_intent,
-)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
     close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
-    requeue_every_code_work_request,
-)
-from control_plane.contracts.every_code_notifications import (
-    EveryCodeNotificationAttemptRecord,
-    EveryCodeNotificationDeliveryStatus,
-    EveryCodeNotificationDestination,
-    EveryCodeNotificationEvent,
-    EveryCodeNotificationPolicyRecord,
-    build_every_code_notification_attempt_id,
 )
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
@@ -92,7 +65,6 @@ from control_plane.contracts.merge_train_stack_collapse import (
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
-from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_pr_feedback_record import (
     MergeTrainPrFeedbackEvent,
     MergeTrainPrFeedbackRecord,
@@ -128,7 +100,6 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_plan_record import (
-    PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -149,17 +120,10 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
     ReleaseStatus,
-)
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
-from control_plane.runtime_key_safety import (
-    evaluate_runtime_key_safety_from_store,
-    latest_active_runtime_key_safety_policy,
-    runtime_key_safety_environment_class,
 )
 from control_plane.drivers.registry import list_driver_descriptors, read_driver_descriptor
 from control_plane.every_code_work_request_write import (
@@ -287,20 +251,6 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_shared_record_store
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.ui_static_http import serve_ui_route
-from control_plane.product_config_http import (
-    ProductConfigRouteResult,
-    apply_product_config_route,
-    product_config_database_required_response,
-    validate_product_config_apply_request,
-)
-from control_plane.provider_target_operations_http import (
-    PROVIDER_TARGET_OPERATIONS_ROUTE,
-    ProviderTargetOperationEnvelope,
-    ProviderTargetOperationRouteResult,
-    execute_provider_target_operation_route,
-    provider_target_operation_authorized,
-    provider_target_operation_requires_reason,
-)
 from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
@@ -354,7 +304,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     build_odoo_preview_apply_inputs,
     execute_odoo_preview_dokploy_apply,
 )
-from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -465,7 +414,6 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _WHOLE_PRODUCT_CONTEXT = "*"
-_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-landing/run-once"
 _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/stack-collapse/run-once"
@@ -648,7 +596,6 @@ _GITHUB_ISSUE_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EVERY_CODE_TRIGGER_LABEL = "every-code"
-_AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -732,6 +679,7 @@ class _OdooStableTargetReplacementOperationStore(Protocol):
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
 _WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
+_EveryCodeWebhookResponse = tuple[int, dict[str, object]]
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -896,27 +844,6 @@ _GENERIC_WEB_BASE_DRIVER_ROUTE_PATHS = frozenset(
 )
 
 
-class PreviewLifecyclePlanEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    context: str
-    desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
-    desired_state_id: str = ""
-    source: str = "workflow"
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "PreviewLifecyclePlanEnvelope":
-        if not self.product.strip():
-            raise ValueError("preview lifecycle plan requires product")
-        if not self.context.strip():
-            raise ValueError("preview lifecycle plan requires context")
-        if not self.source.strip():
-            raise ValueError("preview lifecycle plan requires source")
-        return self
-
-
 class PreviewDesiredStateEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1033,26 +960,6 @@ class PreviewPrFeedbackEnvelope(BaseModel):
             raise ValueError("preview PR feedback requires anchor_pr_url")
         if not self.marker.strip():
             raise ValueError("preview PR feedback requires marker")
-        return self
-
-
-class MergeTrainPolicyImportEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str = "launchplane"
-    mode: Literal["dry_run", "apply"] = "dry_run"
-    reason: str = ""
-    record: MergeTrainPolicyRecord
-
-    @model_validator(mode="after")
-    def _validate_envelope(self) -> "MergeTrainPolicyImportEnvelope":
-        self.product = self.product.strip() or "launchplane"
-        if self.product != "launchplane":
-            raise ValueError("merge train policy import requires product 'launchplane'")
-        self.reason = self.reason.strip()
-        if self.mode == "apply" and not self.reason:
-            raise ValueError("merge train policy import apply requires reason")
         return self
 
 
@@ -1699,17 +1606,8 @@ _VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
 
 _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
     {
-        "/v1/agent/write-intents/evaluate",
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
-        "/v1/product-config/apply",
-        "/v1/authz-policies/github-actions/grants",
-        "/v1/authz-policies/github-actions/removals",
-        "/v1/authz-policies/github-humans/grants",
-        "/v1/authz-policies/terminal-agents/grants",
-        "/v1/authz-policies/local-operators/grants",
-        "/v1/authz-policies/local-admins/grants",
-        "/v1/merge-train/policies/import",
     }
 )
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
@@ -1740,109 +1638,6 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("Launchplane self deploy requires product 'launchplane'.")
         return self
-
-
-class EveryCodeWorkRequestClaimEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-
-    @model_validator(mode="after")
-    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request claim requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code work request claim requires host")
-        return self
-
-
-class EveryCodeWorkRequestStatusEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-    state: Literal["running", "done", "blocked"]
-    result_pr_url: str = ""
-    result_summary: str = ""
-    error_message: str = ""
-    updated_at: str = ""
-
-
-class EveryCodeWorkRequestRerunEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    trigger_actor: str = ""
-    source_url: str = ""
-    agent_write_intent_record_id: str = ""
-
-    @model_validator(mode="after")
-    def _validate_rerun(self) -> "EveryCodeWorkRequestRerunEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request rerun requires request_id")
-        self.request_id = self.request_id.strip()
-        self.trigger_actor = self.trigger_actor.strip()
-        self.source_url = self.source_url.strip()
-        self.agent_write_intent_record_id = self.agent_write_intent_record_id.strip()
-        return self
-
-
-class ProductOnboardingApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    manifest: ProductOnboardingManifest
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError("Product onboarding writes require product 'launchplane'.")
-        self.product = "launchplane"
-        return self
-
-
-class LiveTargetRuntimeApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: str
-    product: str
-    context: str
-    instance: str
-    deploy: bool = False
-    no_cache: bool = False
-    deploy_timeout_seconds: int | None = Field(default=None, gt=0)
-
-    @field_validator("mode")
-    @classmethod
-    def _validate_mode(cls, value: str) -> str:
-        normalized_value = value.strip().lower()
-        if normalized_value not in {"dry-run", "apply"}:
-            raise ValueError("Live target runtime mode must be 'dry-run' or 'apply'.")
-        return normalized_value
-
-    @model_validator(mode="after")
-    def _validate_route(self) -> "LiveTargetRuntimeApplyEnvelope":
-        self.product = self.product.strip()
-        self.context = self.context.strip()
-        self.instance = self.instance.strip()
-        if not self.product:
-            raise ValueError("Live target runtime apply requires product.")
-        if not self.context:
-            raise ValueError("Live target runtime apply requires context.")
-        if not self.instance:
-            raise ValueError("Live target runtime apply requires instance.")
-        if self.mode == "dry-run" and (
-            self.deploy or self.no_cache or self.deploy_timeout_seconds is not None
-        ):
-            raise ValueError("Deploy options require live target runtime mode 'apply'.")
-        return self
-
-    @property
-    def apply_changes(self) -> bool:
-        return self.mode == "apply"
 
 
 def _redirect_response(
@@ -3520,32 +3315,15 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
-        _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
         _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_BATCH_LANDING_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_CONTROLLER_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_PR_FEEDBACK_ROUTE,
         _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
-        "/v1/agent/write-intents/evaluate",
-        "/v1/every-code/work-requests/claim",
-        "/v1/every-code/work-requests/rerun",
-        "/v1/every-code/work-requests/status",
-        "/v1/authz-policies/github-actions/grants",
-        "/v1/authz-policies/github-actions/removals",
-        "/v1/authz-policies/github-humans/grants",
-        "/v1/authz-policies/terminal-agents/grants",
-        "/v1/authz-policies/local-operators/grants",
-        "/v1/authz-policies/local-admins/grants",
-        "/v1/merge-train/policies/import",
-        "/v1/live-target-runtime/apply",
-        "/v1/product-onboarding/apply",
-        PROVIDER_TARGET_OPERATIONS_ROUTE,
-        "/v1/product-config/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
-        "/v1/previews/lifecycle-plan",
         "/v1/previews/lifecycle-sweep",
         "/v1/drivers/launchplane/self-deploy",
     }
@@ -3704,33 +3482,6 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
-class _EveryCodeNotificationStore(Protocol):
-    def write_every_code_notification_policy_record(
-        self, record: EveryCodeNotificationPolicyRecord
-    ) -> object: ...
-
-    def list_every_code_notification_policy_records(
-        self,
-        *,
-        repository: str = "",
-        status: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationPolicyRecord, ...]: ...
-
-    def write_every_code_notification_attempt_record(
-        self, record: EveryCodeNotificationAttemptRecord
-    ) -> object: ...
-
-    def list_every_code_notification_attempt_records(
-        self,
-        *,
-        request_id: str = "",
-        event: str = "",
-        destination_kind: str = "",
-        limit: int | None = None,
-    ) -> tuple[EveryCodeNotificationAttemptRecord, ...]: ...
-
-
 class _PreviewPrFeedbackNotificationStore(Protocol):
     def write_preview_pr_feedback_notification_policy_record(
         self, record: PreviewPrFeedbackNotificationPolicyRecord
@@ -3760,22 +3511,6 @@ class _PreviewPrFeedbackNotificationStore(Protocol):
     ) -> tuple[PreviewPrFeedbackNotificationAttemptRecord, ...]: ...
 
 
-class _AgentWriteIntentRecordStore(Protocol):
-    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
-
-    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord: ...
-
-    def list_agent_write_intent_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[AgentWriteIntentRecord, ...]: ...
-
-
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
         "write_every_code_work_request_record",
@@ -3793,18 +3528,6 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     raise TypeError("record store does not support Every Code work requests")
 
 
-def _every_code_notification_store(record_store: object) -> _EveryCodeNotificationStore | None:
-    required_methods = (
-        "write_every_code_notification_policy_record",
-        "list_every_code_notification_policy_records",
-        "write_every_code_notification_attempt_record",
-        "list_every_code_notification_attempt_records",
-    )
-    if all(hasattr(record_store, method_name) for method_name in required_methods):
-        return cast(_EveryCodeNotificationStore, record_store)
-    return None
-
-
 def _preview_pr_feedback_notification_store(
     record_store: object,
 ) -> _PreviewPrFeedbackNotificationStore | None:
@@ -3817,12 +3540,6 @@ def _preview_pr_feedback_notification_store(
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_PreviewPrFeedbackNotificationStore, record_store)
     return None
-
-
-def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentRecordStore:
-    if hasattr(record_store, "write_agent_write_intent_record"):
-        return cast(_AgentWriteIntentRecordStore, record_store)
-    raise TypeError("record store does not support agent write intent records")
 
 
 class _MergeTrainBatchCandidateRecordStore(Protocol):
@@ -4554,10 +4271,6 @@ def _supports_every_code_work_requests(record_store: object) -> bool:
     return hasattr(record_store, "list_every_code_work_request_records")
 
 
-def _github_webhook_header(environ: dict[str, object], name: str) -> str:
-    return str(environ.get(f"HTTP_{name.upper().replace('-', '_')}", "")).strip()
-
-
 def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, object] | None:
     value = payload.get(key)
     if isinstance(value, dict):
@@ -4565,18 +4278,44 @@ def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, o
     return None
 
 
-def _github_webhook_required_mapping(payload: dict[str, object], key: str) -> dict[str, object]:
-    value = _github_webhook_mapping(payload, key)
-    if value is None:
-        raise ValueError(f"GitHub webhook requires object field {key!r}")
-    return value
-
-
 def _github_webhook_string(mapping: dict[str, object] | None, key: str) -> str:
     if mapping is None:
         return ""
     value = mapping.get(key)
     return value.strip() if isinstance(value, str) else ""
+
+
+def _github_webhook_raw_string(mapping: dict[str, object] | None, key: str) -> str:
+    if mapping is None:
+        return ""
+    value = mapping.get(key)
+    return value if isinstance(value, str) else ""
+
+
+def _github_webhook_positive_int(mapping: dict[str, object] | None, key: str) -> int | None:
+    if mapping is None:
+        return None
+    value = mapping.get(key)
+    if type(value) is int and value >= 1:
+        return value
+    return None
+
+
+def _github_repository_full_name_is_valid(repository: str) -> bool:
+    if repository.strip() != repository:
+        return False
+    owner, separator, name = repository.partition("/")
+    if not (owner and separator and name) or "/" in name:
+        return False
+    return all(_github_repository_component_is_valid(part) for part in (owner, name))
+
+
+def _github_repository_component_is_valid(value: str) -> bool:
+    return bool(
+        value
+        and value.strip() == value
+        and all(character.isalnum() or character in {".", "_", "-"} for character in value)
+    )
 
 
 def _github_login_normalized(login: str) -> str:
@@ -4636,14 +4375,12 @@ def _every_code_feedback_actor_is_trusted(
 
 def _every_code_untrusted_feedback_response(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=202,
-        payload={
+) -> _EveryCodeWebhookResponse:
+    return (
+        202,
+        {
             "status": "accepted",
             "trace_id": trace_id,
             "skipped": True,
@@ -4653,20 +4390,36 @@ def _every_code_untrusted_feedback_response(
     )
 
 
-def _handle_every_code_github_webhook(
-    *,
-    environ: dict[str, object],
-    start_response: _StartResponse,
+def _every_code_github_webhook_invalid_payload_response(
     trace_id: str,
+) -> _EveryCodeWebhookResponse:
+    return (
+        400,
+        {
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "invalid_request",
+                "message": "GitHub webhook payload is invalid.",
+            },
+        },
+    )
+
+
+def handle_every_code_github_webhook_request(
+    body_bytes: bytes,
+    event_name: str,
+    delivery_id: str,
+    signature_header: str,
     record_store: object,
     control_plane_root_path: Path,
-) -> list[bytes]:
+    trace_id: str,
+) -> _EveryCodeWebhookResponse:
     secret = os.environ.get(_EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
     if not secret:
-        return _json_response(
-            start_response=start_response,
-            status_code=503,
-            payload={
+        return (
+            503,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4676,18 +4429,16 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    body_bytes = _read_request_body(environ)
     try:
         verify_github_webhook_signature(
             payload_bytes=body_bytes,
-            signature_header=_github_webhook_header(environ, "X-Hub-Signature-256"),
+            signature_header=signature_header,
             secret=secret,
         )
     except click.ClickException:
-        return _json_response(
-            start_response=start_response,
-            status_code=401,
-            payload={
+        return (
+            401,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4697,12 +4448,10 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    delivery_id = _github_webhook_header(environ, "X-GitHub-Delivery")
-    if not delivery_id:
-        return _json_response(
-            start_response=start_response,
-            status_code=400,
-            payload={
+    if not delivery_id.strip():
+        return (
+            400,
+            {
                 "status": "rejected",
                 "trace_id": trace_id,
                 "error": {
@@ -4712,41 +4461,63 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    payload = _decode_json_request_body(body_bytes)
-    event_name = _github_webhook_header(environ, "X-GitHub-Event")
-    if event_name == "issue_comment":
+    normalized_delivery_id = delivery_id.strip()
+    normalized_event_name = event_name.strip()
+    payload = _decode_json_request_body_or_none(body_bytes)
+    if payload is None:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    return _handle_decoded_every_code_github_webhook_request(
+        trace_id=trace_id,
+        normalized_delivery_id=normalized_delivery_id,
+        normalized_event_name=normalized_event_name,
+        payload=payload,
+        record_store=record_store,
+        control_plane_root_path=control_plane_root_path,
+    )
+
+
+def _handle_decoded_every_code_github_webhook_request(
+    *,
+    trace_id: str,
+    normalized_delivery_id: str,
+    normalized_event_name: str,
+    payload: dict[str, object],
+    record_store: object,
+    control_plane_root_path: Path,
+) -> _EveryCodeWebhookResponse:
+    if normalized_event_name == "issue_comment":
         preview_validation_response = _handle_every_code_preview_validation_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
             control_plane_root_path=control_plane_root_path,
         )
         if preview_validation_response is not None:
             return preview_validation_response
-    if event_name in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
+    if normalized_event_name in {
+        "issue_comment",
+        "pull_request_review",
+        "pull_request_review_comment",
+    }:
         return _handle_every_code_pr_feedback_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
-            event_name=event_name,
+            delivery_id=normalized_delivery_id,
+            event_name=normalized_event_name,
             payload=payload,
             record_store=record_store,
         )
-    if event_name == "pull_request":
+    if normalized_event_name == "pull_request":
         return _handle_every_code_pull_request_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
         )
-    if event_name != "issues":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+    if normalized_event_name != "issues":
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4755,17 +4526,15 @@ def _handle_every_code_github_webhook(
         )
     if payload.get("action") == "closed":
         return _handle_every_code_issue_closed_webhook(
-            start_response=start_response,
             trace_id=trace_id,
-            delivery_id=delivery_id,
+            delivery_id=normalized_delivery_id,
             payload=payload,
             record_store=record_store,
         )
     if payload.get("action") != "labeled":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4776,10 +4545,9 @@ def _handle_every_code_github_webhook(
     label = _github_webhook_mapping(payload, "label")
     label_name = _github_webhook_string(label, "name")
     if label_name.strip().lower() != _EVERY_CODE_TRIGGER_LABEL:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4790,18 +4558,24 @@ def _handle_every_code_github_webhook(
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
     sender_payload = _github_webhook_mapping(payload, "sender")
-    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
-    if not isinstance(issue_number_value, int):
-        raise ValueError("GitHub issue webhook requires integer issue.number")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    issue_url = _github_webhook_string(issue_payload, "html_url")
+    issue_number_value = _github_webhook_positive_int(issue_payload, "number")
+    if (
+        issue_number_value is None
+        or not _github_repository_full_name_is_valid(repository)
+        or not issue_url.strip()
+    ):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
 
     request = EveryCodeWorkRequestCreateEnvelope(
-        repository=_github_webhook_string(repository_payload, "full_name"),
+        repository=repository,
         issue_number=issue_number_value,
-        issue_url=_github_webhook_string(issue_payload, "html_url"),
+        issue_url=issue_url,
         issue_title=_github_webhook_string(issue_payload, "title"),
         trigger_label=_EVERY_CODE_TRIGGER_LABEL,
         trigger_actor=_github_webhook_string(sender_payload, "login"),
-        github_delivery_id=delivery_id,
+        github_delivery_id=normalized_delivery_id,
         source="github_issue_label",
         queued_at=_utc_now_timestamp(),
     )
@@ -4818,24 +4592,23 @@ def _handle_every_code_github_webhook(
         driver_result={"request": stored_record.model_dump(mode="json")},
     )
     accepted_payload["deduped"] = deduped
-    accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    accepted_payload["github_delivery_id"] = normalized_delivery_id
+    return 202, accepted_payload
 
 
 def _handle_every_code_issue_closed_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
-    repository = _github_webhook_string(repository_payload, "full_name")
-    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
-    if not isinstance(issue_number_value, int):
-        raise ValueError("GitHub issue webhook requires integer issue.number")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    issue_number_value = _github_webhook_positive_int(issue_payload, "number")
+    if issue_number_value is None or not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     issue_url = _github_webhook_string(issue_payload, "html_url")
     closed_at = _github_webhook_string(issue_payload, "closed_at") or _utc_now_timestamp()
     state_reason = _github_webhook_string(issue_payload, "state_reason")
@@ -4877,11 +4650,7 @@ def _handle_every_code_issue_closed_webhook(
                 "request_id": terminal_record.request_id,
                 "state": terminal_record.state,
             }
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=response_payload,
-        )
+        return 202, response_payload
 
     updated_record = updated_records[0]
     accepted_payload = _accepted_payload(
@@ -4898,22 +4667,20 @@ def _handle_every_code_issue_closed_webhook(
         },
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _handle_every_code_pull_request_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     if payload.get("action") != "closed":
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4923,8 +4690,12 @@ def _handle_every_code_pull_request_webhook(
 
     repository_payload = _github_webhook_mapping(payload, "repository")
     pull_request_payload = _github_webhook_mapping(payload, "pull_request")
-    repository = _github_webhook_string(repository_payload, "full_name")
-    pr_url = _github_webhook_string(pull_request_payload, "html_url")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    if not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    pr_url = _github_webhook_raw_string(pull_request_payload, "html_url")
+    if not pr_url.strip() or pr_url.strip() != pr_url:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     linked_issue_numbers = (
         _github_issue_numbers_referenced_by_pull_request(
             pull_request_payload,
@@ -4965,10 +4736,9 @@ def _handle_every_code_pull_request_webhook(
             candidate_records[record.request_id] = record
 
     if not candidate_records:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -4994,10 +4764,9 @@ def _handle_every_code_pull_request_webhook(
 
     if not updated_records:
         terminal_record = terminal_records[0]
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5025,7 +4794,7 @@ def _handle_every_code_pull_request_webhook(
         },
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _every_code_issue_url_matches_pull_request(
@@ -5052,13 +4821,12 @@ def _every_code_issue_url_matches_pull_request(
 
 def _handle_every_code_preview_validation_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     payload: dict[str, object],
     record_store: object,
     control_plane_root_path: Path,
-) -> list[bytes] | None:
+) -> _EveryCodeWebhookResponse | None:
     if payload.get("action") != "created":
         return None
     issue_payload = _github_webhook_mapping(payload, "issue")
@@ -5087,7 +4855,6 @@ def _handle_every_code_preview_validation_webhook(
         source_issue_author=issue_author,
     ):
         return _every_code_untrusted_feedback_response(
-            start_response=start_response,
             trace_id=trace_id,
             delivery_id=delivery_id,
         )
@@ -5118,16 +4885,14 @@ def _handle_every_code_preview_validation_webhook(
             token=token,
             received_at=_utc_now_timestamp(),
         )
-    except click.ClickException as exc:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+    except click.ClickException:
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
                 "reason": "preview_validation_failed",
-                "message": str(exc),
                 "github_delivery_id": delivery_id,
             },
         )
@@ -5148,7 +4913,7 @@ def _handle_every_code_preview_validation_webhook(
     if bool(result.get("deduped")):
         accepted_payload["deduped"] = True
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _github_issue_numbers_referenced_by_pull_request(
@@ -5241,21 +5006,19 @@ def _iter_every_code_pr_feedback_records(
 
 def _handle_every_code_pr_feedback_webhook(
     *,
-    start_response: _StartResponse,
     trace_id: str,
     delivery_id: str,
     event_name: str,
     payload: dict[str, object],
     record_store: object,
-) -> list[bytes]:
+) -> _EveryCodeWebhookResponse:
     if not _every_code_pr_feedback_action_supported(
         event_name=event_name,
         action=str(payload.get("action", "")),
     ):
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5266,14 +5029,15 @@ def _handle_every_code_pr_feedback_webhook(
 
     sender_payload = _github_webhook_mapping(payload, "sender")
     body_payload = _every_code_feedback_body_payload(event_name=event_name, payload=payload)
+    if body_payload is None:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     if _every_code_feedback_actor_is_automation(
         sender_payload=sender_payload,
         body_payload=body_payload,
     ):
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5283,25 +5047,28 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     repository_payload = _github_webhook_mapping(payload, "repository")
-    repository = _github_webhook_string(repository_payload, "full_name")
+    repository = _github_webhook_raw_string(repository_payload, "full_name")
+    if not _github_repository_full_name_is_valid(repository):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     actor = _github_webhook_string(sender_payload, "login")
     if not _every_code_feedback_actor_is_trusted(repository=repository, actor=actor):
         return _every_code_untrusted_feedback_response(
-            start_response=start_response,
             trace_id=trace_id,
             delivery_id=delivery_id,
         )
-    pr_number, pr_url = _every_code_feedback_pr_reference(
+    pr_reference = _every_code_feedback_pr_reference(
         event_name=event_name,
         payload=payload,
         repository=repository,
     )
+    if pr_reference is None:
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
+    pr_number, pr_url = pr_reference
     body = _github_webhook_string(body_payload, "body")
     if not body.strip():
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5351,10 +5118,9 @@ def _handle_every_code_pr_feedback_webhook(
                 matched_record = record
                 break
     if matched_record is None:
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload={
+        return (
+            202,
+            {
                 "status": "accepted",
                 "trace_id": trace_id,
                 "skipped": True,
@@ -5364,8 +5130,13 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     github_node_id = _github_webhook_string(body_payload, "node_id")
-    github_id_value = body_payload.get("id") if body_payload is not None else ""
+    github_id_value = body_payload.get("id")
     github_id = str(github_id_value) if github_id_value is not None else ""
+    github_feedback_identity = github_node_id.strip() or github_id.strip()
+    if not github_feedback_identity or not any(
+        character.isalnum() for character in github_feedback_identity
+    ):
+        return _every_code_github_webhook_invalid_payload_response(trace_id)
     feedback_id = build_every_code_pr_feedback_id(
         repository=repository,
         pr_number=pr_number,
@@ -5381,10 +5152,9 @@ def _handle_every_code_pr_feedback_webhook(
     )
     for existing_feedback in existing_feedback_records:
         if existing_feedback.feedback_id == feedback_id:
-            return _json_response(
-                start_response=start_response,
-                status_code=202,
-                payload={
+            return (
+                202,
+                {
                     "status": "accepted",
                     "trace_id": trace_id,
                     "deduped": True,
@@ -5425,7 +5195,7 @@ def _handle_every_code_pr_feedback_webhook(
         driver_result={"feedback": feedback_record.model_dump(mode="json")},
     )
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+    return 202, accepted_payload
 
 
 def _every_code_pr_feedback_action_supported(*, event_name: str, action: str) -> bool:
@@ -5469,9 +5239,9 @@ def _every_code_feedback_kind(event_name: str) -> EveryCodePrFeedbackKind:
 
 def _every_code_feedback_body_payload(
     *, event_name: str, payload: dict[str, object]
-) -> dict[str, object]:
+) -> dict[str, object] | None:
     key = "review" if event_name == "pull_request_review" else "comment"
-    return _github_webhook_required_mapping(payload, key)
+    return _github_webhook_mapping(payload, key)
 
 
 def _every_code_feedback_pr_reference(
@@ -5479,18 +5249,22 @@ def _every_code_feedback_pr_reference(
     event_name: str,
     payload: dict[str, object],
     repository: str,
-) -> tuple[int, str]:
+) -> tuple[int, str] | None:
     if event_name == "issue_comment":
-        issue_payload = _github_webhook_required_mapping(payload, "issue")
+        issue_payload = _github_webhook_mapping(payload, "issue")
+        if issue_payload is None:
+            return None
         pull_request_marker = issue_payload.get("pull_request")
         if not isinstance(pull_request_marker, dict):
-            raise ValueError("Every Code PR feedback issue_comment requires pull_request issue")
-        pr_number_value = issue_payload.get("number")
+            return None
+        pr_number_value = _github_webhook_positive_int(issue_payload, "number")
     else:
-        pull_request_payload = _github_webhook_required_mapping(payload, "pull_request")
-        pr_number_value = pull_request_payload.get("number")
-    if not isinstance(pr_number_value, int):
-        raise ValueError("Every Code PR feedback requires integer pull request number")
+        pull_request_payload = _github_webhook_mapping(payload, "pull_request")
+        if pull_request_payload is None:
+            return None
+        pr_number_value = _github_webhook_positive_int(pull_request_payload, "number")
+    if pr_number_value is None:
+        return None
     return pr_number_value, f"https://github.com/{repository}/pull/{pr_number_value}"
 
 
@@ -5571,22 +5345,6 @@ def _idempotency_request_fingerprint(*, route_path: str, payload: dict[str, obje
     )
 
 
-def _local_operator_product_config_continuity_payload(
-    *, payload: dict[str, object]
-) -> dict[str, object]:
-    canonical_payload = json.loads(json.dumps(payload))
-    if isinstance(canonical_payload, dict):
-        canonical_payload.pop("mode", None)
-        canonical_payload.pop("reason", None)
-    return cast(dict[str, object], canonical_payload)
-
-
-def _local_operator_product_config_dry_run_key(*, payload: dict[str, object]) -> str:
-    return "local-operator-product-config-dry-run:" + _request_fingerprint(
-        _local_operator_product_config_continuity_payload(payload=payload)
-    )
-
-
 def _accepted_payload(
     *,
     trace_id: str,
@@ -5635,7 +5393,6 @@ def _accepted_payload(
         "request_id",
         "feedback_id",
         "state",
-        "agent_write_intent_record_id",
         "merge_train_batch_candidate_record_id",
         "merge_train_batch_landing_plan_record_id",
         "merge_train_stack_collapse_plan_record_id",
@@ -5900,43 +5657,6 @@ def _replay_idempotent_response(
     )
 
 
-def _agent_write_intent_secret_evidence(
-    *, record_store: object, request: AgentWriteIntentRequest
-) -> AgentWriteIntentSecretEvidence:
-    if not request.secret_bindings:
-        return secret_evidence_for_agent_write_intent(request=request, evaluation=None)
-    if request.destination is None:
-        return secret_evidence_for_agent_write_intent(
-            request=request, evaluation=None, unavailable=True
-        )
-    try:
-        policy_record = latest_active_runtime_key_safety_policy(
-            record_store  # type: ignore[arg-type]
-        )
-        evaluation = evaluate_runtime_key_safety_from_store(
-            record_store=record_store,  # type: ignore[arg-type]
-            policy_record=policy_record,
-            target=RuntimeKeySafetyTarget(
-                context=request.destination.context,
-                instance=request.destination.instance,
-                environment_class=runtime_key_safety_environment_class(
-                    request.destination.instance
-                ),
-            ),
-            required_binding_keys=request.secret_bindings,
-        )
-    except (AttributeError, ValueError):
-        return secret_evidence_for_agent_write_intent(
-            request=request, evaluation=None, unavailable=True
-        )
-    return secret_evidence_for_agent_write_intent(
-        request=request,
-        evaluation=evaluation,
-        policy_record_id=policy_record.record_id,
-        policy_sha256=policy_record.policy_sha256,
-    )
-
-
 def _read_idempotency_record(
     *,
     record_store: object,
@@ -5982,44 +5702,6 @@ def _write_idempotency_record(
             recorded_at=_utc_now_timestamp(),
             response_payload=response_payload,
         )
-    )
-
-
-def _write_local_operator_product_config_dry_run_record(
-    *,
-    record_store: object,
-    scope: str,
-    request_payload: dict[str, object],
-    response_trace_id: str,
-    response_payload: dict[str, object],
-) -> None:
-    _write_idempotency_record(
-        record_store=record_store,
-        scope=scope,
-        route_path="/v1/product-config/apply",
-        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
-        request_fingerprint=_request_fingerprint(
-            _local_operator_product_config_continuity_payload(payload=request_payload)
-        ),
-        response_status_code=202,
-        response_trace_id=f"{response_trace_id}-local-operator-dry-run",
-        response_payload=response_payload,
-    )
-
-
-def _local_operator_product_config_dry_run_exists(
-    *, record_store: object, scope: str, request_payload: dict[str, object]
-) -> bool:
-    stored_record = _read_idempotency_record(
-        record_store=record_store,
-        scope=scope,
-        route_path="/v1/product-config/apply",
-        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
-    )
-    if stored_record is None:
-        return False
-    return stored_record.request_fingerprint == _request_fingerprint(
-        _local_operator_product_config_continuity_payload(payload=request_payload)
     )
 
 
@@ -6300,240 +5982,6 @@ def _launchplane_managed_secret_resolver(
     return resolve
 
 
-def _deliver_every_code_blocked_notifications(
-    *,
-    record_store: object,
-    request: EveryCodeWorkRequestRecord,
-    attempted_at: str,
-    discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
-) -> tuple[EveryCodeNotificationAttemptRecord, ...]:
-    notification_store = _every_code_notification_store(record_store)
-    secret_store = _secret_capable_store(record_store)
-    if notification_store is None or secret_store is None:
-        return ()
-    policies = tuple(
-        policy
-        for policy in notification_store.list_every_code_notification_policy_records(
-            repository=request.repository,
-            status="enabled",
-            limit=None,
-        )
-        if policy.matches(request)
-    )
-    if not policies:
-        return ()
-    secret_resolver = _launchplane_managed_secret_resolver(
-        record_store=secret_store,
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-        instance_name="every-code",
-    )
-    attempts: list[EveryCodeNotificationAttemptRecord] = []
-    for policy in policies:
-        for destination in policy.destinations:
-            if destination.status != "enabled":
-                attempt = _write_every_code_notification_attempt(
-                    notification_store=notification_store,
-                    request=request,
-                    event="work_request_blocked",
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                    delivery_status="skipped",
-                    action="destination_disabled",
-                )
-                attempts.append(attempt)
-                continue
-            if destination.kind == "discord":
-                attempt = _deliver_every_code_discord_notification(
-                    notification_store=notification_store,
-                    secret_resolver=secret_resolver,
-                    discord_sender=discord_sender,
-                    request=request,
-                    policy=policy,
-                    destination=destination,
-                    attempted_at=attempted_at,
-                )
-                attempts.append(attempt)
-    return tuple(attempts)
-
-
-def _deliver_every_code_discord_notification(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    secret_resolver: Callable[[str], str],
-    discord_sender: Callable[[str, dict[str, object]], object],
-    request: EveryCodeWorkRequestRecord,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-    attempted_at: str,
-) -> EveryCodeNotificationAttemptRecord:
-    webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
-    if not webhook_url:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="missing_discord_webhook",
-            error_message="Discord webhook secret could not be resolved.",
-        )
-    public_url_error = public_discord_url_error(webhook_url)
-    if public_url_error:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="invalid_discord_webhook",
-            error_message=f"Discord webhook URL is not public: {public_url_error}",
-        )
-    existing_attempt = _existing_every_code_notification_attempt(
-        notification_store=notification_store,
-        request=request,
-        event="work_request_blocked",
-        policy=policy,
-        destination=destination,
-    )
-    if existing_attempt is not None and existing_attempt.delivery_status in {
-        "pending",
-        "delivered",
-    }:
-        return existing_attempt
-    pending_attempt = _write_every_code_notification_attempt(
-        notification_store=notification_store,
-        request=request,
-        event="work_request_blocked",
-        policy=policy,
-        destination=destination,
-        attempted_at=attempted_at,
-        delivery_status="pending",
-        action="dispatching_discord",
-    )
-    try:
-        discord_sender(webhook_url, _every_code_blocked_discord_payload(request))
-    except Exception as error:  # noqa: BLE001 - delivery attempt records preserve failure detail.
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="failed",
-            action="discord_webhook_failed",
-            error_message=str(error) or error.__class__.__name__,
-        )
-    try:
-        return _write_every_code_notification_attempt(
-            notification_store=notification_store,
-            request=request,
-            event="work_request_blocked",
-            policy=policy,
-            destination=destination,
-            attempted_at=attempted_at,
-            delivery_status="delivered",
-            action="posted_discord",
-        )
-    except Exception:  # noqa: BLE001 - the pending attempt preserves dispatch evidence.
-        return pending_attempt
-
-
-def _existing_every_code_notification_attempt(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    request: EveryCodeWorkRequestRecord,
-    event: EveryCodeNotificationEvent,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-) -> EveryCodeNotificationAttemptRecord | None:
-    attempt_id = build_every_code_notification_attempt_id(
-        request_id=request.request_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-        lifecycle_key=_every_code_notification_lifecycle_key(request),
-    )
-    return next(
-        (
-            attempt
-            for attempt in notification_store.list_every_code_notification_attempt_records(
-                request_id=request.request_id,
-                event=event,
-                limit=None,
-            )
-            if attempt.attempt_id == attempt_id
-        ),
-        None,
-    )
-
-
-def _write_every_code_notification_attempt(
-    *,
-    notification_store: _EveryCodeNotificationStore,
-    request: EveryCodeWorkRequestRecord,
-    event: EveryCodeNotificationEvent,
-    policy: EveryCodeNotificationPolicyRecord,
-    destination: EveryCodeNotificationDestination,
-    attempted_at: str,
-    delivery_status: EveryCodeNotificationDeliveryStatus,
-    action: str,
-    error_message: str = "",
-) -> EveryCodeNotificationAttemptRecord:
-    attempt = EveryCodeNotificationAttemptRecord(
-        attempt_id=build_every_code_notification_attempt_id(
-            request_id=request.request_id,
-            event=event,
-            policy_id=policy.policy_id,
-            destination_id=destination.destination_id,
-            lifecycle_key=_every_code_notification_lifecycle_key(request),
-        ),
-        request_id=request.request_id,
-        event=event,
-        policy_id=policy.policy_id,
-        destination_id=destination.destination_id,
-        destination_kind=destination.kind,
-        delivery_status=delivery_status,
-        attempted_at=attempted_at,
-        action=action,
-        error_message=_bounded_text(error_message, max_length=500),
-    )
-    notification_store.write_every_code_notification_attempt_record(attempt)
-    return attempt
-
-
-def _every_code_notification_lifecycle_key(request: EveryCodeWorkRequestRecord) -> str:
-    return request.lifecycle_id
-
-
-def _every_code_blocked_discord_payload(
-    request: EveryCodeWorkRequestRecord,
-) -> dict[str, object]:
-    fields = [
-        {"name": "Repository", "value": request.repository, "inline": True},
-        {"name": "Issue", "value": str(request.issue_number), "inline": True},
-        {"name": "Host", "value": request.claimed_by_host, "inline": True},
-        {"name": "Request", "value": request.request_id, "inline": False},
-    ]
-    if request.issue_url:
-        fields.append({"name": "Issue URL", "value": request.issue_url, "inline": False})
-    return {
-        "embeds": [
-            {
-                "title": "Every Code work request blocked",
-                "description": _bounded_text(request.error_message, max_length=1500),
-                "color": 0xC62828,
-                "fields": fields,
-            }
-        ]
-    }
-
-
 def _bounded_text(value: str, *, max_length: int) -> str:
     normalized_value = " ".join(value.strip().split())
     if len(normalized_value) <= max_length:
@@ -6608,32 +6056,6 @@ def _should_store_idempotency_record(
 ) -> bool:
     if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
         return False
-    if (
-        path
-        in {
-            "/v1/authz-policies/github-actions/grants",
-            "/v1/authz-policies/github-actions/removals",
-            "/v1/authz-policies/github-humans/grants",
-            "/v1/authz-policies/terminal-agents/grants",
-            "/v1/authz-policies/local-operators/grants",
-            "/v1/authz-policies/local-admins/grants",
-        }
-        and isinstance(driver_result, dict)
-        and driver_result.get("mode") == "dry_run"
-    ):
-        return False
-    if (
-        path == "/v1/merge-train/policies/import"
-        and isinstance(driver_result, dict)
-        and driver_result.get("mode") == "dry_run"
-    ):
-        return False
-    if (
-        path == PROVIDER_TARGET_OPERATIONS_ROUTE
-        and isinstance(driver_result, dict)
-        and driver_result.get("mode") != "backfill-apply"
-    ):
-        return False
     if driver_result is None:
         return True
     if _driver_result_contains_status(driver_result, "blocked"):
@@ -6685,6 +6107,16 @@ def _decode_json_request_body(body_bytes: bytes) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("Request body must decode to a JSON object.")
     return payload
+
+
+def _decode_json_request_body_or_none(body_bytes: bytes) -> dict[str, object] | None:
+    try:
+        payload = json.loads(body_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return cast(dict[str, object], payload)
 
 
 def _bearer_token(environ: dict[str, object]) -> str:
@@ -6755,329 +6187,6 @@ def _owner_agent_identity_from_bearer(environ: dict[str, object]) -> Launchplane
         token=provided_token,
         config=_bearer_identity_config_from_env(),
     )
-
-
-def _is_every_code_worker_route(*, method: str, path: str) -> bool:
-    return method == "POST" and path in {
-        "/v1/every-code/work-requests/claim",
-        "/v1/every-code/work-requests/rerun",
-        "/v1/every-code/work-requests/status",
-    }
-
-
-def _every_code_worker_token_authorized(
-    *, environ: dict[str, object], method: str, path: str
-) -> bool:
-    if not _is_every_code_worker_route(method=method, path=path):
-        return False
-    expected_token = _every_code_worker_token_from_env()
-    if not expected_token:
-        return False
-    try:
-        provided_token = _bearer_token(environ)
-    except PermissionError:
-        return False
-    return secrets.compare_digest(provided_token, expected_token)
-
-
-def _handle_every_code_worker_write(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    record_store: object,
-    path: str,
-    payload: dict[str, object],
-    idempotency_key: str = "",
-    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
-) -> list[bytes]:
-    every_code_store = _every_code_work_request_store(record_store)
-    if path == "/v1/every-code/work-requests/claim":
-        claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
-        claimed_record = every_code_store.claim_every_code_work_request_record(
-            request_id=claim_request.request_id.strip(),
-            host=claim_request.host.strip(),
-            claimed_at=_utc_now_timestamp(),
-        )
-        if claimed_record is None:
-            return _json_response(
-                start_response=start_response,
-                status_code=409,
-                payload={
-                    "status": "rejected",
-                    "trace_id": trace_id,
-                    "error": {
-                        "code": "work_request_already_claimed",
-                        "message": "Every Code work request is not queued for claim.",
-                    },
-                },
-            )
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={"request_id": claimed_record.request_id, "state": claimed_record.state},
-                driver_result={"request": claimed_record.model_dump(mode="json")},
-            ),
-        )
-    if path == "/v1/every-code/work-requests/rerun":
-        rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
-        rerun_checked_at = datetime.now(timezone.utc)
-        intent_record, intent_response = _validate_every_code_rerun_write_intent(
-            record_store=record_store,
-            rerun_request=rerun_request,
-            idempotency_key=idempotency_key,
-            now=rerun_checked_at,
-            trace_id=trace_id,
-            start_response=start_response,
-        )
-        if intent_response is not None:
-            return intent_response
-        existing_record = every_code_store.read_every_code_work_request_record(
-            rerun_request.request_id.strip()
-        )
-        if intent_record is None:
-            intent_record = _matching_every_code_rerun_intent_record(
-                record_store=record_store,
-                source_url=existing_record.issue_url,
-                now=rerun_checked_at,
-            )
-            if intent_record is None:
-                return _reject_agent_write_intent(
-                    start_response=start_response,
-                    trace_id=trace_id,
-                    code="agent_write_intent_required",
-                    message="Every Code rerun requires matching approved write-intent evidence.",
-                )
-        if rerun_request.source_url and rerun_request.source_url != existing_record.issue_url:
-            return _reject_agent_write_intent(
-                start_response=start_response,
-                trace_id=trace_id,
-                code="agent_write_intent_source_mismatch",
-                message="Every Code rerun source_url does not match the work-request issue URL.",
-                record_id=intent_record.record_id,
-            )
-        requeued_record = requeue_every_code_work_request(
-            existing_record,
-            queued_at=_utc_now_timestamp(),
-            trigger_actor=rerun_request.trigger_actor,
-        )
-        every_code_store.write_every_code_work_request_record(requeued_record)
-        return _json_response(
-            start_response=start_response,
-            status_code=202,
-            payload=_accepted_payload(
-                trace_id=trace_id,
-                result={
-                    "request_id": requeued_record.request_id,
-                    "state": requeued_record.state,
-                    **(
-                        {"agent_write_intent_record_id": intent_record.record_id}
-                        if intent_record is not None
-                        else {}
-                    ),
-                },
-                driver_result={"request": requeued_record.model_dump(mode="json")},
-            ),
-        )
-    work_request_status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
-    existing_work_request_record = every_code_store.read_every_code_work_request_record(
-        work_request_status_request.request_id.strip()
-    )
-    updated_work_request_record = apply_every_code_work_request_status(
-        existing_work_request_record,
-        EveryCodeWorkRequestStatusUpdate(
-            state=work_request_status_request.state,
-            host=work_request_status_request.host,
-            updated_at=work_request_status_request.updated_at.strip() or _utc_now_timestamp(),
-            result_pr_url=work_request_status_request.result_pr_url,
-            result_summary=work_request_status_request.result_summary,
-            error_message=work_request_status_request.error_message,
-        ),
-    )
-    every_code_store.write_every_code_work_request_record(updated_work_request_record)
-    notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
-    if updated_work_request_record.state == "blocked":
-        notification_attempts = _deliver_every_code_blocked_notifications(
-            record_store=record_store,
-            request=updated_work_request_record,
-            attempted_at=_utc_now_timestamp(),
-            discord_sender=every_code_discord_sender,
-        )
-    return _json_response(
-        start_response=start_response,
-        status_code=202,
-        payload=_accepted_payload(
-            trace_id=trace_id,
-            result={
-                "request_id": updated_work_request_record.request_id,
-                "state": updated_work_request_record.state,
-            },
-            driver_result={
-                "request": updated_work_request_record.model_dump(mode="json"),
-                "notifications": [
-                    notification_attempt.model_dump(mode="json")
-                    for notification_attempt in notification_attempts
-                ],
-            },
-        ),
-    )
-
-
-def _agent_write_intent_rejection_payload(
-    *, trace_id: str, code: str, message: str, record_id: str = ""
-) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "status": "rejected",
-        "trace_id": trace_id,
-        "error": {"code": code, "message": message},
-    }
-    if record_id:
-        payload["records"] = {"agent_write_intent_record_id": record_id}
-    return payload
-
-
-def _reject_agent_write_intent(
-    *,
-    start_response: _StartResponse,
-    trace_id: str,
-    code: str,
-    message: str,
-    record_id: str = "",
-) -> list[bytes]:
-    status_code = 404 if code == "agent_write_intent_not_found" else 409
-    return _json_response(
-        start_response=start_response,
-        status_code=status_code,
-        payload=_agent_write_intent_rejection_payload(
-            trace_id=trace_id,
-            code=code,
-            message=message,
-            record_id=record_id,
-        ),
-    )
-
-
-def _validate_every_code_rerun_write_intent(
-    *,
-    record_store: object,
-    rerun_request: EveryCodeWorkRequestRerunEnvelope,
-    idempotency_key: str,
-    now: datetime,
-    trace_id: str,
-    start_response: _StartResponse,
-) -> tuple[AgentWriteIntentRecord | None, list[bytes] | None]:
-    record_id = rerun_request.agent_write_intent_record_id.strip()
-    if not record_id:
-        return None, None
-    try:
-        record = _agent_write_intent_record_store(record_store).read_agent_write_intent_record(
-            record_id
-        )
-    except FileNotFoundError:
-        return None, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_not_found",
-            message="Agent write-intent evidence record was not found.",
-            record_id=record_id,
-        )
-    if (
-        record.evaluation.status != "allowed"
-        or record.evaluation.intent != "every_code_rerun"
-        or record.evaluation.mode != "apply"
-        or not record.evaluation.safe_to_execute
-    ):
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_not_executable",
-            message="Every Code rerun requires an allowed apply-mode every_code_rerun intent record.",
-            record_id=record.record_id,
-        )
-    if (
-        record.evaluation.product != "launchplane"
-        or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT
-    ):
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_scope_mismatch",
-            message="Agent write-intent evidence does not match the Every Code rerun product/context.",
-            record_id=record.record_id,
-        )
-    if record.evaluation.authz_action != "every_code_work_request.rerun":
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_action_mismatch",
-            message="Agent write-intent evidence was evaluated for a different route action.",
-            record_id=record.record_id,
-        )
-    if rerun_request.source_url and rerun_request.source_url != record.request.source_url:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_source_mismatch",
-            message="Every Code rerun source_url does not match the write-intent source_url.",
-            record_id=record.record_id,
-        )
-    if idempotency_key and record.idempotency_key and idempotency_key != record.idempotency_key:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_idempotency_mismatch",
-            message="Every Code rerun idempotency key does not match the write-intent evidence.",
-            record_id=record.record_id,
-        )
-    try:
-        recorded_at = _parse_utc_timestamp(record.recorded_at)
-    except ValueError:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_stale",
-            message="Agent write-intent evidence timestamp is invalid or stale.",
-            record_id=record.record_id,
-        )
-    if recorded_at > now or now - recorded_at > _AGENT_WRITE_INTENT_MAX_AGE:
-        return record, _reject_agent_write_intent(
-            start_response=start_response,
-            trace_id=trace_id,
-            code="agent_write_intent_stale",
-            message="Agent write-intent evidence is too old for Every Code rerun execution.",
-            record_id=record.record_id,
-        )
-    return record, None
-
-
-def _matching_every_code_rerun_intent_record(
-    *,
-    record_store: object,
-    source_url: str,
-    now: datetime,
-) -> AgentWriteIntentRecord | None:
-    for record in _agent_write_intent_record_store(record_store).list_agent_write_intent_records(
-        product="launchplane",
-        context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-        status="allowed",
-        limit=50,
-    ):
-        if record.evaluation.intent != "every_code_rerun":
-            continue
-        if record.evaluation.mode != "apply" or not record.evaluation.safe_to_execute:
-            continue
-        if record.evaluation.authz_action != "every_code_work_request.rerun":
-            continue
-        if record.request.source_url != source_url:
-            continue
-        try:
-            recorded_at = _parse_utc_timestamp(record.recorded_at)
-        except ValueError:
-            continue
-        if recorded_at <= now and now - recorded_at <= _AGENT_WRITE_INTENT_MAX_AGE:
-            return record
-    return None
 
 
 def _session(
@@ -7224,61 +6333,6 @@ def _authz_diagnostic_payload(
             "context": context,
         }
     return payload
-
-
-def _authz_policy_grant_database_required_response(
-    *, trace_id: str, principal_label: str, start_response: _StartResponse
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=503,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "database_required",
-                "message": (
-                    f"Authz {principal_label} policy grant writes require Launchplane database storage."
-                ),
-            },
-        },
-    )
-
-
-def _authz_policy_grant_denied_response(
-    *, trace_id: str, principal_label: str, start_response: _StartResponse
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=403,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authorization_denied",
-                "message": (
-                    f"Workflow cannot write Launchplane authz {principal_label} policy grants."
-                ),
-            },
-        },
-    )
-
-
-def _authz_policy_unavailable_response(
-    *, trace_id: str, start_response: _StartResponse
-) -> list[bytes]:
-    return _json_response(
-        start_response=start_response,
-        status_code=503,
-        payload={
-            "status": "rejected",
-            "trace_id": trace_id,
-            "error": {
-                "code": "authz_policy_unavailable",
-                "message": "Launchplane active authz policy is unavailable.",
-            },
-        },
-    )
 
 
 def _product_driver_compatible(
@@ -7903,7 +6957,6 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
@@ -8171,53 +7224,6 @@ def create_launchplane_service_app(
                     },
                 },
             )
-        if method == "POST" and path == _EVERY_CODE_GITHUB_WEBHOOK_ROUTE:
-            try:
-                return _handle_every_code_github_webhook(
-                    environ=environ,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    control_plane_root_path=resolved_root,
-                )
-            except ValueError:
-                return _json_response(
-                    start_response=start_response,
-                    status_code=400,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "invalid_request",
-                            "message": "GitHub webhook payload is invalid.",
-                        },
-                    },
-                )
-        if _every_code_worker_token_authorized(environ=environ, method=method, path=path):
-            payload = _read_json_request(environ)
-            try:
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=_idempotency_key(environ),
-                    every_code_discord_sender=every_code_discord_sender,
-                )
-            except ValueError as error:
-                return _json_response(
-                    start_response=start_response,
-                    status_code=400,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "invalid_payload",
-                            "message": str(error),
-                        },
-                    },
-                )
         try:
             if method == "GET":
                 identity = _read_identity(
@@ -8246,11 +7252,7 @@ def create_launchplane_service_app(
                         identity = verifier.verify(token)
                         if not isinstance(identity, GitHubActionsIdentity):
                             raise PermissionError("Mutation routes require GitHub Actions OIDC.")
-            if (
-                isinstance(identity, TerminalAgentIdentity)
-                and method != "GET"
-                and path != "/v1/agent/write-intents/evaluate"
-            ):
+            if isinstance(identity, TerminalAgentIdentity) and method != "GET":
                 return _json_response(
                     start_response=start_response,
                     status_code=403,
@@ -9620,1275 +8622,6 @@ def create_launchplane_service_app(
                                             candidate_record.record_id
                                         )
                                     driver_result = result
-            elif path == "/v1/agent/write-intents/evaluate":
-                intent_request = AgentWriteIntentRequest.model_validate(payload)
-                intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
-                authorized = authz_policy.allows(
-                    identity=identity,
-                    action=intent_authz_action,
-                    product=intent_request.product,
-                    context=intent_request.context,
-                )
-                if intent_request.secret_bindings:
-                    secret_authz_action = agent_write_intent_secret_action(intent_request)
-                    authorized = authorized and authz_policy.allows(
-                        identity=identity,
-                        action=secret_authz_action,
-                        product=intent_request.product,
-                        context=intent_request.context,
-                    )
-                intent_audit = agent_authz_audit(
-                    identity=identity,
-                    action=intent_authz_action,
-                    product=intent_request.product,
-                    context=intent_request.context,
-                    decision="allowed" if authorized else "denied",
-                    reason_code="authorized" if authorized else "authorization_denied",
-                    policy_source=resolved_authz_policy_source,
-                    policy_sha256=resolved_authz_policy_sha256,
-                )
-                secret_evidence = _agent_write_intent_secret_evidence(
-                    record_store=record_store,
-                    request=intent_request,
-                )
-                evaluation = evaluate_agent_write_intent(
-                    request=intent_request,
-                    authorized=authorized,
-                    audit=intent_audit,
-                    secret_evidence=secret_evidence,
-                )
-                recorded_at = _utc_now_timestamp()
-                intent_record = AgentWriteIntentRecord(
-                    record_id=build_agent_write_intent_record_id(
-                        recorded_at=recorded_at,
-                        trace_id=request_trace_id,
-                        request=intent_request,
-                        evaluation=evaluation,
-                    ),
-                    recorded_at=recorded_at,
-                    trace_id=request_trace_id,
-                    idempotency_key=request_idempotency_key,
-                    request=intent_request,
-                    evaluation=evaluation,
-                )
-                _agent_write_intent_record_store(record_store).write_agent_write_intent_record(
-                    intent_record
-                )
-                result = {
-                    "intent": evaluation.model_dump(mode="json"),
-                    "record": {
-                        "record_id": intent_record.record_id,
-                        "recorded_at": intent_record.recorded_at,
-                    },
-                }
-                driver_result = result
-            elif path == "/v1/every-code/work-requests/claim":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.claim",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot claim Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
-            elif path == "/v1/every-code/work-requests/rerun":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.rerun",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot rerun Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
-            elif path == "/v1/every-code/work-requests/status":
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="every_code_work_request.update",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot update Every Code work requests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                return _handle_every_code_worker_write(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    payload=payload,
-                    idempotency_key=request_idempotency_key,
-                    every_code_discord_sender=every_code_discord_sender,
-                )
-            elif path == "/v1/product-config/apply":
-                product_config_request, product_config_response = (
-                    validate_product_config_apply_request(
-                        authz_policy=authz_policy,
-                        identity=identity,
-                        payload=payload,
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                )
-                if product_config_response is not None:
-                    return product_config_response
-                assert product_config_request is not None
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and product_config_request.mode == "apply"
-                    and not _local_operator_product_config_dry_run_exists(
-                        record_store=record_store,
-                        scope=request_scope,
-                        request_payload=payload,
-                    )
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=409,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "matching_dry_run_required",
-                                "message": (
-                                    "Local operator product-config apply requires a prior matching dry-run."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if not isinstance(record_store, PostgresRecordStore):
-                    return product_config_database_required_response(
-                        trace_id=request_trace_id,
-                        json_response=_json_response,
-                        start_response=start_response,
-                    )
-                product_config_result = apply_product_config_route(
-                    record_store=record_store,
-                    request=product_config_request,
-                    actor=_identity_actor(identity),
-                    trace_id=request_trace_id,
-                    json_response=_json_response,
-                    start_response=start_response,
-                )
-                if not isinstance(product_config_result, ProductConfigRouteResult):
-                    return product_config_result
-                driver_result = product_config_result.driver_result
-                if (
-                    isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
-                    and product_config_request.mode == "dry-run"
-                ):
-                    _write_local_operator_product_config_dry_run_record(
-                        record_store=record_store,
-                        scope=request_scope,
-                        request_payload=payload,
-                        response_trace_id=request_trace_id,
-                        response_payload=_accepted_payload(
-                            trace_id=request_trace_id,
-                            result=result,
-                            driver_result=driver_result,
-                        ),
-                    )
-            elif path == "/v1/authz-policies/github-actions/grants":
-                authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Authz policy grant writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=authz_grant_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane authz policy grants.",
-                            },
-                        },
-                    )
-                if authz_grant_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_github_actions_authz_policy_grant(
-                        record_store=record_store,
-                        grant=authz_grant_request.grant,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
-                        request=authz_grant_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if authz_grant_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_github_actions_authz_policy_grant(
-                            record_store=record_store,
-                            request=authz_grant_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authz_policy_unavailable",
-                                "message": "Launchplane active authz policy is unavailable.",
-                            },
-                        },
-                    )
-                if authz_grant_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=authz_grant_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/authz-policies/github-actions/removals":
-                authz_removal_request = control_plane_authz_grant_service.AuthzPolicyGitHubActionsRemovalEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Authz policy removals require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=authz_removal_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot remove Launchplane authz policy grants.",
-                            },
-                        },
-                    )
-                if authz_removal_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_github_actions_authz_policy_removal(
-                        record_store=record_store,
-                        removal=authz_removal_request.removal,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_github_actions_removal_audit_payload(
-                        request=authz_removal_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if authz_removal_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_github_actions_authz_policy_removal(
-                            record_store=record_store,
-                            request=authz_removal_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authz_policy_unavailable",
-                                "message": "Launchplane active authz policy is unavailable.",
-                            },
-                        },
-                    )
-                if authz_removal_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_github_actions_removal_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=authz_removal_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/authz-policies/github-humans/grants":
-                human_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Authz human policy grant writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=human_authz_grant_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane authz human policy grants.",
-                            },
-                        },
-                    )
-                if human_authz_grant_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_github_human_authz_policy_grant(
-                        record_store=record_store,
-                        grant=human_authz_grant_request.grant,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
-                        request=human_authz_grant_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if human_authz_grant_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_github_human_authz_policy_grant(
-                            record_store=record_store,
-                            request=human_authz_grant_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authz_policy_unavailable",
-                                "message": "Launchplane active authz policy is unavailable.",
-                            },
-                        },
-                    )
-                if human_authz_grant_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=human_authz_grant_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/authz-policies/terminal-agents/grants":
-                terminal_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Authz terminal-agent policy grant writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=terminal_authz_grant_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane authz terminal-agent policy grants.",
-                            },
-                        },
-                    )
-                if terminal_authz_grant_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_terminal_agent_authz_policy_grant(
-                        record_store=record_store,
-                        grant=terminal_authz_grant_request.grant,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
-                        request=terminal_authz_grant_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if terminal_authz_grant_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_terminal_agent_authz_policy_grant(
-                            record_store=record_store,
-                            request=terminal_authz_grant_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authz_policy_unavailable",
-                                "message": "Launchplane active authz policy is unavailable.",
-                            },
-                        },
-                    )
-                if terminal_authz_grant_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=terminal_authz_grant_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/authz-policies/local-operators/grants":
-                local_operator_grant_request = control_plane_authz_grant_service.AuthzPolicyLocalOperatorGrantEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _authz_policy_grant_database_required_response(
-                        trace_id=request_trace_id,
-                        principal_label="local-operator",
-                        start_response=start_response,
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=local_operator_grant_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _authz_policy_grant_denied_response(
-                        trace_id=request_trace_id,
-                        principal_label="local-operator",
-                        start_response=start_response,
-                    )
-                if local_operator_grant_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_local_operator_authz_policy_grant(
-                        record_store=record_store,
-                        grant=local_operator_grant_request.grant,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
-                        request=local_operator_grant_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if local_operator_grant_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_local_operator_authz_policy_grant(
-                            record_store=record_store,
-                            request=local_operator_grant_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _authz_policy_unavailable_response(
-                        trace_id=request_trace_id,
-                        start_response=start_response,
-                    )
-                if local_operator_grant_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=local_operator_grant_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/authz-policies/local-admins/grants":
-                local_admin_grant_request = control_plane_authz_grant_service.AuthzPolicyLocalAdminGrantEnvelope.model_validate(
-                    payload
-                )
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _authz_policy_grant_database_required_response(
-                        trace_id=request_trace_id,
-                        principal_label="local-admin",
-                        start_response=start_response,
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="authz_policy_grant.write",
-                    product=local_admin_grant_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _authz_policy_grant_denied_response(
-                        trace_id=request_trace_id,
-                        principal_label="local-admin",
-                        start_response=start_response,
-                    )
-                if local_admin_grant_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                try:
-                    (
-                        current_policy,
-                        current_record,
-                        diff,
-                    ) = control_plane_authz_grant_service.plan_local_admin_authz_policy_grant(
-                        record_store=record_store,
-                        grant=local_admin_grant_request.grant,
-                    )
-                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
-                        request=local_admin_grant_request,
-                        identity=identity,
-                        previous_record=current_record,
-                        new_record=None,
-                        changed=bool(diff["changed"]),
-                        trace_id=request_trace_id,
-                        now_timestamp=_now_timestamp,
-                    )
-                    authz_policy_record = current_record
-                    changed = bool(diff["changed"])
-                    if local_admin_grant_request.mode == "apply":
-                        (
-                            updated_policy,
-                            authz_policy_record,
-                            changed,
-                            diff,
-                            audit,
-                        ) = control_plane_authz_grant_service.write_local_admin_authz_policy_grant(
-                            record_store=record_store,
-                            request=local_admin_grant_request,
-                            identity=identity,
-                            trace_id=request_trace_id,
-                            now_timestamp=_now_timestamp,
-                        )
-                    else:
-                        updated_policy = current_policy
-                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
-                            record_id=current_record.record_id,
-                            status=current_record.status,
-                            source=current_record.source,
-                            updated_at=current_record.updated_at,
-                            policy_sha256=current_record.policy_sha256,
-                            policy=current_record.policy,
-                            audit=audit,
-                        )
-                except ValueError:
-                    return _authz_policy_unavailable_response(
-                        trace_id=request_trace_id,
-                        start_response=start_response,
-                    )
-                if local_admin_grant_request.mode == "apply":
-                    authz_policy = updated_policy
-                    resolved_authz_policy_runtime.update(
-                        updated_policy,
-                        policy_sha256=authz_policy_record.policy_sha256,
-                        source="db",
-                    )
-                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                    resolved_authz_policy_source = "db"
-                result, driver_result = (
-                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
-                        authz_policy_record=authz_policy_record,
-                        changed=changed,
-                        mode=local_admin_grant_request.mode,
-                        diff=diff,
-                        audit=audit,
-                    )
-                )
-            elif path == "/v1/merge-train/policies/import":
-                merge_train_policy_request = MergeTrainPolicyImportEnvelope.model_validate(payload)
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Merge train policy writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="merge_train.policy_import",
-                    product=merge_train_policy_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane merge train policies.",
-                            },
-                        },
-                    )
-                if merge_train_policy_request.mode == "apply":
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                    record_store.write_merge_train_policy_record(merge_train_policy_request.record)
-                result = {
-                    "mode": merge_train_policy_request.mode,
-                    "record": {
-                        "record_id": merge_train_policy_request.record.record_id,
-                        "status": merge_train_policy_request.record.status,
-                        "source": merge_train_policy_request.record.source,
-                        "updated_at": merge_train_policy_request.record.updated_at,
-                        "policy_sha256": merge_train_policy_request.record.policy_sha256,
-                        "repository_count": len(merge_train_policy_request.record.policy.policies),
-                        "policy_keys": [
-                            repository_policy.policy_key
-                            for repository_policy in merge_train_policy_request.record.policy.policies
-                        ],
-                    },
-                }
-                driver_result = result
-            elif path == "/v1/live-target-runtime/apply":
-                live_target_runtime_request = LiveTargetRuntimeApplyEnvelope.model_validate(payload)
-                action = (
-                    "live_target_runtime.apply"
-                    if live_target_runtime_request.apply_changes
-                    else "live_target_runtime.plan"
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action=action,
-                    product=live_target_runtime_request.product,
-                    context=live_target_runtime_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot plan or apply live target runtime for"
-                                    " the requested product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Live target runtime apply requires DB-backed Launchplane"
-                                    " storage."
-                                ),
-                            },
-                        },
-                    )
-                try:
-                    driver_result = control_plane_live_target_runtime.apply_live_target_runtime_environment(
-                        control_plane_root=resolved_root,
-                        product_name=live_target_runtime_request.product,
-                        context_name=live_target_runtime_request.context,
-                        instance_name=live_target_runtime_request.instance,
-                        apply_changes=live_target_runtime_request.apply_changes,
-                        deploy=live_target_runtime_request.deploy,
-                        no_cache=live_target_runtime_request.no_cache,
-                        deploy_timeout_seconds=(live_target_runtime_request.deploy_timeout_seconds),
-                        deploy_trigger=(
-                            control_plane_live_target_runtime.trigger_and_wait_for_dokploy_target_deploy
-                        ),
-                    )
-                except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
-                    status_code = 400
-                    if error.code in {
-                        "runtime_key_safety_unavailable",
-                        "runtime_environment_unavailable",
-                        "dokploy_target_read_failed",
-                    }:
-                        status_code = 503
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=status_code,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": error.code,
-                                "message": str(error),
-                            },
-                        },
-                    )
-                tracked_target = driver_result.get("tracked_target")
-                result = {}
-                if isinstance(tracked_target, dict):
-                    result = {
-                        "target_id": str(tracked_target.get("target_id", "")),
-                        "target_type": str(tracked_target.get("target_type", "")),
-                    }
-            elif path == "/v1/product-onboarding/apply":
-                onboarding_request = ProductOnboardingApplyEnvelope.model_validate(payload)
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Product onboarding writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="product_onboarding.apply",
-                    product=onboarding_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot apply Launchplane product onboarding manifests.",
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                try:
-                    onboarding_result = apply_product_onboarding_manifest(
-                        record_store=record_store,
-                        manifest=onboarding_request.manifest,
-                    )
-                except ValueError as error:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "invalid_product_onboarding_manifest",
-                                "message": str(error),
-                            },
-                        },
-                    )
-                result, driver_result = (
-                    control_plane_product_onboarding_service.build_product_onboarding_service_result(
-                        onboarding_result
-                    )
-                )
-            elif path == PROVIDER_TARGET_OPERATIONS_ROUTE:
-                provider_target_request = ProviderTargetOperationEnvelope.model_validate(payload)
-                if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": (
-                                    "Provider-target operations require Launchplane"
-                                    " database storage."
-                                ),
-                            },
-                        },
-                    )
-                if provider_target_operation_requires_reason(
-                    identity=identity,
-                    request=provider_target_request,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=400,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "reason_required",
-                                "message": (
-                                    "Local operator provider-target backfill apply"
-                                    " requires a reason."
-                                ),
-                            },
-                        },
-                    )
-                if not provider_target_operation_authorized(
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    request=provider_target_request,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot run Launchplane provider-target operations."
-                                ),
-                            },
-                        },
-                    )
-                if provider_target_request.mode == "backfill-apply":
-                    if not request_idempotency_key:
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=400,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "idempotency_key_required",
-                                    "message": (
-                                        "Provider-target backfill apply requests require"
-                                        " an Idempotency-Key header."
-                                    ),
-                                },
-                            },
-                        )
-                    idempotent_response = _check_idempotent_request(
-                        record_store=record_store,
-                        scope=request_scope,
-                        route_path=path,
-                        idempotency_key=request_idempotency_key,
-                        request_fingerprint=request_fingerprint,
-                        start_response=start_response,
-                        trace_id=request_trace_id,
-                    )
-                    if idempotent_response is not None:
-                        return idempotent_response
-                provider_target_result = execute_provider_target_operation_route(
-                    record_store=record_store,
-                    request=provider_target_request,
-                )
-                assert isinstance(provider_target_result, ProviderTargetOperationRouteResult)
-                result = provider_target_result.result
-                driver_result = provider_target_result.driver_result
             elif path in descriptor_driver_dispatch_routes:
                 try:
                     dispatch_response = _dispatch_descriptor_driver_route(
@@ -10963,59 +8696,6 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=self_deploy_request.deploy,
                 ).model_dump(mode="json")
-            elif path == "/v1/previews/lifecycle-plan":
-                preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
-                    payload
-                )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="preview_lifecycle.plan",
-                    product=preview_lifecycle_plan_request.product,
-                    context=preview_lifecycle_plan_request.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot plan preview lifecycle for the requested"
-                                    " product/context."
-                                ),
-                            },
-                        },
-                    )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = build_preview_lifecycle_plan(
-                    product=preview_lifecycle_plan_request.product,
-                    context=preview_lifecycle_plan_request.context,
-                    planned_at=_utc_now_timestamp(),
-                    source=preview_lifecycle_plan_request.source,
-                    desired_previews=preview_lifecycle_plan_request.desired_previews,
-                    desired_state_id=preview_lifecycle_plan_request.desired_state_id,
-                    latest_inventory_scan=_latest_preview_inventory_scan(
-                        record_store=record_store,
-                        context_name=preview_lifecycle_plan_request.context,
-                    ),
-                )
-                preview_lifecycle_plan_id = _write_preview_lifecycle_plan_if_supported(
-                    record_store=record_store,
-                    record=driver_result,
-                )
-                result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
             elif path == "/v1/previews/desired-state":
                 preview_desired_state_request = PreviewDesiredStateEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -11672,6 +9352,7 @@ def serve_launchplane_service(
         work_graph_planning_facts_provider=work_graph_planning_facts_provider,
         work_graph_issue_inbox_provider=work_graph_issue_inbox_provider,
         work_graph_issue_inbox_reconcile_provider=work_graph_issue_inbox_reconcile_provider,
+        every_code_github_webhook_handler=handle_every_code_github_webhook_request,
     )
     fastapi_application.mount(
         "/",

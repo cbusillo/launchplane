@@ -154,19 +154,26 @@ VeriReel product paths:
     product-profile write-contract validation, record storage, and optional
     `Idempotency-Key` replay/conflict handling)
 - product config write route:
-  - `POST /v1/product-config/apply`
+  - `POST /v1/product-config/apply` (native FastAPI for GitHub Actions OIDC,
+    signed-in GitHub human sessions, and local-operator bearer callers, with
+    DB-backed storage, redacted planning/apply behavior, local-operator dry-run
+    continuity, and optional `Idempotency-Key` replay/conflict handling)
 - runtime key-safety policy route:
   - `POST /v1/runtime-key-safety/policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, metadata-only policy writes, and
     optional `Idempotency-Key` replay/conflict handling)
 - product onboarding route:
-  - `POST /v1/product-onboarding/apply`
+  - `POST /v1/product-onboarding/apply` (native FastAPI for bearer-token
+    callers, DB-backed onboarding records, optional `Idempotency-Key`
+    replay/conflict handling, and sanitized onboarding evidence)
 - Dokploy target setup route:
   - `POST /v1/dokploy-targets/setup` (native FastAPI for bearer-token
     callers, DB-backed setup records, apply-only `Idempotency-Key`
     replay/conflict handling, and repeatable dry-runs)
 - provider-target operation route:
-  - `POST /v1/provider-targets/operations`
+  - `POST /v1/provider-targets/operations` (native FastAPI for bearer-token
+    callers, DB-backed audit/backfill records, apply-only `Idempotency-Key`
+    replay/conflict handling, and repeatable audits/dry-runs)
 - product context cutover route:
   - `POST /v1/product-profiles/context-cutover/apply`
 - product legacy context cleanup route:
@@ -175,13 +182,16 @@ VeriReel product paths:
   - `POST /v1/public-ingress/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-- authz policy maintenance route:
+- authz policy maintenance routes:
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-actions/removals`
   - `POST /v1/authz-policies/github-humans/grants`
   - `POST /v1/authz-policies/terminal-agents/grants`
   - `POST /v1/authz-policies/local-operators/grants`
   - `POST /v1/authz-policies/local-admins/grants`
+    (native FastAPI for bearer-token and signed-in GitHub human-session
+    callers, DB-backed policy records, apply-only `Idempotency-Key`
+    replay/conflict handling, and repeatable dry-runs)
 - Every Code local automation work-request routes:
   - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
@@ -202,14 +212,31 @@ VeriReel product paths:
   - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
     bearer-token callers, DB-backed storage, local-operator reason enforcement,
     and optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/github-webhook`
+  - `POST /v1/every-code/github-webhook` (native FastAPI,
+    unauthenticated GitHub HMAC verification, signed-event skip semantics,
+    Every Code work-request creation/dedupe, issue and pull-request close
+    handling, preview validation comments, and PR-feedback ingestion)
   - `POST /v1/every-code/work-requests/create` (native FastAPI for
     bearer-token callers, `every_code_work_request.write` authorization on
     `launchplane`/`launchplane`, record-store write capability checks, and
     optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/claim`
-  - `POST /v1/every-code/work-requests/rerun`
-  - `POST /v1/every-code/work-requests/status`
+  - `POST /v1/every-code/work-requests/claim` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.claim`, record-store claim capability checks,
+    `404 not_found` for missing requests, `409 work_request_already_claimed`
+    for non-queued requests, and workflow `Idempotency-Key` replay/conflict
+    handling)
+  - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.update`, replay-before-write idempotency handling,
+    record-store status capability checks, `404 not_found` for missing requests,
+    and blocked-notification delivery)
+  - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
+    worker-token callers and bearer-token callers with
+    `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
+    evidence, workflow replay-before-write idempotency handling, record-store
+    rerun capability checks, `404 not_found` for missing requests, and
+    terminal-only requeue semantics)
   - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
     worker-token callers, direct PR-feedback record writes, and DB-backed
     storage capability enforcement without idempotency state)
@@ -352,11 +379,13 @@ requests. Other signed events, actions, or labels return `202` with
 Every Code work request and include `deduped` plus the delivery id in the
 response. Matching pull-request close deliveries can close every linked request
 referenced by the PR, including still-queued requests that never stored a result
-PR URL.
+PR URL. The route is native FastAPI; the legacy WSGI branch is deleted, and
+direct WSGI fallback calls fail closed.
 
-The Every Code worker read, claim, and status routes also accept a dedicated
-local-worker bearer token. Configure `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on
-the Launchplane service and on the Mac worker host, then run the worker with
+The Every Code worker read, native claim, and status routes also accept a
+dedicated local-worker bearer token. Configure
+`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on the Launchplane service and on the Mac
+worker host, then run the worker with
 `uv run launchplane every-code start --service-url https://...`. That token is
 scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
 readiness routes, plus read-only `GET /v1/product-profiles` for preview
@@ -441,14 +470,19 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
 not for the preview PR-feedback notification-attempt route. The legacy WSGI
-fallback no longer owns these read paths. Every Code PR-feedback write,
-PR-feedback status, and preview-gate write routes are also native FastAPI routes
-for the dedicated Every Code worker token. They require only the matching
-PR-feedback or preview-gate record-store capabilities, preserve the direct worker
-signal payloads, do not create idempotency records, and fail closed when called
-through the direct WSGI fallback. PR-feedback status preserves the worker
-transition semantics: missing feedback returns `404 not_found`, and already
-applied or ignored feedback returns `409 feedback_already_final`.
+fallback no longer owns these read paths. Every Code work-request status is also
+a native FastAPI route for the dedicated Every Code worker token and workflows
+authorized for `every_code_work_request.update`. It checks idempotency replay
+before requiring status-write store capabilities, writes successful idempotency
+records, preserves missing-request `404 not_found`, and delivers configured
+blocked notifications when a request transitions to `blocked`. Every Code
+PR-feedback write, PR-feedback status, and preview-gate write routes are also
+native FastAPI routes for the dedicated Every Code worker token. They require
+only the matching PR-feedback or preview-gate record-store capabilities, preserve
+the direct worker signal payloads, do not create idempotency records, and fail
+closed when called through the direct WSGI fallback. PR-feedback status preserves
+the worker transition semantics: missing feedback returns `404 not_found`, and
+already applied or ignored feedback returns `409 feedback_already_final`.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
@@ -631,12 +665,17 @@ The second batch service contract is
 creation and guarded PR-native landing, and writes
 `launchplane_merge_train_batch_landing_plans` records.
 
-`POST /v1/merge-train/policies/import` is the service-owned write path for merge
-train policy records. It requires database storage and
+`POST /v1/merge-train/policies/import` is the native FastAPI service-owned write
+path for merge train policy records. It requires database storage and
 `merge_train.policy_import` on product/context `launchplane`, accepts `dry_run`
-and `apply`, and writes the supplied typed record only in apply mode.
-Shared and production policy changes should use this route rather than direct DB
-CLI writes from an arbitrary checkout.
+and `apply`, and writes the supplied typed record only in apply mode. GitHub
+Actions OIDC callers, signed-in GitHub human sessions, and local operator/admin
+bearer callers may use the route when policy grants the action; terminal-agent
+credentials remain read-only. Apply requests preserve `Idempotency-Key`
+replay/conflict handling when callers provide a key; dry-runs remain stateless
+and repeatable. Shared and production policy changes should use this route rather
+than direct DB CLI writes from an arbitrary checkout, and the retired legacy WSGI
+fallback branch fails closed for direct calls.
 
 ## Host Assumption
 
@@ -895,11 +934,17 @@ source, policy digest, and `authz_policy` source kind. Write-intent evaluations
 persist that same provenance as `launchplane_agent_write_intents` records and
 return the record id so later action routes can link to durable evidence.
 
-`POST /v1/agent/write-intents/evaluate` is the first scoped intent surface. It
-does not execute product/runtime mutations. It validates a requested intent,
-maps it to the exact existing policy action, evaluates the caller's policy grant,
-persists the evaluation record, and returns status, safe next action, source URL,
-record id, and `agent_audit` metadata.
+`POST /v1/agent/write-intents/evaluate` is a native FastAPI scoped intent
+surface. It does not execute product/runtime mutations. It validates a requested
+intent, maps it to the exact existing policy action, evaluates the caller's
+policy grant, persists the evaluation record, and returns status, safe next
+action, source URL, record id, and `agent_audit` metadata. Denied intents are
+successful preflight results with `202 accepted`; route errors are reserved for
+authentication, validation, and fail-closed storage-capability failures. The
+legacy WSGI branch is deleted, and terminal-agent bearer callers keep the
+route-specific preflight exception only through this native path. When callers
+send `Idempotency-Key`, Launchplane replays matching evaluations or rejects
+conflicting payloads before requiring the write-intent record store.
 Agents can use it to preflight safe rerun, preview, config, cleanup, and
 promotion-dispatch candidates without receiving a generic write token or reusable
 credentials. Some intents, such as product config apply and promotion dry-run,
@@ -1058,6 +1103,12 @@ report-only behavior and records the cleanup request/result next to the plan.
 Destructive provider cleanup is only attempted when `apply=true` is explicitly
 supplied by an authorized GitHub Actions workflow.
 
+`POST /v1/previews/lifecycle-plan` is a native FastAPI route. It requires
+`preview_lifecycle.plan` authorization for the requested product/context,
+preserves optional `Idempotency-Key` replay/conflict behavior, writes the typed
+preview lifecycle plan record, and has its legacy WSGI fallback branch deleted;
+direct fallback calls fail closed.
+
 PR feedback delivery is part of the same preview lifecycle boundary. Product
 repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
@@ -1149,7 +1200,8 @@ key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
 
-Product config writes use `POST /v1/product-config/apply`. The request carries
+Product config writes use `POST /v1/product-config/apply`. The route is native
+FastAPI and its legacy WSGI fallback branch is deleted. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
@@ -1157,17 +1209,22 @@ accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
 dedicated local-operator bearer credential with a non-empty `reason`, but
 terminal-agent read bearer credentials remain read-only and cannot execute the
 mutation. Local-operator apply requests additionally require a previously
-recorded matching local-operator dry-run. The route authorizes the top-level
-product/context/instance target and rejects nested runtime or secret targets
-that try to broaden or change that authorized target. It reuses the same
-planner/writer as `launchplane product-config apply`, returns only actions,
-keys, counts, actor/source metadata, and secret IDs, uses generic validation
-messages for rejected requests, and fails closed when a secret bundle is
-submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane
-runtime or without an active runtime key-safety policy that allows the requested
-managed secret binding for the target runtime class. Request bodies for this
-route must not be copied into logs, issues, docs, or workflow artifacts because
-they can contain plaintext secret values.
+recorded matching local-operator dry-run with the same payload after removing
+`mode` and `reason`, so operators can update the apply reason without changing
+the reviewed runtime/secret content. Normal `Idempotency-Key` replay/conflict
+uses the full request body and is checked before DB-backed mutation.
+
+The route authorizes the top-level product/context/instance target and rejects
+nested runtime or secret targets that try to broaden or change that authorized
+target. It reuses the same planner/writer as `launchplane product-config apply`,
+returns only actions, keys, counts, actor/source metadata, and secret IDs, uses
+generic validation messages for rejected requests, and fails closed when the
+record store is not DB-backed, when a secret bundle is submitted without
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime, or when
+there is no active runtime key-safety policy that allows the requested managed
+secret binding for the target runtime class. Request bodies for this route must
+not be copied into logs, issues, docs, or workflow artifacts because they can
+contain plaintext secret values.
 
 #### Product-config secret source contract
 
@@ -1236,7 +1293,7 @@ Common failure classes are stable enough for helper summaries:
 - `authorization_denied`: caller lacks `product_config.plan`,
   `product_config.apply`, or the product/context grant.
 - `reason_required`: local-operator calls omitted a concrete reason.
-- `local_operator_dry_run_required`: local-operator apply did not match a prior
+- `matching_dry_run_required`: local-operator apply did not match a prior
   recorded dry-run request.
 - `secret_configuration_required`: trusted Launchplane runtime cannot write
   managed secrets.
@@ -1266,18 +1323,20 @@ context/instance scope and explicit preview instance patterns for dynamic PR
 lanes; policy apply merges those scopes additively without making checked-in
 files runtime authority.
 
-Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
-the same operator-approved manifest as `launchplane product-onboarding apply`
-and writes the full Launchplane-owned bundle: product profile, existing
-Dokploy-backed target records, target-id records, runtime-environment records,
-and managed secret binding placeholders. The manual `Product Onboarding`
-workflow is the supported shared and production caller: operators pass the
-manifest as runtime workflow input, and product-specific onboarding JSON stays
-out of checked-in catalogs. Manifests must use neutral `provider_targets`;
-obsolete `dokploy_targets` input is rejected with a clear validation error. The
-route is restricted to `product_onboarding.apply` authority for product/context
+Product onboarding uses the native FastAPI
+`POST /v1/product-onboarding/apply` route. The route accepts the same
+operator-approved manifest as `launchplane product-onboarding apply` and writes
+the full Launchplane-owned bundle: product profile, existing Dokploy-backed
+target records, target-id records, runtime-environment records, and managed
+secret binding placeholders. The manual `Product Onboarding` workflow is the
+supported shared and production caller: operators pass the manifest as runtime
+workflow input, and product-specific onboarding JSON stays out of checked-in
+catalogs. Manifests must use neutral `provider_targets`; obsolete
+`dokploy_targets` input is rejected with a clear validation error. The route is
+restricted to `product_onboarding.apply` authority for product/context
 `launchplane`, requires DB-backed storage, and returns only sanitized
-`provider_target*` summaries. Product records are not loaded from checked-in
+`provider_target*` summaries. Its legacy WSGI fallback branch is deleted; direct
+fallback calls fail closed. Product records are not loaded from checked-in
 catalogs or product repos.
 
 Product context audit, cutover, and legacy cleanup routes expose copied or
@@ -1286,14 +1345,16 @@ deleted runtime identity records under neutral `provider_targets` and
 provider-specific execution/config storage where needed, but service responses
 must not reintroduce Dokploy-named target buckets for these workflows.
 
-Provider-target Phase Two operations use `POST /v1/provider-targets/operations`.
-The route accepts one Launchplane-owned route at a time with mode `audit`,
-`backfill-dry-run`, or `backfill-apply`, `provider_id`, `context`, `instance`,
-and an apply-only `reason`. It requires DB-backed storage and authorizes through
+Provider-target Phase Two operations use the native FastAPI
+`POST /v1/provider-targets/operations` route. The route accepts one
+Launchplane-owned route at a time with mode `audit`, `backfill-dry-run`, or
+`backfill-apply`, `provider_id`, `context`, `instance`, and an apply-only
+`reason`. It requires DB-backed storage and authorizes through
 `provider_target.audit` for audit/dry-run or `provider_target.backfill` for
 apply, always scoped to product/context `launchplane`. Apply requests are
 idempotency-keyed and write only complete non-conflicting Dokploy target/id
 projections; existing rows and conflicts are reported rather than overwritten.
+Its legacy WSGI fallback branch is deleted; direct fallback calls fail closed.
 The manual `Provider Target Operations` workflow is the supported shared and
 production caller for Phase Two backfill evidence.
 
@@ -1340,17 +1401,19 @@ environment responses because those responses can include provider target
 identifiers, runtime key names, managed-secret binding keys, and operational
 metadata.
 
-Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
-accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
-optional apply-only deploy controls. Dry-run requires `live_target_runtime.plan`;
-apply requires `live_target_runtime.apply`. The route resolves DB-backed runtime
-environment records, managed runtime secrets, and the tracked Dokploy target in
-the deployed Launchplane service, evaluates runtime key-safety policy, compares
-desired and live env by key, and returns sanitized key/count evidence without
-runtime values or secret plaintext. Apply updates only the product profile's
-expected runtime environment keys and runtime managed-secret binding keys for
-the selected lane, preserves unrelated live env, verifies persistence by key
-metadata, and can explicitly trigger a deploy when requested.
+Live target runtime sync uses the native FastAPI
+`POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
+or `mode: "apply"`, product/context/instance, and optional apply-only deploy
+controls. Dry-run requires `live_target_runtime.plan`; apply requires
+`live_target_runtime.apply`. The route resolves DB-backed runtime environment
+records, managed runtime secrets, and the tracked Dokploy target in the deployed
+Launchplane service, evaluates runtime key-safety policy, compares desired and
+live env by key, and returns sanitized key/count evidence without runtime values
+or secret plaintext. Apply updates only the product profile's expected runtime
+environment keys and runtime managed-secret binding keys for the selected lane,
+preserves unrelated live env, verifies persistence by key metadata, and can
+explicitly trigger a deploy when requested. Its legacy WSGI fallback branch is
+deleted; direct WSGI fallback calls fail closed.
 
 Live target runtime applies are service-boundary work. Operators and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make
