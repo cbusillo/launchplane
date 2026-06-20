@@ -197,16 +197,6 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "execution_lane must use"):
             _executor_request(mutate=True, execution_lane="ops-gate;touch bad")
 
-    def test_executor_request_rejects_runner_package_path_traversal(self) -> None:
-        with self.assertRaisesRegex(ValueError, "actions/runner tarball URL"):
-            _executor_request(
-                mutate=True,
-                runner_package_url=(
-                    "https://github.com/actions/runner/releases/download/"
-                    "../download/actions-runner-linux-x64-2.327.1.tar.gz"
-                ),
-            )
-
     def test_blocked_plan_posts_planned_audit_without_token_or_command(self) -> None:
         token_fetcher = _TokenFetcher()
         command_runner = _CommandRunner()
@@ -226,6 +216,82 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
         self.assertEqual(token_fetcher.calls, [])
         self.assertEqual(command_runner.commands, [])
         self.assertEqual(audit_poster.records[0][0], "planned")
+
+    def test_blocked_plan_allows_invalid_runner_package_url_without_token_or_command(
+        self,
+    ) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(
+                mutate=True,
+                runner_package_url=(
+                    "https://github.com/actions/runner/releases/download/"
+                    "../download/actions-runner-linux-x64-2.327.1.tar.gz"
+                ),
+            ),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=(_lane(),)),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned"])
+
+    def test_ready_executor_posts_failed_audit_without_runner_package_url(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(mutate=True, runner_package_url=""),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("requires runner_package_url", result.message)
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
+
+    def test_ready_executor_posts_failed_audit_for_unsafe_runner_package_url(self) -> None:
+        token_fetcher = _TokenFetcher()
+        command_runner = _CommandRunner()
+        audit_poster = _AuditPoster()
+
+        result = execute_runner_lane_registration_executor(
+            request=_executor_request(
+                mutate=True,
+                runner_package_url=(
+                    "https://github.com/actions/runner/releases/download/"
+                    "../download/actions-runner-linux-x64-2.327.1.tar.gz"
+                ),
+            ),
+            policy=_policy(),
+            pre_inventory=_inventory(lanes=()),
+            inventory_reader=lambda _repo: _inventory(lanes=(_lane(),)),
+            token_fetcher=token_fetcher,  # type: ignore[arg-type]
+            remote_runner=command_runner,
+            audit_poster=audit_poster,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("actions/runner tarball URL", result.message)
+        self.assertEqual(token_fetcher.calls, [])
+        self.assertEqual(command_runner.commands, [])
+        self.assertEqual([record[0] for record in audit_poster.records], ["planned", "failed"])
 
     def test_ready_executor_completes_supervised_registration(self) -> None:
         token_fetcher = _TokenFetcher()

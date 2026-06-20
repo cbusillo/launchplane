@@ -81,14 +81,6 @@ class RunnerLaneRegistrationExecutorRequest(BaseModel):
         )
         self.registration_root = _normalized_path(self.registration_root)
         self.runner_package_url = self.runner_package_url.strip()
-        if self.mutate and not self.runner_package_url:
-            raise ValueError(
-                "runner lane registration executor requires runner_package_url when mutate=true"
-            )
-        if self.runner_package_url and not _is_allowed_runner_package_url(self.runner_package_url):
-            raise ValueError(
-                "runner lane registration executor runner_package_url must be an actions/runner tarball URL"
-            )
         self.labels = tuple(
             sorted({label.strip().lower() for label in self.labels if label.strip()})
         )
@@ -159,6 +151,7 @@ def execute_runner_lane_registration_executor(
     token_record: RunnerLaneRegistrationTokenRecord | None = None
     post_inventory: RunnerLaneInventory | None = None
     try:
+        _validate_runner_package_url_for_create(request)
         token, token_record = token_fetcher.fetch_registration_token(repository=request.repository)
         _prepare_runner_directory(request=request, remote_runner=remote_runner)
         _configure_runner(request=request, token=token, remote_runner=remote_runner)
@@ -422,6 +415,20 @@ def _runner_directory(request: RunnerLaneRegistrationExecutorRequest) -> str:
 
 def _systemd_unit_name(request: RunnerLaneRegistrationExecutorRequest) -> str:
     return f"launchplane-runner@{request.lane_name}.service"
+
+
+def _validate_runner_package_url_for_create(
+    request: RunnerLaneRegistrationExecutorRequest,
+) -> None:
+    assert request.mutate
+    if not request.runner_package_url:
+        raise ValueError(
+            "runner lane registration executor requires runner_package_url when mutate=true"
+        )
+    if not _is_allowed_runner_package_url(request.runner_package_url):
+        raise ValueError(
+            "runner lane registration executor runner_package_url must be an actions/runner tarball URL"
+        )
 
 
 def _is_allowed_runner_package_url(value: str) -> bool:
