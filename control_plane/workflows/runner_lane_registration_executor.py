@@ -232,7 +232,9 @@ def validate_local_executor_environment(
         for label in execution_env.get("RUNNER_LABELS", "").split(",")
         if label.strip()
     }
-    if request.execution_lane.lower() not in runner_labels:
+    runner_name = execution_env.get("RUNNER_NAME", "").strip().lower()
+    execution_lane = request.execution_lane.lower()
+    if execution_lane not in runner_labels and runner_name != execution_lane:
         raise ValueError(
             "runner lane registration executor is not running on the approved execution lane."
         )

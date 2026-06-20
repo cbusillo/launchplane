@@ -373,11 +373,22 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
                 current_user="launchplane-runner-hygiene",
             )
 
-    def test_local_environment_fails_closed_without_execution_lane_label(self) -> None:
+    def test_local_environment_fails_closed_without_runner_identity(self) -> None:
         with self.assertRaisesRegex(ValueError, "approved execution lane"):
             validate_local_executor_environment(
                 request=_executor_request(mutate=True),
                 env={"GITHUB_REPOSITORY": "cbusillo/launchplane"},
+                current_user="launchplane-runner-hygiene",
+            )
+
+    def test_local_environment_fails_closed_without_execution_lane_label(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved execution lane"):
+            validate_local_executor_environment(
+                request=_executor_request(mutate=True),
+                env={
+                    "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                    "RUNNER_NAME": "chris-testing-launchplane",
+                },
                 current_user="launchplane-runner-hygiene",
             )
 
@@ -387,6 +398,16 @@ class RunnerLaneRegistrationExecutorTests(unittest.TestCase):
             env={
                 "GITHUB_REPOSITORY": "cbusillo/launchplane",
                 "RUNNER_LABELS": "self-hosted,launchplane,chris-testing-ops-gate",
+            },
+            current_user="launchplane-runner-hygiene",
+        )
+
+    def test_local_environment_accepts_expected_runner_name(self) -> None:
+        validate_local_executor_environment(
+            request=_executor_request(mutate=True),
+            env={
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "RUNNER_NAME": "chris-testing-ops-gate",
             },
             current_user="launchplane-runner-hygiene",
         )
