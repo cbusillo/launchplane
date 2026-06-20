@@ -8637,6 +8637,54 @@ class LaunchplaneServiceTests(unittest.TestCase):
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
 
+    def test_every_code_preview_validation_failure_returns_generic_webhook_response(
+        self,
+    ) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            body="/preview ok",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+            patch(
+                "control_plane.service.resolve_launchplane_github_token",
+                side_effect=ClickException(
+                    "Traceback (most recent call last): secret token leaked"
+                ),
+            ),
+        ):
+            app = create_every_code_github_webhook_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-validation-failed",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertIs(payload["skipped"], True)
+        self.assertEqual(payload["reason"], "preview_validation_failed")
+        self.assertNotIn("message", payload)
+        self.assertNotIn("Traceback", json.dumps(payload, sort_keys=True))
+
     def test_every_code_preview_ok_allows_repo_owner_override(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload(

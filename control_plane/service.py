@@ -4908,7 +4908,7 @@ def _handle_every_code_preview_validation_webhook(
             token=token,
             received_at=_utc_now_timestamp(),
         )
-    except click.ClickException as exc:
+    except click.ClickException:
         return (
             202,
             {
@@ -4916,7 +4916,6 @@ def _handle_every_code_preview_validation_webhook(
                 "trace_id": trace_id,
                 "skipped": True,
                 "reason": "preview_validation_failed",
-                "message": str(exc),
                 "github_delivery_id": delivery_id,
             },
         )
